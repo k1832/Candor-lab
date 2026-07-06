@@ -16,3 +16,15 @@ One lesson per entry, one-line summary first.
   memory-model design, and adversarial reviews; medium/light on scaffolding
   and mechanical work. Adversarial review of every major design doc is the
   established quality pattern (the philosophy itself went v1→v4 that way).
+
+- **The document pipeline is: draft → adversarial review → dispositions →
+  revision, each step a separate commit.** Review findings live in
+  `docs/reviews/` with the deciding authority's disposition recorded inline
+  per finding; the revision agent implements dispositions exactly (they are
+  decisions, not suggestions). This caught 3 blockers in the kill criterion
+  and 2 soundness holes in the memory model on 2026-07-06 — keep it.
+
+- **Agents drafting in parallel can bake in stale facts.** The criterion
+  draft claimed GOVERNANCE.md didn't exist because it was written in
+  parallel with the scaffolding commit. Check parallel-drafted docs for
+  references to repo state and fix before review.
