@@ -117,10 +117,14 @@ fn non_exhaustive_match() {
 
 #[test]
 fn move_binding_from_borrowed_scrutinee() {
+    // Design §8.2.1 (Stage 3): a payload bound from a `read` scrutinee is a
+    // shared *borrow* of the sub-place (`borrow Box i64`), not an owned `Box`.
+    // Passing it to a by-value `Box i64` parameter is therefore a type error
+    // (the old conservative E0602 "non-movable" rule is gone).
     assert_has(
         "enum E { v(Box i64) } fn takeb(b: Box i64) -> unit { } \
          fn f(e: read E) -> unit { match e { case E::v(b) => takeb(b) } }",
-        "E0602",
+        "E0703",
     );
 }
 

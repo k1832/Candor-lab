@@ -30,8 +30,8 @@ pub struct Binding {
     pub name: String,
     pub ty: Type,
     pub mode: BindMode,
-    /// A borrow-binding of a non-copy payload from a borrowed scrutinee is not
-    /// movable in Stage 2 (design ruling; see report). Moving it is E0602.
+    /// Retained for the value-gear move analysis; borrow-bindings are borrow
+    /// *values* (design 0001 §8.2.1) and so are always movable-as-values.
     pub movable: bool,
     pub span: Span,
 }
@@ -82,16 +82,28 @@ fn mode_for(hold: HoldMode, ty: &Type, items: &dyn ItemEnv) -> (BindMode, bool) 
             if copy {
                 (BindMode::Copy, true)
             } else {
-                (BindMode::BorrowShared, false)
+                (BindMode::BorrowShared, true)
             }
         }
         HoldMode::Excl => {
             if copy {
                 (BindMode::Copy, true)
             } else {
-                (BindMode::BorrowExcl, false)
+                (BindMode::BorrowExcl, true)
             }
         }
+    }
+}
+
+/// The value type of a payload binding: a borrowed-scrutinee binding is a
+/// *borrow* of the payload sub-place (design 0001 §8.2.1), so its type wears the
+/// borrow (`borrow T` / `borrow_mut T`); a moved/copied binding is the payload
+/// type itself.
+fn binding_ty(mode: BindMode, ty: &Type) -> Type {
+    match mode {
+        BindMode::Move | BindMode::Copy => ty.clone(),
+        BindMode::BorrowShared => Type::Borrow(Box::new(ty.clone())),
+        BindMode::BorrowExcl => Type::BorrowMut(Box::new(ty.clone())),
     }
 }
 
@@ -122,7 +134,7 @@ pub fn analyze_pattern(
             let (mode, movable) = mode_for(hold, &ty, items);
             out.push(Binding {
                 name: name.clone(),
-                ty,
+                ty: binding_ty(mode, &ty),
                 mode,
                 movable,
                 span: pat.span,
@@ -186,7 +198,7 @@ fn bind_sub(
             let (mode, movable) = mode_for(hold, ty, items);
             out.push(Binding {
                 name: name.clone(),
-                ty: ty.clone(),
+                ty: binding_ty(mode, ty),
                 mode,
                 movable,
                 span: pat.span,

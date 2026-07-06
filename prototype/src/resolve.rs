@@ -18,6 +18,8 @@ use crate::types::*;
 pub struct ParamInfo {
     pub name: String,
     pub mode: ParamMode,
+    /// Region tag on a borrow parameter (design 0001 §3.3), e.g. `r` in `read[r] T`.
+    pub region: Option<String>,
     pub decl_ty: Type,
     pub lowered: Type,
     pub span: Span,
@@ -30,6 +32,8 @@ pub struct FnSig {
     pub params: Vec<ParamInfo>,
     pub alloc: bool,
     pub ret: Type,
+    /// Region tag on a borrow return (design 0001 §3.3), if written.
+    pub ret_region: Option<String>,
     pub ret_span: Span,
     pub span: Span,
 }
@@ -281,12 +285,13 @@ pub fn resolve_program(prog: &Program, diags: &mut Vec<Diag>) -> Items {
                         params.push(ParamInfo {
                             name: p.name.clone(),
                             mode: p.mode,
+                            region: p.region.clone(),
                             decl_ty: dty,
                             lowered,
                             span: p.span,
                         });
                     }
-                    let (ret, ret_span) = match &f.ret {
+                    let (ret, ret_region, ret_span) = match &f.ret {
                         Some(rt) => {
                             let base = r.resolve_ty(&rt.ty);
                             let t = match rt.borrow {
@@ -294,9 +299,9 @@ pub fn resolve_program(prog: &Program, diags: &mut Vec<Diag>) -> Items {
                                 Some(BorrowKind::Exclusive) => Type::BorrowMut(Box::new(base)),
                                 None => base,
                             };
-                            (t, rt.span)
+                            (t, rt.region.clone(), rt.span)
                         }
-                        None => (Type::unit(), f.span),
+                        None => (Type::unit(), None, f.span),
                     };
                     items.fns.insert(
                         f.name.clone(),
@@ -306,6 +311,7 @@ pub fn resolve_program(prog: &Program, diags: &mut Vec<Diag>) -> Items {
                             params,
                             alloc: f.alloc,
                             ret,
+                            ret_region,
                             ret_span,
                             span: f.span,
                         },

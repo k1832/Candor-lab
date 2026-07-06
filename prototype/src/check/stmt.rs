@@ -6,6 +6,7 @@ use crate::ast::*;
 use crate::types::Type;
 
 use super::dataflow::{Access, Place};
+use crate::ast::{ExprKind, PrefixOp};
 use super::{Checker, Use};
 
 impl<'a> Checker<'a> {
@@ -39,6 +40,7 @@ impl<'a> Checker<'a> {
                 let decl_ty = ty.as_ref().map(|t| self.resolve_ty(t));
                 match init {
                     Some(e) => {
+                        self.clear_carried();
                         let t = match &decl_ty {
                             Some(dt) => {
                                 self.check_against(e, dt);
@@ -48,6 +50,13 @@ impl<'a> Checker<'a> {
                         };
                         self.add_local(name, t, true);
                         self.emit(&Some(Place::local(name.clone())), Access::Assign, s.span);
+                        // A borrow value landing in a binding anchors its loan(s)
+                        // to this binding's live range (design §2.3).
+                        if carries_borrow(self, e) {
+                            self.anchor_carried(name);
+                        } else {
+                            self.clear_carried();
+                        }
                     }
                     None => {
                         let t = decl_ty.unwrap_or(Type::Error);
@@ -58,9 +67,20 @@ impl<'a> Checker<'a> {
             }
             StmtKind::Assign { target, value } => {
                 let (tt, place) = self.check_place(target);
+                self.clear_carried();
                 self.check_against(value, &tt);
                 if place.is_some() {
                     self.emit(&place, Access::Assign, s.span);
+                }
+                if let (true, Some(p)) = (carries_borrow(self, value), &place) {
+                    if p.proj.is_empty() {
+                        let name = p.root.clone();
+                        self.anchor_carried(&name);
+                    } else {
+                        self.clear_carried();
+                    }
+                } else {
+                    self.clear_carried();
                 }
             }
             StmtKind::Expr(e) => {
@@ -103,5 +123,33 @@ impl<'a> Checker<'a> {
     }
     pub(super) fn ret_ty_clone(&self) -> Type {
         self.f.ret_ty.clone()
+    }
+}
+
+/// Whether an expression's *value* is a borrow that carries a loan needing to be
+/// anchored at its landing binding (design §2.1/§3.1). A conservative syntactic
+/// whitelist: explicit borrows, slice ops, and calls that return a borrow.
+fn carries_borrow(c: &Checker, e: &crate::ast::Expr) -> bool {
+    match &e.kind {
+        ExprKind::Paren(i) => carries_borrow(c, i),
+        ExprKind::Prefix {
+            op: PrefixOp::Read | PrefixOp::Write,
+            ..
+        } => true,
+        ExprKind::Call { callee, .. } => {
+            if let ExprKind::Ident(name) = &callee.kind {
+                if matches!(name.as_str(), "slice_of" | "slice_of_mut" | "subslice") {
+                    return true;
+                }
+                if let Some(sig) = c.items.fns.get(name) {
+                    return matches!(
+                        sig.ret,
+                        crate::types::Type::Borrow(_) | crate::types::Type::BorrowMut(_)
+                    );
+                }
+            }
+            false
+        }
+        _ => false,
     }
 }

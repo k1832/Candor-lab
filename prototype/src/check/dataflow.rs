@@ -60,6 +60,48 @@ impl Place {
         }
         s
     }
+
+    /// The conflict-granularity place (design 0001 §2.2): a place reached through
+    /// a `deref` collapses to its root binding (a reborrow anchors on the parent;
+    /// a borrow through a `Box` anchors on the box binding); any index covers the
+    /// whole array, so the projection is truncated at the first `Index`; distinct
+    /// fields stay distinct.
+    pub fn canonical(&self) -> Place {
+        if self.proj.iter().any(|p| matches!(p, Proj::Deref)) {
+            return Place::local(self.root.clone());
+        }
+        let mut proj = Vec::new();
+        for p in &self.proj {
+            match p {
+                Proj::Field(f) => proj.push(Proj::Field(f.clone())),
+                Proj::Index => break,
+                Proj::Deref => unreachable!(),
+            }
+        }
+        Place {
+            root: self.root.clone(),
+            proj,
+        }
+    }
+}
+
+/// Do two *canonical* places overlap (design 0001 §2.2)? Same root and one
+/// field-path is a prefix of the other (`p` overlaps `p.f`; `p.f` and `p.g` do
+/// not). Canonicalization has already collapsed derefs and indices.
+pub fn overlaps(a: &Place, b: &Place) -> bool {
+    if a.root != b.root {
+        return false;
+    }
+    let n = a.proj.len().min(b.proj.len());
+    a.proj[..n] == b.proj[..n]
+}
+
+/// Shared vs. exclusive borrow discriminator carried on a `Borrow` action and
+/// on every loan (design 0001 §2.1/§2.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoanKind {
+    Shared,
+    Excl,
 }
 
 /// How a program point touches a place (design 0001 §2.2 access classification).
@@ -75,7 +117,7 @@ pub enum Access {
     /// Store into the place (definite assignment gen).
     Assign,
     /// Take a borrow (shared/exclusive) — Stage 3 loan point.
-    Borrow,
+    Borrow(LoanKind),
     /// Caller-side `out` argument: the place is initialized after the call.
     OutArg,
     /// Introduce an uninitialized local (`let x;`).
@@ -96,8 +138,12 @@ pub enum Term {
     Goto(BlockId),
     Branch(BlockId, BlockId),
     Switch(Vec<BlockId>),
-    /// Normal return: out-parameter obligations are checked here.
+    /// Normal return of an explicit `return e;` (or `return;`).
     Return,
+    /// The body ran off its end without an explicit `return` — an implicit
+    /// unit return. For a non-unit function this is the all-paths-return error
+    /// (§7.4/NN#5); Stage 3 flags it.
+    FallThrough,
     /// Panic / no successor.
     Diverge,
 }
@@ -134,7 +180,7 @@ pub fn successors(t: &Term) -> Vec<BlockId> {
         Term::Goto(x) => vec![*x],
         Term::Branch(a, b) => vec![*a, *b],
         Term::Switch(v) => v.clone(),
-        Term::Return | Term::Diverge => vec![],
+        Term::Return | Term::FallThrough | Term::Diverge => vec![],
     }
 }
 

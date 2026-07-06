@@ -9,6 +9,7 @@
 pub mod dataflow;
 pub mod effects;
 pub mod init;
+pub mod loans;
 pub mod patterns;
 
 mod expr;
@@ -22,8 +23,9 @@ use crate::resolve::{resolve_program, Items};
 use crate::span::Span;
 use crate::types::*;
 
-use dataflow::{Access, Cfg, CfgBlock, FlowState, Place, St, Term};
+use dataflow::{Access, Cfg, CfgBlock, FlowState, LoanKind, Place, St, Term};
 use effects::AllocEffect;
+use loans::{Anchor, LoanInfo, LoanTables};
 
 /// How an expression's result is consumed at its use site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +60,21 @@ struct FnState {
     /// (continue target, break target) per enclosing loop.
     loops: Vec<(usize, usize)>,
     alloc: AllocEffect,
+    // ---- Stage 3 loan machinery ----
+    /// Every loan created in the body (design 0001 §2.3).
+    loans: Vec<LoanInfo>,
+    /// Loan ids that are co-arguments of one call (§3.1, no two-phase).
+    call_groups: Vec<Vec<usize>>,
+    /// Loans carried by the just-evaluated expression's value (borrow exprs,
+    /// call-return extension). Read by the binding site to anchor them.
+    carried: Vec<usize>,
+    /// Provenance root of the just-evaluated borrow value (for return checks).
+    carried_prov: Option<String>,
+    /// Signature facts the return-provenance check needs (name, is_borrow_param,
+    /// region tag) and the return's region/borrow-ness.
+    sig_params: Vec<(String, bool, Option<String>)>,
+    ret_region: Option<String>,
+    ret_is_borrow: bool,
 }
 
 impl FnState {
@@ -72,6 +89,13 @@ impl FnState {
             cur: None,
             loops: Vec::new(),
             alloc: AllocEffect::default(),
+            loans: Vec::new(),
+            call_groups: Vec::new(),
+            carried: Vec::new(),
+            carried_prov: None,
+            sig_params: Vec::new(),
+            ret_region: None,
+            ret_is_borrow: false,
         }
     }
 }
@@ -171,7 +195,14 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Use::BorrowShared | Use::BorrowExcl => Access::Borrow,
+            Use::BorrowShared => {
+                self.record_borrow(place, LoanKind::Shared, span);
+                Access::Borrow(LoanKind::Shared)
+            }
+            Use::BorrowExcl => {
+                self.record_borrow(place, LoanKind::Excl, span);
+                Access::Borrow(LoanKind::Excl)
+            }
             Use::Assign => Access::Assign,
             Use::Out => Access::OutArg,
             Use::ReadOnly => Access::Read,
@@ -194,6 +225,79 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Create a loan on `place`'s conflict-granularity anchor (design §2.2/§2.3)
+    /// and mark it as carried by the expression's value. Anchoring to a binding
+    /// (or extension across a call) happens later, at the value's landing site.
+    pub(super) fn record_borrow(&mut self, place: &Option<Place>, kind: LoanKind, span: Span) {
+        match place {
+            Some(p) => {
+                let canon = p.canonical();
+                let root = canon.root.clone();
+                let id = self.f.loans.len();
+                self.f.loans.push(LoanInfo {
+                    place: canon,
+                    kind,
+                    span,
+                    anchor: Anchor::Temp,
+                });
+                self.f.carried = vec![id];
+                self.f.carried_prov = Some(root);
+            }
+            None => {
+                self.f.carried = Vec::new();
+                self.f.carried_prov = None;
+            }
+        }
+    }
+
+    /// Anchor the currently-carried loans to a landing binding `name` (a `let` or
+    /// assignment target): they are now in scope over `name`'s live range (§2.3).
+    pub(super) fn anchor_carried(&mut self, name: &str) {
+        let ids = std::mem::take(&mut self.f.carried);
+        for id in ids {
+            self.f.loans[id].anchor = Anchor::Binding(name.to_string());
+        }
+        self.f.carried_prov = None;
+    }
+
+    pub(super) fn take_carried(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.f.carried)
+    }
+    pub(super) fn set_carried(&mut self, ids: Vec<usize>, prov: Option<String>) {
+        self.f.carried = ids;
+        self.f.carried_prov = prov;
+    }
+    pub(super) fn clear_carried(&mut self) {
+        self.f.carried = Vec::new();
+        self.f.carried_prov = None;
+    }
+    /// Create a loan directly anchored to a binding (a borrowed-scrutinee
+    /// pattern binding, §8.2.1): in scope over that binding's live range.
+    pub(super) fn record_binding_loan(&mut self, place: &Place, kind: LoanKind, span: Span, name: &str) {
+        self.f.loans.push(LoanInfo {
+            place: place.canonical(),
+            kind,
+            span,
+            anchor: Anchor::Binding(name.to_string()),
+        });
+    }
+
+    pub(super) fn new_temp_loan(&mut self, place: Place, kind: LoanKind, span: Span) -> usize {
+        let id = self.f.loans.len();
+        self.f.loans.push(LoanInfo {
+            place,
+            kind,
+            span,
+            anchor: Anchor::Temp,
+        });
+        id
+    }
+    pub(super) fn push_call_group(&mut self, group: Vec<usize>) {
+        if group.len() >= 2 {
+            self.f.call_groups.push(group);
+        }
+    }
+
     fn note_alloc(&mut self, span: Span, reason: impl Into<String>) {
         self.f.alloc.note(span, reason);
     }
@@ -204,6 +308,14 @@ impl<'a> Checker<'a> {
         let sig = self.items.fns[&f.name].clone();
         self.f = FnState::empty();
         self.f.ret_ty = sig.ret.clone();
+        self.f.ret_is_borrow = matches!(sig.ret, Type::Borrow(_) | Type::BorrowMut(_));
+        self.f.ret_region = sig.ret_region.clone();
+        self.f.sig_params = sig
+            .params
+            .iter()
+            .map(|p| (p.name.clone(), is_borrow_param(p), p.region.clone()))
+            .collect();
+        self.check_signature_regions(&sig);
 
         // Entry block + parameter environment + initial flow state.
         let entry = self.new_block();
@@ -228,9 +340,10 @@ impl<'a> Checker<'a> {
 
         self.check_block_stmts(&f.body);
 
-        // Fall-through: a body that does not diverge is a normal return.
+        // Fall-through: a body that runs off its end is an implicit unit return
+        // (an all-paths-return error for a non-unit function; Stage 3 flags it).
         if let Some(cur) = self.f.cur {
-            self.set_term(cur, Term::Return);
+            self.set_term(cur, Term::FallThrough);
         }
 
         // ensures clauses may reference `result` (design §7.3).
@@ -253,6 +366,18 @@ impl<'a> Checker<'a> {
         cfg.compute_preds();
         let out_params = self.f.out_params.clone();
         init::analyze(&cfg, &entry_state, &out_params, &mut self.diags);
+
+        // Stage 3: NLL-lite loan liveness + XOR/move/write conflict scan,
+        // same-call overlap, and all-paths-return (design §2.2/§2.3/§3.1/§7.4).
+        let tables = LoanTables {
+            loans: std::mem::take(&mut self.f.loans),
+            call_groups: std::mem::take(&mut self.f.call_groups),
+        };
+        let ret_non_unit = !matches!(
+            sig.ret,
+            Type::Scalar(crate::token::ScalarTy::Unit) | Type::Never | Type::Error
+        );
+        loans::analyze(&cfg, &tables, ret_non_unit, f.span, &mut self.diags);
 
         if let Some(d) = self.f.alloc.finish(f.alloc, &f.name, f.span) {
             self.diags.push(d);
@@ -357,6 +482,52 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Region well-formedness for a borrow-returning signature (design §3.3):
+    /// two-plus borrow params returning a borrow require a region variable;
+    /// an explicit return region must be declared and tag some borrow param.
+    fn check_signature_regions(&mut self, sig: &crate::resolve::FnSig) {
+        if !matches!(sig.ret, Type::Borrow(_) | Type::BorrowMut(_)) {
+            return;
+        }
+        let borrow_params: Vec<&crate::resolve::ParamInfo> =
+            sig.params.iter().filter(|p| is_borrow_param(p)).collect();
+        match &sig.ret_region {
+            Some(r) => {
+                if !sig.regions.contains(r) {
+                    self.diags.push(
+                        Diag::error(
+                            "E0807",
+                            format!("return region `{r}` is not declared in the signature"),
+                            sig.ret_span,
+                        )
+                        .with_note("declare it in brackets after the function name, e.g. `fn f[r](...)` (§3.3)", None),
+                    );
+                } else if !borrow_params.iter().any(|p| p.region.as_deref() == Some(r.as_str())) {
+                    self.diags.push(
+                        Diag::error(
+                            "E0808",
+                            format!("return region `{r}` tags no borrow parameter"),
+                            sig.ret_span,
+                        )
+                        .with_note("attach the region to the borrow parameter the return derives from (§3.3)", None),
+                    );
+                }
+            }
+            None => {
+                if borrow_params.len() >= 2 {
+                    self.diags.push(
+                        Diag::error(
+                            "E0807",
+                            "a borrow return from two or more borrow parameters requires a region variable".to_string(),
+                            sig.ret_span,
+                        )
+                        .with_note("region variables are mandatory here; there is no compact default (§3.3)", None),
+                    );
+                }
+            }
+        }
+    }
+
     fn require_unsafe(&mut self, span: Span, op: &str) {
         if !self.f.in_unsafe {
             self.diags.push(
@@ -369,4 +540,10 @@ impl<'a> Checker<'a> {
             );
         }
     }
+}
+
+/// A parameter that is itself a borrow (design §3.3): a `read`/`write` mode
+/// parameter, or a by-value borrow-kind (slice/borrow) parameter.
+fn is_borrow_param(p: &crate::resolve::ParamInfo) -> bool {
+    matches!(p.mode, ParamMode::Read | ParamMode::Write) || p.decl_ty.is_borrow_kind()
 }

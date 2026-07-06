@@ -8,7 +8,7 @@ use crate::span::Span;
 use crate::token::ScalarTy;
 use crate::types::*;
 
-use super::dataflow::{Access, Place, Proj, Term};
+use super::dataflow::{Access, LoanKind, Place, Proj, Term};
 use super::patterns::{self, BindMode, HoldMode};
 use super::{Checker, Use};
 
@@ -529,6 +529,96 @@ impl<'a> Checker<'a> {
 
     // ----- helpers used by control flow (in this file) --------------------
 
+    /// Check that a returned borrow's provenance is a region-legal input, not a
+    /// local (design §3.3): a borrow may not outlive the body it was born in.
+    fn check_return_provenance(&mut self, e: &Expr) {
+        let root = match self.borrow_provenance(e) {
+            Some(r) => r,
+            None => return,
+        };
+        let found = self
+            .f
+            .sig_params
+            .iter()
+            .find(|(n, _, _)| *n == root)
+            .cloned();
+        match found {
+            None => self.diags.push(
+                Diag::error(
+                    "E0806",
+                    format!("returned borrow of local `{root}` does not live long enough"),
+                    e.span,
+                )
+                .with_note("a borrow may not outlive the body it was born in; return an owned value or borrow an input (§3.3)", None),
+            ),
+            Some((_, is_bp, region)) => {
+                if !is_bp {
+                    self.diags.push(
+                        Diag::error(
+                            "E0806",
+                            format!("returned borrow derives from owned parameter `{root}`, which does not outlive the body"),
+                            e.span,
+                        )
+                        .with_note("borrow-return provenance must be a `read`/`write`/slice parameter (§3.3)", None),
+                    );
+                } else if let Some(r) = self.f.ret_region.clone() {
+                    if region.as_deref() != Some(r.as_str()) {
+                        self.diags.push(
+                            Diag::error(
+                                "E0808",
+                                format!("returned borrow is tagged region `{r}` but derives from `{root}`, which is not in that region"),
+                                e.span,
+                            )
+                            .with_note("the returned borrow must derive from the parameter carrying the return's region (§3.3)", None),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The input root a borrow value ultimately derives from (design §3.3),
+    /// computed purely from the expression shape.
+    fn borrow_provenance(&self, e: &Expr) -> Option<String> {
+        match &e.kind {
+            ExprKind::Paren(i) => self.borrow_provenance(i),
+            ExprKind::Prefix {
+                op: PrefixOp::Read | PrefixOp::Write,
+                expr,
+            } => expr_place_root(expr),
+            ExprKind::Ident(n) => {
+                if self.lookup_local(n).map(|l| l.ty.is_borrow_kind()).unwrap_or(false) {
+                    Some(n.clone())
+                } else {
+                    None
+                }
+            }
+            ExprKind::Call { callee, args } => {
+                if let ExprKind::Ident(name) = &callee.kind {
+                    match name.as_str() {
+                        "slice_of" | "slice_of_mut" => args.first().and_then(expr_place_root),
+                        "subslice" => args.first().and_then(|a| self.borrow_provenance(a)),
+                        _ => {
+                            if let Some(sig) = self.items.fns.get(name) {
+                                if matches!(sig.ret, Type::Borrow(_) | Type::BorrowMut(_)) {
+                                    let src = region_source_indices(sig);
+                                    return src
+                                        .first()
+                                        .and_then(|&i| args.get(i))
+                                        .and_then(|a| self.borrow_provenance(a));
+                                }
+                            }
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn f_in_unsafe(&self) -> bool {
         self.in_unsafe_get()
     }
@@ -564,15 +654,20 @@ impl<'a> Checker<'a> {
         match ct {
             Type::FnPtr(fp) => {
                 let n = fp.params.len().min(args.len());
+                let mut group: Vec<usize> = Vec::new();
                 for ((mode, pty), a) in fp.params.iter().zip(args) {
+                    self.clear_carried();
                     self.check_arg_mode(*mode, pty, a);
+                    group.extend(self.take_carried());
                 }
                 for a in args.iter().skip(n) {
                     self.check_expr(a, Use::Value);
                 }
+                self.push_call_group(group);
                 if fp.alloc {
                     self.note_alloc(span, "indirect call through an `alloc` fn-pointer (§6.1)");
                 }
+                self.clear_carried();
                 *fp.ret
             }
             Type::Error => Type::Error,
@@ -600,11 +695,35 @@ impl<'a> Checker<'a> {
                 span,
             ));
         }
+        // Evaluate each argument, capturing the loan(s) it contributes (§3.1).
+        let mut per_arg: Vec<Vec<usize>> = Vec::new();
+        let mut per_prov: Vec<Option<String>> = Vec::new();
         for (p, a) in sig.params.iter().zip(args) {
+            self.clear_carried();
             self.check_arg_mode(p.mode, &p.decl_ty, a);
+            per_prov.push(self.f.carried_prov.clone());
+            per_arg.push(self.take_carried());
         }
+        let group: Vec<usize> = per_arg.iter().flatten().copied().collect();
+        self.push_call_group(group);
         if sig.alloc {
             self.note_alloc(span, format!("call to `alloc` function `{}` (§6.3)", sig.name));
+        }
+        // Return-borrow extension: the returned borrow keeps the loan(s) on the
+        // argument(s) tagged with the return's region alive (§3.1/§3.3).
+        if matches!(sig.ret, Type::Borrow(_) | Type::BorrowMut(_)) {
+            let src = region_source_indices(sig);
+            let mut ids = Vec::new();
+            let mut prov = None;
+            for i in src {
+                ids.extend(per_arg[i].iter().copied());
+                if prov.is_none() {
+                    prov = per_prov[i].clone();
+                }
+            }
+            self.set_carried(ids, prov);
+        } else {
+            self.clear_carried();
         }
         sig.ret.clone()
     }
@@ -629,7 +748,12 @@ impl<'a> Checker<'a> {
     fn check_out_arg(&mut self, arg: &Expr, expected: &Type) {
         let (t, place) = self.check_place(arg);
         match &place {
-            Some(_) => self.emit(&place, Access::OutArg, arg.span),
+            Some(p) => {
+                self.emit(&place, Access::OutArg, arg.span);
+                // `out place` is an exclusive loan on the slot for the call (§3.1).
+                let id = self.new_temp_loan(p.canonical(), LoanKind::Excl, arg.span);
+                self.set_carried(vec![id], Some(p.canonical().root));
+            }
             None => self.diags.push(
                 Diag::error("E0705", "an `out` argument must be a place", arg.span)
                     .with_note("pass a local or field the caller owns (§3.1)", None),
@@ -746,6 +870,23 @@ impl<'a> Checker<'a> {
                     Type::Error
                 }
             }
+            "slice_of_mut" => {
+                if args.len() == 1 {
+                    let (t, place) = self.check_place(&args[0]);
+                    self.emit_place_action(&place, Use::BorrowExcl, &t, args[0].span);
+                    match t {
+                        Type::Array(e, _) | Type::Slice(e) | Type::SliceMut(e) => Type::SliceMut(e),
+                        Type::Error => Type::Error,
+                        other => {
+                            self.mismatch(span, "slice_of_mut", "an array", &other);
+                            Type::Error
+                        }
+                    }
+                } else {
+                    self.arity(span, "slice_of_mut", 1);
+                    Type::Error
+                }
+            }
             "subslice" => {
                 if args.len() == 3 {
                     let s = self.check_expr(&args[0], Use::Value);
@@ -852,6 +993,9 @@ impl<'a> Checker<'a> {
 
     fn check_match(&mut self, scrut: &Expr, arms: &[MatchArm], span: Span) -> Type {
         let (sc_ty, sc_place) = self.check_place(scrut);
+        // A borrow returned by a call scrutinee (return-extended loan) is not
+        // anchored to a binding here; its transient loan dies at the match head.
+        self.clear_carried();
         let resolved = patterns::resolve_enum(&sc_ty, self.items);
         let (hold, einfo, ename) = match resolved {
             Some(x) => x,
@@ -939,6 +1083,18 @@ impl<'a> Checker<'a> {
             for bd in &binds {
                 self.add_local(&bd.name, bd.ty.clone(), bd.movable);
                 self.emit(&Some(Place::local(bd.name.clone())), Access::Assign, bd.span);
+                // A borrowed-scrutinee binding is a reborrow of a scrutinee
+                // sub-place: it carries a loan restricting the scrutinee (§8.2.1).
+                if let Some(scp) = &sc_place {
+                    let kind = match bd.mode {
+                        BindMode::BorrowShared => Some(LoanKind::Shared),
+                        BindMode::BorrowExcl => Some(LoanKind::Excl),
+                        _ => None,
+                    };
+                    if let Some(k) = kind {
+                        self.record_binding_loan(scp, k, bd.span, &bd.name);
+                    }
+                }
             }
             let bt = self.check_expr(&arm.body, Use::Value);
             self.pop_scope();
@@ -1008,6 +1164,9 @@ impl<'a> Checker<'a> {
         if let Some(e) = operand {
             let ret = self.ret_ty_clone();
             self.check_against(e, &ret);
+            if self.f.ret_is_borrow {
+                self.check_return_provenance(e);
+            }
         }
         if let Some(cur) = self.cur_get() {
             self.set_term(cur, Term::Return);
@@ -1065,6 +1224,46 @@ fn join_types(a: Type, b: Type) -> Type {
                 a
             } else {
                 b
+            }
+        }
+    }
+}
+
+/// The canonical root binding of the place an expression denotes.
+fn expr_place_root(e: &Expr) -> Option<String> {
+    match &e.kind {
+        ExprKind::Paren(i) => expr_place_root(i),
+        ExprKind::Ident(n) => Some(n.clone()),
+        ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => expr_place_root(base),
+        ExprKind::Prefix {
+            op: PrefixOp::Deref,
+            expr,
+        } => expr_place_root(expr),
+        _ => None,
+    }
+}
+
+/// Which argument indices are the return-region source for a borrow-returning
+/// call (design §3.3): the params tagged with the return region, or — under the
+/// compact default — the sole borrow parameter.
+fn region_source_indices(sig: &crate::resolve::FnSig) -> Vec<usize> {
+    let bidx: Vec<usize> = sig
+        .params
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| matches!(p.mode, ParamMode::Read | ParamMode::Write) || p.decl_ty.is_borrow_kind())
+        .map(|(i, _)| i)
+        .collect();
+    match &sig.ret_region {
+        Some(r) => bidx
+            .into_iter()
+            .filter(|&i| sig.params[i].region.as_deref() == Some(r.as_str()))
+            .collect(),
+        None => {
+            if bidx.len() == 1 {
+                vec![bidx[0]]
+            } else {
+                Vec::new()
             }
         }
     }

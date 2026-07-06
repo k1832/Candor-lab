@@ -64,7 +64,7 @@ pub fn analyze(cfg: &Cfg, entry: &FlowState, out_params: &[String], diags: &mut 
         for a in &cfg.blocks[b].actions {
             apply(&mut st, a, out_params, Some(diags));
         }
-        if let Term::Return = cfg.blocks[b].term {
+        if matches!(cfg.blocks[b].term, Term::Return | Term::FallThrough) {
             for op in out_params {
                 if st.get(&Place::local(op.clone())) != St::Init {
                     diags.push(
@@ -116,13 +116,13 @@ fn apply(st: &mut FlowState, a: &Action, out_params: &[String], report: Option<&
     let root = Place::local(a.place.root.clone());
     let key = if opaque { &root } else { &a.place };
     match &a.access {
-        Access::Read | Access::Borrow => {
+        Access::Read | Access::Borrow(_) => {
             if let Some(d) = report {
                 require_init(st, key, out_params, a.span, d);
             }
         }
         Access::Move {
-            movable,
+            movable: _,
             drop_hooked_partial,
         } => {
             if opaque {
@@ -140,16 +140,6 @@ fn apply(st: &mut FlowState, a: &Action, out_params: &[String], report: Option<&
                                 a.span,
                             )
                             .with_note("move or borrow the whole value; a drop-hooked type cannot be left partial (§1.6)", None),
-                        );
-                    }
-                    if !*movable {
-                        d.push(
-                            Diag::error(
-                                "E0602",
-                                format!("cannot move `{}`: it is a borrow-binding from a borrowed scrutinee", a.place.display()),
-                                a.span,
-                            )
-                            .with_note("matching a borrowed scrutinee yields borrows, not owned values (§8.2.1)", None),
                         );
                     }
                 }
