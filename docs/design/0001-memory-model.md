@@ -2,11 +2,13 @@
 
 **Status:** Design. Subordinate to `LANG_PHYLOSOPHY.md`, which outranks this document (§9 hierarchy). Where this document and the philosophy conflict, the philosophy wins and this document is the artifact that changes.
 
+**Revision note.** Revised same-day against adversarial review #1 (`docs/reviews/2026-07-06-memory-model-review-1.md`); all 13 findings dispositioned and applied.
+
 **Scope.** This document specifies the memory/ownership model for the *Bet 5 validation prototype* only: a **checker plus tree-walking interpreter**, deliberately throwaway syntax, **no optimizer**, **no stdlib beyond slices and one allocation surface**. It is written to be implemented from without further questions, and to be the target the adversarial basket is authored against: an allocator, an intrusive-list scheduler, an MMIO driver state machine, a parser, and an arena-based compiler pass (Bet 5, §3).
 
 **What the prototype must not do.** It must not accidentally make Candor look better or worse than the real language would (Bet 5 measurement validity). Two consequences recur below: (a) where a real-language convenience is cheap to implement soundly, the prototype includes it, so the measurement is not biased by artificial friction (e.g. non-lexical borrows); (b) where a real-language convenience would *hide* a pressure valve, the prototype refuses it, so valve frequency is measured honestly (e.g. no borrow-typed struct fields).
 
-**Throwaway syntax contract.** Keywords are ugly-but-unambiguous. The grammar parses without a symbol table (NN#13): every construct is disambiguated by keyword and grammatical position, never by resolving an identifier's type. Do not read the syntax as a proposal for the real language; read it as a fixture.
+**Throwaway syntax contract.** Keywords are ugly-but-unambiguous. The grammar parses without a symbol table (NN#13): every construct is disambiguated by keyword and grammatical position, never by resolving an identifier's type. Do not read the syntax as a proposal for the real language; read it as a fixture. Two token reservations follow from NN#13 and are fixed here: `::` is reserved **exclusively** for enum-variant reference (`Enum::Variant`), so `Ident :: Ident` parses by grammatical position without resolving either identifier; and the ugly keywords (`read`, `write`, `take`, `out`, `unsafe`, `wrapping`, `saturating`, `conv`, ...) are the sole disambiguators.
 
 ---
 
@@ -55,7 +57,7 @@ Rationale for opt-in struct copy: a two-`i32` struct is cheap to copy, but makin
 
 ### 1.4 Explicit `clone` and `copy` operators
 
-- `clone place` produces an owned, independent duplicate of the value at `place`. It is defined **structurally**: recursively `clone` each field/element; for `Box T` it allocates a new box (so `clone` on a box-bearing type is an **`alloc`-effecting** operation, §6.3, and the call site inherits the effect). `clone` is available for any type all of whose fields are cloneable; a type is not cloneable if it contains a `rawptr` (the prototype will not guess how to duplicate raw graph memory) — such a type must be duplicated by hand inside a valve.
+- `clone place` produces an owned, independent duplicate of the value at `place`. It is defined **structurally**: recursively `clone` each field/element; for `Box T` it allocates a new box (so `clone` on a box-bearing type is an **`alloc`-effecting** operation, §6.3, and the call site inherits the effect). `clone` is available for any type all of whose fields are cloneable. **The rawptr-not-cloneable rule applies to user types only:** a *user* type that contains a `rawptr` is not cloneable (the prototype will not guess how to duplicate raw graph memory) — such a type must be duplicated by hand inside a valve. The compiler-known `Box T` is the exception (§6.2): it clones by **copying its stored `Alloc` handle, allocating a fresh box through that stored handle, and cloning the pointee**, even though it holds `rawptr` internally. Cloning any value that bears `Box`es allocates through **each `Box`'s own stored handle**.
 - No separate `copy` operator is needed: for a `copy`-typed place, ordinary use already copies. `clone` on a `copy` type is permitted and equals a copy.
 
 `clone` is the *only* implicit-cost-free way to say "I am paying for a duplicate here," and it is always visible in the source (P13: the expensive thing wears a word).
@@ -96,7 +98,14 @@ Borrows are produced by keyword operators on places:
 
 Dereference: `deref b` is a **place** denoting the borrowed storage. On the right of `=` it reads (copying if `copy`, or serving as a place to re-borrow); on the left it writes: `deref b = v` (only if `b` is exclusive).
 
-A borrow of a place through another borrow is a **reborrow**: `write (deref b)` where `b` is exclusive yields a fresh exclusive borrow constrained to not outlive `b`. Reborrows are how borrows are passed down the call stack.
+A borrow of a place through another borrow is a **reborrow**: `write (deref b)` where `b` is exclusive yields a fresh exclusive borrow constrained to not outlive `b`, and `read (deref b)` yields a fresh **shared** borrow of the pointee. Reborrows are how borrows are passed down the call stack.
+
+**The reborrow rule (both directions).** Every reborrow places a loan on the *pointee* that restricts the **parent** borrow for the reborrow's live range (§2.3):
+
+- An **exclusive reborrow** (`write (deref b)`) **suspends the parent entirely**: while it is live, `b` may not be used at all — no read, no write, no further reborrow through it.
+- A **shared reborrow** (`read (deref b)`, legal even when `b` is exclusive) **freezes the parent to shared**: while it is live, the pointee may be read through `b` or re-shared, but `b` may not write and may not be reborrowed exclusively.
+
+Each restriction lasts exactly the reborrow's live range; then the parent is fully usable again. This is the §2.2 XOR rule applied one level down, through the parent.
 
 ### 2.2 The aliasing rule (XOR)
 
@@ -108,13 +117,22 @@ Consequences enforced by the checker:
 - While an exclusive borrow of a place is live, the place may be accessed **only** through that borrow (no direct read, no direct write, no second borrow).
 - While any shared borrow of a place is live, the place may be read directly and re-shared, but **not written** and **not exclusively borrowed**.
 - Borrowing overlapping places (e.g. `p` and `p.f`) conflicts by the same rule; disjoint fields (`p.f` and `p.g`) do **not** conflict — the checker tracks borrows at place granularity, including distinct fields, but treats any index `a[i]` as covering the whole array `a` (no index-sensitive disjointness in the prototype; §10).
+- A **move** out of a place (whole or partial, §1.6) and a **direct write or reassignment** to a place are **exclusive accesses** to that place for this conflict check: each conflicts with *any* live loan — shared or exclusive — on that place or on any overlapping place. (A move is neither a plain read nor a borrow, so without this clause nothing would stop it invalidating storage a live borrow still views.)
+
+Rejected program (the hole this clause closes):
+
+```
+let b = read x;     // shared loan on x, live until the deref below
+let y = x;          // MOVE out of x -- exclusive access -- conflicts with b's loan: REJECTED
+use(deref b);       // would otherwise read moved-from storage (an NN#5 violation)
+```
 
 ### 2.3 Borrow duration — non-lexical, body-local, aggressive (NLL-lite)
 
 Borrow scope is **not** tied to lexical blocks. A borrow's **live range** is inferred body-locally by liveness, and the aliasing rule is checked over live ranges. Concrete, implementable discipline:
 
 1. **Build the CFG** of the function body (basic blocks, edges for `if`/`match`/`loop`/`break`/`return`).
-2. **Reference liveness (backward dataflow).** A borrow value `b` (and any borrow reborrowed from it) is **live** at a point `P` if there is a path from `P` to a *use* of `b` — a `deref`, a pass-by-borrow, a store of `b`, a reborrow of `b` — that does not first pass through a redefinition of the binding holding `b`. Standard backward liveness; converges in one worklfrom pass over a finite lattice.
+2. **Reference liveness (backward dataflow).** A borrow value `b` (and any borrow reborrowed from it) is **live** at a point `P` if there is a path from `P` to a *use* of `b` — a `deref`, a pass-by-borrow, a store of `b`, a reborrow of `b` — that does not first pass through a redefinition of the binding holding `b`. Standard backward liveness; converges in one worklist pass over a finite lattice.
 3. **Loan set.** Each borrow expression creates a **loan** on the place it borrows, tagged shared/exclusive. The loan is *in scope* exactly over the live range of the borrow value(s) carrying it (including reborrows, whose loans extend the parent's obligation).
 4. **Conflict check.** At every point, for every place, if the in-scope loans violate the XOR rule (§2.2), reject with a diagnostic naming both loans, their creation sites, and the point of conflict (P4: full provenance).
 
@@ -141,11 +159,19 @@ A parameter is written `name: MODE Type`. There are **four** modes. **Omitting t
 | by value (default) | `take` (or omitted) | its argument **moved in** (or copied, if the type is `copy`) | an owned value it may mutate, move, or drop | transferred **in** |
 | shared borrow | `read` | argument **borrowed shared**; unchanged, still owned by caller | a `read`-borrow: may read, may re-share, may not mutate or move | borrowed |
 | exclusive borrow | `write` | argument **borrowed exclusively**; still owned by caller, untouchable during the call | a `write`-borrow: may read and mutate through it, may not move the pointee out | borrowed |
-| out / init | `out` | a place it **owns but has not initialized**; after the call it is initialized | a slot it **must fully initialize before normal return** and **may not read before initializing** | caller keeps ownership; callee fills it |
+| out / init | `out` | a place it **owns**; if already initialized, its old value is **dropped at the call site before the call** (§1.5); the place is initialized after the call | a slot it **must initialize on every normal-return path** and **may not read before its first assignment** | caller keeps ownership; callee fills it |
 
 Return values use `-> T` and **move out** (RVO is a permissible interpreter optimization but is semantically a move, never a hidden copy).
 
-`out` rules (checker obligations, reusing definite-assignment analysis, §7.4): on every normal-return path the out-place is definitely assigned exactly once and never read before assignment; if the function **faults** before assigning, the slot stays uninitialized and is **not** dropped by the caller (the caller's definite-assignment state for that place is "still uninitialized," so scope exit does not drop it). `out` exists because in-place initialization of a caller-owned slot — a device-state struct, a freshly allocated node — is a real systems pattern that the "no uninitialized reads" rule (NN#5) otherwise makes clumsy; it reuses machinery the checker needs anyway.
+`out` rules (checker obligations, reusing definite-assignment analysis, §7.4):
+
+- **Aliasing.** `out place` produces an **exclusive loan** on the place for the duration of the call; by the §2.2 rule it conflicts with any other argument in the same call that touches an overlapping place. So `f(out x, write x)` and `f(out x, read x)` are **rejected** — the `out` loan and the second argument's loan overlap on `x` (this closes the two-paths-to-one-slot hole).
+- **A pre-initialized slot is dropped at the call site.** Passing an already-initialized place as `out` first **drops its current value at the call site, before the call** — the same visible rule as reassignment (§1.5) — so the slot the callee sees is uninitialized. If the call **faults** mid-way, nothing further executes (abort policy, §7.4), so no partially-initialized drop question arises.
+- **Definite assignment.** The callee must leave the slot **definitely assigned on every normal-return path** and **may never read it before its first assignment** (the ordinary definite-assignment pass, §7.4). *Repeated* assignment (e.g. inside a loop) is ordinary reassignment and is **permitted** — "exactly once" is not required. If the callee faults before assigning, the slot stays uninitialized and is **not** dropped by the caller (its definite-assignment state is "still uninitialized," so scope exit does not drop it).
+
+`out` exists because in-place initialization of a caller-owned slot — a device-state struct, a freshly allocated node — is a real systems pattern that the "no uninitialized reads" rule (NN#5) otherwise makes clumsy; it reuses machinery the checker needs anyway.
+
+**Passing borrow-typed arguments.** A slice or borrow-typed value is **passed by value**, not re-annotated with a mode: a shared borrow / `slice` is `copy` and copies in; an exclusive borrow / `slice_mut` **moves** in, or is **reborrowed at the call site** (`write (deref b)`). Consequently a `read`/`write` mode written on a parameter whose type is *already* a borrow kind (a borrow, `slice`, or `slice_mut`) is **ill-formed** — there is one canonical spelling (P3), and this keeps the annotation metric deterministic. (A `write usize` parameter is fine: `usize` is not a borrow kind, so `write` there is an ordinary exclusive borrow of an owned integer.)
 
 Why these four and not more/fewer: §10.1.
 
@@ -207,14 +233,16 @@ Operations (all require `unsafe`):
 | `ptr_read(p)` | `rawptr T` → `T` | bitwise read of `*p` (author guarantees `p` valid + initialized) |
 | `ptr_write(p, v)` | `rawptr T, T` → `unit` | bitwise store to `*p`; does **not** drop the old value |
 | `ptr_offset(p, n)` | `rawptr T, isize` → `rawptr T` | pointer arithmetic by `n` elements |
-| `ptr_null()` | → `rawptr T` | null pointer of element type `T` (annotate `T` at call) |
+| `ptr_null[T]()` | → `rawptr T` | null pointer of element type `T` (`T` written explicitly at the call) |
 | `is_null(p)` | `rawptr T` → `bool` | (safe to call; but only meaningful in unsafe workflows) |
 | `ptr_to_addr(p)` | `rawptr T` → `usize` | address as integer |
-| `addr_to_ptr(a)` | `usize` → `rawptr T` | integer to pointer (MMIO, fixed addresses) |
-| `cast_ptr(p)` | `rawptr T` → `rawptr U` | reinterpret element type |
+| `addr_to_ptr[T](a)` | `usize` → `rawptr T` | integer to pointer (MMIO, fixed addresses); target `T` written explicitly |
+| `cast_ptr[U](p)` | `rawptr T` → `rawptr U` | reinterpret element type; target `U` written explicitly |
 | `offsetof(Type, field)` | (compile-time) → `usize` | byte offset of a field (for `container_of`) |
 
 `ptr_read` moving semantics: `ptr_read` yields an owned value by bit copy; the author is responsible for not creating two owners of a move-only value (the checker cannot help here — that is what the valve *is*). The dereference forms deliberately do **not** drop or move-track, because the whole point of the valve is that the author has taken over that responsibility, visibly.
+
+`ptr_null[T]`, `cast_ptr[U]`, and `addr_to_ptr[T]` carry their target element type **explicitly** in brackets: there is no implicit pointer-type inference and no `as` cast anywhere in the language (P2). Changing a *pointer's* element type is one of these `unsafe` forms; changing an *integer's* type is the safe `conv` form (§8.1).
 
 This set is exactly what the allocator (free-list splice), the scheduler (`container_of`, doubly-linked splice), and the MMIO driver (fixed-address volatile access) need — no more. `is_null` is callable from safe code so that a `rawptr` returned across an unsafe boundary can be null-checked without re-entering `unsafe`.
 
@@ -227,6 +255,8 @@ Defense (this is a measurement decision, not just a scope cut):
 - **The basket does not need it.** Interior mutability buys safe *aliased mutation*. Of the five programs, the two that alias mutable state — the free-list allocator and the intrusive scheduler — do so through genuinely pointer-shaped structures (a free list is a linked list threaded through the free blocks themselves; an intrusive node is reachable from two links at once). A `RefCell` does **not** help those: they are `rawptr` structures in any language, and would be `unsafe` in the real Candor too. The arena's back-references use **indices**, which are safe *without* interior mutability. So omitting the cell does **not** push any basket program from safe into `unsafe` — the safe alternative for the one case it might serve (graph back-edges) is the index idiom, which we have.
 - **One valve keeps the Bet 5 signal clean.** Bet 5 measures *how often* authors reach for a valve. Two valves (unsafe-pointer and checked-cell) would split that signal — a reviewer counting "escapes from the safe gears" would have to sum two categories with different costs. A single valve gives one unambiguous frequency. This is a positive measurement argument for omission, not merely an argument that omission is harmless.
 - **P6 budget.** With no generics, a cell would be a special-cased built-in type carrying a runtime borrow flag and a fault path — real implementation surface for zero basket benefit.
+
+**Honest upper bound (measurement consequence).** The prototype ships only the unsafe valve, whereas P12's valve set also admits **checked-runtime alternatives**. A valve count measured here is therefore an **upper bound** on real-Candor valve occurrence: a region forced into `unsafe` in the prototype might, in the real language, have used a checked-runtime cell instead and not counted as an unsafe valve at all. The Bet 5 kill criterion absorbs this with *cell-substitutable* tagging, so a KILL is never triggered by this scope cut alone — see `docs/BET5_CRITERION.md` (the mechanics live there, not here).
 
 Named residual risk: if a *future* basket program legitimately needs safe aliased mutation over non-pointer data (e.g. an observer graph), its absence would force that program into `unsafe` and **overstate** valve frequency. The prototype's five programs do not include such a case; if the basket is extended and one appears, adding the cell is the correct response and this decision should be revisited (it is recorded in §10.3 as the alternative most likely to be wrong).
 
@@ -245,7 +275,7 @@ A slice is a **borrow** of a contiguous run of `T` — conceptually `(pointer, l
 - `slice T` — a **shared** slice. `copy`, aliasable, read-only. A shared borrow of a run.
 - `slice_mut T` — an **exclusive** slice. Moves, unique, read-write. An exclusive borrow of a run.
 
-Slices obey the borrow rules of §2 against the array/allocation they view (taking a `slice_mut` of an array is an exclusive loan on the array). Because slices are borrows, **they may not be struct fields** (§3.4) and they follow NLL live ranges (§2.3).
+Slices obey the borrow rules of §2 against the array/allocation they view (taking a `slice_mut` of an array is an exclusive loan on the array). Because slices are borrows, **they may not be struct fields** (§3.4) and they follow NLL live ranges (§2.3). Like all borrow-typed values, slices are **passed by value** (§3.1): a `slice` copies, a `slice_mut` moves or is reborrowed at the call site; a `read`/`write` mode on a slice-typed parameter is ill-formed.
 
 Operations: `slice_of(place)` borrows a whole array; `subslice(s, lo, hi)` reborrows `[lo, hi)` (bounds-faulting if `lo > hi` or `hi > len`); `len(s) -> usize`; `s[i]` is a place (read for `slice`, read/write for `slice_mut`). String and byte literals produce `slice u8` viewing read-only static storage (§8.4).
 
@@ -265,8 +295,8 @@ An allocator is a small **copy handle**:
 
 ```
 struct AllocVtable {
-    alloc: fn(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8,   // null == out of memory
-    free:  fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit,
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,   // null == out of memory
+    free:  fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,   // alloc-marked conservatively
 }
 
 copy struct Alloc {          // copy: it is a handle, freely passed and stored
@@ -277,10 +307,12 @@ copy struct Alloc {          // copy: it is a handle, freely passed and stored
 
 `Alloc` is `copy` and its `rawptr` fields are inert in safe code (§4.2), so a handle can be passed by value, stored in a `Box`, and copied without a valve. Only the *implementation* of an allocator dereferences `ctx`/`vt` (inside `unsafe`). This is "the capability travels as an ordinary value" (P2) in concrete form.
 
-Function pointers (`fn(...) -> ...`, with parameter modes) are the one mechanism the vtable needs; they may not capture (no closures), so a vtable entry is always a top-level function. Calling through a function pointer is an ordinary call for effect/borrow purposes.
+Function pointers (`fn(...) -> ...`) are the one mechanism the vtable needs; they may not capture (no closures), so a vtable entry is always a top-level function. **A function pointer's type includes its parameter modes *and* its effect marker.** Assigning an `alloc`-marked function to a non-`alloc` fn-pointer type is a **checker error** (it would understate the effect, NN#19); assigning a non-`alloc` function to an `alloc`-typed slot is permitted conservatism (effects are upper bounds, §3.2). An **indirect call takes its effect from the pointer's type**: calling through an `alloc`-typed pointer makes the caller `alloc`; calling through a non-`alloc`-typed pointer does not. There is **no vtable special case** — the `AllocVtable` fields are `alloc`-typed (both `alloc` and, conservatively, `free`), so every call through them is `alloc` by this one general rule.
 
 - **To BE an allocator** (the allocator basket program): define `ctx` state, write `alloc`/`free` functions matching the vtable signatures, and build an `Alloc { ctx: addr_of_mut(state), vt: addr_of(MY_VTABLE) }` (the `addr_of`s are in `unsafe`). §11.1.
 - **To USE an allocator:** call the safe surface below.
+
+**Constructing an `Alloc` is the unsafe act that carries a liveness obligation.** The `addr_of`/`addr_of_mut` that build `ctx` and `vt` are already inside `unsafe`; that region's justification must assert that **`ctx` and `vt` remain valid for the lifetime of every copy of the handle and every `Box` it serves**. Because an `Alloc` is `copy` and a `Box` stores one, a handle built from a local that dies too early leaves live `Box`es freeing through dangling storage. The checker **cannot** verify this (the pointers are inert to it); that unverifiable liveness promise *is* what the valve buys, and it must be stated in the justification string (§11.1).
 
 ### 6.2 The safe allocation surface: `Box T`
 
@@ -288,6 +320,7 @@ Raw `alloc`/`free` return `rawptr u8` — untyped, uninitialized, valve territor
 
 - `box(a: read Alloc, v: T) -> BoxResult T` — allocates `sizeof(T)`/`alignof(T)` through `a`, moves `v` into it, returns `boxed(Box T)` on success or `oom` on allocation failure. `BoxResult T` is a compiler-known sum `enum BoxResult { boxed(Box T), oom }` (allocation failure is a **value**, P7/NN#8 — never a fault). `box` is `alloc`-effecting.
 - `Box T` **owns** its pointee and its originating `Alloc` handle (a `copy` value, so no borrow field — consistent with §3.4). Dropping a `Box T` drops the pointee (running its `drop`, §1.5) and then calls `free` through the stored handle. Deterministic, RAII-style.
+- **Cloning a `Box T`** is compiler-known and is *not* subject to the user-type rawptr-not-cloneable rule (§1.4): it **copies the stored `Alloc` handle**, **allocates a fresh box through that stored handle**, and **clones the pointee** into it (so it is `alloc`-effecting, §6.3). Cloning any box-bearing value allocates through **each `Box`'s own stored handle** — the same handle that will later free it — so the §6.1 liveness obligation covers the clone too.
 - `deref` on a `Box T` yields the pointee place (read via `read`-borrow, write via `write`-borrow). Moving the pointee out is `unbox(b: Box T) -> T` (frees the box storage, returns the owned pointee).
 
 `Box`/`slice`/`[N]T` are the prototype's only parametric types, all compiler-known; user code cannot define generics (§8.3). `Box` is what makes the parser's owned AST safe (§11.4) without exposing generics.
@@ -295,7 +328,7 @@ Raw `alloc`/`free` return `rawptr u8` — untyped, uninitialized, valve territor
 ### 6.3 The tracked allocation effect (minimal)
 
 - The effect is a single boolean per function signature: `alloc` present or absent.
-- Any call to `box`, any `clone` of a box-bearing type, and any call to an `alloc`-marked function makes the enclosing function `alloc`-marked. Calling a vtable's `alloc`/`free` function pointer is `alloc`-marked as well.
+- Any call to `box`, any `clone` of a box-bearing type, and any call to an `alloc`-marked function makes the enclosing function `alloc`-marked. An **indirect call takes its effect from the fn-pointer's type** (§6.1): calling through an `alloc`-typed pointer — such as any `AllocVtable` field — makes the caller `alloc`. There is **no** vtable-specific rule; the field types carry the effect.
 - A non-`alloc` function calling an `alloc` function is a **checker error** with a diagnostic tracing the allocation to its source (P4). The ground floor — allocation-free code — is callable from everywhere (P2).
 - Effects are upper bounds: a function may be marked `alloc` and never allocate (permitted conservatism); it may not allocate while unmarked (NN#19).
 
@@ -341,13 +374,25 @@ Included because the allocator's invariants (a freed block's size matches its al
 - Integers: `i8 i16 i32 i64 isize` (signed) and `u8 u16 u32 u64 usize` (unsigned). Sized and target-defined widths for `isize`/`usize` (queryable per target, P5). Overflow-checked by default (§7.2).
 - `bool`, `unit`.
 - Arithmetic regimes: default checked; `wrapping { ... }` and `saturating { ... }` scoped blocks change the overflow behavior of arithmetic *inside the block only*, greppably (P5). **Unchecked arithmetic does not exist outside a valve** (NN#4) — and the prototype provides no unchecked-arith operation at all; overflow is either checked, wrapped, or saturated. Both block forms are trivial for the interpreter (they select the overflow rule) and are included because P5 mandates their existence and greppability.
+- **Regime blocks apply textually only.** A `wrapping`/`saturating` block changes the overflow behaviour of the arithmetic operations **lexically inside it**, and **never** that of a function it calls — a callee runs under its own regime. The block is a purely syntactic, greppable region with no dynamic scope across calls.
+- **Explicit integer conversion — no implicit conversions (P2).** Converting between integer types is written **`conv T (e)`** (throwaway syntax). A **widening** conversion is always value-preserving. A **narrowing or sign-changing** conversion **faults on value loss** under the default regime, **truncates** (two's-complement) inside a `wrapping` block, and **saturates** to the nearest representable value inside a `saturating` block — the same three regimes as arithmetic, selected the same textual way. `conv` is the only integer-conversion form; a lossy conversion is a semantic event and so wears a word (P13). (Pointer-type changes are not `conv`: they are the `unsafe` `cast_ptr[U]`/`addr_to_ptr[T]` forms of §4.2.)
 
 ### 8.2 Aggregates and control
 
 - `struct Name { f0: T0, f1: T1, ... }` — nominal, named fields. Optional `copy` marker (§1.3) and optional `drop` hook (§1.5).
-- `enum Name { V0(T), V1, V2(A, B), ... }` — nominal tagged sum, variants with zero or more payloads. **Pattern matching** via `match e { case V0(x) => ..., case V1 => ..., case V2(a, b) => ... }`; matches must be exhaustive (checker-enforced). Sum types are the mechanism for errors-as-values (P7): a fallible function returns `enum ...Result { ok(T), err(E) }` and the caller `match`es. (A lightweight `?`-style propagation operator is a syntax convenience the throwaway prototype omits; `match` suffices for measuring the model.)
+- `enum Name { V0(T), V1, V2(A, B), ... }` — nominal tagged sum, variants with zero or more payloads. Variants are **enum-scoped** and are named, in both construction and patterns, as **`Name::V0(...)`** — the `::` token is **reserved exclusively for enum-variant reference**, so `Ident :: Ident` is disambiguated by grammatical position with **no symbol table** (NN#13; throwaway-syntax contract). **Pattern matching** via `match e { case Name::V0(x) => ..., case Name::V1 => ..., case Name::V2(a, b) => ... }`; matches must be exhaustive (checker-enforced); payload binding modes are §8.2.1. Sum types are the mechanism for errors-as-values (P7): a fallible function returns `enum SomeResult { ok(T), err(E) }` and the caller `match`es `SomeResult::ok(...)` / `SomeResult::err(...)`. (A lightweight `?`-style propagation operator is a syntax convenience the throwaway prototype omits; `match` suffices for measuring the model.)
 - Functions `fn` (§3) and non-capturing function pointers (§6.1).
 - Control: `if/else`, `match`, `loop { ... }` with `break`/`continue`, `while cond { ... }`, `return`. One loop family; the canonical-form question (P3) is out of scope for a throwaway grammar.
+
+### 8.2.1 Pattern-binding semantics
+
+The binding mode of each payload variable in a `match` pattern is fixed by **how the scrutinee is held**, mirroring the three gears:
+
+- **Owned scrutinee.** Each *named* payload is taken **by the value gear**: it **moves** out of the payload sub-place, or **copies** if the payload type is `copy`. A move binding **partial-moves** the scrutinee under §1.6 — so it is rejected when the enum has a `drop` hook (no partial move out of a `drop`-hooked type), and the resulting move state must **agree at every control-flow join** (§1.6, rule 1). Payloads a pattern does not name are left owned by the scrutinee and dropped with it; a discriminant-only match that binds nothing does not move the scrutinee.
+- **Borrowed scrutinee.** Reached through a `read`-borrow, each named payload binds as a **`read`-borrow of the corresponding payload sub-place**; through a `write`-borrow, as a **`write`-borrow** of it. These bindings are ordinary loans (§2.2 XOR, §2.3 live ranges); matching never moves out of a borrowed scrutinee. Where a payload type is `copy`, the binding may instead be **read out as an owned copy at the match head** (§2.1's rule that a `copy` place read through a shared borrow yields an independent value), which ends that payload's loan there.
+- **Nested patterns** compose these rules **one level at a time**: the mode an outer payload is bound with becomes the holding mode of the sub-scrutinee its nested pattern matches.
+
+§11.4 exercises the owned case (payloads moved out of an owned `BoxResult`); §11.5 exercises the borrowed case (payloads of a `read Node`). Their legality is stated at each example.
 
 ### 8.3 No user-defined generics
 
@@ -355,7 +400,7 @@ User code cannot declare generic types or functions. The only parametric types a
 
 ### 8.4 Text: byte slices only
 
-There is **no string type**. Text is `slice u8` (borrowed) or `[N]u8`/`Box`-of-bytes (owned). String literals produce `slice u8` viewing read-only static storage. This follows P3's explicit warning that "one string type" collides with the freestanding/allocator-free reality, and refuses to prejudge the text-budget question inside a throwaway prototype. The parser basket consumes `read slice u8`; that is the whole text story.
+There is **no string type**. Text is `slice u8` (borrowed) or `[N]u8`/`Box`-of-bytes (owned). String literals produce `slice u8` viewing read-only static storage. This follows P3's explicit warning that "one string type" collides with the freestanding/allocator-free reality, and refuses to prejudge the text-budget question inside a throwaway prototype. The parser basket consumes `slice u8` (a slice is already a borrow, passed by value); that is the whole text story.
 
 ---
 
@@ -421,11 +466,23 @@ None of these omissions touch the question Bet 5 asks. The two that a careful re
 - **Rejected: a trait-based `Allocator` interface.** No traits in the prototype (§8.3); the concrete `Alloc` vtable-handle achieves polymorphism-by-value without the definition-site-generics machinery.
 - **Rejected: only raw `alloc`/`free`, no `Box`.** Would make *every* heap use a valve (untyped `rawptr` + `unsafe` init), **overstating** valve frequency and biasing Bet 5 (§6.2). `Box` gives safe typed heap ownership so that "uses an allocator" is a value-gear act while "implements an allocator" is a valve act — which is the honest split.
 
+### 10.8 Pattern binding mode
+
+- **Rejected: a single fixed binding mode (always-move, or always-borrow).** Always-move rejects §11.5 (matching a borrowed arena node would consume it); always-borrow rejects §11.4 (the parser must move owned children out of `BoxResult`). Binding mode is instead **derived from how the scrutinee is held** (§8.2.1) — the same gear-following rule the rest of the model uses — so no new annotation is introduced and each worked example is legal under it.
+- **Rejected: an explicit per-pattern `move`/`ref` keyword (Rust-style `ref`).** Redundant with the scrutinee's mode, which already determines it, and a violation of "one canonical way" (P3): the scrutinee already says whether the value is owned or borrowed.
+
+### 10.9 Integer conversion
+
+- **Rejected: implicit integer widening/narrowing.** Violates P2 (no implicit conversions); a silent narrowing is exactly the invisible value-loss the model refuses. Every conversion wears `conv` (§8.1).
+- **Rejected: truncate-by-default (C/Rust `as` semantics).** A default that silently discards high bits is a soundness-of-*values* trap of the kind NN#4 closes for arithmetic; so the default **faults on value loss**, and truncation is reachable only by explicitly entering a `wrapping` block — the same visible, greppable regime choice as wrapping arithmetic (saturation is the `saturating` regime). This keeps "the dangerous thing is loud" (P13) and mirrors the arithmetic regimes exactly.
+
 ---
 
 ## 11. Worked examples — the basket's hardest patterns
 
 Each sketch shows the hardest pattern that program needs, in throwaway syntax, and names the gear. Where a valve is forced, it is said plainly — Bet 5's measurement depends on valves being **visible, not hidden**.
+
+**Standing verification obligation.** Every example in this section is a **test case of the prototype checker**: each is entered into the checker's fixture suite, and this document is **re-verified against the implementation** (each example accepted or rejected exactly as its prose claims) **before the criterion's freeze step (i)** (`docs/BET5_CRITERION.md`). The examples below are hand-walked against §1—8 as revised; the machine check is what makes that binding.
 
 ### 11.1 Allocator — free-list splice (**valve**)
 
@@ -439,24 +496,37 @@ struct Pool { head: rawptr u8, block_size: usize }   // head: first free block, 
 // vtable functions (top-level, match the fn-pointer signatures)
 fn pool_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
     unsafe "pool owns [ctx..); head chains free blocks each >= block_size" {
-        let p: Pool = ptr_read(cast_ptr(ctx));       // load pool state
-        if is_null(p.head) { return ptr_null(); }    // OOM is a value (null), not a fault
+        let p: Pool = ptr_read(cast_ptr[Pool](ctx));   // load pool state
+        if is_null(p.head) { return ptr_null[u8](); }  // OOM is a value (null), not a fault
         let block: rawptr u8 = p.head;
-        let next: rawptr u8 = ptr_read(cast_ptr(block));   // *block == next free
-        ptr_write(cast_ptr(ctx), Pool { head: next, block_size: p.block_size });
+        let next: rawptr u8 = ptr_read(cast_ptr[rawptr u8](block));   // *block == next free
+        ptr_write(cast_ptr[Pool](ctx), Pool { head: next, block_size: p.block_size });
         return block;
     }
 }
 
 fn pool_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
     unsafe "push freed block onto head; block is >= pointer-sized" {
-        let p: Pool = ptr_read(cast_ptr(ctx));
-        ptr_write(cast_ptr(ptr), p.head);            // *block = old head
-        ptr_write(cast_ptr(ctx), Pool { head: ptr, block_size: p.block_size });
+        let p: Pool = ptr_read(cast_ptr[Pool](ctx));
+        ptr_write(cast_ptr[rawptr u8](ptr), p.head);   // *block = old head
+        ptr_write(cast_ptr[Pool](ctx), Pool { head: ptr, block_size: p.block_size });
+    }
+}
+
+// POOL_VTABLE: a top-level value `AllocVtable { alloc: pool_alloc, free: pool_free }`
+// (top-level, like §6.1's MY_VTABLE). Its fields are `alloc`-typed; pool_alloc/pool_free
+// do not themselves `box`, so they are non-`alloc` functions in `alloc`-typed slots --
+// permitted conservatism (effects are upper bounds, §3.2).
+fn pool_handle(state: write Pool) -> Alloc {
+    unsafe "ctx and vt must stay valid for the lifetime of every COPY of this Alloc handle and every Box it serves; the caller guarantees `state` and POOL_VTABLE outlive them all" {
+        return Alloc {
+            ctx: cast_ptr[u8](addr_of_mut(deref state)),
+            vt:  addr_of(POOL_VTABLE),
+        };
     }
 }
 ```
-**Gear: valve.** The free list is a `rawptr`-threaded structure; §3.4 correctly refuses to let it be safe borrow fields, so it lands in `unsafe`, visibly. OOM is a `rawptr` null return checked safely by the caller via `Box`/`is_null` — a *value*, per P7 (§6.2). This is a valve that is *critical in function but confined in occurrence* — exactly Bet 5's shape.
+**Gear: valve.** The free list is a `rawptr`-threaded structure; §3.4 correctly refuses to let it be safe borrow fields, so it lands in `unsafe`, visibly. OOM is a `rawptr` null return checked safely by the caller via `Box`/`is_null` — a *value*, per P7 (§6.2). This is a valve that is *critical in function but confined in occurrence* — exactly Bet 5's shape. The `Alloc` handle is built in `pool_handle`'s `unsafe` block, whose justification carries the **outlives-every-copy-and-every-Box** obligation of §6.1 — the one liveness fact the checker cannot see (Finding 4).
 
 ### 11.2 Intrusive-list scheduler — doubly-linked splice + `container_of` (**valve, the design's hardest case**)
 
@@ -481,8 +551,8 @@ fn list_remove(n: rawptr Link) -> unit {
 
 fn task_of(link: rawptr Link) -> rawptr Task {
     unsafe "link is the `link` field of a live Task (container_of)" {
-        return cast_ptr(ptr_offset(cast_ptr(link) as rawptr u8,
-                                   0 - (offsetof(Task, link) as isize)));
+        return cast_ptr[Task](ptr_offset(cast_ptr[u8](link),
+                                         0 - conv isize (offsetof(Task, link))));
     }
 }
 ```
@@ -498,28 +568,28 @@ struct Uart { base: usize, state: State }   // base: fixed MMIO address
 
 fn reg_write(base: usize, off: usize, val: u32) -> unit {
     unsafe "device MMIO window at [base..base+0x40); volatile store" {
-        ptr_write(addr_to_ptr(base + off) as rawptr u32, val);   // one valve op
+        ptr_write(addr_to_ptr[u32](base + off), val);   // one valve op
     }
 }
 fn reg_read(base: usize, off: usize) -> u32 {
     unsafe "device MMIO window; volatile load" {
-        return ptr_read(addr_to_ptr(base + off) as rawptr u32);
+        return ptr_read(addr_to_ptr[u32](base + off));
     }
 }
 
 fn step(d: write Uart, ev: Event) -> unit {
     // safe value gear: the whole transition table is a plain match on a sum type
     let s: State = match ev {
-        case Event.start => State.arming,
-        case Event.ready => State.running,
-        case Event.err   => State.faulted,
-        case Event.stop  => State.idle,
+        case Event::start => State::arming,
+        case Event::ready => State::running,
+        case Event::err   => State::faulted,
+        case Event::stop  => State::idle,
     };
     match s {
-        case State.arming  => reg_write((deref d).base, 0x00, 1),   // valve escapes only here
-        case State.running => reg_write((deref d).base, 0x04, 1),
-        case State.faulted => reg_write((deref d).base, 0x00, 0),
-        case State.idle    => reg_write((deref d).base, 0x00, 0),
+        case State::arming  => reg_write((deref d).base, 0x00, 1),   // valve escapes only here
+        case State::running => reg_write((deref d).base, 0x04, 1),
+        case State::faulted => reg_write((deref d).base, 0x00, 0),
+        case State::idle    => reg_write((deref d).base, 0x00, 0),
     };
     (deref d).state = s;   // exclusive borrow, safe
 }
@@ -533,34 +603,32 @@ Hardest pattern: return a freshly *owned* subtree while *borrowing* the input, w
 ```
 enum Expr { num(i64), add(Box Expr, Box Expr), mul(Box Expr, Box Expr) }
 
-struct P { src: rawptr u8, pos: usize, len: usize }   // (throwaway cursor; src via slice below)
-
 // returns an owned Box Expr; input slice is only read (borrow gear), never stored in the AST
-fn parse_term(a: read Alloc, s: read slice u8, pos: write usize) alloc
+fn parse_term(a: read Alloc, s: slice u8, pos: write usize) alloc
         -> BoxResult Expr {
     let n: i64 = read_number(s, pos);          // reads through the shared slice borrow
-    return box(a, Expr.num(n));                // owned node on the explicit allocator
+    return box(a, Expr::num(n));                // owned node on the explicit allocator
 }
 
-fn parse_expr(a: read Alloc, s: read slice u8, pos: write usize) alloc
+fn parse_expr(a: read Alloc, s: slice u8, pos: write usize) alloc
         -> BoxResult Expr {
     match parse_term(a, s, write (deref pos)) {   // reborrow the cursor down
-        case BoxResult.oom => return BoxResult.oom,
-        case BoxResult.boxed(lhs) => {
+        case BoxResult::oom => return BoxResult::oom,
+        case BoxResult::boxed(lhs) => {
             if peek(s, pos) == PLUS {
                 advance(pos);
                 match parse_expr(a, s, write (deref pos)) {
-                    case BoxResult.oom => return BoxResult.oom,   // lhs drops here, deterministically
-                    case BoxResult.boxed(rhs) =>
-                        return box(a, Expr.add(lhs, rhs)),        // move both owned children in
+                    case BoxResult::oom => return BoxResult::oom,   // lhs drops here, deterministically
+                    case BoxResult::boxed(rhs) =>
+                        return box(a, Expr::add(lhs, rhs)),        // move both owned children in
                 }
             }
-            return BoxResult.boxed(lhs);
+            return BoxResult::boxed(lhs);
         }
     }
 }
 ```
-**Gears: value (owned `Box` AST, moved-in children) + borrow (`read slice u8` input, `write usize` cursor).** No valve. The AST never *stores* a borrow into the input (§3.4 satisfied by owning parsed data), so no region annotation is needed — the returned `Box Expr` derives from *fresh* allocation, not from `s`, and the `read`/`write` params carry no region variables (single-borrow-return default never even triggers, because nothing borrowed is returned). Allocation is explicit and effect-marked (`alloc`, threaded `Alloc`), per P9. This is the workload Bet 5 predicts value-first fits cleanly, and it does.
+**Gears: value (owned `Box` AST, moved-in children) + borrow (`slice u8` input, `write usize` cursor).** No valve. The AST never *stores* a borrow into the input (§3.4 satisfied by owning parsed data), so no region annotation is needed — the returned `Box Expr` derives from *fresh* allocation, not from `s`, and the `read`/`write` params carry no region variables (single-borrow-return default never even triggers, because nothing borrowed is returned). Allocation is explicit and effect-marked (`alloc`, threaded `Alloc`), per P9. This is the workload Bet 5 predicts value-first fits cleanly, and it does. **Pattern legality (owned case, §8.2.1):** each `match` scrutinee is an owned `BoxResult Expr`, so `boxed(lhs)`/`boxed(rhs)` bind by **move** (`Box Expr` is not `copy`); `BoxResult` has no `drop` hook, and every arm consumes or returns the binding, so the partial-move states agree at the joins — legal.
 
 ### 11.5 Arena compiler pass — back-references by index, valve confined to the arena (**value + index gear; valve only inside the arena**)
 
@@ -573,20 +641,20 @@ struct Arena { mem: Box [4096]Node, count: u32 }   // owns its backing (Box), sa
 
 fn arena_push(ar: write Arena, n: Node) -> u32 {
     let i: u32 = (deref ar).count;
-    (deref ar).mem[i as usize] = n;           // safe: bounds-checked array store
+    (deref ar).mem[conv usize (i)] = n;           // safe: bounds-checked array store
     (deref ar).count = i + 1;                 // checked add; faults on overflow
     return i;                                  // stable handle
 }
 
 fn arena_get(ar: read Arena, i: u32) -> read Node {   // single borrow param -> return borrows `ar`
-    return read (deref ar).mem[i as usize];    // bounds-checked; region default: derives from `ar`
+    return read (deref ar).mem[conv usize (i)];    // bounds-checked; region default: derives from `ar`
 }
 
 // a pass that follows back-references purely by index (value gear)
 fn fold_consts(ar: write Arena, root: u32) -> i64 {
     match arena_get(read (deref ar), root) {   // reborrow ar as shared for the read
-        case Node.leaf(v) => return v,
-        case Node.binop(op, l, r) => {
+        case Node::leaf(v) => return v,
+        case Node::binop(op, l, r) => {
             let lv: i64 = fold_consts(write (deref ar), l);   // follow child index
             let rv: i64 = fold_consts(write (deref ar), r);   // follow child index
             return apply(op, lv, rv),
@@ -594,7 +662,7 @@ fn fold_consts(ar: write Arena, root: u32) -> i64 {
     }
 }
 ```
-**Gears: value + index (safe) for the whole graph; the only valve is inside the arena's *backing allocation*, not shown here — `Box [4096]Node` hides it (§6.2).** Back-references are `u32` indices: `copy`, storable in `enum` payloads (not borrow fields, so §3.4 is satisfied), and dereferenced by a safe, bounds-checked `arena_get`. `arena_get` is the textbook compact-default case: one borrow parameter, returns a borrow, no region variables needed (§3.3). This demonstrates the **safe alternative to the pointer valve** — the index/handle idiom — which is precisely the value-first move Bet 5 bets systems programmers will make when the language nudges them. The valve stays sealed inside `Box`.
+**Gears: value + index (safe) for the whole graph; the only valve is inside the arena's *backing allocation*, not shown here — `Box [4096]Node` hides it (§6.2).** Back-references are `u32` indices: `copy`, storable in `enum` payloads (not borrow fields, so §3.4 is satisfied), and dereferenced by a safe, bounds-checked `arena_get`. `arena_get` is the textbook compact-default case: one borrow parameter, returns a borrow, no region variables needed (§3.3). This demonstrates the **safe alternative to the pointer valve** — the index/handle idiom — which is precisely the value-first move Bet 5 bets systems programmers will make when the language nudges them. The valve stays sealed inside `Box`. **Pattern legality (borrowed case, §8.2.1):** the scrutinee `arena_get(...)` is a `read Node`, and every payload (`v`, `op`, `l`, `r`) is a `copy` scalar, so each is read out as an owned copy at the match head; the shared loan on `ar` ends there, which is exactly what lets each recursive `fold_consts` take a fresh **exclusive** reborrow `write (deref ar)` with no shared loan on `ar` live across it — legal, no valve.
 
 ---
 
