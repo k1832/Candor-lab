@@ -1,0 +1,49 @@
+// Runnable §11.2 — intrusive scheduler. list_remove/task_of verbatim; `main` ADAPTED.
+
+struct Link { next: rawptr Link, prev: rawptr Link }
+struct Task { link: Link, prio: u8 }
+
+fn list_remove(n: rawptr Link) -> unit {
+    unsafe "n is linked; neighbors are valid nodes of this list" {
+        let nn: Link = ptr_read(n);
+        let prev: rawptr Link = nn.prev;
+        let next: rawptr Link = nn.next;
+        let pv: Link = ptr_read(prev);
+        ptr_write(prev, Link { next: next, prev: pv.prev });
+        let nx: Link = ptr_read(next);
+        ptr_write(next, Link { next: nx.next, prev: prev });
+    }
+}
+
+fn task_of(link: rawptr Link) -> rawptr Task {
+    unsafe "link is the link field of a live Task (container_of)" {
+        return cast_ptr[Task](ptr_offset(cast_ptr[u8](link),
+                                         0 - conv isize (offsetof(Task, link))));
+    }
+}
+
+// ADAPTED: build a 3-node doubly-linked list, splice out the middle node via
+// list_remove, and use task_of (container_of) to recover a Task from its link.
+fn main() -> i64 {
+    unsafe "local nodes live for the whole body" {
+        let mut a: Link = Link { next: ptr_null[Link](), prev: ptr_null[Link]() };
+        let mut b: Link = Link { next: ptr_null[Link](), prev: ptr_null[Link]() };
+        let mut c: Link = Link { next: ptr_null[Link](), prev: ptr_null[Link]() };
+        let pa: rawptr Link = addr_of_mut(a);
+        let pb: rawptr Link = addr_of_mut(b);
+        let pc: rawptr Link = addr_of_mut(c);
+        a.next = pb;
+        b.prev = pa;
+        b.next = pc;
+        c.prev = pb;
+        list_remove(pb);
+        let mut ok: i64 = 0;
+        if ptr_to_addr(a.next) == ptr_to_addr(pc) { ok = ok + 1; }
+        if ptr_to_addr(c.prev) == ptr_to_addr(pa) { ok = ok + 1; }
+        // container_of: recover a Task from an interior link pointer
+        let mut t: Task = Task { link: Link { next: ptr_null[Link](), prev: ptr_null[Link]() }, prio: 40u8 };
+        let lp: rawptr Link = addr_of_mut(t.link);
+        let back: Task = ptr_read(task_of(lp));
+        return conv i64 (back.prio) + ok;
+    }
+}

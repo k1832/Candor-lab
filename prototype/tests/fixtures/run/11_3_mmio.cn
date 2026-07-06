@@ -1,0 +1,41 @@
+// Runnable §11.3 — MMIO driver state machine. reg_*/step verbatim; `main` ADAPTED.
+
+enum State { idle, arming, running, faulted }
+enum Event { start, ready, err, stop }
+struct Uart { base: usize, state: State }
+
+fn reg_write(base: usize, off: usize, val: u32) -> unit {
+    unsafe "device MMIO window at [base..base+0x40); volatile store" {
+        ptr_write(addr_to_ptr[u32](base + off), val);
+    }
+}
+fn reg_read(base: usize, off: usize) -> u32 {
+    unsafe "device MMIO window; volatile load" {
+        return ptr_read(addr_to_ptr[u32](base + off));
+    }
+}
+
+fn step(d: write Uart, ev: Event) -> unit {
+    let s: State = match ev {
+        case Event::start => State::arming,
+        case Event::ready => State::running,
+        case Event::err   => State::faulted,
+        case Event::stop  => State::idle,
+    };
+    match s {
+        case State::arming  => reg_write((deref d).base, 0x00, 1),
+        case State::running => reg_write((deref d).base, 0x04, 1),
+        case State::faulted => reg_write((deref d).base, 0x00, 0),
+        case State::idle    => reg_write((deref d).base, 0x00, 0),
+    };
+    (deref d).state = s;
+}
+
+// ADAPTED: drive start->ready, then read the "running" register back over MMIO.
+fn main() -> i64 {
+    let mut d: Uart = Uart { base: 3145728, state: State::idle };
+    step(write d, Event::start);
+    step(write d, Event::ready);
+    let v: u32 = reg_read(d.base, 0x04);
+    return conv i64 (v) + 41;
+}

@@ -7,6 +7,7 @@
 pub mod ast;
 pub mod check;
 pub mod diag;
+pub mod interp;
 pub mod lexer;
 pub mod parser;
 pub mod resolve;
@@ -28,4 +29,28 @@ pub fn parse_source(src: &str) -> Result<Program, Diag> {
 pub fn check_source(src: &str) -> Result<Vec<Diag>, Diag> {
     let program = parse_source(src)?;
     Ok(check::check_program(&program))
+}
+
+/// Parse, fully check, then execute a program's `main`. Returns the run outcome,
+/// a fault, or a list of check diagnostics (as the error path).
+pub enum RunResult {
+    Ok(interp::Run),
+    Fault(interp::Fault),
+    CheckErrors(Vec<Diag>),
+    ParseError(Diag),
+}
+
+pub fn run_source(src: &str) -> RunResult {
+    let program = match parse_source(src) {
+        Ok(p) => p,
+        Err(d) => return RunResult::ParseError(d),
+    };
+    let diags = check::check_program(&program);
+    if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
+        return RunResult::CheckErrors(diags);
+    }
+    match interp::run_program(&program) {
+        Ok(run) => RunResult::Ok(run),
+        Err(f) => RunResult::Fault(f),
+    }
 }

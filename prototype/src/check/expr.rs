@@ -911,6 +911,13 @@ impl<'a> Checker<'a> {
                 self.arg0(args, span, "len");
                 Type::usize()
             }
+            // Prototype observability intrinsic (Stage 4): appends an i64 to the
+            // interpreter's trace log so drop-order tests can observe destruction.
+            "trace" => {
+                let t = self.arg0(args, span, "trace");
+                self.expect_integer(&t, span);
+                Type::unit()
+            }
             _ => return None,
         };
         Some(t)

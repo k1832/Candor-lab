@@ -13,8 +13,9 @@ fn main() -> ExitCode {
     match (args.get(1).map(String::as_str), args.get(2)) {
         (Some("parse"), Some(path)) => run_parse(path),
         (Some("check"), Some(path)) => run_check(path),
+        (Some("run"), Some(path)) => run_run(path),
         _ => {
-            eprintln!("usage: candor-proto (parse|check) <file>");
+            eprintln!("usage: candor-proto (parse|check|run) <file>");
             ExitCode::from(2)
         }
     }
@@ -62,6 +63,33 @@ fn run_check(path: &str) -> ExitCode {
         }
         Err(diag) => {
             println!("{}", diag.to_json());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_run(path: &str) -> ExitCode {
+    let src = match read(path) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    match candor_proto::run_source(&src) {
+        candor_proto::RunResult::Ok(run) => {
+            println!("{}", run.ret);
+            ExitCode::SUCCESS
+        }
+        candor_proto::RunResult::Fault(f) => {
+            eprintln!("{}", f.to_json());
+            ExitCode::from(candor_proto::interp::FAULT_EXIT)
+        }
+        candor_proto::RunResult::CheckErrors(diags) => {
+            for d in &diags {
+                println!("{}", d.to_json());
+            }
+            ExitCode::FAILURE
+        }
+        candor_proto::RunResult::ParseError(d) => {
+            println!("{}", d.to_json());
             ExitCode::FAILURE
         }
     }

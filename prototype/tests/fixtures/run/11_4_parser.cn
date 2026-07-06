@@ -1,0 +1,88 @@
+// Runnable §11.4 — parser: owned AST over borrowed input. parse_term/parse_expr
+// verbatim from §11.4; the read_number/peek/advance stubs are made real and a
+// bump allocator + owned-AST evaluator are added (ADAPTED) to exercise the path.
+
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free:  fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize }
+
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "bump owns [ctx..)" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let mask: usize = align - 1;
+        let aligned: usize = (b.next + mask) / align * align;
+        if aligned + size > b.end { return ptr_null[u8](); }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit { }
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+fn mk_alloc(state: write Bump) -> Alloc {
+    unsafe "handle + backing outlive every Box" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(deref state)), vt: addr_of(BUMP_VT) };
+    }
+}
+
+enum Expr { num(i64), add(Box Expr, Box Expr), mul(Box Expr, Box Expr) }
+
+static PLUS: u8 = 43u8;
+
+// ADAPTED stubs: a single-digit-number/peek/advance cursor over `slice u8`.
+fn read_number(s: slice u8, pos: write usize) -> i64 {
+    let c: u8 = s[deref pos];
+    deref pos = deref pos + 1;
+    return conv i64 (c) - 48;
+}
+fn peek(s: slice u8, pos: read usize) -> u8 {
+    if deref pos >= len(s) { return 0u8; }
+    return s[deref pos];
+}
+fn advance(pos: write usize) -> unit { deref pos = deref pos + 1; }
+
+fn parse_term(a: read Alloc, s: slice u8, pos: write usize) alloc
+        -> BoxResult Expr {
+    let n: i64 = read_number(s, pos);
+    return box(a, Expr::num(n));
+}
+
+fn parse_expr(a: read Alloc, s: slice u8, pos: write usize) alloc
+        -> BoxResult Expr {
+    match parse_term(a, s, write (deref pos)) {
+        case BoxResult::oom => return BoxResult::oom,
+        case BoxResult::boxed(lhs) => {
+            if peek(s, read (deref pos)) == PLUS {
+                advance(write (deref pos));
+                match parse_expr(a, s, write (deref pos)) {
+                    case BoxResult::oom => return BoxResult::oom,
+                    case BoxResult::boxed(rhs) =>
+                        return box(a, Expr::add(lhs, rhs)),
+                }
+            }
+            return BoxResult::boxed(lhs);
+        }
+    }
+}
+
+// ADAPTED: consume the owned AST, freeing each Box, and compute its value.
+fn eval_owned(e: Expr) -> i64 {
+    match e {
+        case Expr::num(n) => return n,
+        case Expr::add(l, r) => return eval_owned(unbox(l)) + eval_owned(unbox(r)),
+        case Expr::mul(l, r) => return eval_owned(unbox(l)) * eval_owned(unbox(r)),
+    }
+}
+
+fn main() alloc -> i64 {
+    let mut st: Bump = Bump { next: 16777216, end: 33554432 };
+    let a: Alloc = mk_alloc(write st);
+    let s: slice u8 = "5+3+9";
+    let mut pos: usize = 0;
+    match parse_expr(read a, s, write pos) {
+        case BoxResult::oom => return 0 - 1,
+        case BoxResult::boxed(root) => return eval_owned(unbox(root)),
+    }
+}
