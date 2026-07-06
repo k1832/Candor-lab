@@ -1,0 +1,29 @@
+// Fixture: design 0001 §11.4 — parser: owned AST over borrowed input
+// (value + borrow gear, no valve). read_number/peek/advance/PLUS are undefined
+// (fine: no symbol table, NN#13).
+
+enum Expr { num(i64), add(Box Expr, Box Expr), mul(Box Expr, Box Expr) }
+
+fn parse_term(a: read Alloc, s: slice u8, pos: write usize) alloc
+        -> BoxResult Expr {
+    let n: i64 = read_number(s, pos);
+    return box(a, Expr::num(n));
+}
+
+fn parse_expr(a: read Alloc, s: slice u8, pos: write usize) alloc
+        -> BoxResult Expr {
+    match parse_term(a, s, write (deref pos)) {
+        case BoxResult::oom => return BoxResult::oom,
+        case BoxResult::boxed(lhs) => {
+            if peek(s, pos) == PLUS {
+                advance(pos);
+                match parse_expr(a, s, write (deref pos)) {
+                    case BoxResult::oom => return BoxResult::oom,
+                    case BoxResult::boxed(rhs) =>
+                        return box(a, Expr::add(lhs, rhs)),
+                }
+            }
+            return BoxResult::boxed(lhs);
+        }
+    }
+}

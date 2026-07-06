@@ -1,0 +1,24 @@
+// Fixture: design 0001 §11.2 — intrusive-list scheduler (valve).
+// The `/* ... */` placeholder in the design's Task struct is kept verbatim.
+
+struct Link { next: rawptr Link, prev: rawptr Link }
+struct Task { link: Link, prio: u8, /* ... */ }
+
+fn list_remove(n: rawptr Link) -> unit {
+    unsafe "n is linked; neighbors are valid nodes of this list" {
+        let nn: Link = ptr_read(n);
+        let prev: rawptr Link = nn.prev;
+        let next: rawptr Link = nn.next;
+        let pv: Link = ptr_read(prev);
+        ptr_write(prev, Link { next: next, prev: pv.prev });
+        let nx: Link = ptr_read(next);
+        ptr_write(next, Link { next: nx.next, prev: prev });
+    }
+}
+
+fn task_of(link: rawptr Link) -> rawptr Task {
+    unsafe "link is the link field of a live Task (container_of)" {
+        return cast_ptr[Task](ptr_offset(cast_ptr[u8](link),
+                                         0 - conv isize (offsetof(Task, link))));
+    }
+}

@@ -1,0 +1,17 @@
+[package]
+name = "candor-proto"
+version = "0.1.0"
+edition = "2021"
+description = "Candor Bet 5 validation prototype: lexer, AST and parser (Stage 1)"
+
+[lib]
+name = "candor_proto"
+path = "src/lib.rs"
+
+[[bin]]
+name = "candor-proto"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
