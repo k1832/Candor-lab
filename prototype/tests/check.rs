@@ -178,3 +178,80 @@ fn clone_of_box_bearing_propagates_alloc() {
 fn result_inside_ensures_ok() {
     assert_clean("fn f() ensures(result == 0) -> i64 { return 0; }");
 }
+
+// ----- loop definite-assignment / move regression (dataflow fixpoint fix) -----
+// A forward must-analysis must join only over *computed* predecessors: a loop
+// back-edge that is still pessimistically `Uninit` on the first pass must not
+// degrade a value initialized before the loop to possibly-uninitialized.
+
+#[test]
+fn while_reads_loop_invariant_local_ok() {
+    // (a) `x` is initialized before the loop and read in the body.
+    assert_clean(
+        "fn main() -> i64 { let x: i64 = 5; let mut i: i64 = 0; \
+         while i < 3 { i = i + x; } return i; }",
+    );
+}
+
+#[test]
+fn loop_with_break_reads_invariant_ok() {
+    // (b) same, using `loop { ... break; }`.
+    assert_clean(
+        "fn main() -> i64 { let x: i64 = 5; let mut i: i64 = 0; \
+         loop { i = i + x; if i >= 3 { break; } } return i; }",
+    );
+}
+
+#[test]
+fn loop_reads_conditionally_initialized_still_uninit() {
+    // (c) `x` is initialized only on the `if` branch before the loop: a genuine
+    // uninit path remains, so the read in the body is still E0304 (the fix must
+    // not paper over a real definite-assignment hole).
+    assert_has(
+        "fn f(c: bool) -> i64 { let x: i64; if c { x = 5; } let mut i: i64 = 0; \
+         while i < 3 { i = i + x; } return i; }",
+        "E0304",
+    );
+}
+
+#[test]
+fn value_moved_in_loop_body_used_next_iteration_still_error() {
+    // (d) a non-copy value moved inside the body is used again on the next
+    // iteration: the back-edge join sees moved-vs-live and the use-after-move
+    // fires. Loop-carried move errors must still be caught.
+    assert_has(
+        "fn sink(b: Box i64) -> unit { } \
+         fn f(b: Box i64) -> unit { while true { sink(b); } }",
+        "E0301",
+    );
+}
+
+#[test]
+fn value_moved_in_loop_used_after_loop_still_error() {
+    // (d, variant) moved inside the body, then used after the loop.
+    assert_has(
+        "fn sink(b: Box i64) -> unit { } \
+         fn f(b: Box i64) -> unit { let mut i: i64 = 0; \
+         while i < 1 { sink(b); i = i + 1; } sink(b); }",
+        "E0301",
+    );
+}
+
+#[test]
+fn loop_accumulator_then_returned_ok() {
+    // (e) `let mut` accumulated across iterations and returned.
+    assert_clean(
+        "fn main() -> i64 { let mut acc: i64 = 0; let mut i: i64 = 0; \
+         while i < 5 { acc = acc + i; i = i + 1; } return acc; }",
+    );
+}
+
+#[test]
+fn nested_loops_read_outer_invariant_ok() {
+    // (f) the inner loop reads a value initialized before the outer loop.
+    assert_clean(
+        "fn main() -> i64 { let x: i64 = 5; let mut i: i64 = 0; \
+         while i < 3 { let mut j: i64 = 0; while j < 2 { i = i + x; j = j + 1; } } \
+         return i; }",
+    );
+}

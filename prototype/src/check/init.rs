@@ -20,7 +20,14 @@ pub fn analyze(cfg: &Cfg, entry: &FlowState, out_params: &[String], diags: &mut 
     let reach = reachable(cfg);
 
     // --- Fixpoint (silent) -------------------------------------------------
+    // A forward *must*-analysis needs its join to meet only over predecessors
+    // whose out-state has actually been computed. `visited[p]` records that:
+    // an unvisited (not-yet-computed) predecessor edge — notably a loop
+    // back-edge on the first pass — contributes identity/TOP to the meet, not
+    // the pessimistic bottom (`Uninit`) state, so a loop body that reads a
+    // value initialized before the loop is not falsely degraded (E0304).
     let mut out_state: Vec<FlowState> = vec![FlowState::new(); n];
+    let mut visited = vec![false; n];
     let order: Vec<BlockId> = (0..n).filter(|b| reach.contains(b)).collect();
     let mut changed = true;
     let mut guard = 0;
@@ -28,11 +35,12 @@ pub fn analyze(cfg: &Cfg, entry: &FlowState, out_params: &[String], diags: &mut 
         changed = false;
         guard += 1;
         for &b in &order {
-            let in_b = incoming(cfg, b, entry, &out_state, &reach, None);
+            let in_b = incoming(cfg, b, entry, &out_state, &reach, &visited, None);
             let mut st = in_b;
             for a in &cfg.blocks[b].actions {
                 apply(&mut st, a, out_params, None);
             }
+            visited[b] = true;
             if st != out_state[b] {
                 out_state[b] = st;
                 changed = true;
@@ -43,7 +51,7 @@ pub fn analyze(cfg: &Cfg, entry: &FlowState, out_params: &[String], diags: &mut 
     // --- Reporting pass ----------------------------------------------------
     for &b in &order {
         let mut disagree: Vec<String> = Vec::new();
-        let in_b = incoming(cfg, b, entry, &out_state, &reach, Some(&mut disagree));
+        let in_b = incoming(cfg, b, entry, &out_state, &reach, &visited, Some(&mut disagree));
         let mut seen: BTreeSet<String> = BTreeSet::new();
         for key in disagree {
             if seen.insert(key.clone()) {
@@ -87,15 +95,21 @@ fn incoming(
     entry: &FlowState,
     out_state: &[FlowState],
     reach: &BTreeSet<BlockId>,
+    visited: &[bool],
     disagree: Option<&mut Vec<String>>,
 ) -> FlowState {
     if b == cfg.entry {
         return entry.clone();
     }
+    // Meet only over predecessors that are both reachable and already computed:
+    // a not-yet-visited edge is treated as identity/TOP (omitted from the meet),
+    // never as bottom. At the fixpoint every reachable predecessor is visited,
+    // so the reporting pass still meets over *all* incoming paths — a genuine
+    // uninit path (E0304) and a move-state disagreement (§1.6) are both kept.
     let preds: Vec<BlockId> = cfg.preds[b]
         .iter()
         .copied()
-        .filter(|p| reach.contains(p))
+        .filter(|p| reach.contains(p) && visited[*p])
         .collect();
     if preds.is_empty() {
         return entry.clone();

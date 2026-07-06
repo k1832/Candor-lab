@@ -232,3 +232,15 @@ fn empty_non_unit_fn() {
 fn unit_fn_may_fall_off_end() {
     assert_clean("fn g() -> unit { use_i(1); }");
 }
+
+#[test]
+fn nll_loan_dead_before_loop_not_live_in_loop() {
+    // NLL positive (dual of the init.rs fix): `b` borrows `x` and is last used
+    // BEFORE the loop, so it is not live inside the loop and the loop's write to
+    // `x` is accepted. (Backward liveness is a union analysis whose natural
+    // bottom is the empty set, so unvisited successors never over-approximate.)
+    assert_clean(
+        "fn f() -> unit { let mut x: S = mk(); let b = read x; use_i((deref b).n); \
+         while true { x = mk(); } }",
+    );
+}
