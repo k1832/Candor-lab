@@ -5,11 +5,14 @@
 //! binary is a thin CLI over `parse_source`.
 
 pub mod ast;
+pub mod check;
 pub mod diag;
 pub mod lexer;
 pub mod parser;
+pub mod resolve;
 pub mod span;
 pub mod token;
+pub mod types;
 
 use ast::Program;
 use diag::Diag;
@@ -18,4 +21,11 @@ use diag::Diag;
 pub fn parse_source(src: &str) -> Result<Program, Diag> {
     let tokens = lexer::lex(src)?;
     parser::parse(tokens)
+}
+
+/// Parse then run the Stage 2 static checker. Returns all diagnostics (empty
+/// on success). A parse error is returned as a single-element vector.
+pub fn check_source(src: &str) -> Result<Vec<Diag>, Diag> {
+    let program = parse_source(src)?;
+    Ok(check::check_program(&program))
 }

@@ -1,0 +1,1071 @@
+//! Expression and place type checking with mode-aware calls, intrinsics,
+//! `unsafe`/rawptr gating, the alloc effect, and control-flow lowering into the
+//! shared CFG (design 0001 §3.1, §4.2, §5, §6, §8.1, §8.2.1).
+
+use crate::ast::*;
+use crate::diag::Diag;
+use crate::span::Span;
+use crate::token::ScalarTy;
+use crate::types::*;
+
+use super::dataflow::{Access, Place, Proj, Term};
+use super::patterns::{self, BindMode, HoldMode};
+use super::{Checker, Use};
+
+impl<'a> Checker<'a> {
+    pub(super) fn check_expr(&mut self, e: &Expr, u: Use) -> Type {
+        match &e.kind {
+            ExprKind::Ident(_)
+            | ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Prefix {
+                op: PrefixOp::Deref,
+                ..
+            } => {
+                let (t, place) = self.check_place(e);
+                self.emit_place_action(&place, u, &t, e.span);
+                t
+            }
+            ExprKind::Paren(inner) => self.check_expr(inner, u),
+            ExprKind::Prefix {
+                op: PrefixOp::Read,
+                expr,
+            } => {
+                let t = self.check_expr(expr, Use::BorrowShared);
+                Type::Borrow(Box::new(t))
+            }
+            ExprKind::Prefix {
+                op: PrefixOp::Write,
+                expr,
+            } => {
+                let t = self.check_expr(expr, Use::BorrowExcl);
+                Type::BorrowMut(Box::new(t))
+            }
+            ExprKind::Prefix {
+                op: PrefixOp::Clone,
+                expr,
+            } => {
+                let t = self.check_expr(expr, Use::ReadOnly);
+                if bears_box(&t, self.items) {
+                    self.note_alloc(e.span, "`clone` of a value that owns a `Box` allocates (§6.3)");
+                }
+                t
+            }
+            ExprKind::IntLit { suffix, .. } => match suffix {
+                Some(s) => Type::Scalar(*s),
+                None => Type::IntLit,
+            },
+            ExprKind::StrLit(_) => Type::Slice(Box::new(Type::Scalar(ScalarTy::U8))),
+            ExprKind::BoolLit(_) => Type::bool(),
+            ExprKind::Unary { op, expr } => self.check_unary(*op, expr),
+            ExprKind::Binary { op, lhs, rhs } => self.check_binary(*op, lhs, rhs, e.span),
+            ExprKind::Conv { ty, expr } => self.check_conv(ty, expr, e.span),
+            ExprKind::Call { callee, args } => self.check_call(callee, args, e.span),
+            ExprKind::StructLit { name, fields } => self.check_struct_lit(name, fields, e.span),
+            ExprKind::EnumCtor {
+                enum_name,
+                variant,
+                args,
+            } => self.check_enum_ctor(enum_name, variant, args, e.span),
+            ExprKind::ArrayLit(elems) => self.check_array_lit(elems),
+            ExprKind::ArrayRepeat { value, size } => {
+                let t = self.check_expr(value, Use::Value);
+                let _ = self.check_expr(size, Use::Value);
+                Type::Array(Box::new(t), ArrayLen::Unknown)
+            }
+            ExprKind::CastPtr { ty, arg } => {
+                self.require_unsafe(e.span, "cast_ptr");
+                self.check_expr(arg, Use::Value);
+                Type::RawPtr(Box::new(self.resolve_ty(ty)))
+            }
+            ExprKind::AddrToPtr { ty, arg } => {
+                self.require_unsafe(e.span, "addr_to_ptr");
+                let t = self.check_expr(arg, Use::Value);
+                self.expect_integer(&t, arg.span);
+                Type::RawPtr(Box::new(self.resolve_ty(ty)))
+            }
+            ExprKind::PtrNull { ty } => {
+                self.require_unsafe(e.span, "ptr_null");
+                Type::RawPtr(Box::new(self.resolve_ty(ty)))
+            }
+            ExprKind::Offsetof { ty, .. } => {
+                let _ = self.resolve_ty(ty);
+                Type::usize()
+            }
+            ExprKind::Sizeof(ty) | ExprKind::Alignof(ty) => {
+                let _ = self.resolve_ty(ty);
+                Type::usize()
+            }
+            ExprKind::Block(b) => self.check_block_value(b),
+            ExprKind::If {
+                cond,
+                then_blk,
+                else_blk,
+            } => self.check_if(cond, then_blk, else_blk.as_deref(), e.span),
+            ExprKind::Match { scrutinee, arms } => self.check_match(scrutinee, arms, e.span),
+            ExprKind::Loop(b) => self.check_loop(b, e.span),
+            ExprKind::While { cond, body } => self.check_while(cond, body, e.span),
+            ExprKind::Unsafe { body, .. } => {
+                let saved = self.f_in_unsafe();
+                self.set_in_unsafe(true);
+                self.check_block_stmts(body);
+                self.set_in_unsafe(saved);
+                Type::unit()
+            }
+            ExprKind::Wrapping(b) | ExprKind::Saturating(b) => {
+                self.check_block_stmts(b);
+                Type::unit()
+            }
+            ExprKind::Return(opt) => self.check_return(opt.as_deref(), e.span),
+            ExprKind::Break => {
+                self.do_break(e.span);
+                Type::Never
+            }
+            ExprKind::Continue => {
+                self.do_continue(e.span);
+                Type::Never
+            }
+            ExprKind::Assert(cond) => {
+                let t = self.check_expr(cond, Use::Value);
+                self.expect_bool(&t, cond.span, "an `assert`");
+                Type::unit()
+            }
+            ExprKind::Panic(msg) => {
+                self.check_expr(msg, Use::Value);
+                self.diverge();
+                Type::Never
+            }
+            ExprKind::Result => {
+                if self.f_in_ensures() {
+                    self.ret_ty_clone()
+                } else {
+                    self.diags.push(
+                        Diag::error(
+                            "E0702",
+                            "`result` may appear only inside an `ensures` clause",
+                            e.span,
+                        )
+                        .with_note("`result` names the return value of the function (§7.3)", None),
+                    );
+                    Type::Error
+                }
+            }
+        }
+    }
+
+    // ----- places ---------------------------------------------------------
+
+    pub(super) fn check_place(&mut self, e: &Expr) -> (Type, Option<Place>) {
+        match &e.kind {
+            ExprKind::Paren(inner) => self.check_place(inner),
+            ExprKind::Ident(name) => {
+                if let Some(li) = self.lookup_local(name) {
+                    (li.ty.clone(), Some(Place::local(name)))
+                } else if let Some((t, _)) = self.items.statics.get(name) {
+                    (t.clone(), None)
+                } else if let Some(sig) = self.items.fns.get(name) {
+                    (self.fnptr_of_sig(sig), None)
+                } else {
+                    self.diags.push(Diag::error(
+                        "E0103",
+                        format!("unknown name `{name}`"),
+                        e.span,
+                    ));
+                    (Type::Error, None)
+                }
+            }
+            ExprKind::Prefix {
+                op: PrefixOp::Deref,
+                expr,
+            } => {
+                let (t, p) = self.check_place(expr);
+                let inner = match &t {
+                    Type::Borrow(x) | Type::BorrowMut(x) | Type::Box(x) => (**x).clone(),
+                    Type::Error => Type::Error,
+                    other => {
+                        self.diags.push(Diag::error(
+                            "E0703",
+                            format!("cannot `deref` a value of type `{}`", other.display()),
+                            e.span,
+                        ));
+                        Type::Error
+                    }
+                };
+                let place = p.map(|mut pl| {
+                    pl.proj.push(Proj::Deref);
+                    pl
+                });
+                (inner, place)
+            }
+            ExprKind::Field { base, field } => {
+                let (bt, bp) = self.check_place(base);
+                let (st, mut place) = self.autoderef(bt, bp);
+                match &st {
+                    Type::Named(n) => {
+                        let fld = self
+                            .items
+                            .lookup_struct(n)
+                            .and_then(|s| s.fields.iter().find(|(fn_, _)| fn_ == field).cloned());
+                        match fld {
+                            Some((_, fty)) => {
+                                if let Some(p) = place.as_mut() {
+                                    p.proj.push(Proj::Field(field.clone()));
+                                }
+                                (fty, place)
+                            }
+                            None => {
+                                self.diags.push(Diag::error(
+                                    "E0107",
+                                    format!("type `{n}` has no field `{field}`"),
+                                    e.span,
+                                ));
+                                (Type::Error, place)
+                            }
+                        }
+                    }
+                    Type::Error => (Type::Error, place),
+                    other => {
+                        self.diags.push(Diag::error(
+                            "E0703",
+                            format!("field access on non-struct type `{}`", other.display()),
+                            e.span,
+                        ));
+                        (Type::Error, place)
+                    }
+                }
+            }
+            ExprKind::Index { base, index } => {
+                let it = self.check_expr(index, Use::Value);
+                self.expect_integer(&it, index.span);
+                let (bt, bp) = self.check_place(base);
+                let (st, mut place) = self.autoderef(bt, bp);
+                let elem = match &st {
+                    Type::Array(e, _) | Type::Slice(e) | Type::SliceMut(e) => (**e).clone(),
+                    Type::Error => Type::Error,
+                    other => {
+                        self.diags.push(Diag::error(
+                            "E0703",
+                            format!("cannot index a value of type `{}`", other.display()),
+                            e.span,
+                        ));
+                        Type::Error
+                    }
+                };
+                if let Some(p) = place.as_mut() {
+                    p.proj.push(Proj::Index);
+                }
+                (elem, place)
+            }
+            _ => {
+                let t = self.check_expr(e, Use::Value);
+                (t, None)
+            }
+        }
+    }
+
+    /// Peel `borrow`/`borrow_mut`/`Box` layers, extending the place with `deref`
+    /// projections (making it opaque to field-granular move tracking).
+    fn autoderef(&self, mut ty: Type, mut place: Option<Place>) -> (Type, Option<Place>) {
+        loop {
+            match ty {
+                Type::Borrow(x) | Type::BorrowMut(x) | Type::Box(x) => {
+                    ty = *x;
+                    place = place.map(|mut p| {
+                        p.proj.push(Proj::Deref);
+                        p
+                    });
+                }
+                other => return (other, place),
+            }
+        }
+    }
+
+    pub(super) fn fnptr_of_sig(&self, sig: &crate::resolve::FnSig) -> Type {
+        Type::FnPtr(crate::types::FnPtrTy {
+            params: sig
+                .params
+                .iter()
+                .map(|p| (p.mode, p.decl_ty.clone()))
+                .collect(),
+            alloc: sig.alloc,
+            ret: Box::new(sig.ret.clone()),
+        })
+    }
+
+    // ----- operators ------------------------------------------------------
+
+    fn check_unary(&mut self, op: UnOp, expr: &Expr) -> Type {
+        let t = self.check_expr(expr, Use::Value);
+        match op {
+            UnOp::Neg => {
+                self.expect_integer(&t, expr.span);
+                t
+            }
+            UnOp::Not => {
+                self.expect_bool(&t, expr.span, "operand of `!`");
+                Type::bool()
+            }
+        }
+    }
+
+    fn check_binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, span: Span) -> Type {
+        let l = self.check_expr(lhs, Use::Value);
+        let r = self.check_expr(rhs, Use::Value);
+        match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+                self.unify_int(&l, &r, span)
+            }
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                self.unify_int(&l, &r, span);
+                Type::bool()
+            }
+            BinOp::Eq | BinOp::Ne => {
+                if !matches!(l, Type::Error)
+                    && !matches!(r, Type::Error)
+                    && !assignable(&l, &r)
+                    && !assignable(&r, &l)
+                {
+                    self.diags.push(Diag::error(
+                        "E0703",
+                        format!("cannot compare `{}` with `{}`", l.display(), r.display()),
+                        span,
+                    ));
+                }
+                Type::bool()
+            }
+            BinOp::And | BinOp::Or => {
+                self.expect_bool(&l, lhs.span, "operand of a boolean operator");
+                self.expect_bool(&r, rhs.span, "operand of a boolean operator");
+                Type::bool()
+            }
+        }
+    }
+
+    fn unify_int(&mut self, l: &Type, r: &Type, span: Span) -> Type {
+        if matches!(l, Type::Error) || matches!(r, Type::Error) {
+            return Type::Error;
+        }
+        if !l.is_integer() || !r.is_integer() {
+            self.diags.push(Diag::error(
+                "E0703",
+                format!(
+                    "arithmetic requires integer operands, found `{}` and `{}`",
+                    l.display(),
+                    r.display()
+                ),
+                span,
+            ));
+            return Type::Error;
+        }
+        match (l, r) {
+            (Type::IntLit, Type::IntLit) => Type::IntLit,
+            (Type::IntLit, t) | (t, Type::IntLit) => t.clone(),
+            (a, b) if a == b => a.clone(),
+            _ => {
+                self.diags.push(Diag::error(
+                    "E0703",
+                    format!("mismatched integer types `{}` and `{}`", l.display(), r.display()),
+                    span,
+                ));
+                l.clone()
+            }
+        }
+    }
+
+    fn check_conv(&mut self, ty: &Ty, expr: &Expr, span: Span) -> Type {
+        let src = self.check_expr(expr, Use::Value);
+        let target = self.resolve_ty(ty);
+        if !matches!(src, Type::Error) && !src.is_integer() {
+            self.diags.push(
+                Diag::error(
+                    "E0701",
+                    format!("`conv` operand must be an integer, found `{}`", src.display()),
+                    span,
+                )
+                .with_note("`conv` converts between integer types only (§8.1)", None),
+            );
+        }
+        if !matches!(target, Type::Error) && !target.is_integer() {
+            self.diags.push(
+                Diag::error(
+                    "E0701",
+                    format!("`conv` target must be an integer type, found `{}`", target.display()),
+                    span,
+                )
+                .with_note("pointer retyping uses `cast_ptr`/`addr_to_ptr` (§4.2)", None),
+            );
+        }
+        target
+    }
+
+    // ----- struct / enum construction -------------------------------------
+
+    fn check_struct_lit(&mut self, name: &str, fields: &[FieldInit], span: Span) -> Type {
+        let sinfo = self.items.lookup_struct(name).cloned();
+        match sinfo {
+            Some(s) => {
+                for fi in fields {
+                    match s.fields.iter().find(|(fn_, _)| fn_ == &fi.name) {
+                        Some((_, fty)) => {
+                            self.check_against(&fi.value, fty);
+                        }
+                        None => {
+                            self.diags.push(Diag::error(
+                                "E0107",
+                                format!("type `{name}` has no field `{}`", fi.name),
+                                fi.span,
+                            ));
+                            self.check_expr(&fi.value, Use::Value);
+                        }
+                    }
+                }
+                Type::Named(name.to_string())
+            }
+            None => {
+                self.diags.push(Diag::error(
+                    "E0102",
+                    format!("unknown struct type `{name}`"),
+                    span,
+                ));
+                for fi in fields {
+                    self.check_expr(&fi.value, Use::Value);
+                }
+                Type::Error
+            }
+        }
+    }
+
+    fn check_enum_ctor(&mut self, enum_name: &str, variant: &str, args: &[Expr], span: Span) -> Type {
+        if enum_name == "BoxResult" {
+            return match variant {
+                "boxed" => {
+                    let t = if args.len() == 1 {
+                        self.check_expr(&args[0], Use::Value)
+                    } else {
+                        Type::Error
+                    };
+                    match t {
+                        Type::Box(inner) => Type::BoxResult(inner),
+                        Type::Error => Type::BoxResult(Box::new(Type::Error)),
+                        other => {
+                            self.diags.push(Diag::error(
+                                "E0703",
+                                format!("`BoxResult::boxed` expects a `Box`, found `{}`", other.display()),
+                                span,
+                            ));
+                            Type::BoxResult(Box::new(Type::Error))
+                        }
+                    }
+                }
+                "oom" => Type::BoxResult(Box::new(Type::Error)),
+                _ => {
+                    self.diags.push(Diag::error(
+                        "E0108",
+                        format!("`BoxResult` has no variant `{variant}`"),
+                        span,
+                    ));
+                    Type::Error
+                }
+            };
+        }
+        let einfo = self.items.lookup_enum(enum_name).cloned();
+        match einfo {
+            Some(e) => match e.variants.iter().find(|v| v.name == variant) {
+                Some(v) => {
+                    if args.len() != v.payload.len() {
+                        self.diags.push(Diag::error(
+                            "E0605",
+                            format!(
+                                "variant `{}::{}` expects {} payload(s), found {}",
+                                enum_name,
+                                variant,
+                                v.payload.len(),
+                                args.len()
+                            ),
+                            span,
+                        ));
+                    }
+                    for (a, pty) in args.iter().zip(&v.payload) {
+                        self.check_against(a, pty);
+                    }
+                    Type::Named(enum_name.to_string())
+                }
+                None => {
+                    self.diags.push(Diag::error(
+                        "E0108",
+                        format!("enum `{enum_name}` has no variant `{variant}`"),
+                        span,
+                    ));
+                    for a in args {
+                        self.check_expr(a, Use::Value);
+                    }
+                    Type::Error
+                }
+            },
+            None => {
+                self.diags.push(Diag::error(
+                    "E0102",
+                    format!("unknown enum type `{enum_name}`"),
+                    span,
+                ));
+                for a in args {
+                    self.check_expr(a, Use::Value);
+                }
+                Type::Error
+            }
+        }
+    }
+
+    fn check_array_lit(&mut self, elems: &[Expr]) -> Type {
+        let mut ty = Type::Error;
+        for (i, el) in elems.iter().enumerate() {
+            let t = self.check_expr(el, Use::Value);
+            if i == 0 {
+                ty = t;
+            }
+        }
+        Type::Array(Box::new(ty), ArrayLen::Lit(elems.len() as u64))
+    }
+
+    // ----- helpers used by control flow (in this file) --------------------
+
+    fn f_in_unsafe(&self) -> bool {
+        self.in_unsafe_get()
+    }
+    fn f_in_ensures(&self) -> bool {
+        self.in_ensures_get()
+    }
+}
+
+impl<'a> Checker<'a> {
+    pub(super) fn expect_integer(&mut self, t: &Type, span: Span) {
+        if !matches!(t, Type::Error | Type::Never) && !t.is_integer() {
+            self.diags.push(Diag::error(
+                "E0703",
+                format!("expected an integer, found `{}`", t.display()),
+                span,
+            ));
+        }
+    }
+
+    // ----- calls ----------------------------------------------------------
+
+    fn check_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> Type {
+        if let ExprKind::Ident(name) = &callee.kind {
+            if let Some(t) = self.check_builtin(name, args, span) {
+                return t;
+            }
+            if let Some(sig) = self.items.fns.get(name).cloned() {
+                return self.check_user_call(&sig, args, span);
+            }
+        }
+        // Indirect call: the callee is a fn-pointer value (§6.1).
+        let ct = self.check_expr(callee, Use::Value);
+        match ct {
+            Type::FnPtr(fp) => {
+                let n = fp.params.len().min(args.len());
+                for ((mode, pty), a) in fp.params.iter().zip(args) {
+                    self.check_arg_mode(*mode, pty, a);
+                }
+                for a in args.iter().skip(n) {
+                    self.check_expr(a, Use::Value);
+                }
+                if fp.alloc {
+                    self.note_alloc(span, "indirect call through an `alloc` fn-pointer (§6.1)");
+                }
+                *fp.ret
+            }
+            Type::Error => Type::Error,
+            other => {
+                self.diags.push(Diag::error(
+                    "E0704",
+                    format!("`{}` is not callable", other.display()),
+                    span,
+                ));
+                Type::Error
+            }
+        }
+    }
+
+    fn check_user_call(&mut self, sig: &crate::resolve::FnSig, args: &[Expr], span: Span) -> Type {
+        if args.len() != sig.params.len() {
+            self.diags.push(Diag::error(
+                "E0706",
+                format!(
+                    "function `{}` expects {} argument(s), found {}",
+                    sig.name,
+                    sig.params.len(),
+                    args.len()
+                ),
+                span,
+            ));
+        }
+        for (p, a) in sig.params.iter().zip(args) {
+            self.check_arg_mode(p.mode, &p.decl_ty, a);
+        }
+        if sig.alloc {
+            self.note_alloc(span, format!("call to `alloc` function `{}` (§6.3)", sig.name));
+        }
+        sig.ret.clone()
+    }
+
+    fn check_arg_mode(&mut self, mode: ParamMode, decl_ty: &Type, arg: &Expr) {
+        match mode {
+            ParamMode::Take => {
+                self.check_against(arg, decl_ty);
+            }
+            ParamMode::Read => {
+                let expected = Type::Borrow(Box::new(decl_ty.clone()));
+                self.check_against(arg, &expected);
+            }
+            ParamMode::Write => {
+                let expected = Type::BorrowMut(Box::new(decl_ty.clone()));
+                self.check_against(arg, &expected);
+            }
+            ParamMode::Out => self.check_out_arg(arg, decl_ty),
+        }
+    }
+
+    fn check_out_arg(&mut self, arg: &Expr, expected: &Type) {
+        let (t, place) = self.check_place(arg);
+        match &place {
+            Some(_) => self.emit(&place, Access::OutArg, arg.span),
+            None => self.diags.push(
+                Diag::error("E0705", "an `out` argument must be a place", arg.span)
+                    .with_note("pass a local or field the caller owns (§3.1)", None),
+            ),
+        }
+        if !matches!(t, Type::Error) && !assignable(&t, expected) {
+            self.diags.push(Diag::error(
+                "E0703",
+                format!(
+                    "`out` argument type `{}` does not match parameter `{}`",
+                    t.display(),
+                    expected.display()
+                ),
+                arg.span,
+            ));
+        }
+    }
+
+    // ----- builtins (spelled as ordinary calls, design 0002 §0.5) ---------
+
+    fn check_builtin(&mut self, name: &str, args: &[Expr], span: Span) -> Option<Type> {
+        let t = match name {
+            "box" => {
+                if args.len() == 2 {
+                    self.check_expr(&args[0], Use::Value);
+                    let v = self.check_expr(&args[1], Use::Value);
+                    self.note_alloc(span, "call to `box` allocates (§6.3)");
+                    Type::BoxResult(Box::new(v))
+                } else {
+                    self.arity(span, "box", 2);
+                    Type::Error
+                }
+            }
+            "unbox" => {
+                let b = self.arg0(args, span, "unbox");
+                match b {
+                    Type::Box(inner) => *inner,
+                    Type::Error => Type::Error,
+                    other => {
+                        self.mismatch(span, "unbox", "Box T", &other);
+                        Type::Error
+                    }
+                }
+            }
+            "ptr_read" => {
+                self.require_unsafe(span, "ptr_read");
+                match self.arg0(args, span, "ptr_read") {
+                    Type::RawPtr(inner) => *inner,
+                    Type::Error => Type::Error,
+                    other => {
+                        self.mismatch(span, "ptr_read", "rawptr T", &other);
+                        Type::Error
+                    }
+                }
+            }
+            "ptr_write" => {
+                self.require_unsafe(span, "ptr_write");
+                if args.len() == 2 {
+                    self.check_expr(&args[0], Use::Value);
+                    self.check_expr(&args[1], Use::Value);
+                } else {
+                    self.arity(span, "ptr_write", 2);
+                }
+                Type::unit()
+            }
+            "ptr_offset" => {
+                self.require_unsafe(span, "ptr_offset");
+                if args.len() == 2 {
+                    let p = self.check_expr(&args[0], Use::Value);
+                    let n = self.check_expr(&args[1], Use::Value);
+                    self.expect_integer(&n, args[1].span);
+                    p
+                } else {
+                    self.arity(span, "ptr_offset", 2);
+                    Type::Error
+                }
+            }
+            "is_null" => {
+                self.arg0(args, span, "is_null");
+                Type::bool()
+            }
+            "ptr_to_addr" => {
+                self.require_unsafe(span, "ptr_to_addr");
+                self.arg0(args, span, "ptr_to_addr");
+                Type::usize()
+            }
+            "addr_of" | "addr_of_mut" => {
+                self.require_unsafe(span, name);
+                if args.len() == 1 {
+                    let (t, place) = self.check_place(&args[0]);
+                    self.emit_place_action(&place, Use::ReadOnly, &t, args[0].span);
+                    Type::RawPtr(Box::new(t))
+                } else {
+                    self.arity(span, name, 1);
+                    Type::Error
+                }
+            }
+            "slice_of" => {
+                if args.len() == 1 {
+                    let (t, place) = self.check_place(&args[0]);
+                    self.emit_place_action(&place, Use::BorrowShared, &t, args[0].span);
+                    match t {
+                        Type::Array(e, _) | Type::Slice(e) | Type::SliceMut(e) => {
+                            Type::Slice(e)
+                        }
+                        Type::Error => Type::Error,
+                        other => {
+                            self.mismatch(span, "slice_of", "an array", &other);
+                            Type::Error
+                        }
+                    }
+                } else {
+                    self.arity(span, "slice_of", 1);
+                    Type::Error
+                }
+            }
+            "subslice" => {
+                if args.len() == 3 {
+                    let s = self.check_expr(&args[0], Use::Value);
+                    let lo = self.check_expr(&args[1], Use::Value);
+                    let hi = self.check_expr(&args[2], Use::Value);
+                    self.expect_integer(&lo, args[1].span);
+                    self.expect_integer(&hi, args[2].span);
+                    match s {
+                        Type::Slice(_) | Type::SliceMut(_) => s,
+                        Type::Error => Type::Error,
+                        other => {
+                            self.mismatch(span, "subslice", "a slice", &other);
+                            Type::Error
+                        }
+                    }
+                } else {
+                    self.arity(span, "subslice", 3);
+                    Type::Error
+                }
+            }
+            "len" => {
+                self.arg0(args, span, "len");
+                Type::usize()
+            }
+            _ => return None,
+        };
+        Some(t)
+    }
+
+    fn arg0(&mut self, args: &[Expr], span: Span, name: &str) -> Type {
+        if args.len() == 1 {
+            self.check_expr(&args[0], Use::Value)
+        } else {
+            self.arity(span, name, 1);
+            for a in args {
+                self.check_expr(a, Use::Value);
+            }
+            Type::Error
+        }
+    }
+
+    fn arity(&mut self, span: Span, name: &str, n: usize) {
+        self.diags.push(Diag::error(
+            "E0706",
+            format!("`{name}` expects {n} argument(s)"),
+            span,
+        ));
+    }
+
+    fn mismatch(&mut self, span: Span, name: &str, want: &str, got: &Type) {
+        self.diags.push(Diag::error(
+            "E0703",
+            format!("`{name}` expects `{want}`, found `{}`", got.display()),
+            span,
+        ));
+    }
+
+    // ----- control-flow lowering into the CFG -----------------------------
+
+    fn check_if(
+        &mut self,
+        cond: &Expr,
+        then_blk: &Block,
+        else_blk: Option<&Expr>,
+        span: Span,
+    ) -> Type {
+        let ct = self.check_expr(cond, Use::Value);
+        self.expect_bool(&ct, cond.span, "an `if` condition");
+        let c0 = match self.cur_get() {
+            Some(b) => b,
+            None => {
+                self.check_block_value(then_blk);
+                if let Some(e) = else_blk {
+                    self.check_expr(e, Use::Value);
+                }
+                return Type::unit();
+            }
+        };
+        let then_bb = self.new_block();
+        let else_bb = self.new_block();
+        let join_bb = self.new_block();
+        self.set_join_span(join_bb, span);
+        self.set_term(c0, Term::Branch(then_bb, else_bb));
+
+        self.cur_set(Some(then_bb));
+        let tt = self.check_block_value(then_blk);
+        if let Some(cur) = self.cur_get() {
+            self.set_term(cur, Term::Goto(join_bb));
+        }
+
+        self.cur_set(Some(else_bb));
+        let et = if let Some(e) = else_blk {
+            self.check_expr(e, Use::Value)
+        } else {
+            Type::unit()
+        };
+        if let Some(cur) = self.cur_get() {
+            self.set_term(cur, Term::Goto(join_bb));
+        }
+
+        self.cur_set(Some(join_bb));
+        join_types(tt, et)
+    }
+
+    fn check_match(&mut self, scrut: &Expr, arms: &[MatchArm], span: Span) -> Type {
+        let (sc_ty, sc_place) = self.check_place(scrut);
+        let resolved = patterns::resolve_enum(&sc_ty, self.items);
+        let (hold, einfo, ename) = match resolved {
+            Some(x) => x,
+            None => {
+                if !matches!(sc_ty, Type::Error) {
+                    self.diags.push(Diag::error(
+                        "E0603",
+                        format!("match scrutinee is not an enum: `{}`", sc_ty.display()),
+                        scrut.span,
+                    ));
+                }
+                for arm in arms {
+                    self.check_expr(&arm.body, Use::Value);
+                }
+                return Type::Error;
+            }
+        };
+        let pats: Vec<&Pattern> = arms.iter().map(|a| &a.pattern).collect();
+        if let Some(d) = patterns::check_exhaustive(&pats, &einfo, &ename, span) {
+            self.diags.push(d);
+        }
+        // The scrutinee is read at the match head.
+        self.emit_place_action(&sc_place, Use::ReadOnly, &sc_ty, scrut.span);
+
+        let c0 = match self.cur_get() {
+            Some(b) => b,
+            None => {
+                let mut ty = Type::Never;
+                for arm in arms {
+                    let mut binds = Vec::new();
+                    patterns::analyze_pattern(
+                        &arm.pattern,
+                        &einfo,
+                        &ename,
+                        hold,
+                        self.items,
+                        &mut self.diags,
+                        &mut binds,
+                    );
+                    self.push_scope();
+                    for b in &binds {
+                        self.add_local(&b.name, b.ty.clone(), b.movable);
+                    }
+                    ty = join_types(ty, self.check_expr(&arm.body, Use::Value));
+                    self.pop_scope();
+                }
+                return ty;
+            }
+        };
+
+        let join_bb = self.new_block();
+        self.set_join_span(join_bb, span);
+        let mut arm_bbs = Vec::new();
+        let mut result = Type::Never;
+        for arm in arms {
+            let mut binds = Vec::new();
+            patterns::analyze_pattern(
+                &arm.pattern,
+                &einfo,
+                &ename,
+                hold,
+                self.items,
+                &mut self.diags,
+                &mut binds,
+            );
+            let b = self.new_block();
+            arm_bbs.push(b);
+            self.cur_set(Some(b));
+            self.push_scope();
+            let moves = hold == HoldMode::Owned && binds.iter().any(|bd| bd.mode == BindMode::Move);
+            if moves {
+                if let Some(p) = sc_place.clone() {
+                    let dh = self.is_drop_hooked_partial(&p);
+                    let mv = self.local_movable(&p.root);
+                    self.emit(
+                        &Some(p),
+                        Access::Move {
+                            movable: mv,
+                            drop_hooked_partial: dh,
+                        },
+                        scrut.span,
+                    );
+                }
+            }
+            for bd in &binds {
+                self.add_local(&bd.name, bd.ty.clone(), bd.movable);
+                self.emit(&Some(Place::local(bd.name.clone())), Access::Assign, bd.span);
+            }
+            let bt = self.check_expr(&arm.body, Use::Value);
+            self.pop_scope();
+            if let Some(cur) = self.cur_get() {
+                self.set_term(cur, Term::Goto(join_bb));
+            }
+            result = join_types(result, bt);
+        }
+        self.set_term(c0, Term::Switch(arm_bbs));
+        self.cur_set(Some(join_bb));
+        result
+    }
+
+    fn check_loop(&mut self, body: &Block, span: Span) -> Type {
+        let c0 = match self.cur_get() {
+            Some(b) => b,
+            None => {
+                self.check_block_stmts(body);
+                return Type::Never;
+            }
+        };
+        let header = self.new_block();
+        self.set_term(c0, Term::Goto(header));
+        let break_bb = self.new_block();
+        self.set_join_span(break_bb, span);
+        self.loops_push(header, break_bb);
+        self.cur_set(Some(header));
+        self.check_block_stmts(body);
+        if let Some(cur) = self.cur_get() {
+            self.set_term(cur, Term::Goto(header));
+        }
+        self.loops_pop();
+        self.cur_set(Some(break_bb));
+        Type::unit()
+    }
+
+    fn check_while(&mut self, cond: &Expr, body: &Block, span: Span) -> Type {
+        let c0 = match self.cur_get() {
+            Some(b) => b,
+            None => {
+                self.check_expr(cond, Use::Value);
+                self.check_block_stmts(body);
+                return Type::unit();
+            }
+        };
+        let header = self.new_block();
+        self.set_term(c0, Term::Goto(header));
+        self.cur_set(Some(header));
+        let ct = self.check_expr(cond, Use::Value);
+        self.expect_bool(&ct, cond.span, "a `while` condition");
+        let body_bb = self.new_block();
+        let exit_bb = self.new_block();
+        self.set_join_span(exit_bb, span);
+        self.set_term(header, Term::Branch(body_bb, exit_bb));
+        self.loops_push(header, exit_bb);
+        self.cur_set(Some(body_bb));
+        self.check_block_stmts(body);
+        if let Some(cur) = self.cur_get() {
+            self.set_term(cur, Term::Goto(header));
+        }
+        self.loops_pop();
+        self.cur_set(Some(exit_bb));
+        Type::unit()
+    }
+
+    fn check_return(&mut self, operand: Option<&Expr>, _span: Span) -> Type {
+        if let Some(e) = operand {
+            let ret = self.ret_ty_clone();
+            self.check_against(e, &ret);
+        }
+        if let Some(cur) = self.cur_get() {
+            self.set_term(cur, Term::Return);
+            self.cur_set(None);
+        }
+        Type::Never
+    }
+
+    fn do_break(&mut self, span: Span) {
+        match self.loops_break() {
+            Some(brk) => {
+                if let Some(cur) = self.cur_get() {
+                    self.set_term(cur, Term::Goto(brk));
+                    self.cur_set(None);
+                }
+            }
+            None => self.diags.push(Diag::error(
+                "E0707",
+                "`break` outside of a loop",
+                span,
+            )),
+        }
+    }
+
+    fn do_continue(&mut self, span: Span) {
+        match self.loops_continue() {
+            Some(cont) => {
+                if let Some(cur) = self.cur_get() {
+                    self.set_term(cur, Term::Goto(cont));
+                    self.cur_set(None);
+                }
+            }
+            None => self.diags.push(Diag::error(
+                "E0707",
+                "`continue` outside of a loop",
+                span,
+            )),
+        }
+    }
+
+    fn diverge(&mut self) {
+        if let Some(cur) = self.cur_get() {
+            self.set_term(cur, Term::Diverge);
+            self.cur_set(None);
+        }
+    }
+}
+
+fn join_types(a: Type, b: Type) -> Type {
+    match (&a, &b) {
+        (Type::Never, _) => b,
+        (_, Type::Never) => a,
+        _ => {
+            if assignable(&b, &a) {
+                a
+            } else {
+                b
+            }
+        }
+    }
+}

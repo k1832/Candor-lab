@@ -28,3 +28,11 @@ One lesson per entry, one-line summary first.
   draft claimed GOVERNANCE.md didn't exist because it was written in
   parallel with the scaffolding commit. Check parallel-drafted docs for
   references to repo state and fix before review.
+
+- **§11's own example code leans on an implicit reborrow the model forbids.**
+  In 11.4 `peek(s, pos)`/`advance(pos)` pass a bare exclusive-borrow param
+  (`pos: write usize`), which the memory model says *moves* it (reborrow needs
+  the explicit `write (deref pos)`). So a use-after-move follows on the next
+  cursor use. The Stage-2 checkable fixtures adapt those two call sites to
+  `read (deref pos)`/`write (deref pos)` (commented ADAPTED). If Stage 3/4 ever
+  auto-reborrows at call sites, revisit these adaptations.

@@ -1,0 +1,43 @@
+// Checkable §11.1 — allocator free-list splice (valve).
+// §11 code preserved verbatim; POOL_VTABLE is added as a `static` (grammar D4).
+
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free:  fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+}
+
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+
+struct Pool { head: rawptr u8, block_size: usize }
+
+fn pool_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "pool owns [ctx..); head chains free blocks each >= block_size" {
+        let p: Pool = ptr_read(cast_ptr[Pool](ctx));
+        if is_null(p.head) { return ptr_null[u8](); }
+        let block: rawptr u8 = p.head;
+        let next: rawptr u8 = ptr_read(cast_ptr[rawptr u8](block));
+        ptr_write(cast_ptr[Pool](ctx), Pool { head: next, block_size: p.block_size });
+        return block;
+    }
+}
+
+fn pool_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    unsafe "push freed block onto head; block is >= pointer-sized" {
+        let p: Pool = ptr_read(cast_ptr[Pool](ctx));
+        ptr_write(cast_ptr[rawptr u8](ptr), p.head);
+        ptr_write(cast_ptr[Pool](ctx), Pool { head: ptr, block_size: p.block_size });
+    }
+}
+
+// top-level vtable value (design 0002 D4 `static`); its `alloc`-typed fields hold
+// the non-`alloc` pool_alloc/pool_free -- permitted conservatism (§3.2).
+static POOL_VTABLE: AllocVtable = AllocVtable { alloc: pool_alloc, free: pool_free };
+
+fn pool_handle(state: write Pool) -> Alloc {
+    unsafe "ctx and vt must stay valid for the lifetime of every COPY of this Alloc handle and every Box it serves; the caller guarantees state and POOL_VTABLE outlive them all" {
+        return Alloc {
+            ctx: cast_ptr[u8](addr_of_mut(deref state)),
+            vt:  addr_of(POOL_VTABLE),
+        };
+    }
+}

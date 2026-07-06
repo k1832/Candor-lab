@@ -1,0 +1,39 @@
+// Checkable §11.4 — parser: owned AST over borrowed input (value + borrow gear).
+// Self-contained stubs: Alloc/AllocVtable (§6.1), read_number/peek/advance/PLUS.
+
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free:  fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+
+enum Expr { num(i64), add(Box Expr, Box Expr), mul(Box Expr, Box Expr) }
+
+static PLUS: u8 = 43u8;
+fn read_number(s: slice u8, pos: write usize) -> i64 { return 0; }
+fn peek(s: slice u8, pos: read usize) -> u8 { return 0u8; }
+fn advance(pos: write usize) -> unit { }
+
+fn parse_term(a: read Alloc, s: slice u8, pos: write usize) alloc
+        -> BoxResult Expr {
+    let n: i64 = read_number(s, pos);
+    return box(a, Expr::num(n));
+}
+
+fn parse_expr(a: read Alloc, s: slice u8, pos: write usize) alloc
+        -> BoxResult Expr {
+    match parse_term(a, s, write (deref pos)) {
+        case BoxResult::oom => return BoxResult::oom,
+        case BoxResult::boxed(lhs) => {
+            if peek(s, read (deref pos)) == PLUS {   // ADAPTED: reborrow (read) the cursor
+                advance(write (deref pos));          // ADAPTED: reborrow (write) the cursor
+                match parse_expr(a, s, write (deref pos)) {
+                    case BoxResult::oom => return BoxResult::oom,
+                    case BoxResult::boxed(rhs) =>
+                        return box(a, Expr::add(lhs, rhs)),
+                }
+            }
+            return BoxResult::boxed(lhs);
+        }
+    }
+}

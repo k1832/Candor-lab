@@ -100,6 +100,8 @@ Dereference: `deref b` is a **place** denoting the borrowed storage. On the righ
 
 A borrow of a place through another borrow is a **reborrow**: `write (deref b)` where `b` is exclusive yields a fresh exclusive borrow constrained to not outlive `b`, and `read (deref b)` yields a fresh **shared** borrow of the pointee. Reborrows are how borrows are passed down the call stack.
 
+**Reborrowing at a call site is explicit** (clarification, 2026-07-06, surfaced by the Stage 2 checker): passing a held borrow *down* to a `read`/`write`-mode parameter is written `read (deref b)` / `write (deref b)`, never bare `b` — there is no implicit call-site reborrow in the prototype. Passing the binding bare is whatever the value gear says it is (a move of the borrow value, for an exclusive borrow), which is almost never what the author meant; the checker's use-after-move diagnostic points at the reborrow spelling. Rationale: P2/P13 — the reviewer sees exactly where a second-gear handle is re-lent, and the checker stays a loan scan rather than acquiring an implicit-coercion pass. Cost named: per-call ceremony that Rust's implicit `&mut *x` reborrow avoids; these are use-site tokens, which the Bet 5 criterion deliberately excludes from M1's signature-site annotation counts, so the measurement is not distorted — but reading friction is real, and if the basket shows it is frequent, an implicit-reborrow rule is the recorded revisit (a P13-vs-P2 trade decided in the open, not a silent convenience).
+
 **The reborrow rule (both directions).** Every reborrow places a loan on the *pointee* that restricts the **parent** borrow for the reborrow's live range (§2.3):
 
 - An **exclusive reborrow** (`write (deref b)`) **suspends the parent entirely**: while it is live, `b` may not be used at all — no read, no write, no further reborrow through it.
@@ -224,7 +226,7 @@ The **justification string is mandatory and must be a non-empty string literal**
 
 Type: `rawptr T`. A raw pointer is an address; it may be null and is not tracked by the borrow checker or the ownership system. **Holding, moving, copying, and comparing a `rawptr` value is safe** (it is a `copy` scalar, and a `rawptr` field in a struct is inert in safe code). Everything that **creates, offsets, casts, or dereferences** one requires an `unsafe` region. This draws the audit line cleanly: *every* line that gives a raw pointer meaning is inside an `unsafe` block; safe code may shuffle addresses around but can never act on them.
 
-Operations (all require `unsafe`):
+Operations (all require `unsafe`, with one carve-out: `offsetof` — like `is_null` — is a **safe** compile-time constant query; it confers no ability to act on memory, and the unsafety lives in the pointer arithmetic that consumes it. Clarification 2026-07-06, surfaced by the Stage 2 checker):
 
 | Operation | Signature | Meaning |
 |-----------|-----------|---------|

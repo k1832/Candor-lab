@@ -1,0 +1,30 @@
+// Checkable §11.5 — arena compiler pass (value + index; valve in Box).
+// §11 code preserved; `apply` is a self-contained helper stub.
+
+enum Node { leaf(i64), binop(u8, u32, u32) }
+
+struct Arena { mem: Box [4096]Node, count: u32 }
+
+fn apply(op: u8, l: i64, r: i64) -> i64 { return 0; }
+
+fn arena_push(ar: write Arena, n: Node) -> u32 {
+    let i: u32 = (deref ar).count;
+    (deref ar).mem[conv usize (i)] = n;
+    (deref ar).count = i + 1;
+    return i;
+}
+
+fn arena_get(ar: read Arena, i: u32) -> read Node {
+    return read (deref ar).mem[conv usize (i)];
+}
+
+fn fold_consts(ar: write Arena, root: u32) -> i64 {
+    match arena_get(read (deref ar), root) {
+        case Node::leaf(v) => return v,
+        case Node::binop(op, l, r) => {
+            let lv: i64 = fold_consts(write (deref ar), l);
+            let rv: i64 = fold_consts(write (deref ar), r);
+            return apply(op, lv, rv);   // ADAPTED (D1): `;` terminator, not `,`
+        }
+    }
+}
