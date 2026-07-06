@@ -120,11 +120,16 @@ free blocks were coalesced rather than left fragmented.
 3.7 **Exhaustion is graceful.** When space is insufficient, `alloc`/`realloc`
 return the OOM error value; no live block is disturbed.
 
-3.8 **Determinism of success/failure.** Given the same region size and the same
-operation sequence, the set of which operations succeed vs. return which error
-MUST be reproducible. Actual addresses MAY differ between implementations
-(declared nondeterminism); the pass/fail and overlap/alignment invariants MUST
-NOT.
+3.8 **Determinism of success/failure (same-implementation).** For a **fixed
+implementation**, given the same region size and operation sequence, the set of
+which operations succeed vs. return which error MUST be reproducible run to run.
+**Across** implementations this set need not match: §5.2 grants placement-strategy
+freedom (first-fit, best-fit, segregated lists), and different strategies fragment
+differently, so which steps hit `E_OUT_OF_MEMORY` is implementation-dependent. What
+every implementation MUST hold on every run are the §3.1–3.5
+overlap/alignment/size/integrity invariants and the graceful-OOM guarantee (§3.7).
+Actual addresses likewise MAY differ between implementations (declared
+nondeterminism).
 
 ---
 
@@ -141,8 +146,11 @@ named error value is returned and no state changes.
   pairwise non-overlapping (3.4).
 - **A5.** `alloc(64,64)`, write fill `0xA5`, then `alloc(64,64)` for a second
   block, write `0x5A`; first block still reads `0xA5` (3.5).
-- **A6.** `realloc` a 100-byte block (filled `0xC3`) to 400 bytes; first 100
-  bytes still `0xC3`; new pointer 400 bytes usable, original alignment preserved.
+- **A6.** `alloc(100, 64)` (a **64-aligned** block), fill `0xC3`, then `realloc`
+  it to 400 bytes; the first 100 bytes still read `0xC3`; the new pointer is 400
+  bytes usable **and is still 64-aligned**. `realloc` MUST preserve the block's
+  original alignment (2.4) — a vacuous `align=1` request could not catch a
+  non-preserving implementation, so the alignment here is non-trivial.
 - **A7.** `realloc` a 400-byte block down to 50 bytes; first 50 bytes preserved;
   the operation succeeds.
 
@@ -206,9 +214,35 @@ fill}. `SLOTS = 256`.
 in-bounds, (3.2) alignment, (3.3) size, (3.4) pairwise non-overlap, (3.5) fill
 integrity. Any violation fails the suite.
 
-4.5 **Reproducibility.** With the fixed seed and rule above, the sequence of
-`op`/`slot`/`size`/`align`/`fill` values is identical for every implementation;
-so is the set of which steps hit OOM (3.8), given identical region size.
+4.5 **Reproducibility.** With the fixed seed and rule above, the **draw sequence**
+— the `op`/`slot`/`size`/`align`/`fill` values produced by the PRNG — is identical
+for every implementation. The **set of steps that hit `E_OUT_OF_MEMORY` is NOT
+required to match across implementations**: placement-strategy freedom (§5.2) makes
+OOM timing implementation-dependent, so each implementation replays its own OOM set
+deterministically (§3.8, same-implementation) while two implementations may diverge
+on which draws OOM. The per-step invariants of §4.4 MUST hold for every
+implementation regardless.
+
+### Partial coalescing (targeted anti-cheat)
+
+- **A22 (partial coalescing of an adjacent middle run).** Let `HDR` be the
+  implementation's declared per-block overhead (the same `HDR <= 64` of §3.6).
+  Carve the region into **10 contiguous 1 KiB blocks** by ten successive
+  `alloc(1024 - HDR, 1)` calls `b0 .. b9` (each request sized so one block plus its
+  header occupies exactly 1024 bytes, laying the ten down back to back). Then
+  `free(b3)`, `free(b4)`, `free(b5)` — freeing **only** the adjacent middle three
+  while `b0,b1,b2,b6,b7,b8,b9` stay **live**. Now `alloc(3*1024 - HDR, 1)`
+  (three-blocks-worth net of one header) **MUST succeed**: the only place it can fit
+  is the reclaimed `b3+b4+b5` span, which requires that the three freed blocks were
+  **coalesced into one 3 KiB free region**. This catches two cheaper
+  implementations that A10/A11 (free-**all**, then one big alloc) let pass: (i) a
+  **bump allocator that only resets when the region is completely empty** — here the
+  region is never empty (seven blocks stay live), so a bump-reset cheat has no
+  contiguous run to hand back and the alloc fails; (ii) a **non-coalescing free
+  list** that keeps `b3,b4,b5` as three separate 1 KiB free entries — no single
+  entry is `3*1024 - HDR` bytes, so the alloc fails. Only genuine adjacent-free
+  coalescing satisfies A22. (Numbered A22 — the next free index — to avoid
+  renumbering the frozen error and stress vectors.)
 
 ---
 
@@ -223,3 +257,7 @@ are. The criterion measures cognitive load, not speed (criterion §8.2).
 observable guarantees of 2.4 are graded.
 5.5 **Reclaiming memory to the OS / growing the region** is out of scope; the
 region is fixed at `init`.
+
+---
+
+**Revision history.** 2026-07-06: revised per blind adversarial review #1 (`docs/reviews/2026-07-06-basket-specs-review-1.md`); findings 4, 6, 10 applied.

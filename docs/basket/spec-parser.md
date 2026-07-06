@@ -19,9 +19,12 @@ pair (§4) — with a **byte offset source position**, never a crash/panic.
 
 1.4 The parser MUST operate over a **slice/view of the input** (zero-copy):
 identifier and integer AST nodes reference the input by `(offset, length)` /
-sub-slice; the parser MUST NOT copy token text into owned strings. This is
-observable via §3.5 (serialization reproduces the exact input substring) and is a
-required property, not an optimization.
+sub-slice; the parser MUST NOT copy token text into owned strings. Zero-copy is an
+**adjudicator-confirmed** property (criterion §6.5 code inspection), **not**
+suite-enforced: the §3.5 span/substring check only verifies that a node's span
+selects the correct input bytes, and a conforming implementation could satisfy it
+while still copying token text into owned storage. The no-copy requirement is
+therefore confirmed by inspection, not observed by the tests; it remains required.
 
 1.5 Input is a byte string. Bytes are interpreted as ASCII; non-ASCII bytes
 outside string/identifier rules are `E_UNEXPECTED_CHAR`.
@@ -83,9 +86,11 @@ AST.
 3.4 **AST equality** = string equality of `S(root)`. Two implementations parsing
 the same valid input MUST produce the same `S(root)`.
 
-3.5 **Zero-copy check.** For every `Int`/`Ident` node, the substring of the input
-at the node's span MUST equal the token text emitted in `S`. This makes the
-slice-referencing requirement (1.4) observable.
+3.5 **Span/substring check.** For every `Int`/`Ident` node, the substring of the
+input at the node's span MUST equal the token text emitted in `S`. This verifies
+the span is correct; it does **not** by itself prove no copy occurred (an
+implementation could copy and still pass), so the zero-copy requirement of §1.4 is
+**adjudicator-confirmed by code inspection** (criterion §6.5), not suite-enforced.
 
 ---
 
@@ -115,7 +120,7 @@ reported. `offset` is a 0-based byte index; end-of-input errors use
 - **P16** `1 + 2 * 3 - 4 / 2` → `(- (+ 1 (* 2 3)) (/ 4 2))`.
 - **P17** `a % b * c` → `(* (% a b) c)` (`%` same level as `*`, left-assoc).
 - **P18** `  1\n+\t2 ` (leading/inner/trailing whitespace) → `(+ 1 2)`; the `Int`
-  `1` node span is `[2,3)` and the `Int` `2` span is `[5,6)` (positions ignore
+  `1` node span is `[2,3)` and the `Int` `2` span is `[6,7)` (positions ignore
   skipped whitespace).
 - **P19** `((((5))))` → `5`.
 - **P20** `a >= b != c <= d` → `(!= (>= a b) (<= c d))`.
@@ -138,7 +143,7 @@ reported. `offset` is a 0-based byte index; end-of-input errors use
 
 ### Structural cross-checks
 - **P31.** For every valid vector, re-parsing `S(root)` is **not** required, but
-  the §3.5 zero-copy substring check MUST hold for all leaf nodes.
+  the §3.5 span/substring check MUST hold for all leaf nodes.
 - **P32.** Parsing is deterministic: the same input yields the same
   `Ok`/`Err` result on every run and every conforming implementation.
 
@@ -159,3 +164,7 @@ equality, error `{kind, offset}` correctness, and the zero-copy property
 (criterion §8.2).
 5.6 Building a **CST / preserving whitespace and comments** is out of scope; only
 the typed AST of §3 is produced.
+
+---
+
+**Revision history.** 2026-07-06: revised per blind adversarial review #1 (`docs/reviews/2026-07-06-basket-specs-review-1.md`); findings 3, 9 applied.

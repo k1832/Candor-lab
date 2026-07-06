@@ -106,10 +106,17 @@ the head has no predecessor, the tail no successor; the number of reachable node
 equals the tracked length; there are no cycles other than a sentinel structure if
 used.
 
-3.5 **O(1) middle removal is observable.** `block`/`exit`/`set_priority` of a task
-that is neither head nor tail of its queue MUST leave the remaining queue a
-well-formed list with that task absent and the relative order of the others
-unchanged.
+3.5 **Middle-removal correctness (suite-verified); O(1) and intrusiveness
+adjudicator-inspected.** `block`/`exit`/`set_priority` of a task that is neither
+head nor tail of its queue MUST leave the remaining queue a well-formed list with
+that task absent and the relative order of the others unchanged. This **removal
+correctness** is what the suite verifies, via `queue_dump` and the list-integrity
+checks of 3.4. The **O(1) cost** of the removal and the **intrusive doubly-linked**
+representation (criterion §2.4b) are **not** observable from the suite's outputs —
+a scanning or index-into-an-array implementation could produce identical dumps — so
+they are **confirmed by adjudicator code inspection under criterion §6.5**, not by
+the tests. The requirement itself (1.1, 1.3) stands unchanged; only the claim that
+the suite observes it is withdrawn.
 
 3.6 **Determinism.** Given an operation sequence, the sequence of `pick_next`
 results and every `queue_dump` are fully determined by this spec (see reference
@@ -198,6 +205,19 @@ classification matches. Any mismatch fails the suite.
 rule is fixed, the shadow model is single-valued; every conforming implementation
 MUST reproduce identical `queue_dump`s at every step.
 
+### Reschedule on a BLOCKED task (additional nominal)
+
+- **T20 (set_priority on a BLOCKED task takes effect at wake).** `admit(61,p0)`,
+  `admit(62,p0)` so `dump(0) == [61,62]`; `admit(60,p2)`; `block(60)` (60 leaves
+  p2 and becomes BLOCKED with recorded priority 2); `set_priority(60, 0)` — 60 is
+  BLOCKED, so per §2.7 the new level 0 is recorded for the next `wake` and 60's
+  priority field becomes 0, with **no** run-queue change yet (`dump(0)` and
+  `dump(2)` unchanged at this point); then `wake(60)` moves 60 to the **tail of
+  level 0** (its recorded new level), giving `dump(0) == [61,62,60]` and
+  `dump(2) == []`. Confirms §2.7's BLOCKED branch: a priority change on a blocked
+  task is applied on re-insertion, not immediately. (Numbered T20 — the next free
+  index — to avoid renumbering the frozen error and stress vectors.)
+
 ---
 
 ## 5. Non-goals
@@ -210,5 +230,11 @@ starvation avoidance is NOT required (and MUST NOT be added — it would change
 observable order and fail §4).
 5.4 **Memory allocation for tasks** is the caller's concern; the scheduler
 allocates nothing per task (intrusive requirement, 1.1).
-5.5 **Performance** is not graded, only the O(1) *shape* implied by §3.5 and the
-observable outcomes (criterion §8.2).
+5.5 **Performance** is not graded; the suite grades the observable outcomes of
+§3–§4, while the **O(1) cost shape and the intrusive doubly-linked representation
+are adjudicator-inspected** (§3.5, criterion §6.5, §2.4b), **not** suite-graded
+(criterion §8.2).
+
+---
+
+**Revision history.** 2026-07-06: revised per blind adversarial review #1 (`docs/reviews/2026-07-06-basket-specs-review-1.md`); findings 5, 12 applied.

@@ -61,13 +61,18 @@ no latched bits.
 **On write:**
 - CTRL with `RESET` set: if the scenario's `init_stuck_first` flag is armed and
   this is the first RESET, set `stuck := true`, `DS := RESETTING`, consume the
-  flag; else `DS := RESETTING`, `reset_ctr := RESET_DELAY`, clear `stuck`, clear
-  all latched bits and `err_at`.
+  flag; else `DS := RESETTING`, `reset_ctr := RESET_DELAY`, clear all latched bits
+  and `err_at`, and clear `stuck` **unless** the scenario's `stuck_persists` flag
+  is set. When `stuck_persists` is set, a RESET leaves `stuck` unchanged, so a
+  device that is already stuck stays stuck across recovery (M10 relies on this).
 - CTRL with `ENABLE` set while `DS == INITED`: `DS := READY`.
 - CTRL with `START` set while `DS == READY`: `DS := ACTIVE`, `rem := LEN`,
   `data_out := 0`, `err_at :=` the scenario's configured fault index for the
   *current* transfer (or none).
-- CTRL with `IRQ_ACK` set: clear latched `DONE`/`ERROR`.
+- CTRL with `IRQ_ACK` set: clear latched `DONE`/`ERROR`; and if `DS == COMPLETE`,
+  set `DS := READY`. This IRQ_ACK-while-COMPLETE transition is what returns the
+  device to READY after a completed transfer, enabling the next transfer without
+  re-init (M6 depends on it).
 - LEN: store into `LEN`. CMD: store into `CMD`.
 - DATA while `DS == ACTIVE` and `CMD == CMD_WRITE`: accept one word (no state
   advance; advancing happens on STATUS reads).
@@ -88,9 +93,10 @@ no latched bits.
   `data_out += 1`.
 
 2.5 **Scenario configuration** (set by the harness, not via MMIO): `init_stuck_first`
-(bool), and a per-transfer `err_at` (word index at which a transfer faults, or
-none). All device behavior is a deterministic function of these plus the driver's
-access sequence.
+(bool); `stuck_persists` (bool) — when set, a RESET does not clear an existing
+`stuck` (§2.4), so an init-timeout cannot be recovered (M10); and a per-transfer
+`err_at` (word index at which a transfer faults, or none). All device behavior is a
+deterministic function of these plus the driver's access sequence.
 
 ---
 
@@ -113,14 +119,18 @@ FATAL; write CTRL=ENABLE; return OK.
 1. write LEN=n; write CMD=cmd; write CTRL=ENABLE|START.
 2. `transferred := 0`, `stall := 0`.
 3. loop:
-   - if `cmd == CMD_WRITE` and `transferred < n`: write DATA=buf[transferred].
+   - if `cmd == CMD_WRITE` and `transferred < n`: write DATA=buf[transferred],
+     then `transferred += 1`, `stall := 0`. Writing a word is forward progress, so
+     the stall guard is reset each time; only words `0 .. n-1` are ever written.
    - read STATUS -> `st`.
    - if `st & ERROR`: return XFER_ERROR.
    - if `st & TIMEOUT`: return XFER_TIMEOUT.
    - if `st & DONE`: break.
-   - if `st & BUSY`: if `cmd == CMD_READ`: read DATA -> buf[transferred];
-     `transferred += 1`; `stall := 0`.
-   - else: `stall += 1`; if `stall >= MAX_POLLS` return XFER_TIMEOUT.
+   - otherwise `st & BUSY` holds:
+     - if `cmd == CMD_READ`: read DATA -> buf[transferred]; `transferred += 1`;
+       `stall := 0`.
+     - else (`cmd == CMD_WRITE`, nothing to read this poll): `stall += 1`; if
+       `stall >= MAX_POLLS` return XFER_TIMEOUT.
 4. write CTRL=IRQ_ACK; return OK.
 
 3.5 `run(cmd, n, buf)` (top-level, per scenario):
@@ -187,13 +197,23 @@ Notation: `W REG=hh` / `R REG=hh` (hex). Register names abbreviate offsets.
   `W LEN=0x03,W CMD=0x02,W CTRL=0x03,W DATA=0x11,R STATUS=0x02,
   W DATA=0x22,R STATUS=0x02,W DATA=0x33,R STATUS=0x02,R STATUS=0x05,W CTRL=0x08`.
   Result OK.
-- **M9 (unrecoverable: fault on both attempts):** `err_at=0` armed for every
-  transfer; init, attempt faults on first STATUS (`... R STATUS=0x08`), recover,
-  retry faults again -> driver returns `DEV_FATAL` (a value). Trace ends after the
-  second fault + no further register access. No crash.
-- **M10 (init timeout unrecoverable):** `init_stuck_first` armed AND recover's
-  RESET also stuck (scenario keeps `stuck`): init poll ×8 TIMEOUT, recover poll
-  ×8 TIMEOUT -> `recover()` returns FATAL -> `run` returns `DEV_FATAL`. No crash.
+- **M9 (unrecoverable: fault on both attempts; WRITE 3 words `[0x11,0x22,0x33]`,
+  `err_at=0` armed for every transfer):** with `err_at=0` the fault fires on the
+  first STATUS poll of each attempt, after exactly one DATA word is written. Full
+  trace: init `W CTRL=0x04, R STATUS=0x02, R STATUS=0x01, W CTRL=0x01`; first
+  attempt `W LEN=0x03, W CMD=0x02, W CTRL=0x03, W DATA=0x11, R STATUS=0x08`
+  (ERROR -> XFER_ERROR); recover `W CTRL=0x04, R STATUS=0x02, R STATUS=0x01,
+  W CTRL=0x01`; retry `W LEN=0x03, W CMD=0x02, W CTRL=0x03, W DATA=0x11,
+  R STATUS=0x08` (ERROR again -> XFER_ERROR). `run` returns `DEV_FATAL` (a value);
+  the trace ends here with no further register access. No crash.
+- **M10 (init timeout unrecoverable):** `init_stuck_first` armed AND
+  `stuck_persists` set, so the recover RESET does not clear `stuck` (§2.4) and the
+  device never leaves RESETTING. Full trace: init `W CTRL=0x04`, then
+  `R STATUS=0x02` ×8 (RESETTING with `stuck` returns BUSY forever; poll exhausted
+  -> TIMEOUT), so `init()` returns TIMEOUT and `run` calls `recover()`, which
+  issues `W CTRL=0x04`, then `R STATUS=0x02` ×8 (still stuck -> BUSY; poll
+  exhausted -> TIMEOUT), so `recover()` returns FATAL -> `run` returns `DEV_FATAL`
+  (a value). The trace ends here with no further register access. No crash.
 
 ### Cross-checks (structural, all scenarios)
 - **M11.** Every scenario visits at least the states
@@ -217,3 +237,7 @@ equality and returned results (criterion §8.2).
 they would perturb the trace and fail §4.
 5.5 **Retry counts beyond one** are out of scope; the spec fixes exactly one
 retry per recovery path.
+
+---
+
+**Revision history.** 2026-07-06: revised per blind adversarial review #1 (`docs/reviews/2026-07-06-basket-specs-review-1.md`); findings 1, 2, 7, 8, 11 applied.
