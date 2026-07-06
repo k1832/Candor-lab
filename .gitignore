@@ -1,0 +1,7 @@
+# Rust prototype build output
+target/
+
+# Editor droppings
+*.swp
+.idea/
+.vscode/
