@@ -1,0 +1,8 @@
+[package]
+name = "candor_arena"
+version = "0.1.0"
+edition = "2021"
+description = "Arena-based constant-folding compiler pass (Bet 5 idiomatic-Rust baseline)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
