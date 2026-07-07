@@ -27,12 +27,24 @@ of this manifest; grammar changes past this point require a pre-freeze ledger am
 Note on the M6 model set: M6 was demoted to supplementary, non-gating evidence by ledger row 11,
 so no model set is required at this step.
 
-## Step (ii) — specs authored and reviewed; publication pending
+## Step (ii) — specs authored, reviewed, and provisionally published
 
 The five language-agnostic basket specs exist, blind-authored and blind-reviewed
-(docs/reviews/2026-07-06-basket-specs-review-1.md). Hashes recorded now; the step completes when
-the specs are PUBLISHED (criterion §6.2: published before baselines are chosen — the deciding
-authority must resolve what publication means for a currently private repository).
+(docs/reviews/2026-07-06-basket-specs-review-1.md).
+
+**Publication ruling (deciding authority, 2026-07-07):** provisional publication by annotated git
+tag (`bet5-specs-v1`) plus the hashes below, while the repository remains private. The repository
+MUST become public before the freeze instant (criterion §0.1); until then, the criterion's
+open-comment and publish-either-way provisions are honored as written-for-the-public-record but
+have no external witnesses — stated plainly rather than pretended otherwise. Baseline selection
+may proceed against the tagged spec hashes.
+
+**Baseline-production ruling (deciding authority, 2026-07-07):** hybrid per program — allocator
+and scheduler adapted from independently-sourced open-source Rust (sources and commits recorded
+in criterion §6.6 when frozen); MMIO, parser, and arena commissioned from Opus-family model
+sessions blind to the Candor design documents. Consequence, binding under criterion §6.3: the
+Candor basket ports may NOT be authored by Opus-family models; they will be authored by a
+different model family, recorded in §6.6 alongside the baselines.
 
 | Artifact | SHA-256 |
 |---|---|
