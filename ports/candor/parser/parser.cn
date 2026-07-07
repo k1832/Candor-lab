@@ -1,0 +1,648 @@
+// ============================================================================
+// Candor port: recursive-descent expression parser (Bet 5 basket,
+// spec-parser.md; the harness marker below follows ruling R14).
+//
+// Architecture: a byte-code lexer over the borrowed input `slice u8`, a
+// recursive-descent parser (one function per precedence tier collapsed into a
+// level-indexed pair parse_bin/bin_tail; left association by accumulator-
+// passing tail recursion), an owned AST (`enum Ast`, Box children per design
+// 0001 §11.4), errors as values (`PR::err(kind, offset)`), and a canonical
+// S-expression serializer that CONSUMES the owned AST, emitting leaf text
+// directly from each node's recorded span into the input (zero-copy, spec
+// §1.4: leaves carry only (start, end) byte offsets; token text is never
+// copied into owned storage — the only owned bytes are the serializer's
+// output buffer, which §3.3 requires producing).
+//
+// Allocator: AST nodes are boxed through a bump allocator (parser
+// infrastructure, same shape as the §11.4 fixture's). Its two unsafe blocks
+// are the port's only valves; the parser proper is pure value + borrow gear.
+//
+// Error kinds (spec §4), as u8 codes:
+//   1 E_UNEXPECTED_CHAR   2 E_UNEXPECTED_EOF   3 E_EXPECTED_EXPR
+//   4 E_EXPECTED_RPAREN   5 E_TRAILING_INPUT
+// Rulings honored: R10/R11 (E_EXPECTED_RPAREN at the offending token's start,
+// EOF => offset = len), R12 (parenthesized grouping is span-transparent),
+// P27's principle generalized: a lex error surfaces as E_UNEXPECTED_CHAR
+// wherever that token is demanded, before any other diagnosis.
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// Bump allocator (parser infrastructure): Box construction needs an Alloc
+// handle (design 0001 §6.1/§6.2). Never freed individually; bump_free is a
+// no-op and the arena dies with the run.
+// ---------------------------------------------------------------------------
+
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free:  fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize }
+
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live Bump state whose [next, end) address range is reserved to this arena alone (it lies above the interpreter stack region and no other code hands out addresses from it); the carved block stays inside [next, end)" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let aligned: usize = (b.next + align - 1) / align * align;
+        if aligned + size > b.end { return ptr_null[u8](); }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit { }
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+
+fn mk_alloc(state: write Bump) -> Alloc {
+    unsafe "ctx (the Bump local in main) and vt (the static BUMP_VT) outlive every copy of this handle and every Box it serves: both live for the whole run, and every Box built from it is dropped before main returns" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(deref state)), vt: addr_of(BUMP_VT) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tokens. kind codes; two-character operators are matched maximally (spec 2.1).
+// TK_ERR marks a byte no token can start with, at its offset.
+// ---------------------------------------------------------------------------
+
+static TK_EOF: u8 = 0u8;
+static TK_ERR: u8 = 1u8;
+static TK_INT: u8 = 2u8;
+static TK_IDENT: u8 = 3u8;
+static TK_LP: u8 = 4u8;
+static TK_RP: u8 = 5u8;
+static TK_COMMA: u8 = 6u8;
+static TK_PLUS: u8 = 7u8;
+static TK_MINUS: u8 = 8u8;
+static TK_STAR: u8 = 9u8;
+static TK_SLASH: u8 = 10u8;
+static TK_PCT: u8 = 11u8;
+static TK_BANG: u8 = 12u8;
+static TK_LT: u8 = 13u8;
+static TK_LE: u8 = 14u8;
+static TK_GT: u8 = 15u8;
+static TK_GE: u8 = 16u8;
+static TK_EQ: u8 = 17u8;
+static TK_NE: u8 = 18u8;
+static TK_AND: u8 = 19u8;
+static TK_OR: u8 = 20u8;
+
+// error kind codes (spec §4)
+static K_CHAR: u8 = 1u8;
+static K_EOF: u8 = 2u8;
+static K_EXPR: u8 = 3u8;
+static K_RPAREN: u8 = 4u8;
+static K_TRAIL: u8 = 5u8;
+
+copy struct Tok { kind: u8, start: usize, end: usize }
+
+fn is_ws(c: u8) -> bool { return c == 32u8 || c == 9u8 || c == 10u8 || c == 13u8; }
+fn is_digit(c: u8) -> bool { return c >= 48u8 && c <= 57u8; }
+fn is_ident_start(c: u8) -> bool {
+    return (c >= 65u8 && c <= 90u8) || (c >= 97u8 && c <= 122u8) || c == 95u8;
+}
+fn is_ident_cont(c: u8) -> bool { return is_ident_start(c) || is_digit(c); }
+
+fn tok1(k: u8, i: usize) -> Tok { return Tok { kind: k, start: i, end: i + 1 }; }
+fn tok2(k: u8, i: usize) -> Tok { return Tok { kind: k, start: i, end: i + 2 }; }
+
+// lex the single token starting at the first non-whitespace byte >= from.
+// Pure: the cursor is advanced by the caller (to t.end) only on consumption,
+// so peeking is just not advancing.
+fn lex(s: slice u8, from: usize) -> Tok {
+    let mut i: usize = from;
+    while i < len(s) && is_ws(s[i]) { i = i + 1; }
+    if i >= len(s) { return Tok { kind: TK_EOF, start: len(s), end: len(s) }; }
+    let c: u8 = s[i];
+    if is_digit(c) {
+        let mut j: usize = i + 1;
+        while j < len(s) && is_digit(s[j]) { j = j + 1; }
+        return Tok { kind: TK_INT, start: i, end: j };
+    }
+    if is_ident_start(c) {
+        let mut j: usize = i + 1;
+        while j < len(s) && is_ident_cont(s[j]) { j = j + 1; }
+        return Tok { kind: TK_IDENT, start: i, end: j };
+    }
+    if c == 40u8 { return tok1(TK_LP, i); }
+    if c == 41u8 { return tok1(TK_RP, i); }
+    if c == 44u8 { return tok1(TK_COMMA, i); }
+    if c == 43u8 { return tok1(TK_PLUS, i); }
+    if c == 45u8 { return tok1(TK_MINUS, i); }
+    if c == 42u8 { return tok1(TK_STAR, i); }
+    if c == 47u8 { return tok1(TK_SLASH, i); }
+    if c == 37u8 { return tok1(TK_PCT, i); }
+    if c == 60u8 {                                        // <  <=
+        if i + 1 < len(s) && s[i + 1] == 61u8 { return tok2(TK_LE, i); }
+        return tok1(TK_LT, i);
+    }
+    if c == 62u8 {                                        // >  >=
+        if i + 1 < len(s) && s[i + 1] == 61u8 { return tok2(TK_GE, i); }
+        return tok1(TK_GT, i);
+    }
+    if c == 33u8 {                                        // !  !=
+        if i + 1 < len(s) && s[i + 1] == 61u8 { return tok2(TK_NE, i); }
+        return tok1(TK_BANG, i);
+    }
+    if c == 61u8 {                                        // == only; bare = is no token
+        if i + 1 < len(s) && s[i + 1] == 61u8 { return tok2(TK_EQ, i); }
+        return tok1(TK_ERR, i);
+    }
+    if c == 38u8 {                                        // && only
+        if i + 1 < len(s) && s[i + 1] == 38u8 { return tok2(TK_AND, i); }
+        return tok1(TK_ERR, i);
+    }
+    if c == 124u8 {                                       // || only
+        if i + 1 < len(s) && s[i + 1] == 124u8 { return tok2(TK_OR, i); }
+        return tok1(TK_ERR, i);
+    }
+    return tok1(TK_ERR, i);
+}
+
+// ---------------------------------------------------------------------------
+// The typed AST (spec §3). Owned recursive value: Box children, no borrow
+// stored anywhere (design 0001 §3.4/§11.4). Every variant carries its byte
+// span [start, end); leaves carry ONLY the span — their text is the input
+// bytes it selects (zero-copy, spec §1.4). `op` is the token-kind code.
+// Call argument lists are an owned cons list (the prototype has no Vec).
+// ---------------------------------------------------------------------------
+
+enum Ast {
+    lit(usize, usize),                       // Int:   start, end
+    name(usize, usize),                      // Ident: start, end
+    un(u8, Box Ast, usize, usize),           // op, operand, start, end
+    bin(u8, Box Ast, Box Ast, usize, usize), // op, left, right, start, end
+    call(Box Ast, Box Args, usize, usize),   // callee, args, start, end
+}
+enum Args { nil, cons(Box Ast, Box Args) }
+
+// parse result: the owned root, or the FIRST error as a {kind, offset} value
+enum PR { ok(Box Ast), err(u8, usize) }
+// argument-list result: the owned list plus the closing ')' end (for the
+// Call span, spec 3.2), or the first error
+enum ARes { ok(Box Args, usize), err(u8, usize) }
+
+// span accessors: copy payloads read out through the shared borrow (§8.2.1)
+fn ast_start(e: read Ast) -> usize {
+    match e {
+        case Ast::lit(st, _) => return st,
+        case Ast::name(st, _) => return st,
+        case Ast::un(_, _, st, _) => return st,
+        case Ast::bin(_, _, _, st, _) => return st,
+        case Ast::call(_, _, st, _) => return st,
+    }
+}
+fn ast_end(e: read Ast) -> usize {
+    match e {
+        case Ast::lit(_, en) => return en,
+        case Ast::name(_, en) => return en,
+        case Ast::un(_, _, _, en) => return en,
+        case Ast::bin(_, _, _, _, en) => return en,
+        case Ast::call(_, _, _, en) => return en,
+    }
+}
+
+// Box construction. Arena exhaustion is an infrastructure fault, not a spec
+// error (spec §4 has no OOM kind); the harness arena is sized so it cannot
+// happen for any vector.
+fn must_box(a: read Alloc, v: Ast) alloc -> Box Ast {
+    match box(a, v) {
+        case BoxResult::boxed(b) => return b,
+        case BoxResult::oom => panic("parser arena exhausted"),
+    }
+}
+fn must_box_args(a: read Alloc, v: Args) alloc -> Box Args {
+    match box(a, v) {
+        case BoxResult::boxed(b) => return b,
+        case BoxResult::oom => panic("parser arena exhausted"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parser. Precedence tiers (spec 2.2), low to high:
+//   0 ||   1 &&   2 == !=   3 < <= > >=   4 + -   5 * / %
+// One level-indexed function pair covers all six binary tiers; left
+// associativity is the accumulator in bin_tail. Unary is right-associative
+// by direct recursion; postfix call is its own accumulator tail.
+// ---------------------------------------------------------------------------
+
+fn is_op_at(k: u8, lvl: u8) -> bool {
+    if lvl == 0u8 { return k == TK_OR; }
+    if lvl == 1u8 { return k == TK_AND; }
+    if lvl == 2u8 { return k == TK_EQ || k == TK_NE; }
+    if lvl == 3u8 { return k == TK_LT || k == TK_LE || k == TK_GT || k == TK_GE; }
+    if lvl == 4u8 { return k == TK_PLUS || k == TK_MINUS; }
+    return k == TK_STAR || k == TK_SLASH || k == TK_PCT;
+}
+
+// the operand one tier tighter than lvl (unary above the tightest binary tier)
+fn parse_sub(a: read Alloc, s: slice u8, pos: write usize, lvl: u8) alloc -> PR {
+    if lvl == 5u8 { return parse_unary(a, s, write (deref pos)); }
+    return parse_bin(a, s, write (deref pos), lvl + 1u8);
+}
+
+fn parse_bin(a: read Alloc, s: slice u8, pos: write usize, lvl: u8) alloc -> PR {
+    match parse_sub(a, s, write (deref pos), lvl) {
+        case PR::err(k, o) => return PR::err(k, o),
+        case PR::ok(lhs) => return bin_tail(a, s, write (deref pos), lvl, lhs),
+    }
+}
+
+// left-assoc: fold each further `lhs <op> rhs` into the accumulator
+fn bin_tail(a: read Alloc, s: slice u8, pos: write usize, lvl: u8, lhs: Box Ast)
+        alloc -> PR {
+    let t: Tok = lex(s, deref pos);
+    if is_op_at(t.kind, lvl) {
+        deref pos = t.end;
+        match parse_sub(a, s, write (deref pos), lvl) {
+            case PR::err(k, o) => return PR::err(k, o),
+            case PR::ok(rhs) => {
+                let st: usize = ast_start(read (deref lhs));
+                let en: usize = ast_end(read (deref rhs));
+                let n: Box Ast = must_box(a, Ast::bin(t.kind, lhs, rhs, st, en));
+                return bin_tail(a, s, write (deref pos), lvl, n);
+            }
+        }
+    }
+    return PR::ok(lhs);
+}
+
+// unary := ("-" | "!") unary | postfix   (right-assoc; span [op.start, operand.end))
+fn parse_unary(a: read Alloc, s: slice u8, pos: write usize) alloc -> PR {
+    let t: Tok = lex(s, deref pos);
+    if t.kind == TK_MINUS || t.kind == TK_BANG {
+        deref pos = t.end;
+        match parse_unary(a, s, write (deref pos)) {
+            case PR::err(k, o) => return PR::err(k, o),
+            case PR::ok(x) => {
+                let en: usize = ast_end(read (deref x));
+                return PR::ok(must_box(a, Ast::un(t.kind, x, t.start, en)));
+            }
+        }
+    }
+    return parse_postfix(a, s, write (deref pos));
+}
+
+// postfix := primary ( "(" args ")" )*   (left-assoc chained calls)
+fn parse_postfix(a: read Alloc, s: slice u8, pos: write usize) alloc -> PR {
+    match parse_primary(a, s, write (deref pos)) {
+        case PR::err(k, o) => return PR::err(k, o),
+        case PR::ok(e) => return call_tail(a, s, write (deref pos), e),
+    }
+}
+
+fn call_tail(a: read Alloc, s: slice u8, pos: write usize, callee: Box Ast)
+        alloc -> PR {
+    let t: Tok = lex(s, deref pos);
+    if t.kind == TK_LP {
+        deref pos = t.end;
+        match parse_args(a, s, write (deref pos)) {
+            case ARes::err(k, o) => return PR::err(k, o),
+            case ARes::ok(args, close_end) => {
+                let st: usize = ast_start(read (deref callee));
+                let n: Box Ast = must_box(a, Ast::call(callee, args, st, close_end));
+                return call_tail(a, s, write (deref pos), n);
+            }
+        }
+    }
+    return PR::ok(callee);
+}
+
+// args := epsilon | expr ("," expr)*   — cursor sits just after "(".
+// No trailing comma: after a "," the next thing must be an expression, so a
+// ")" there falls out of parse_primary as E_EXPECTED_EXPR (P28).
+fn parse_args(a: read Alloc, s: slice u8, pos: write usize) alloc -> ARes {
+    let t: Tok = lex(s, deref pos);
+    if t.kind == TK_RP {
+        deref pos = t.end;
+        return ARes::ok(must_box_args(a, Args::nil), t.end);
+    }
+    return args_rest(a, s, write (deref pos));
+}
+
+fn args_rest(a: read Alloc, s: slice u8, pos: write usize) alloc -> ARes {
+    match parse_bin(a, s, write (deref pos), 0u8) {
+        case PR::err(k, o) => return ARes::err(k, o),
+        case PR::ok(head) => {
+            let t: Tok = lex(s, deref pos);
+            if t.kind == TK_COMMA {
+                deref pos = t.end;
+                match args_rest(a, s, write (deref pos)) {
+                    case ARes::err(k, o) => return ARes::err(k, o),
+                    case ARes::ok(tail, ce) =>
+                        return ARes::ok(must_box_args(a, Args::cons(head, tail)), ce),
+                }
+            }
+            if t.kind == TK_RP {
+                deref pos = t.end;
+                let tail: Box Args = must_box_args(a, Args::nil);
+                return ARes::ok(must_box_args(a, Args::cons(head, tail)), t.end);
+            }
+            // unclosed argument list (rulings R10/R11): the offending token's
+            // offset, EOF => len; a lex error surfaces first as UNEXPECTED_CHAR
+            if t.kind == TK_ERR { return ARes::err(K_CHAR, t.start); }
+            if t.kind == TK_EOF { return ARes::err(K_RPAREN, len(s)); }
+            return ARes::err(K_RPAREN, t.start);
+        }
+    }
+}
+
+// primary := INT | IDENT | "(" expr ")"
+fn parse_primary(a: read Alloc, s: slice u8, pos: write usize) alloc -> PR {
+    let t: Tok = lex(s, deref pos);
+    if t.kind == TK_INT {
+        deref pos = t.end;
+        return PR::ok(must_box(a, Ast::lit(t.start, t.end)));
+    }
+    if t.kind == TK_IDENT {
+        deref pos = t.end;
+        return PR::ok(must_box(a, Ast::name(t.start, t.end)));
+    }
+    if t.kind == TK_LP {
+        deref pos = t.end;
+        match parse_bin(a, s, write (deref pos), 0u8) {
+            case PR::err(k, o) => return PR::err(k, o),
+            case PR::ok(inner) => {
+                let c: Tok = lex(s, deref pos);
+                if c.kind == TK_RP {
+                    deref pos = c.end;
+                    return PR::ok(inner);   // R12: grouping is span-transparent
+                }
+                if c.kind == TK_ERR { return PR::err(K_CHAR, c.start); }
+                if c.kind == TK_EOF { return PR::err(K_RPAREN, len(s)); }
+                return PR::err(K_RPAREN, c.start);
+            }
+        }
+    }
+    if t.kind == TK_ERR { return PR::err(K_CHAR, t.start); }
+    if t.kind == TK_EOF { return PR::err(K_EOF, t.start); }   // t.start == len(s)
+    return PR::err(K_EXPR, t.start);                          // token that no primary starts
+}
+
+// top level (spec 2.3): one expr, then end of input. A lexically bad trailing
+// byte surfaces as E_UNEXPECTED_CHAR when that token is demanded, before
+// trailing-input is diagnosed (P27).
+fn parse(a: read Alloc, s: slice u8) alloc -> PR {
+    let mut pos: usize = 0;
+    match parse_bin(a, s, write pos, 0u8) {
+        case PR::err(k, o) => return PR::err(k, o),
+        case PR::ok(root) => {
+            let t: Tok = lex(s, pos);
+            if t.kind == TK_EOF { return PR::ok(root); }
+            if t.kind == TK_ERR { return PR::err(K_CHAR, t.start); }
+            return PR::err(K_TRAIL, t.start);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Canonical S-expression serializer (spec 3.3), into a byte buffer. It
+// consumes the owned AST (unbox per child — the owned-match idiom of §11.4's
+// evaluator); leaf text is emitted straight from the input at the node's
+// span, so the output bytes ARE the span-selected input bytes (§3.5).
+// ---------------------------------------------------------------------------
+
+struct Buf { b: [256]u8, n: usize }
+
+fn bpush(o: write Buf, c: u8) -> unit {
+    (deref o).b[(deref o).n] = c;    // bounds-checked; overflow is a harness bug
+    (deref o).n = (deref o).n + 1;
+}
+
+fn emit_bytes(o: write Buf, t: slice u8) -> unit {
+    let mut i: usize = 0;
+    while i < len(t) {
+        bpush(write (deref o), t[i]);
+        i = i + 1;
+    }
+}
+
+// the operator lexeme for a token-kind code
+fn emit_op(o: write Buf, k: u8) -> unit {
+    if k == TK_PLUS { bpush(write (deref o), 43u8); return; }
+    if k == TK_MINUS { bpush(write (deref o), 45u8); return; }
+    if k == TK_STAR { bpush(write (deref o), 42u8); return; }
+    if k == TK_SLASH { bpush(write (deref o), 47u8); return; }
+    if k == TK_PCT { bpush(write (deref o), 37u8); return; }
+    if k == TK_BANG { bpush(write (deref o), 33u8); return; }
+    if k == TK_LT { bpush(write (deref o), 60u8); return; }
+    if k == TK_GT { bpush(write (deref o), 62u8); return; }
+    if k == TK_LE { emit_bytes(write (deref o), "<="); return; }
+    if k == TK_GE { emit_bytes(write (deref o), ">="); return; }
+    if k == TK_EQ { emit_bytes(write (deref o), "=="); return; }
+    if k == TK_NE { emit_bytes(write (deref o), "!="); return; }
+    if k == TK_AND { emit_bytes(write (deref o), "&&"); return; }
+    if k == TK_OR { emit_bytes(write (deref o), "||"); return; }
+    panic("emit_op: not an operator kind");
+}
+
+fn ser(e: Ast, s: slice u8, o: write Buf) alloc -> unit {
+    match e {
+        case Ast::lit(st, en) => {
+            emit_bytes(write (deref o), subslice(s, st, en));
+            return;
+        }
+        case Ast::name(st, en) => {
+            emit_bytes(write (deref o), subslice(s, st, en));
+            return;
+        }
+        case Ast::un(op, x, _, _) => {
+            bpush(write (deref o), 40u8);            // (
+            bpush(write (deref o), 117u8);           // u
+            emit_op(write (deref o), op);
+            bpush(write (deref o), 32u8);            // space
+            ser(unbox(x), s, write (deref o));
+            bpush(write (deref o), 41u8);            // )
+        }
+        case Ast::bin(op, l, r, _, _) => {
+            bpush(write (deref o), 40u8);
+            emit_op(write (deref o), op);
+            bpush(write (deref o), 32u8);
+            ser(unbox(l), s, write (deref o));
+            bpush(write (deref o), 32u8);
+            ser(unbox(r), s, write (deref o));
+            bpush(write (deref o), 41u8);
+            return;
+        }
+        case Ast::call(f, args, _, _) => {
+            emit_bytes(write (deref o), "(call ");
+            ser(unbox(f), s, write (deref o));
+            ser_args(unbox(args), s, write (deref o));
+            bpush(write (deref o), 41u8);
+            return;
+        }
+    }
+}
+
+fn ser_args(x: Args, s: slice u8, o: write Buf) alloc -> unit {
+    match x {
+        case Args::nil => return,
+        case Args::cons(h, t) => {
+            bpush(write (deref o), 32u8);
+            ser(unbox(h), s, write (deref o));
+            ser_args(unbox(t), s, write (deref o));
+            return;
+        }
+    }
+}
+
+// ===========================================================================
+// Test harness — the frozen vector suite P1-P32 (spec §4). Harness faults
+// (assert) are the intended failure mode for a broken vector.
+// ===========================================================================
+
+fn buf_eq(o: read Buf, want: slice u8) -> bool {
+    if (deref o).n != len(want) { return false; }
+    let mut i: usize = 0;
+    while i < (deref o).n {
+        if (deref o).b[i] != want[i] { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+// valid vector: parse must succeed and serialize to exactly `want`. Because
+// the serializer emits leaf text from each leaf's span, byte equality of the
+// output IS the §3.5 span/substring check for every leaf (P31).
+fn ck_ok(a: read Alloc, input: slice u8, want: slice u8) alloc -> unit {
+    match parse(a, input) {
+        case PR::err(_, _) => assert(false),
+        case PR::ok(root) => {
+            let mut o: Buf = Buf { b: [0u8; 256], n: 0 };
+            ser(unbox(root), input, write o);
+            assert(buf_eq(read o, want));
+        }
+    }
+}
+
+// invalid vector: first error kind + byte offset must match exactly
+fn ck_err(a: read Alloc, input: slice u8, k: u8, off: usize) alloc -> unit {
+    match parse(a, input) {
+        case PR::ok(_) => assert(false),
+        case PR::err(gk, go) => {
+            assert(gk == k);
+            assert(go == off);
+        }
+    }
+}
+
+// root span check (P1, P8): re-parse and read the root node's span
+fn ck_root_span(a: read Alloc, input: slice u8, st: usize, en: usize) alloc -> unit {
+    match parse(a, input) {
+        case PR::err(_, _) => assert(false),
+        case PR::ok(root) => {
+            assert(ast_start(read (deref root)) == st);
+            assert(ast_end(read (deref root)) == en);
+        }
+    }
+}
+
+// leaf span collector for P18's exact-offset check (consumes the AST)
+struct Spans { st: [16]usize, en: [16]usize, n: usize }
+
+fn leaf_spans(e: Ast, o: write Spans) alloc -> unit {
+    match e {
+        case Ast::lit(st, en) => {
+            (deref o).st[(deref o).n] = st;
+            (deref o).en[(deref o).n] = en;
+            (deref o).n = (deref o).n + 1;
+            return;
+        }
+        case Ast::name(st, en) => {
+            (deref o).st[(deref o).n] = st;
+            (deref o).en[(deref o).n] = en;
+            (deref o).n = (deref o).n + 1;
+            return;
+        }
+        case Ast::un(_, x, _, _) => {
+            leaf_spans(unbox(x), write (deref o));
+            return;
+        }
+        case Ast::bin(_, l, r, _, _) => {
+            leaf_spans(unbox(l), write (deref o));
+            leaf_spans(unbox(r), write (deref o));
+            return;
+        }
+        case Ast::call(f, args, _, _) => {
+            leaf_spans(unbox(f), write (deref o));
+            arg_leaf_spans(unbox(args), write (deref o));
+            return;
+        }
+    }
+}
+
+fn arg_leaf_spans(x: Args, o: write Spans) alloc -> unit {
+    match x {
+        case Args::nil => return,
+        case Args::cons(h, t) => {
+            leaf_spans(unbox(h), write (deref o));
+            arg_leaf_spans(unbox(t), write (deref o));
+            return;
+        }
+    }
+}
+
+// P18: whitespace is skipped, spans ignore it — leaf `1` at [2,3), `2` at [6,7)
+fn ck_p18_spans(a: read Alloc) alloc -> unit {
+    match parse(a, "  1\n+\t2 ") {
+        case PR::err(_, _) => assert(false),
+        case PR::ok(root) => {
+            let mut sp: Spans = Spans { st: [0; 16], en: [0; 16], n: 0 };
+            leaf_spans(unbox(root), write sp);
+            assert(sp.n == 2);
+            assert(sp.st[0] == 2 && sp.en[0] == 3);
+            assert(sp.st[1] == 6 && sp.en[1] == 7);
+        }
+    }
+}
+
+fn main() alloc -> i64 {
+    // arena at [16 MiB, 32 MiB) in the interpreter's flat address space:
+    // above the stack region, touched by nothing else in this program
+    let mut st: Bump = Bump { next: 16777216, end: 33554432 };
+    let a: Alloc = mk_alloc(write st);
+
+    // --- valid: precedence & associativity ---
+    ck_ok(read a, "42", "42");                                          // P1
+    ck_root_span(read a, "42", 0, 2);                                   // P1 span
+    ck_ok(read a, "foo", "foo");                                        // P2
+    ck_ok(read a, "1+2", "(+ 1 2)");                                    // P3
+    ck_ok(read a, "1 + 2 * 3", "(+ 1 (* 2 3))");                        // P4
+    ck_ok(read a, "1 * 2 + 3", "(+ (* 1 2) 3)");                        // P5
+    ck_ok(read a, "(1 + 2) * 3", "(* (+ 1 2) 3)");                      // P6
+    ck_ok(read a, "1 - 2 - 3", "(- (- 1 2) 3)");                        // P7
+    ck_ok(read a, "-a", "(u- a)");                                      // P8
+    ck_root_span(read a, "-a", 0, 2);                                   // P8 span
+    ck_ok(read a, "--a", "(u- (u- a))");                                // P9
+    ck_ok(read a, "!a && b", "(&& (u! a) b)");                          // P10
+    ck_ok(read a, "a < b == c", "(== (< a b) c)");                      // P11
+    ck_ok(read a, "a || b && c", "(|| a (&& b c))");                    // P12
+    ck_ok(read a, "f(1, 2)", "(call f 1 2)");                           // P13
+    ck_ok(read a, "f()", "(call f)");                                   // P14
+    ck_ok(read a, "f(1)(2)", "(call (call f 1) 2)");                    // P15
+    ck_ok(read a, "1 + 2 * 3 - 4 / 2", "(- (+ 1 (* 2 3)) (/ 4 2))");    // P16
+    ck_ok(read a, "a % b * c", "(* (% a b) c)");                        // P17
+    ck_ok(read a, "  1\n+\t2 ", "(+ 1 2)");                             // P18
+    ck_p18_spans(read a);                                               // P18 spans
+    ck_ok(read a, "((((5))))", "5");                                    // P19 (R12)
+    ck_ok(read a, "a >= b != c <= d", "(!= (>= a b) (<= c d))");        // P20
+
+    // --- invalid: kind + position ---
+    ck_err(read a, "", K_EOF, 0);                                       // P21
+    ck_err(read a, "1 +", K_EOF, 3);                                    // P22
+    ck_err(read a, "1 + )", K_EXPR, 4);                                 // P23
+    ck_err(read a, "(1 + 2", K_RPAREN, 6);                              // P24
+    ck_err(read a, "1 2", K_TRAIL, 2);                                  // P25
+    ck_err(read a, "@", K_CHAR, 0);                                     // P26
+    ck_err(read a, "1 + 2 @", K_CHAR, 6);                               // P27
+    ck_err(read a, "f(1,)", K_EXPR, 4);                                 // P28
+    ck_err(read a, ")", K_EXPR, 0);                                     // P29
+    ck_err(read a, "a && ", K_EOF, 5);                                  // P30
+
+    // --- structural cross-checks ---
+    // P31 (span/substring for all leaves) holds for every ck_ok above by
+    // construction: leaves serialize as their span-selected input bytes, so
+    // the byte-equality assertions already verified each leaf span.
+    // P32 (determinism): the same input twice yields the same result.
+    ck_ok(read a, "1 + 2 * 3 - 4 / 2", "(- (+ 1 (* 2 3)) (/ 4 2))");
+    ck_err(read a, "f(1,)", K_EXPR, 4);
+
+    return 777;   // sentinel: every vector passed
+}
