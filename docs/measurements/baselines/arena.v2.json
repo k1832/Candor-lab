@@ -1,0 +1,146 @@
+{
+ "annotation_units": {
+  "a": 16,
+  "b": 0,
+  "c": 0,
+  "d": 0
+ },
+ "derived": {
+  "annotation_per_stmt": 0.2051,
+  "annotation_units_total": 16,
+  "copy_per_stmt": 0.0,
+  "valve_function_fraction": 0.0,
+  "valve_line_fraction": 0.0,
+  "valve_statement_fraction": 0.0
+ },
+ "logical_statements": 78,
+ "per_file": {
+  "baselines/rust/arena/src/lib.rs": {
+   "annotation_units": {
+    "a": 16,
+    "b": 0,
+    "c": 0,
+    "d": 0,
+    "per_site": [
+     {
+      "class": "a",
+      "end": 1749,
+      "kind": "ref_mut_self",
+      "start": 1748
+     },
+     {
+      "class": "a",
+      "end": 1985,
+      "kind": "ref_self",
+      "start": 1984
+     },
+     {
+      "class": "a",
+      "end": 2257,
+      "kind": "ref_mut_self",
+      "start": 2256
+     },
+     {
+      "class": "a",
+      "end": 2389,
+      "kind": "ref_self",
+      "start": 2388
+     },
+     {
+      "class": "a",
+      "end": 2522,
+      "kind": "ref_self",
+      "start": 2521
+     },
+     {
+      "class": "a",
+      "end": 2858,
+      "kind": "ref",
+      "start": 2857
+     },
+     {
+      "class": "a",
+      "end": 3102,
+      "kind": "ref",
+      "start": 3101
+     },
+     {
+      "class": "a",
+      "end": 3127,
+      "kind": "ref_mut",
+      "start": 3126
+     },
+     {
+      "class": "a",
+      "end": 4226,
+      "kind": "ref_mut",
+      "start": 4225
+     },
+     {
+      "class": "a",
+      "end": 4687,
+      "kind": "ref_mut",
+      "start": 4686
+     },
+     {
+      "class": "a",
+      "end": 5175,
+      "kind": "ref_mut",
+      "start": 5174
+     },
+     {
+      "class": "a",
+      "end": 5788,
+      "kind": "ref_mut",
+      "start": 5787
+     },
+     {
+      "class": "a",
+      "end": 6509,
+      "kind": "ref_mut",
+      "start": 6508
+     },
+     {
+      "class": "a",
+      "end": 6959,
+      "kind": "ref",
+      "start": 6958
+     },
+     {
+      "class": "a",
+      "end": 7781,
+      "kind": "ref",
+      "start": 7780
+     },
+     {
+      "class": "a",
+      "end": 7807,
+      "kind": "ref",
+      "start": 7806
+     }
+    ]
+   },
+   "logical_statements": 78,
+   "table_version": "1",
+   "unit_ext_version": "2",
+   "value_copy_units": 0,
+   "valve": {
+    "functions": 0,
+    "lines": 0,
+    "total_functions": 16,
+    "total_lines": 227
+   },
+   "valve_statements": 0
+  }
+ },
+ "table_version": "1",
+ "unit_ext_version": "2",
+ "value_copy_units": 0,
+ "valve": {
+  "functions": 0,
+  "lines": 0,
+  "total_functions": 16,
+  "total_lines": 227
+ },
+ "valve_statements": 0
+}

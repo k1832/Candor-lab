@@ -44,3 +44,21 @@ One lesson per entry, one-line summary first.
   cursor use. The Stage-2 checkable fixtures adapt those two call sites to
   `read (deref pos)`/`write (deref pos)` (commented ADAPTED). If Stage 3/4 ever
   auto-reborrows at call sites, revisit these adaptations.
+
+- **Simulating volatile MMIO needs a seam on the ACCESS, not the value; fn-pointer
+  hooks provide it cleanly.** The mmio port keeps reg_read/reg_write as real
+  one-ptr-op valves over a live register window and attaches the device model via
+  fn-pointer fields in the handle (on_write after the store, on_read BEFORE the
+  load, depositing the driven value). This keeps the measured section free of
+  simulation code and standalone-checkable (R14). §6.1's vtable machinery
+  (fn-pointer fields, enums-in-structs through ptr_read/ptr_write, loop/break)
+  all worked first try — verify capabilities with tiny scratch programs before
+  committing to an architecture.
+
+- **Consuming matches over Box-bearing enums must return from every arm
+  (E0302).** A visitor-style `match` that moves payloads out of an owned
+  enum cannot fall through the match join — arms that move and arms that
+  don't disagree on partial-move state (§1.6 rule 1) even in a unit function
+  with nothing used afterwards. Put `return;` at the end of every arm (the
+  §11.4 fixture's all-arms-return shape is load-bearing, not style). Found
+  in the parser port's serializer/span-walker, 2026-07-07.

@@ -132,3 +132,43 @@ fn deterministic_sites_sorted_by_span() {
     assert_eq!(starts, sorted);
     assert_eq!(c.annotation_units.a, 2);
 }
+
+#[test]
+fn valve_statements_inside_unsafe_block_counted() {
+    // fn + let a + unsafe-stmt + let b + let c = 5 logical statements.
+    // Valve statements: the unsafe-block statement (span-coincident with the
+    // valve, partly-inside not strictly enclosing) plus the two inner lets = 3.
+    // The outer `let a` and the enclosing fn are NOT counted.
+    let c = counts("fn f() { let a = 1; unsafe { let b = 2; let c = 3; } }");
+    assert_eq!(c.logical_statements, 5);
+    assert_eq!(c.valve_statements, 3);
+    assert_eq!(c.unit_ext_version, "2");
+    assert_eq!(c.table_version, "1");
+}
+
+#[test]
+fn valve_statements_exclude_fn_and_siblings_outside_unsafe() {
+    // A statement in a fn that contains a valve but sits OUTSIDE the unsafe block
+    // is not counted; neither is the enclosing fn nor the wrapping `if`.
+    let c = counts("fn f() { if true { unsafe { let z = 1; } } let w = 9; }");
+    assert_eq!(c.logical_statements, 5); // fn + if + unsafe + z + w
+    assert_eq!(c.valve_statements, 2); // unsafe-stmt + z
+}
+
+#[test]
+fn valve_statements_unsafe_fn_body_is_all_valve() {
+    // An `unsafe fn` makes its whole body a valve region: the two body statements
+    // (and the coincident fn declaration) are valve statements.
+    let c = counts("unsafe fn f() { let x = 1; let y = 2; }");
+    assert_eq!(c.logical_statements, 3);
+    assert_eq!(c.valve_statements, 3);
+}
+
+#[test]
+fn valve_statements_rawptr_declaration_is_not_a_valve_statement() {
+    // A raw-pointer field opens a valve region on the type node, but the
+    // declaration statement strictly encloses it, so it is not a valve statement.
+    let c = counts("struct P { head: *mut u8, n: usize }");
+    assert_eq!(c.logical_statements, 1);
+    assert_eq!(c.valve_statements, 0);
+}

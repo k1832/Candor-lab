@@ -24,12 +24,20 @@ use syn::{
 
 pub const TABLE_VERSION: &str = "1";
 
+/// Additive unit-extension version (mirrors the Candor counter). `table_version`
+/// stays "1"; this marks the presence of the exact valve-statement unit.
+pub const UNIT_EXT_VERSION: &str = "2";
+
 #[derive(Serialize)]
 pub struct Counts {
     pub table_version: &'static str,
+    pub unit_ext_version: &'static str,
     pub annotation_units: Annotation,
     pub value_copy_units: usize,
     pub logical_statements: usize,
+    /// Logical statements whose byte span intersects any valve region span
+    /// without strictly enclosing it (the exact valve-statement unit, §4.1).
+    pub valve_statements: usize,
     pub valve: Valve,
 }
 
@@ -86,6 +94,23 @@ fn lc_le(a: LineColumn, b: LineColumn) -> bool {
     (a.line, a.column) <= (b.line, b.column)
 }
 
+fn lc_lt(a: LineColumn, b: LineColumn) -> bool {
+    (a.line, a.column) < (b.line, b.column)
+}
+
+/// Half-open spans (in (line, column) space) intersect if they share a position.
+fn sp_intersect(a: Sp, b: Sp) -> bool {
+    lc_lt(a.0, b.1) && lc_lt(b.0, a.1)
+}
+
+/// `outer` strictly contains `inner`: covers it and is strictly larger, so a
+/// statement merely wrapping a valve region is excluded from the count.
+fn sp_strictly_contains(outer: Sp, inner: Sp) -> bool {
+    lc_le(outer.0, inner.0)
+        && lc_le(inner.1, outer.1)
+        && (lc_lt(outer.0, inner.0) || lc_lt(inner.1, outer.1))
+}
+
 struct Counter {
     line_starts: Vec<usize>,
     sites: Vec<Site>,
@@ -93,6 +118,7 @@ struct Counter {
     logical_statements: usize,
     valve_spans: Vec<Sp>,
     fn_spans: Vec<Sp>,
+    stmt_spans: Vec<Sp>,
 }
 
 impl Counter {
@@ -104,6 +130,7 @@ impl Counter {
             logical_statements: 0,
             valve_spans: Vec::new(),
             fn_spans: Vec::new(),
+            stmt_spans: Vec::new(),
         }
     }
 
@@ -135,6 +162,7 @@ impl Counter {
             }
             Item::Struct(s) => {
                 self.logical_statements += 1;
+                self.stmt_spans.push(sp_of(s));
                 self.generics_decl(&s.generics);
                 for field in &s.fields {
                     self.decl_type(&field.ty);
@@ -142,6 +170,7 @@ impl Counter {
             }
             Item::Enum(e) => {
                 self.logical_statements += 1;
+                self.stmt_spans.push(sp_of(e));
                 self.generics_decl(&e.generics);
                 for v in &e.variants {
                     for field in &v.fields {
@@ -151,6 +180,7 @@ impl Counter {
             }
             Item::Union(u) => {
                 self.logical_statements += 1;
+                self.stmt_spans.push(sp_of(u));
                 self.generics_decl(&u.generics);
                 for field in &u.fields.named {
                     self.decl_type(&field.ty);
@@ -158,19 +188,23 @@ impl Counter {
             }
             Item::Const(c) => {
                 self.logical_statements += 1;
+                self.stmt_spans.push(sp_of(c));
                 self.decl_type(&c.ty);
             }
             Item::Static(s) => {
                 self.logical_statements += 1;
+                self.stmt_spans.push(sp_of(s));
                 self.decl_type(&s.ty);
             }
             Item::Type(t) => {
                 self.logical_statements += 1;
+                self.stmt_spans.push(sp_of(t));
                 self.generics_decl(&t.generics);
                 self.decl_type(&t.ty);
             }
             Item::Trait(t) => {
                 self.logical_statements += 1;
+                self.stmt_spans.push(sp_of(t));
                 self.generics_decl(&t.generics);
                 for ti in &t.items {
                     match ti {
@@ -180,10 +214,12 @@ impl Counter {
                         }
                         TraitItem::Const(c) => {
                             self.logical_statements += 1;
+                            self.stmt_spans.push(sp_of(c));
                             self.decl_type(&c.ty);
                         }
-                        TraitItem::Type(_) => {
+                        TraitItem::Type(t) => {
                             self.logical_statements += 1;
+                            self.stmt_spans.push(sp_of(t));
                         }
                         _ => {}
                     }
@@ -199,10 +235,12 @@ impl Counter {
                         }
                         ImplItem::Const(c) => {
                             self.logical_statements += 1;
+                            self.stmt_spans.push(sp_of(c));
                             self.decl_type(&c.ty);
                         }
                         ImplItem::Type(t) => {
                             self.logical_statements += 1;
+                            self.stmt_spans.push(sp_of(t));
                             self.decl_type(&t.ty);
                         }
                         _ => {}
@@ -212,6 +250,7 @@ impl Counter {
             Item::Mod(m) => {
                 if let Some((_, items)) = &m.content {
                     self.logical_statements += 1;
+                    self.stmt_spans.push(sp_of(m));
                     for it in items {
                         self.count_item(it);
                     }
@@ -226,6 +265,7 @@ impl Counter {
     fn function(&mut self, sig: &Signature, body: Option<&Block>) {
         let fn_sp = sig_body_span(sig, body);
         self.fn_spans.push(fn_sp);
+        self.stmt_spans.push(fn_sp);
 
         // (d) `unsafe fn`: valve-entry declaration + the whole body a valve region.
         if sig.unsafety.is_some() {
@@ -398,6 +438,19 @@ impl Counter {
             }
         }
 
+        // Valve statements: logical statements whose span intersects a valve
+        // region span without strictly enclosing it (§4.1) — statements inside
+        // or partly inside a valve region, excluding enclosing fns/blocks.
+        let valve_statements = self
+            .stmt_spans
+            .iter()
+            .filter(|st| {
+                self.valve_spans
+                    .iter()
+                    .any(|v| sp_intersect(**st, *v) && !sp_strictly_contains(**st, *v))
+            })
+            .count();
+
         let total_functions = self.fn_spans.len();
         let valve_functions = self
             .fn_spans
@@ -411,6 +464,7 @@ impl Counter {
 
         Counts {
             table_version: TABLE_VERSION,
+            unit_ext_version: UNIT_EXT_VERSION,
             annotation_units: Annotation {
                 a,
                 b,
@@ -420,6 +474,7 @@ impl Counter {
             },
             value_copy_units: self.value_copy,
             logical_statements: self.logical_statements,
+            valve_statements,
             valve: Valve {
                 lines: valve_lines.len(),
                 functions: valve_functions,
@@ -446,14 +501,17 @@ impl<'ast, 'a> Visit<'ast> for BodyVisitor<'a> {
             }
             Stmt::Local(l) => {
                 self.c.logical_statements += 1;
+                self.c.stmt_spans.push(sp_of(s));
                 syn::visit::visit_local(self, l);
             }
             Stmt::Expr(..) => {
                 self.c.logical_statements += 1;
+                self.c.stmt_spans.push(sp_of(s));
                 syn::visit::visit_stmt(self, s);
             }
             Stmt::Macro(_) => {
                 self.c.logical_statements += 1;
+                self.c.stmt_spans.push(sp_of(s));
                 syn::visit::visit_stmt(self, s);
             }
         }

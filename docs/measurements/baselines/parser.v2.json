@@ -1,0 +1,416 @@
+{
+ "annotation_units": {
+  "a": 33,
+  "b": 28,
+  "c": 0,
+  "d": 0
+ },
+ "derived": {
+  "annotation_per_stmt": 0.415,
+  "annotation_units_total": 61,
+  "copy_per_stmt": 0.0,
+  "valve_function_fraction": 0.0,
+  "valve_line_fraction": 0.0,
+  "valve_statement_fraction": 0.0
+ },
+ "logical_statements": 147,
+ "per_file": {
+  "baselines/rust/parser/src/lib.rs": {
+   "annotation_units": {
+    "a": 33,
+    "b": 28,
+    "c": 0,
+    "d": 0,
+    "per_site": [
+     {
+      "class": "b",
+      "end": 1181,
+      "kind": "region_decl",
+      "start": 1179
+     },
+     {
+      "class": "a",
+      "end": 1210,
+      "kind": "ref",
+      "start": 1209
+     },
+     {
+      "class": "b",
+      "end": 1212,
+      "kind": "region_use",
+      "start": 1210
+     },
+     {
+      "class": "a",
+      "end": 1282,
+      "kind": "ref",
+      "start": 1281
+     },
+     {
+      "class": "b",
+      "end": 1284,
+      "kind": "region_use",
+      "start": 1282
+     },
+     {
+      "class": "a",
+      "end": 1352,
+      "kind": "ref",
+      "start": 1351
+     },
+     {
+      "class": "b",
+      "end": 1393,
+      "kind": "region_use",
+      "start": 1391
+     },
+     {
+      "class": "a",
+      "end": 1460,
+      "kind": "ref",
+      "start": 1459
+     },
+     {
+      "class": "b",
+      "end": 1498,
+      "kind": "region_use",
+      "start": 1496
+     },
+     {
+      "class": "b",
+      "end": 1528,
+      "kind": "region_use",
+      "start": 1526
+     },
+     {
+      "class": "b",
+      "end": 1607,
+      "kind": "region_use",
+      "start": 1605
+     },
+     {
+      "class": "b",
+      "end": 1636,
+      "kind": "region_use",
+      "start": 1634
+     },
+     {
+      "class": "b",
+      "end": 1687,
+      "kind": "region_decl",
+      "start": 1685
+     },
+     {
+      "class": "a",
+      "end": 1790,
+      "kind": "ref_self",
+      "start": 1789
+     },
+     {
+      "class": "a",
+      "end": 2146,
+      "kind": "ref_self",
+      "start": 2145
+     },
+     {
+      "class": "a",
+      "end": 2276,
+      "kind": "ref_self",
+      "start": 2275
+     },
+     {
+      "class": "a",
+      "end": 2288,
+      "kind": "ref_mut",
+      "start": 2287
+     },
+     {
+      "class": "a",
+      "end": 3495,
+      "kind": "ref_self",
+      "start": 3494
+     },
+     {
+      "class": "a",
+      "end": 3507,
+      "kind": "ref_mut",
+      "start": 3506
+     },
+     {
+      "class": "a",
+      "end": 3531,
+      "kind": "ref",
+      "start": 3530
+     },
+     {
+      "class": "b",
+      "end": 3533,
+      "kind": "region_use",
+      "start": 3531
+     },
+     {
+      "class": "a",
+      "end": 4291,
+      "kind": "ref",
+      "start": 4290
+     },
+     {
+      "class": "a",
+      "end": 4483,
+      "kind": "ref",
+      "start": 4482
+     },
+     {
+      "class": "b",
+      "end": 5268,
+      "kind": "region_decl",
+      "start": 5266
+     },
+     {
+      "class": "a",
+      "end": 5284,
+      "kind": "ref",
+      "start": 5283
+     },
+     {
+      "class": "b",
+      "end": 5286,
+      "kind": "region_use",
+      "start": 5284
+     },
+     {
+      "class": "b",
+      "end": 5478,
+      "kind": "region_decl",
+      "start": 5476
+     },
+     {
+      "class": "a",
+      "end": 5743,
+      "kind": "ref_self",
+      "start": 5742
+     },
+     {
+      "class": "a",
+      "end": 8093,
+      "kind": "ref_mut_self",
+      "start": 8092
+     },
+     {
+      "class": "a",
+      "end": 8237,
+      "kind": "ref_self",
+      "start": 8236
+     },
+     {
+      "class": "a",
+      "end": 8273,
+      "kind": "ref",
+      "start": 8272
+     },
+     {
+      "class": "b",
+      "end": 8275,
+      "kind": "region_use",
+      "start": 8273
+     },
+     {
+      "class": "a",
+      "end": 8465,
+      "kind": "ref_mut_self",
+      "start": 8464
+     },
+     {
+      "class": "b",
+      "end": 8492,
+      "kind": "region_use",
+      "start": 8490
+     },
+     {
+      "class": "a",
+      "end": 8641,
+      "kind": "ref_mut_self",
+      "start": 8640
+     },
+     {
+      "class": "a",
+      "end": 8665,
+      "kind": "ref",
+      "start": 8664
+     },
+     {
+      "class": "a",
+      "end": 8677,
+      "kind": "ref",
+      "start": 8676
+     },
+     {
+      "class": "a",
+      "end": 8710,
+      "kind": "ref_mut",
+      "start": 8709
+     },
+     {
+      "class": "b",
+      "end": 8723,
+      "kind": "region_use",
+      "start": 8721
+     },
+     {
+      "class": "b",
+      "end": 8743,
+      "kind": "region_use",
+      "start": 8741
+     },
+     {
+      "class": "b",
+      "end": 8782,
+      "kind": "region_use",
+      "start": 8780
+     },
+     {
+      "class": "a",
+      "end": 9405,
+      "kind": "ref_mut_self",
+      "start": 9404
+     },
+     {
+      "class": "b",
+      "end": 9432,
+      "kind": "region_use",
+      "start": 9430
+     },
+     {
+      "class": "a",
+      "end": 9533,
+      "kind": "ref_mut_self",
+      "start": 9532
+     },
+     {
+      "class": "b",
+      "end": 9560,
+      "kind": "region_use",
+      "start": 9558
+     },
+     {
+      "class": "a",
+      "end": 9673,
+      "kind": "ref_mut_self",
+      "start": 9672
+     },
+     {
+      "class": "b",
+      "end": 9700,
+      "kind": "region_use",
+      "start": 9698
+     },
+     {
+      "class": "a",
+      "end": 9871,
+      "kind": "ref_mut_self",
+      "start": 9870
+     },
+     {
+      "class": "b",
+      "end": 9898,
+      "kind": "region_use",
+      "start": 9896
+     },
+     {
+      "class": "a",
+      "end": 10182,
+      "kind": "ref_mut_self",
+      "start": 10181
+     },
+     {
+      "class": "b",
+      "end": 10209,
+      "kind": "region_use",
+      "start": 10207
+     },
+     {
+      "class": "a",
+      "end": 10332,
+      "kind": "ref_mut_self",
+      "start": 10331
+     },
+     {
+      "class": "b",
+      "end": 10359,
+      "kind": "region_use",
+      "start": 10357
+     },
+     {
+      "class": "a",
+      "end": 10684,
+      "kind": "ref_mut_self",
+      "start": 10683
+     },
+     {
+      "class": "b",
+      "end": 10711,
+      "kind": "region_use",
+      "start": 10709
+     },
+     {
+      "class": "a",
+      "end": 11236,
+      "kind": "ref_mut_self",
+      "start": 11235
+     },
+     {
+      "class": "b",
+      "end": 11263,
+      "kind": "region_use",
+      "start": 11261
+     },
+     {
+      "class": "a",
+      "end": 12021,
+      "kind": "ref_mut_self",
+      "start": 12020
+     },
+     {
+      "class": "b",
+      "end": 12052,
+      "kind": "region_use",
+      "start": 12050
+     },
+     {
+      "class": "a",
+      "end": 12489,
+      "kind": "ref_mut_self",
+      "start": 12488
+     },
+     {
+      "class": "b",
+      "end": 12516,
+      "kind": "region_use",
+      "start": 12514
+     }
+    ]
+   },
+   "logical_statements": 147,
+   "table_version": "1",
+   "unit_ext_version": "2",
+   "value_copy_units": 0,
+   "valve": {
+    "functions": 0,
+    "lines": 0,
+    "total_functions": 22,
+    "total_lines": 441
+   },
+   "valve_statements": 0
+  }
+ },
+ "table_version": "1",
+ "unit_ext_version": "2",
+ "value_copy_units": 0,
+ "valve": {
+  "functions": 0,
+  "lines": 0,
+  "total_functions": 22,
+  "total_lines": 441
+ },
+ "valve_statements": 0
+}

@@ -1,0 +1,599 @@
+{
+ "annotation_units": {
+  "a": 22,
+  "b": 4,
+  "c": 0,
+  "d": 62
+ },
+ "derived": {
+  "annotation_per_stmt": 0.2943,
+  "annotation_units_total": 88,
+  "copy_per_stmt": 0.0,
+  "valve_function_fraction": 0.6842,
+  "valve_line_fraction": 0.1929,
+  "valve_statement_fraction": 0.2876
+ },
+ "logical_statements": 299,
+ "per_file": {
+  "baselines/rust/allocator/src/lib.rs": {
+   "annotation_units": {
+    "a": 11,
+    "b": 4,
+    "c": 0,
+    "d": 22,
+    "per_site": [
+     {
+      "class": "d",
+      "end": 1809,
+      "kind": "rawptr_mut",
+      "start": 1802
+     },
+     {
+      "class": "b",
+      "end": 2696,
+      "kind": "region_decl",
+      "start": 2694
+     },
+     {
+      "class": "d",
+      "end": 2741,
+      "kind": "rawptr_mut",
+      "start": 2734
+     },
+     {
+      "class": "d",
+      "end": 2766,
+      "kind": "rawptr_mut",
+      "start": 2759
+     },
+     {
+      "class": "a",
+      "end": 2794,
+      "kind": "ref_mut",
+      "start": 2793
+     },
+     {
+      "class": "b",
+      "end": 2796,
+      "kind": "region_use",
+      "start": 2794
+     },
+     {
+      "class": "b",
+      "end": 2818,
+      "kind": "region_decl",
+      "start": 2816
+     },
+     {
+      "class": "a",
+      "end": 3163,
+      "kind": "ref_mut",
+      "start": 3162
+     },
+     {
+      "class": "b",
+      "end": 3165,
+      "kind": "region_use",
+      "start": 3163
+     },
+     {
+      "class": "d",
+      "end": 3623,
+      "kind": "unsafe_block",
+      "start": 3591
+     },
+     {
+      "class": "a",
+      "end": 3895,
+      "kind": "ref_mut_self",
+      "start": 3894
+     },
+     {
+      "class": "d",
+      "end": 5015,
+      "kind": "unsafe_block",
+      "start": 4991
+     },
+     {
+      "class": "d",
+      "end": 5290,
+      "kind": "unsafe_block",
+      "start": 5252
+     },
+     {
+      "class": "a",
+      "end": 6029,
+      "kind": "ref_mut_self",
+      "start": 6028
+     },
+     {
+      "class": "d",
+      "end": 6051,
+      "kind": "rawptr_mut",
+      "start": 6044
+     },
+     {
+      "class": "d",
+      "end": 6416,
+      "kind": "unsafe_block",
+      "start": 6389
+     },
+     {
+      "class": "a",
+      "end": 7176,
+      "kind": "ref_mut_self",
+      "start": 7175
+     },
+     {
+      "class": "d",
+      "end": 7198,
+      "kind": "rawptr_mut",
+      "start": 7191
+     },
+     {
+      "class": "d",
+      "end": 7861,
+      "kind": "unsafe_block",
+      "start": 7797
+     },
+     {
+      "class": "d",
+      "end": 7967,
+      "kind": "unsafe_block",
+      "start": 7940
+     },
+     {
+      "class": "a",
+      "end": 8175,
+      "kind": "ref_self",
+      "start": 8174
+     },
+     {
+      "class": "d",
+      "end": 8194,
+      "kind": "rawptr_const",
+      "start": 8185
+     },
+     {
+      "class": "d",
+      "end": 8205,
+      "kind": "rawptr_const",
+      "start": 8196
+     },
+     {
+      "class": "a",
+      "end": 8365,
+      "kind": "ref_self",
+      "start": 8364
+     },
+     {
+      "class": "a",
+      "end": 8430,
+      "kind": "ref_mut_self",
+      "start": 8429
+     },
+     {
+      "class": "a",
+      "end": 8449,
+      "kind": "ref",
+      "start": 8448
+     },
+     {
+      "class": "d",
+      "end": 8877,
+      "kind": "unsafe_block",
+      "start": 8751
+     },
+     {
+      "class": "a",
+      "end": 9061,
+      "kind": "ref_self",
+      "start": 9060
+     },
+     {
+      "class": "d",
+      "end": 9079,
+      "kind": "rawptr_mut",
+      "start": 9072
+     },
+     {
+      "class": "d",
+      "end": 9714,
+      "kind": "unsafe_block",
+      "start": 9687
+     },
+     {
+      "class": "d",
+      "end": 10373,
+      "kind": "unsafe_fn",
+      "start": 10371
+     },
+     {
+      "class": "d",
+      "end": 10400,
+      "kind": "rawptr_mut",
+      "start": 10393
+     },
+     {
+      "class": "a",
+      "end": 10411,
+      "kind": "ref",
+      "start": 10410
+     },
+     {
+      "class": "d",
+      "end": 10639,
+      "kind": "unsafe_fn",
+      "start": 10637
+     },
+     {
+      "class": "d",
+      "end": 10665,
+      "kind": "rawptr_mut",
+      "start": 10658
+     },
+     {
+      "class": "d",
+      "end": 10905,
+      "kind": "unsafe_fn",
+      "start": 10903
+     },
+     {
+      "class": "d",
+      "end": 10931,
+      "kind": "rawptr_mut",
+      "start": 10924
+     }
+    ]
+   },
+   "logical_statements": 78,
+   "table_version": "1",
+   "unit_ext_version": "2",
+   "value_copy_units": 0,
+   "valve": {
+    "functions": 10,
+    "lines": 28,
+    "total_functions": 12,
+    "total_lines": 249
+   },
+   "valve_statements": 17
+  },
+  "baselines/rust/allocator/src/vendored_llalloc.rs": {
+   "annotation_units": {
+    "a": 11,
+    "b": 0,
+    "c": 0,
+    "d": 40,
+    "per_site": [
+     {
+      "class": "d",
+      "end": 2633,
+      "kind": "unsafe_fn",
+      "start": 2631
+     },
+     {
+      "class": "d",
+      "end": 2658,
+      "kind": "rawptr_mut",
+      "start": 2651
+     },
+     {
+      "class": "a",
+      "end": 3052,
+      "kind": "ref_mut_self",
+      "start": 3051
+     },
+     {
+      "class": "d",
+      "end": 3769,
+      "kind": "unsafe_fn",
+      "start": 3767
+     },
+     {
+      "class": "a",
+      "end": 3782,
+      "kind": "ref_mut_self",
+      "start": 3781
+     },
+     {
+      "class": "a",
+      "end": 3950,
+      "kind": "ref_self",
+      "start": 3949
+     },
+     {
+      "class": "d",
+      "end": 4040,
+      "kind": "unsafe_block",
+      "start": 3975
+     },
+     {
+      "class": "a",
+      "end": 4120,
+      "kind": "ref_self",
+      "start": 4119
+     },
+     {
+      "class": "d",
+      "end": 4318,
+      "kind": "rawptr_mut",
+      "start": 4311
+     },
+     {
+      "class": "d",
+      "end": 4336,
+      "kind": "rawptr_mut",
+      "start": 4329
+     },
+     {
+      "class": "d",
+      "end": 4423,
+      "kind": "rawptr_mut",
+      "start": 4416
+     },
+     {
+      "class": "d",
+      "end": 4689,
+      "kind": "rawptr_mut",
+      "start": 4682
+     },
+     {
+      "class": "d",
+      "end": 4956,
+      "kind": "unsafe_block",
+      "start": 4773
+     },
+     {
+      "class": "a",
+      "end": 4980,
+      "kind": "ref_self",
+      "start": 4979
+     },
+     {
+      "class": "a",
+      "end": 4990,
+      "kind": "ref",
+      "start": 4989
+     },
+     {
+      "class": "d",
+      "end": 5034,
+      "kind": "unsafe_block",
+      "start": 5005
+     },
+     {
+      "class": "d",
+      "end": 5354,
+      "kind": "rawptr_mut",
+      "start": 5347
+     },
+     {
+      "class": "d",
+      "end": 10249,
+      "kind": "unsafe_block",
+      "start": 10192
+     },
+     {
+      "class": "d",
+      "end": 10393,
+      "kind": "unsafe_block",
+      "start": 10357
+     },
+     {
+      "class": "d",
+      "end": 10883,
+      "kind": "unsafe_block",
+      "start": 10799
+     },
+     {
+      "class": "d",
+      "end": 11777,
+      "kind": "unsafe_block",
+      "start": 10963
+     },
+     {
+      "class": "d",
+      "end": 13012,
+      "kind": "unsafe_block",
+      "start": 11826
+     },
+     {
+      "class": "d",
+      "end": 13369,
+      "kind": "rawptr_mut",
+      "start": 13362
+     },
+     {
+      "class": "d",
+      "end": 13466,
+      "kind": "unsafe_block",
+      "start": 13437
+     },
+     {
+      "class": "d",
+      "end": 13926,
+      "kind": "unsafe_block",
+      "start": 13858
+     },
+     {
+      "class": "d",
+      "end": 14156,
+      "kind": "rawptr_mut",
+      "start": 14149
+     },
+     {
+      "class": "d",
+      "end": 14439,
+      "kind": "unsafe_block",
+      "start": 14415
+     },
+     {
+      "class": "d",
+      "end": 14497,
+      "kind": "unsafe_block",
+      "start": 14463
+     },
+     {
+      "class": "a",
+      "end": 14827,
+      "kind": "ref_mut_self",
+      "start": 14826
+     },
+     {
+      "class": "d",
+      "end": 15590,
+      "kind": "unsafe_fn",
+      "start": 15588
+     },
+     {
+      "class": "d",
+      "end": 15613,
+      "kind": "rawptr_mut",
+      "start": 15606
+     },
+     {
+      "class": "a",
+      "end": 17904,
+      "kind": "ref_mut_self",
+      "start": 17903
+     },
+     {
+      "class": "d",
+      "end": 19017,
+      "kind": "unsafe_fn",
+      "start": 19015
+     },
+     {
+      "class": "a",
+      "end": 19030,
+      "kind": "ref_mut_self",
+      "start": 19029
+     },
+     {
+      "class": "d",
+      "end": 19422,
+      "kind": "unsafe_fn",
+      "start": 19420
+     },
+     {
+      "class": "d",
+      "end": 19446,
+      "kind": "rawptr_mut",
+      "start": 19439
+     },
+     {
+      "class": "d",
+      "end": 19810,
+      "kind": "rawptr_mut",
+      "start": 19803
+     },
+     {
+      "class": "d",
+      "end": 20122,
+      "kind": "unsafe_block",
+      "start": 20093
+     },
+     {
+      "class": "d",
+      "end": 20657,
+      "kind": "unsafe_block",
+      "start": 20472
+     },
+     {
+      "class": "a",
+      "end": 20849,
+      "kind": "ref_mut_self",
+      "start": 20848
+     },
+     {
+      "class": "d",
+      "end": 21007,
+      "kind": "unsafe_block",
+      "start": 20978
+     },
+     {
+      "class": "d",
+      "end": 22364,
+      "kind": "unsafe_block",
+      "start": 22233
+     },
+     {
+      "class": "d",
+      "end": 22740,
+      "kind": "unsafe_block",
+      "start": 22716
+     },
+     {
+      "class": "d",
+      "end": 23670,
+      "kind": "unsafe_block",
+      "start": 23641
+     },
+     {
+      "class": "d",
+      "end": 24101,
+      "kind": "unsafe_block",
+      "start": 23926
+     },
+     {
+      "class": "d",
+      "end": 24287,
+      "kind": "unsafe_block",
+      "start": 24118
+     },
+     {
+      "class": "a",
+      "end": 24790,
+      "kind": "ref_mut",
+      "start": 24789
+     },
+     {
+      "class": "d",
+      "end": 24817,
+      "kind": "rawptr_mut",
+      "start": 24810
+     },
+     {
+      "class": "d",
+      "end": 25050,
+      "kind": "unsafe_block",
+      "start": 25018
+     },
+     {
+      "class": "d",
+      "end": 27649,
+      "kind": "rawptr_mut",
+      "start": 27642
+     },
+     {
+      "class": "d",
+      "end": 27675,
+      "kind": "rawptr_mut",
+      "start": 27668
+     }
+    ]
+   },
+   "logical_statements": 221,
+   "table_version": "1",
+   "unit_ext_version": "2",
+   "value_copy_units": 0,
+   "valve": {
+    "functions": 16,
+    "lines": 151,
+    "total_functions": 26,
+    "total_lines": 679
+   },
+   "valve_statements": 69
+  }
+ },
+ "table_version": "1",
+ "unit_ext_version": "2",
+ "value_copy_units": 0,
+ "valve": {
+  "functions": 26,
+  "lines": 179,
+  "total_functions": 38,
+  "total_lines": 928
+ },
+ "valve_statements": 86
+}

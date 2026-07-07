@@ -19,12 +19,22 @@ use crate::span::Span;
 
 pub const TABLE_VERSION: &str = "1";
 
+/// Additive unit-extension version. `table_version` stays "1" (all its fields
+/// are unchanged and computed identically); this marks the presence of the
+/// exact valve-statement unit (`valve_statements`) added for the successor
+/// registration (BET5_CRITERION2 §4.1).
+pub const UNIT_EXT_VERSION: &str = "2";
+
 #[derive(Serialize)]
 pub struct Counts {
     pub table_version: &'static str,
+    pub unit_ext_version: &'static str,
     pub annotation_units: Annotation,
     pub value_copy_units: usize,
     pub logical_statements: usize,
+    /// Logical statements whose byte span intersects any valve region span
+    /// without strictly enclosing it (the exact valve-statement unit, §4.1).
+    pub valve_statements: usize,
     pub valve: Valve,
 }
 
@@ -80,6 +90,8 @@ struct Counter {
     /// Span of every function-like declaration (FnDecl or a `drop` hook), for
     /// valve-function attribution and `total_functions`.
     fn_spans: Vec<Span>,
+    /// Span of every logical statement counted, for the valve-statement unit.
+    stmt_spans: Vec<Span>,
 }
 
 impl Counter {
@@ -98,6 +110,7 @@ impl Counter {
         match item {
             Item::Struct(s) => {
                 self.logical_statements += 1;
+                self.stmt_spans.push(s.span);
                 for f in &s.fields {
                     self.decl_rawptr(&f.ty);
                 }
@@ -106,6 +119,7 @@ impl Counter {
                     // declaration (one logical statement) with an exclusive-self
                     // receiver (table §5.12).
                     self.logical_statements += 1;
+                    self.stmt_spans.push(hook.span);
                     self.fn_spans.push(hook.span);
                     self.site("a", "drop_self", Span::point(hook.span.start));
                     self.block(&hook.stmts);
@@ -113,6 +127,7 @@ impl Counter {
             }
             Item::Enum(e) => {
                 self.logical_statements += 1;
+                self.stmt_spans.push(e.span);
                 for v in &e.variants {
                     for ty in &v.payload {
                         self.decl_rawptr(ty);
@@ -121,12 +136,14 @@ impl Counter {
             }
             Item::Fn(f) => {
                 self.logical_statements += 1;
+                self.stmt_spans.push(f.span);
                 self.fn_spans.push(f.span);
                 self.fn_sig(f);
                 self.block(&f.body.stmts);
             }
             Item::Static(s) => {
                 self.logical_statements += 1;
+                self.stmt_spans.push(s.span);
                 self.decl_rawptr(&s.ty);
                 self.expr(&s.value);
             }
@@ -208,6 +225,7 @@ impl Counter {
     fn block(&mut self, stmts: &[Stmt]) {
         for s in stmts {
             self.logical_statements += 1;
+            self.stmt_spans.push(s.span);
             self.stmt(s);
         }
     }
@@ -351,6 +369,20 @@ impl Counter {
             }
         }
 
+        // Valve statements: logical statements whose span intersects any valve
+        // region span without strictly enclosing it (§4.1). Statements inside —
+        // or partly inside — a valve region count; an enclosing fn/block/if that
+        // merely wraps a valve does not (it strictly contains the valve span).
+        let valve_statements = self
+            .stmt_spans
+            .iter()
+            .filter(|st| {
+                self.valve_spans
+                    .iter()
+                    .any(|v| spans_intersect(**st, *v) && !strictly_contains(**st, *v))
+            })
+            .count();
+
         let total_functions = self.fn_spans.len();
         let valve_functions = self
             .fn_spans
@@ -364,6 +396,7 @@ impl Counter {
 
         Counts {
             table_version: TABLE_VERSION,
+            unit_ext_version: UNIT_EXT_VERSION,
             annotation_units: Annotation {
                 a,
                 b,
@@ -373,6 +406,7 @@ impl Counter {
             },
             value_copy_units: self.value_copy,
             logical_statements: self.logical_statements,
+            valve_statements,
             valve: Valve {
                 lines: valve_lines.len(),
                 functions: valve_functions,
@@ -390,6 +424,19 @@ fn is_borrow_kind_ty(k: &TyKind) -> bool {
         k,
         TyKind::Slice(_) | TyKind::SliceMut(_) | TyKind::Borrow(_) | TyKind::BorrowMut(_)
     )
+}
+
+/// Half-open spans intersect if they share at least one byte.
+fn spans_intersect(a: Span, b: Span) -> bool {
+    a.start < b.end && b.start < a.end
+}
+
+/// `outer` strictly contains `inner` (covers it and is strictly larger), so a
+/// statement that merely wraps a valve region is excluded from the count.
+fn strictly_contains(outer: Span, inner: Span) -> bool {
+    outer.start <= inner.start
+        && inner.end <= outer.end
+        && (outer.start < inner.start || inner.end < outer.end)
 }
 
 /// Byte offsets at which each source line begins (line 1 starts at 0).

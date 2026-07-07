@@ -132,3 +132,47 @@ fn deterministic_sites_sorted_by_span() {
     assert_eq!(starts, sorted);
     assert_eq!(c.annotation_units.a, 2);
 }
+
+#[test]
+fn valve_statements_inside_unsafe_block_counted() {
+    // fn + let a + unsafe-stmt + let b + let c = 5 logical statements.
+    // Valve statements: the unsafe-block statement (its span coincides with the
+    // valve region — partly-inside, not strictly enclosing) plus the two inner
+    // lets = 3. The outer `let a` and the enclosing fn are NOT counted.
+    let c = counts("fn f() -> unit { let a = 1; unsafe \"x\" { let b = 2; let c = 3; } }");
+    assert_eq!(c.logical_statements, 5);
+    assert_eq!(c.valve_statements, 3);
+    assert_eq!(c.unit_ext_version, "2");
+    assert_eq!(c.table_version, "1");
+}
+
+#[test]
+fn valve_statements_exclude_fn_and_siblings_outside_unsafe() {
+    // Statements in a fn that contains a valve but sit OUTSIDE the unsafe block
+    // are not counted; neither is the enclosing fn declaration.
+    let c = counts("fn outer() -> unit { let before = 0; unsafe \"y\" { let inside = 1; } let after = 2; }");
+    assert_eq!(c.logical_statements, 5); // fn + before + unsafe + inside + after
+    assert_eq!(c.valve_statements, 2); // unsafe-stmt + inside
+}
+
+#[test]
+fn valve_statements_empty_unsafe_block_counts_only_the_unsafe_statement() {
+    // The unsafe-block statement is partly inside the valve (span-coincident);
+    // it counts even with an empty body. The enclosing fn does not.
+    let c = counts("fn f() -> unit { unsafe \"z\" { } }");
+    assert_eq!(c.logical_statements, 2); // fn + unsafe-stmt
+    assert_eq!(c.valve_statements, 1);
+}
+
+#[test]
+fn valve_statements_rawptr_declaration_is_not_a_valve_statement() {
+    // A struct with a rawptr field opens a valve region on the type node, but the
+    // declaration statement strictly encloses it, so it is not a valve statement.
+    let c = counts("struct P { head: rawptr u8, n: usize }");
+    assert_eq!(c.logical_statements, 1);
+    assert_eq!(c.valve_statements, 0);
+    // A rawptr param + empty body: the fn strictly encloses the valve span.
+    let c2 = counts("fn f(p: rawptr u8) -> unit { }");
+    assert_eq!(c2.logical_statements, 1);
+    assert_eq!(c2.valve_statements, 0);
+}

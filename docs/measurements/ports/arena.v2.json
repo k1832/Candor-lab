@@ -1,0 +1,87 @@
+{
+  "table_version": "1",
+  "unit_ext_version": "2",
+  "annotation_units": {
+    "a": 11,
+    "b": 0,
+    "c": 0,
+    "d": 0,
+    "per_site": [
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 3559,
+        "end": 3574
+      },
+      {
+        "class": "a",
+        "kind": "read_param",
+        "start": 4094,
+        "end": 4108
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 4404,
+        "end": 4419
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 6407,
+        "end": 6423
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 6983,
+        "end": 6999
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 7632,
+        "end": 7648
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 8508,
+        "end": 8524
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 9030,
+        "end": 9046
+      },
+      {
+        "class": "a",
+        "kind": "read_param",
+        "start": 9944,
+        "end": 9959
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 9961,
+        "end": 9977
+      },
+      {
+        "class": "a",
+        "kind": "read_param",
+        "start": 11659,
+        "end": 11674
+      }
+    ]
+  },
+  "value_copy_units": 0,
+  "logical_statements": 111,
+  "valve_statements": 0,
+  "valve": {
+    "lines": 0,
+    "functions": 0,
+    "total_lines": 157,
+    "total_functions": 18
+  }
+}
