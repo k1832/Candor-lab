@@ -3,17 +3,21 @@
 //! region, satisfying `docs/basket/spec-allocator.md`.
 //!
 //! The free-list engine (first-fit placement with adjacent-hole coalescing on
-//! free) is provided by the `linked_list_allocator` crate. This module adapts
-//! it to the spec's abstract interface: a caller-provided region, arbitrary
-//! sizes, caller-specified alignment, pointer-only `free`/`realloc`, and errors
+//! free) is the `linked_list_allocator` crate's `Heap`/hole-list engine,
+//! **vendored** into `src/vendored_llalloc.rs` (adjudication ruling of
+//! 2026-07-07, measured-artifact self-containment). This module adapts it to
+//! the spec's abstract interface: a caller-provided region, arbitrary sizes,
+//! caller-specified alignment, pointer-only `free`/`realloc`, and errors
 //! returned as values. See `README.md` for the full list of adaptations.
+
+mod vendored_llalloc;
 
 use core::alloc::Layout;
 use core::marker::PhantomData;
 use core::mem::size_of;
 use core::ptr::{self, NonNull};
 
-use linked_list_allocator::Heap;
+use crate::vendored_llalloc::Heap;
 
 /// Largest alignment the allocator honors (spec `MAX_ALIGN`).
 pub const MAX_ALIGN: usize = 4096;

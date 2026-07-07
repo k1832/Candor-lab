@@ -4,22 +4,48 @@ Idiomatic-Rust baseline for the Candor Bet 5 basket, implementing the frozen
 functional specification `docs/basket/spec-allocator.md`. This is the comparison
 baseline (criterion §2.5); it was written blind to the Candor design documents.
 
-## Provenance (independently sourced, adapted)
+## Provenance (vendored — adjudication ruling of 2026-07-07)
+
+Per the adjudication ruling of **2026-07-07** (measured-artifact
+self-containment): the spec-mandated core mechanics must live **in-source**, so
+the free-list engine is **vendored** into `src/vendored_llalloc.rs` rather than
+pulled from a cargo dependency. The comparison target (a port in a language with
+no crate ecosystem) necessarily carries this machinery in-source; leaving it in
+a dependency would exclude exactly the unsafe-dense code the measurement counts.
+The cargo dependency has been removed (`Cargo.toml` and `Cargo.lock` no longer
+reference `linked_list_allocator`).
 
 - **Source crate:** [`linked_list_allocator`](https://crates.io/crates/linked_list_allocator)
-  by Philipp Oppermann, Apache-2.0/MIT.
-- **Exact version derived from / depended on:** `0.10.6` (crates.io; pinned as
-  `=0.10.6` in `Cargo.toml`, recorded in `Cargo.lock`).
-- **Source studied at:** git commit `a1d90498ff82872c5eb89edef77a08b25b4f14c4`
-  (`https://github.com/rust-osdev/linked-list-allocator`, `Cargo.toml` version
-  `0.10.6`), whose `src/hole.rs` implements the free-list engine used here.
+  by Philipp Oppermann.
+- **Version:** `0.10.6` (crates.io).
+- **Upstream commit:** `a1d90498ff82872c5eb89edef77a08b25b4f14c4`
+  (`https://github.com/rust-osdev/linked-list-allocator`).
+- **License:** MIT OR Apache-2.0 (dual). The upstream MIT copyright notice
+  (`Copyright (c) 2016 Philipp Oppermann`) and full provenance are reproduced at
+  the top of `src/vendored_llalloc.rs`. This baseline is itself `MIT OR
+  Apache-2.0`, so the notice is preserved unchanged.
 
-The crate provides the load-bearing part of the spec: a linked list of free
-"holes" stored **in-band in the free memory itself** (raw pointer/address
-manipulation, no owning std container — spec §1.6), with **first-fit placement,
-alignment-aware splitting, and adjacent-hole coalescing on free** (spec §1.5,
-§3.6). This module (`src/lib.rs`) is a thin adapter over that engine; the
-allocation-strategy and coalescing logic are the crate's, unmodified.
+### Vendored vs. written
+
+- **Vendored (`src/vendored_llalloc.rs`, ~700 lines):** the crate's `Heap`
+  façade and its `HoleList` hole-list engine (from upstream `src/lib.rs` and
+  `src/hole.rs`) — a linked list of free "holes" stored **in-band in the free
+  memory itself** (raw pointer/address manipulation, no owning std container —
+  spec §1.6), with **first-fit placement, alignment-aware splitting, and
+  adjacent-hole coalescing on free** (spec §1.5, §3.6). The retained code is
+  upstream's, unchanged except for **dead-code removal** and the minimal edits
+  compilation requires; its idiomaticity is upstream's, which is the point.
+- **Dead code trimmed (per the ruling):** the crate surface the baseline never
+  exercises — `init`/`extend`/`*_from_slice`, `LockedHeap`, the `GlobalAlloc`
+  and `Allocator` impls, spin-lock support, the `pending_extend` reclaim state
+  that only `extend` consumes, debug/fuzzing hooks, and the upstream test module.
+- **Written (`src/lib.rs`):** the spec adapter over that engine (caller-provided
+  borrowed region, in-band header, pointer-only `free`/`realloc`, alignment
+  handling, errors-as-values, invalid-pointer/double-free rejection). The
+  allocation-strategy and coalescing logic are the vendored engine's, unmodified.
+- **Added lint suppressions:** none. The vendored module carries only upstream's
+  own `#[allow(clippy::result_unit_err)]`; clippy is clean at default lints (and
+  under `-D warnings`) with no new module-level allow.
 
 ## Adaptations beyond the source (disclosed per the task)
 
@@ -77,7 +103,9 @@ surface, all added in `src/lib.rs`:
 
 ## Layout
 
-- `src/lib.rs` — the allocator (core logic, `no_std`).
+- `src/vendored_llalloc.rs` — vendored `linked_list_allocator` engine
+  (`Heap` + `HoleList`), `no_std`; see the header for provenance/license.
+- `src/lib.rs` — the spec adapter over that engine (core logic, `no_std`).
 - `tests/vectors.rs` — the frozen suite, one test per vector `A1..A22`,
   including the full deterministic xorshift64 stress sequence (A21, seed
   `0x2545F4914F6CDD1D`, 20 000 steps, 256 slots, per-step no-overlap / alignment

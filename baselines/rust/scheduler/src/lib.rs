@@ -10,13 +10,16 @@
 //! removal of an element from the middle of a queue (given a handle to it) are
 //! both O(1) via the embedded links — no scan.
 //!
-//! The intrusive-list machinery is provided by the `intrusive-collections`
-//! crate (see `README.md` for provenance); the scheduling policy on top is
-//! written against the spec.
+//! The intrusive-list machinery is the `intrusive-collections` crate's
+//! used subset, **vendored** into `src/vendored_intrusive/` (adjudication
+//! ruling of 2026-07-07, measured-artifact self-containment; see `README.md`
+//! for provenance). The scheduling policy on top is written against the spec.
+
+pub mod vendored_intrusive;
 
 use std::cell::Cell;
 
-use intrusive_collections::{LinkedList, LinkedListLink, UnsafeRef, intrusive_adapter};
+use crate::vendored_intrusive::{LinkedList, LinkedListLink, UnsafeRef};
 
 /// Number of strict-priority levels: 0 (highest) .. 3 (lowest).
 pub const NPRIO: usize = 4;

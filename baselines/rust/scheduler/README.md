@@ -5,24 +5,59 @@ Baseline (Bet 5, criterion §2.5) for `docs/basket/spec-scheduler.md`: a strict
 a level) built on **intrusive doubly-linked lists** — the list linkage is
 embedded in the scheduled `Task`, and the scheduler never owns the tasks.
 
-## Provenance
+## Provenance (vendored — adjudication ruling of 2026-07-07)
 
-- **Intrusive-list machinery:** the [`intrusive-collections`] crate by Amanieu
-  d'Antras, **used as a Cargo dependency** (not vendored).
-  - **Exact version:** `intrusive-collections v0.10.2`
-    (crates.io checksum `4b719c59241cfaac1042a6d26787e28ed7ee4a4e21a5a907786f54222d1b0062`,
-    pinned in `Cargo.lock`).
-  - **Used, not derived:** the crate's `LinkedList`, `LinkedListLink`,
-    `UnsafeRef`, and `intrusive_adapter!` provide the intrusive doubly-linked
-    list, its embedded link field, the non-owning handle type, and the
-    container-of adapter. The O(1) mid-removal is the crate's
-    `cursor_mut_from_ptr(...).remove()`. No intrusive-list code is copied or
-    re-derived; it is called through the public API.
-- **Scheduler policy (this repo's own code, written against the spec):** the
-  four run-queues, strict-priority + FIFO ordering, the single RUNNING slot, and
-  the full operation set (`admit`/`pick_next`/`yield`/`block`/`wake`/
-  `set_priority`/`exit`, including the on-BLOCKED reschedule rule of §2.7).
+Per the adjudication ruling of **2026-07-07** (measured-artifact
+self-containment): the spec-mandated core mechanics must live **in-source**, so
+the intrusive-list machinery is **vendored** into `src/vendored_intrusive/`
+rather than pulled from a cargo dependency. The comparison target (a port in a
+language with no crate ecosystem) necessarily carries this machinery in-source;
+leaving it in a dependency would exclude exactly the unsafe-dense code the
+measurement counts. The cargo dependency has been removed (`Cargo.toml` and
+`Cargo.lock` no longer reference `intrusive-collections` or its `memoffset`
+dependency).
+
+- **Source crate:** [`intrusive-collections`] by Amanieu d'Antras and Amari
+  Robinson, version `0.10.2` (crates.io checksum
+  `4b719c59241cfaac1042a6d26787e28ed7ee4a4e21a5a907786f54222d1b0062`).
+- **License:** MIT OR Apache-2.0 (dual). The upstream per-file copyright headers
+  (`Copyright 2016 Amanieu d'Antras`, `Copyright 2020 Amari Robinson`) are
+  preserved on each vendored file, with full provenance in
+  `src/vendored_intrusive/mod.rs`. This baseline is itself `MIT OR Apache-2.0`.
 - **Toolchain:** built and tested with `rustc 1.93.1` (stable).
+
+### Vendored vs. written
+
+- **Vendored (`src/vendored_intrusive/`, ~990 lines across five submodules
+  mirroring upstream):** `LinkedList` and its `Cursor`/`CursorMut` (with the
+  O(1) `cursor_mut_from_ptr(...).remove()`), the `LinkedListLink` embedded link,
+  the `Adapter`/`LinkOps`/`PointerOps` machinery plus the `intrusive_adapter!`
+  and `container_of!` macros, `UnsafeRef`, and the `DefaultPointerOps`
+  specialization for `UnsafeRef`. The retained code is upstream's, unchanged
+  except for **dead-code removal** and the minimal edits compilation requires
+  (module-path rewrites `crate::` → `super::`/`$crate::vendored_intrusive::`,
+  and `offset_of!` sourced from `core::mem` instead of upstream's `memoffset`
+  re-export — stable since Rust 1.77). Its idiomaticity is upstream's.
+- **Dead code trimmed (per the ruling):** the red-black tree, the singly- and
+  xor-linked lists, the atomic link variant (`AtomicLink`/`AtomicLinkOps`),
+  `CursorOwning`, `IntoIter`, `KeyAdapter`, the `&T`/`Pin`/`Box`/`Rc`/`Arc`
+  pointer-op specializations, `clone_pointer_from_raw`, and every unused
+  cursor/list method (`push_front`, `pop_back`, split/splice/replace/take,
+  `back*`, etc.).
+- **Written (this repo's own code, `src/lib.rs`, against the spec):** the four
+  run-queues, strict-priority + FIFO ordering, the single RUNNING slot, and the
+  full operation set (`admit`/`pick_next`/`yield`/`block`/`wake`/`set_priority`/
+  `exit`, including the on-BLOCKED reschedule rule of §2.7).
+- **Added lint suppressions (vendoring-required, not memory-model relaxations;
+  the ruling forbids restyling the vendored code):** module-level allows in
+  `src/vendored_intrusive/mod.rs` — `clippy::declare_interior_mutable_const`
+  (upstream's own, for the generated `const NEW`), `clippy::missing_safety_doc`,
+  `clippy::manual_dangling_ptr`, `clippy::wrong_self_convention`, and the
+  edition-bridge `unsafe_op_in_unsafe_fn` (upstream is edition 2018, where an
+  `unsafe fn` body is implicitly an unsafe context; this baseline is edition
+  2024). The `intrusive_adapter!`-generated impl carries the same
+  `unsafe_op_in_unsafe_fn` allow since it expands outside the vendored module.
+  With these, `cargo clippy --all-targets -- -D warnings` is clean.
 
 [`intrusive-collections`]: https://crates.io/crates/intrusive-collections
 
@@ -72,6 +107,9 @@ and both are noted here rather than silently decided:
 
 ## Layout
 
+- `src/vendored_intrusive/` — vendored `intrusive-collections` subset
+  (`adapter`, `linked_list`, `link_ops`, `pointer_ops`, `unsafe_ref`); see
+  `mod.rs` for provenance/license and the vendoring-required suppressions.
 - `src/lib.rs` — `Task`, `Scheduler`, `State`, `SchedError`.
 - `tests/vectors.rs` — every frozen vector T1..T20, named by ID, plus the T19
   xorshift64 stress (seed `0x9E3779B97F4A7C15`, 20 000 steps) with a
