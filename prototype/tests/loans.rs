@@ -127,7 +127,7 @@ fn no_two_phase_write_read() {
 fn out_and_read_overlap() {
     assert_has(
         "fn h(a: out S, b: read S) -> unit { a = mk(); } \
-         fn f() -> unit { let mut x: S = mk(); h(x, read x); }",
+         fn f() -> unit { let mut x: S = mk(); h(out x, read x); }",
         "E0805",
     );
 }
@@ -242,5 +242,87 @@ fn nll_loan_dead_before_loop_not_live_in_loop() {
     assert_clean(
         "fn f() -> unit { let mut x: S = mk(); let b = read x; use_i((deref b).n); \
          while true { x = mk(); } }",
+    );
+}
+
+// ---- §2.3 / §8.2.1: return-extended loan on an inline call scrutinee -------
+// A compact-default fn returning a borrow into its argument, called inline as a
+// match scrutinee with a NON-copy payload bound as a borrow binding: the
+// argument loan must persist over the binding's live range (verification S1).
+
+const S1: &str = "
+struct Big { a: i64, b: i64 }
+enum Wrap { one(Big), none }
+fn get(w: read Wrap) -> read Wrap { return read (deref w); }
+";
+
+#[test]
+fn inline_scrutinee_reassign_arg_in_arm() {
+    assert_has(
+        &format!("{S1}fn f() -> i64 {{ let mut w: Wrap = Wrap::one(Big {{ a: 111, b: 222 }}); \
+            match get(read w) {{ case Wrap::one(inner) => {{ w = Wrap::one(Big {{ a: 999, b: 888 }}); \
+            return (deref inner).a; }} case Wrap::none => {{ return 0; }} }} }}"),
+        "E0803",
+    );
+}
+
+#[test]
+fn inline_scrutinee_write_mode_call_in_arm() {
+    assert_has(
+        &format!("{S1}fn clobber(w: write Wrap) -> unit {{ (deref w) = Wrap::none; }} \
+            fn f() -> i64 {{ let mut w: Wrap = Wrap::one(Big {{ a: 111, b: 222 }}); \
+            match get(read w) {{ case Wrap::one(inner) => {{ clobber(write w); \
+            return (deref inner).a; }} case Wrap::none => {{ return 0; }} }} }}"),
+        "E0801",
+    );
+}
+
+#[test]
+fn inline_scrutinee_arena_mutate_element_in_arm() {
+    assert_has(
+        "struct Payload { x: i64 } enum Node { leaf(Payload), other } \
+         struct Arena { mem: [4]Node, count: u32 } \
+         fn arena_get(ar: read Arena, i: u32) -> read Node { return read (deref ar).mem[conv usize (i)]; } \
+         fn f() -> i64 { let mut ar: Arena = Arena { mem: [Node::leaf(Payload { x: 111 }), Node::other, Node::other, Node::other], count: 1u32 }; \
+         match arena_get(read ar, 0u32) { case Node::leaf(p) => { ar.mem[0] = Node::leaf(Payload { x: 999 }); \
+         return (deref p).x; } case Node::other => { return 0; } } }",
+        "E0803",
+    );
+}
+
+#[test]
+fn inline_scrutinee_reborrow_of_reborrow() {
+    assert_has(
+        &format!("{S1}fn outer(w: read Wrap) -> read Wrap {{ return mid(read (deref w)); }} \
+            fn mid(w: read Wrap) -> read Wrap {{ return read (deref w); }} \
+            fn f() -> i64 {{ let mut w: Wrap = Wrap::one(Big {{ a: 111, b: 222 }}); \
+            match outer(read w) {{ case Wrap::one(inner) => {{ w = Wrap::one(Big {{ a: 999, b: 888 }}); \
+            return (deref inner).a; }} case Wrap::none => {{ return 0; }} }} }}"),
+        "E0803",
+    );
+}
+
+#[test]
+fn inline_scrutinee_copy_payload_reassign_accepted() {
+    // Copy payloads are read out at the match head, ending the loan there — the
+    // §11.5 fixture depends on this; the reassignment in the arm is legal.
+    assert_clean(
+        "enum W { one(i64), none } \
+         fn get(w: read W) -> read W { return read (deref w); } \
+         fn f() -> i64 { let mut w: W = W::one(111); \
+         match get(read w) { case W::one(inner) => { w = W::one(999); return inner; } \
+         case W::none => { return 0; } } }",
+    );
+}
+
+#[test]
+fn named_binding_control_stays_rejected() {
+    // The named-local equivalent already rejected (E0803); it must stay rejected.
+    assert_has(
+        "struct Big { a: i64, b: i64 } \
+         fn getb(w: read Big) -> read Big { return read (deref w); } \
+         fn f() -> i64 { let mut b: Big = Big { a: 111, b: 222 }; \
+         let r: borrow Big = getb(read b); b = Big { a: 999, b: 888 }; return (deref r).a; }",
+        "E0803",
     );
 }

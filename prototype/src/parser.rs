@@ -784,7 +784,17 @@ impl Parser {
         self.no_struct = false;
         let mut args = Vec::new();
         while !self.at(&TokKind::RParen) {
-            args.push(self.parse_or()?);
+            if self.at(&TokKind::Kw(Kw::Out)) {
+                let lo = self.cur_start();
+                self.bump();
+                let place = self.parse_or()?;
+                args.push(Expr {
+                    kind: ExprKind::OutArg(Box::new(place)),
+                    span: self.span_from(lo),
+                });
+            } else {
+                args.push(self.parse_or()?);
+            }
             if !self.eat(&TokKind::Comma) {
                 break;
             }

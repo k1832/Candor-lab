@@ -555,6 +555,7 @@ impl<'a> Interp<'a> {
         self.cur_span = e.span;
         match &e.kind {
             ExprKind::Paren(i) => self.eval_value(i, expected),
+            ExprKind::OutArg(i) => self.eval_value(i, expected),
             ExprKind::Ident(name) => {
                 if self.local_addr_ty(name).is_some() || self.statics.contains_key(name) {
                     let (addr, ty, pl) = self.eval_place(e)?;
@@ -1034,6 +1035,10 @@ impl<'a> Interp<'a> {
         let mut caps: Vec<CapArg> = Vec::new();
         let mut outs: Vec<Place> = Vec::new();
         for (p, a) in sig.params.iter().zip(args) {
+            let a: &Expr = match &a.kind {
+                ExprKind::OutArg(inner) => inner,
+                _ => a,
+            };
             match p.mode {
                 ParamMode::Out => {
                     let (addr, ty, pl) = self.eval_place(a)?;

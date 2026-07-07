@@ -255,3 +255,43 @@ fn nested_loops_read_outer_invariant_ok() {
          return i; }",
     );
 }
+
+// ----- C1: unsafe justification must be non-empty (§4.1) -------------------
+
+#[test]
+fn unsafe_empty_justification_rejected() {
+    assert_has(
+        "fn f() -> i64 { unsafe \"\" { let p: rawptr i64 = ptr_null[i64](); } return 0; }",
+        "E0502",
+    );
+}
+
+#[test]
+fn unsafe_whitespace_justification_accepted() {
+    assert_clean(
+        "fn f() -> i64 { let x: i64 = 5; unsafe \"   \" { let p: rawptr i64 = addr_of(x); } return 0; }",
+    );
+}
+
+// ----- D-A: `out` is the mandatory call-site marker for out-args (§3.1) ----
+
+#[test]
+fn out_arg_with_marker_accepted() {
+    assert_clean("fn g(a: out i64) -> unit { a = 1; } fn f() -> i64 { let mut x: i64; g(out x); return x; }");
+}
+
+#[test]
+fn out_arg_without_marker_rejected() {
+    assert_has(
+        "fn g(a: out i64) -> unit { a = 1; } fn f() -> i64 { let mut x: i64; g(x); return x; }",
+        "E0307",
+    );
+}
+
+#[test]
+fn out_marker_on_non_out_param_rejected() {
+    assert_has(
+        "fn g(a: write i64) -> unit { (deref a) = 1; } fn f() -> i64 { let mut x: i64 = 0; g(out x); return x; }",
+        "E0308",
+    );
+}

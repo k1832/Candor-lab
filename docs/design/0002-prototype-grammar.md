@@ -222,7 +222,8 @@ Prefix  = ("-"|"!") Prefix
 Postfix = Primary { "(" [ ArgList ] ")"      -- call
                   | "[" Expr "]"             -- index
                   | "." IDENT }              -- field
-ArgList = Expr { "," Expr } [ "," ]
+ArgList = Arg { "," Arg } [ "," ]
+Arg     = [ "out" ] Expr                     -- `out place` marks an out-mode argument (§3.1)
 ```
 Prefix keyword-operators bind **looser** than postfix, so `read (deref ar).mem[i]`
 is `read( ((deref ar).mem)[i] )`; the §11 examples parenthesize `(deref x)`
@@ -337,6 +338,16 @@ where a fixture is affected) the fixture carries an inline `ADAPTED` note.
   **Ruling:** the grammar fixes trailing `drop(write self) { … }`, a `static`
   item, and `fn name[r](… read[r] …) -> read[r] …` respectively (§0.8, §2.1).
   Not inconsistencies — recorded so the choices are auditable.
+
+- **D-A — `out` call-site spelling now implemented as design 0001 §3.1 writes it
+  (resolved 2026-07-07).** Design 0001 §3.1's examples spell an out-mode argument
+  `f(out x)`. This was previously passed *bare* (`f(x)`), which parsed but left
+  the out-mutation invisible at the call site (against §3.1's intent and P13).
+  The `Arg = [ "out" ] Expr` production above and the checker now make `out` the
+  **mandatory** call-site marker for out-mode arguments: the marker is required
+  for out-mode parameters and rejected for non-out parameters. This **resolves**
+  a divergence (0001 §3.1's `f(out x)` spelling is implemented as written) rather
+  than adding one; recorded here for auditability. D1-D4 above are unchanged.
 
 **Fixture additions (not divergences, no semantics changed):**
 - `11_1_allocator.cn` includes `struct AllocVtable { … }` from §6.1, which

@@ -265,6 +265,9 @@ pub enum ExprKind {
     Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
 
     Call { callee: Box<Expr>, args: Vec<Expr> },
+    /// `out place` — the mandatory call-site marker for an out-mode argument
+    /// (design 0001 §3.1; grammar 0002). Only valid as a call argument.
+    OutArg(Box<Expr>),
     Field { base: Box<Expr>, field: String },
     Index { base: Box<Expr>, index: Box<Expr> },
 

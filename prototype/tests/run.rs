@@ -202,7 +202,7 @@ fn partial_move_remaining_dropped_moved_not() {
 
 #[test]
 fn out_arg_drops_old_at_call_site() {
-    let src = format!("{RES}fn fill(o: out Res) -> unit {{ o = Res {{ id: 9 }}; }}\nfn main() -> i64 {{ let mut a: Res = Res {{ id: 1 }}; fill(a); return 0; }}");
+    let src = format!("{RES}fn fill(o: out Res) -> unit {{ o = Res {{ id: 9 }}; }}\nfn main() -> i64 {{ let mut a: Res = Res {{ id: 1 }}; fill(out a); return 0; }}");
     // old a (1) dropped at call site before call; new (9) dropped at scope end
     assert_eq!(run(&src).trace, vec![1, 9]);
 }

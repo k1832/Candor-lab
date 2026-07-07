@@ -27,6 +27,17 @@ impl<'a> Checker<'a> {
                 t
             }
             ExprKind::Paren(inner) => self.check_expr(inner, u),
+            ExprKind::OutArg(inner) => {
+                self.diags.push(
+                    Diag::error(
+                        "E0308",
+                        "`out` marker is only valid on an out-mode call argument",
+                        e.span,
+                    )
+                    .with_note("write `out place` only where the parameter is an out-mode parameter (§3.1)", None),
+                );
+                self.check_expr(inner, u)
+            }
             ExprKind::Prefix {
                 op: PrefixOp::Read,
                 expr,
@@ -105,7 +116,17 @@ impl<'a> Checker<'a> {
             ExprKind::Match { scrutinee, arms } => self.check_match(scrutinee, arms, e.span),
             ExprKind::Loop(b) => self.check_loop(b, e.span),
             ExprKind::While { cond, body } => self.check_while(cond, body, e.span),
-            ExprKind::Unsafe { body, .. } => {
+            ExprKind::Unsafe { justification, body } => {
+                if justification.is_empty() {
+                    self.diags.push(
+                        Diag::error(
+                            "E0502",
+                            "an `unsafe` justification must be a non-empty string literal",
+                            e.span,
+                        )
+                        .with_note("`unsafe` carries a stated justification (§4.1)", None),
+                    );
+                }
                 let saved = self.f_in_unsafe();
                 self.set_in_unsafe(true);
                 self.check_block_stmts(body);
@@ -729,19 +750,46 @@ impl<'a> Checker<'a> {
     }
 
     fn check_arg_mode(&mut self, mode: ParamMode, decl_ty: &Type, arg: &Expr) {
+        let out_marked = matches!(&arg.kind, ExprKind::OutArg(_));
+        let inner: &Expr = match &arg.kind {
+            ExprKind::OutArg(i) => i,
+            _ => arg,
+        };
+        if mode != ParamMode::Out && out_marked {
+            self.diags.push(
+                Diag::error(
+                    "E0308",
+                    "`out` marker on an argument to a non-out parameter",
+                    arg.span,
+                )
+                .with_note("the `out` marker is written only for out-mode parameters (§3.1)", None),
+            );
+        }
         match mode {
             ParamMode::Take => {
-                self.check_against(arg, decl_ty);
+                self.check_against(inner, decl_ty);
             }
             ParamMode::Read => {
                 let expected = Type::Borrow(Box::new(decl_ty.clone()));
-                self.check_against(arg, &expected);
+                self.check_against(inner, &expected);
             }
             ParamMode::Write => {
                 let expected = Type::BorrowMut(Box::new(decl_ty.clone()));
-                self.check_against(arg, &expected);
+                self.check_against(inner, &expected);
             }
-            ParamMode::Out => self.check_out_arg(arg, decl_ty),
+            ParamMode::Out => {
+                if !out_marked {
+                    self.diags.push(
+                        Diag::error(
+                            "E0307",
+                            "an out-mode argument must carry the `out` marker",
+                            arg.span,
+                        )
+                        .with_note("spell it `out place`: a caller-owned slot the callee fills must be visible at the call site (§3.1)", None),
+                    );
+                }
+                self.check_out_arg(inner, decl_ty);
+            }
         }
     }
 
@@ -1000,9 +1048,13 @@ impl<'a> Checker<'a> {
 
     fn check_match(&mut self, scrut: &Expr, arms: &[MatchArm], span: Span) -> Type {
         let (sc_ty, sc_place) = self.check_place(scrut);
-        // A borrow returned by a call scrutinee (return-extended loan) is not
-        // anchored to a binding here; its transient loan dies at the match head.
-        self.clear_carried();
+        // A borrow returned by an inline call scrutinee carries return-extended
+        // argument loans (§3.3). They are NOT dropped at the match head: they
+        // must persist over the live range of every non-copy borrow binding
+        // derived from the scrutinee (§2.3/§8.2.1) — the same treatment the
+        // named-local path gets via `anchor_carried`. Captured here, re-anchored
+        // onto each derived borrow binding below.
+        let scrut_carried = self.take_carried();
         let resolved = patterns::resolve_enum(&sc_ty, self.items);
         let (hold, einfo, ename) = match resolved {
             Some(x) => x,
@@ -1100,6 +1152,15 @@ impl<'a> Checker<'a> {
                     };
                     if let Some(k) = kind {
                         self.record_binding_loan(scp, k, bd.span, &bd.name);
+                    }
+                }
+                // Inline call scrutinee (a temporary, no `sc_place`): the
+                // return-extended argument loans persist over this borrow
+                // binding's live range (§2.3/§3.3). Re-anchor a copy of each.
+                if matches!(bd.mode, BindMode::BorrowShared | BindMode::BorrowExcl) {
+                    for &cl in &scrut_carried {
+                        let li = self.f.loans[cl].clone();
+                        self.record_binding_loan(&li.place, li.kind, bd.span, &bd.name);
                     }
                 }
             }
