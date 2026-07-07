@@ -1,0 +1,9 @@
+[package]
+name = "candor-parser-baseline"
+version = "0.1.0"
+edition = "2021"
+description = "Idiomatic Rust baseline for the Candor Bet 5 recursive-descent expression parser (spec-parser.md)."
+
+[lib]
+name = "candor_parser_baseline"
+path = "src/lib.rs"
