@@ -77,3 +77,19 @@ From that commit, BET5_CRITERION.md is frozen: no threshold, metric, definition,
 ever. Porting order (§6.4, hardest-first): allocator, scheduler, MMIO state machine, parser,
 arena pass. Ports live under ports/candor/; their development history is pushed publicly as it
 happens.
+
+## Successor registration (BET5_CRITERION2.md) — RATIFIED AND FROZEN, 2026-07-08
+
+Ratified by the deciding authority after adversarial review #1 (fit-after-amendments; laundering
+charge examined and rebutted) and re-confirmation review #2 (unit vindicated; baseline-sensitivity
+routing added). Hashes at ratification (pre-status-line-edit hash of record: the ratification
+commit itself is the canonical freeze point):
+
+| Artifact | SHA-256 (at ratification commit) |
+|---|---|
+| docs/BET5_CRITERION2.md (pre-ratification-edit) | 5125a2349c162e00bb817535323532c32ac7b6c6374c4e6081491a18e93453f4 |
+| prototype/src/count.rs (extended counter, unit_ext_version 2) | c582131900b496a306de376783e2bc88bd656df706dad91083ca4a4c95745715 |
+| tools/rust-count/src/lib.rs (extended counter) | 3cc57a9c8a564b5ce97fc5534fb2ad295ee4e8bb0cc15aa2c9f90ada1974ab27 |
+
+The formal re-scoring follows in the same commit series, computed mechanically from the frozen
+docs/measurements/*/*.v2.json.

@@ -7,7 +7,10 @@ It fixes, in the open, the corrected conditions under which Bet 5's *ordering cl
 registration*) computed KILL with published operationalization defects (`docs/RESULTS.md` §0.3, the
 final-verdict block, and the measurement-observation block).
 
-**Status:** PRE-REGISTERED — *data-aware* (see §0). Not yet frozen.
+**Status:** RATIFIED AND FROZEN — 2026-07-08, by the deciding authority, after adversarial review
+#1 and re-confirmation review #2 (docs/reviews/). Data-aware (see §0). Registration hash at
+ratification recorded in docs/FREEZE_MANIFEST.md; no further changes except the §7 re-scoring
+outcome annotation.
 **Registration version:** SUCCESSOR-1.
 **Date:** 2026-07-07.
 **Governing document:** `LANG_PHYLOSOPHY.md` v4.1 (normative; this sits at the design-document tier

@@ -98,3 +98,29 @@ seam) inside an eight-function program. The allocator's 63% valve-line fraction 
 breach that likely survives any denominator correction. What a future re-registration should
 measure instead (absolute valve content against spec-mandated pointer work, or fractions
 normalized to the baseline's density) belongs to the amendment proceeding, not to this record.
+
+---
+
+# Re-scoring under the ratified successor registration (BET5_CRITERION2.md, frozen 2026-07-08)
+
+Mechanical computation from the frozen v2 measurements (docs/measurements/*/*.v2.json), per the
+registration's decision rule. M1/M1b/M4/M5 carry over as already computed (all pass; M1 worse
+ratio 0.474, decisive).
+
+| Program | V_candor | V_rust | R_valve | Gate | Outcome |
+|---|---|---|---|---|---|
+| Allocator | 96 | 86 (17 authored + 69 vendored) | 1.116 | home-ground, carved (P12 concession) | **WARN → mandatory review** |
+| Scheduler | 47 | 89 (2 authored + 87 vendored) | 0.528 | home-ground, gates normally | pass under registered rule; **23.5 KILL under authored-only** → **baseline-sensitive → mandatory review** |
+| MMIO | 3 | 6 | 0.500 | value-favorable | pass |
+| Parser | 9 | 0 → V2 (0.0289) | — | value-favorable floor | pass |
+| Arena | 0 | 0 → V2 (0.0000) | — | value-favorable floor | pass |
+
+**Outcome: MANDATORY §9 REVIEW** (no clean confirmation; no KILL). The review must dispose of:
+1. The allocator's home-ground WARN on the conceded allocator class (P12 v4.1).
+2. The scheduler yardstick question, verbatim from the registration: is "idiomatic Rust's
+   inherent valve demand" the self-contained measured artifact (R1: 89 statements) or the
+   authored valve figure (2 statements, the crate carrying the rest) — noting symmetrically that
+   a mature Candor ecosystem would provide the same machinery to its authors, so the
+   authored-only reading cuts both ways across time.
+3. The standing evidence: the load claim passed decisively on every metric and every program;
+   value-first's cost concentrates precisely and only where P12 v4.1 already concedes it.
