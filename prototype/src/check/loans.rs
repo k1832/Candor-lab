@@ -147,6 +147,7 @@ fn transfer(set: &mut HashSet<String>, a: &Action) {
         Access::Read | Access::Borrow(_) | Access::OutArg | Access::Move { .. } => {
             set.insert(root);
         }
+        Access::ScopeExit => {} // a drop point is neither a use nor a def of a loan
     }
 }
 
@@ -174,7 +175,7 @@ fn classify(a: &Action) -> AccessKind {
         Access::Move { .. } => AccessKind::Move,
         Access::Assign | Access::OutArg => AccessKind::Write,
         Access::Borrow(k) => AccessKind::Borrow(*k),
-        Access::Decl => AccessKind::None,
+        Access::Decl | Access::ScopeExit => AccessKind::None,
     }
 }
 

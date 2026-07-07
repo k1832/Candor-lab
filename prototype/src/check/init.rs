@@ -6,6 +6,13 @@
 //! (`MaybeInit` is legal until read), whereas move state must *agree* at every
 //! join — a place live on one path and moved on another is an error even if
 //! never read again (`join_st` flags it).
+//!
+//! The dual of that move-join rule (the scope-exit path-independence rule,
+//! finding 2026-07-07) closes the initialization dimension for types whose drop
+//! is observable: at a *needs-drop* place's drop point (a `ScopeExit` action) a
+//! `MaybeInit` state is **E0309** — otherwise the interpreter would decide the
+//! drop from a runtime flag. Drop-inert types stay exempt (`MaybeInit` at exit
+//! is harmless — their drop is a no-op).
 
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
@@ -180,6 +187,36 @@ fn apply(st: &mut FlowState, a: &Action, out_params: &[String], report: Option<&
         }
         Access::Decl => {
             st.set(&a.place, St::Uninit);
+        }
+        Access::ScopeExit => {
+            // The dual of §1.6's move-join rule (finding 2026-07-07): at a
+            // needs-drop place's drop point its initialization must be
+            // path-independent. `MaybeInit` here means it is initialized on
+            // some incoming paths and not others, so the interpreter would
+            // decide the drop from a runtime flag — rejected as E0309.
+            // (`Init` always-drops, `Uninit`/`Moved` never-drop: both static.)
+            if let Some(d) = report {
+                if st.get(&a.place) == St::MaybeInit {
+                    d.push(
+                        Diag::error(
+                            "E0309",
+                            format!(
+                                "place `{}` may be initialized here but not on every path reaching this scope exit",
+                                a.place.display()
+                            ),
+                            a.span,
+                        )
+                        .with_note(
+                            "its type runs drop work, so its drop must be a static fact of this program point, not a runtime decision (§1.6 dual)",
+                            None,
+                        )
+                        .with_note(
+                            "initialize it on every path, consume it on every path, or narrow its scope (finding 2026-07-07)",
+                            None,
+                        ),
+                    );
+                }
+            }
         }
     }
 }

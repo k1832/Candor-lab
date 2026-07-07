@@ -122,6 +122,12 @@ pub enum Access {
     OutArg,
     /// Introduce an uninitialized local (`let x;`).
     Decl,
+    /// A place leaves scope here (a drop point). Emitted only for *needs-drop*
+    /// places (§1.5): the dual of §1.6's move-join rule requires the place's
+    /// initialization state to be path-independent at this point, else the
+    /// interpreter would decide the drop from a runtime flag (finding
+    /// 2026-07-07). A no-op for dataflow state; a reporting-only check.
+    ScopeExit,
 }
 
 #[derive(Clone, Debug)]

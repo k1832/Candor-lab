@@ -50,6 +50,18 @@ case) or by **adding a checker rule** that rejects a local owned-on-some-path-on
 (making drop truly static, consistent with §10.6's intent) is for the independent reviewer and the
 deciding authority to adjudicate. It does not, on its own, make any accepted program memory-unsafe.
 
+**RESOLVED (2026-07-07, in the strict direction; `docs/reviews/2026-07-07-drop-flag-finding.md`).**
+The deciding authority accepted the finding and chose the checker rule over amending §1.5. The checker
+now enforces the **dual of §1.6's move-join rule** (0001 §1.6 rule 3, §7.4): at a place's drop point
+(any scope exit, including via `return`/`break`/`continue`), a **needs-drop** place — one whose type
+has a `drop` hook or transitively contains a drop-hooked type or a `Box` — whose initialization state
+is path-dependent (`MaybeInit`) is rejected as **E0309**, while drop-inert types stay exempt. Move
+state must still agree (E0302, unchanged), so the drop schedule for needs-drop values is now fully
+static in both the move and the initialization dimension; the interpreter's `MoveMask` consultation at
+scope exit is a mechanism for exempt types and an internal debug assertion for needs-drop ones, never a
+semantic drop-flag decision. §1.5/§10.6's "no runtime drop flags" claim therefore holds as written for
+safe code, and §2.1's discharge is complete. The example above (`f(c)`) is now a checker error.
+
 ---
 
 ## 1. The claim, stated precisely and honestly

@@ -447,3 +447,34 @@ fn subslice_out_of_bounds_faults() {
     let f = fault("fn main() -> i64 { let a: [3]i64 = [1,2,3]; let s: slice i64 = slice_of(a); let sub: slice i64 = subslice(s, 1, 9); return 0; }");
     assert_eq!(f.kind, FaultKind::Bounds);
 }
+
+// --------------------------------------------------------------------------
+// E0309 accepted-program runtime behavior is unchanged (finding 2026-07-07):
+// a needs-drop local whose init is path-independent still drops correctly, and
+// the scope-exit debug assertion (active in these debug test builds) holds.
+// --------------------------------------------------------------------------
+
+#[test]
+fn drop_hooked_conditional_init_both_branches_runs() {
+    // Accepted by E0309 (initialized on every path); dropped once at scope end.
+    let src = format!(
+        "{RES}fn mk(n: i64) -> Res {{ return Res {{ id: n }}; }} \
+         fn main() -> i64 {{ let c: bool = true; let x: Res; \
+         if c {{ x = mk(7); }} else {{ x = mk(8); }} return 0; }}"
+    );
+    assert_eq!(run(&src).trace, vec![7]);
+}
+
+#[test]
+fn drop_hooked_uninit_on_all_taken_paths_no_drop() {
+    // Accepted by E0309 (Uninit on the taken path is path-independent here);
+    // the scope-exit mask read correctly skips the drop — no trace.
+    let src = format!(
+        "{RES}fn mk(n: i64) -> Res {{ return Res {{ id: n }}; }} \
+         fn sink(r: Res) -> unit {{ trace(100 + r.id); }} \
+         fn main() -> i64 {{ let c: bool = false; let x: Res; \
+         if c {{ x = mk(7); sink(x); }} return 0; }}"
+    );
+    let r = run(&src);
+    assert!(r.trace.is_empty(), "expected no drop, got {:?}", r.trace);
+}

@@ -1228,7 +1228,7 @@ impl<'a> Checker<'a> {
         Type::unit()
     }
 
-    fn check_return(&mut self, operand: Option<&Expr>, _span: Span) -> Type {
+    fn check_return(&mut self, operand: Option<&Expr>, span: Span) -> Type {
         if let Some(e) = operand {
             let ret = self.ret_ty_clone();
             self.check_against(e, &ret);
@@ -1236,6 +1236,9 @@ impl<'a> Checker<'a> {
                 self.check_return_provenance(e);
             }
         }
+        // A `return` unwinds every open block scope (all but the parameter
+        // scope, `env[0]`), dropping their locals here (§1.6 dual).
+        self.emit_scope_exits(1, span);
         if let Some(cur) = self.cur_get() {
             self.set_term(cur, Term::Return);
             self.cur_set(None);
@@ -1247,6 +1250,10 @@ impl<'a> Checker<'a> {
         match self.loops_break() {
             Some(brk) => {
                 if let Some(cur) = self.cur_get() {
+                    // `break` unwinds the loop body scopes it exits (§1.6 dual).
+                    if let Some(depth) = self.loops_scope_depth() {
+                        self.emit_scope_exits(depth, span);
+                    }
                     self.set_term(cur, Term::Goto(brk));
                     self.cur_set(None);
                 }
@@ -1263,6 +1270,10 @@ impl<'a> Checker<'a> {
         match self.loops_continue() {
             Some(cont) => {
                 if let Some(cur) = self.cur_get() {
+                    // `continue` unwinds the loop body scopes it exits (§1.6 dual).
+                    if let Some(depth) = self.loops_scope_depth() {
+                        self.emit_scope_exits(depth, span);
+                    }
                     self.set_term(cur, Term::Goto(cont));
                     self.cur_set(None);
                 }

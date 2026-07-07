@@ -198,6 +198,44 @@ fn is_copy_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> bool {
     }
 }
 
+/// Does dropping a value of `ty` do observable work (design 0001 §1.5/§1.6)?
+/// True iff the type has a `drop` hook, or transitively contains a drop-hooked
+/// type or a `Box` (whose drop frees through its stored handle). Scalars, copy
+/// aggregates, `rawptr`, borrows/slices, and aggregates of only such fields are
+/// drop-inert. This is the dual of copyability the scope-exit path-independence
+/// rule keys on: at a needs-drop place's drop point the interpreter must not
+/// have to consult a runtime flag (finding 2026-07-07; §1.6/§7.4).
+pub fn needs_drop(ty: &Type, env: &dyn ItemEnv) -> bool {
+    needs_drop_rec(ty, env, &mut Vec::new())
+}
+
+fn needs_drop_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> bool {
+    match ty {
+        Type::Box(_) | Type::BoxResult(_) => true,
+        Type::Array(elem, _) => needs_drop_rec(elem, env, stack),
+        Type::Named(n) => {
+            if stack.iter().any(|s| s == n) {
+                // A cycle is only reachable through a `Box`, already accounted
+                // for (it returned `true` above); this arm terminates the walk.
+                return false;
+            }
+            stack.push(n.clone());
+            let r = if let Some(s) = env.lookup_struct(n) {
+                s.has_drop || s.fields.iter().any(|(_, t)| needs_drop_rec(t, env, stack))
+            } else if let Some(e) = env.lookup_enum(n) {
+                e.variants
+                    .iter()
+                    .any(|v| v.payload.iter().any(|t| needs_drop_rec(t, env, stack)))
+            } else {
+                false
+            };
+            stack.pop();
+            r
+        }
+        _ => false,
+    }
+}
+
 /// Does a value of `ty` own one or more `Box`es (so `clone` allocates, §1.4/§6.3)?
 pub fn bears_box(ty: &Type, env: &dyn ItemEnv) -> bool {
     bears_box_rec(ty, env, &mut Vec::new())

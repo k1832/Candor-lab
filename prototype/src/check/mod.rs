@@ -57,8 +57,11 @@ struct FnState {
     in_ensures: bool,
     blocks: Vec<CfgBlock>,
     cur: Option<usize>,
-    /// (continue target, break target) per enclosing loop.
-    loops: Vec<(usize, usize)>,
+    /// (continue target, break target, env scope depth) per enclosing loop.
+    /// The depth is the number of open scopes *outside* the loop body, so
+    /// `break`/`continue` can emit scope-exit drop checks (§1.6 dual) for the
+    /// body scopes they unwind.
+    loops: Vec<(usize, usize, usize)>,
     alloc: AllocEffect,
     // ---- Stage 3 loan machinery ----
     /// Every loan created in the body (design 0001 §2.3).
@@ -208,6 +211,29 @@ impl<'a> Checker<'a> {
             Use::ReadOnly => Access::Read,
         };
         self.emit(place, access, span);
+    }
+
+    /// Emit scope-exit drop-point checks (the dual of §1.6's move-join rule,
+    /// finding 2026-07-07) for every *needs-drop* local declared in
+    /// `self.f.env[from_depth..]`, at `span`. These mirror the interpreter's
+    /// `drop_scope` points: a lexical block end and the body scopes a
+    /// `return`/`break`/`continue` unwinds. A no-op once control has left the
+    /// block (`cur` is `None`) — that path emitted its own exits already.
+    fn emit_scope_exits(&mut self, from_depth: usize, span: Span) {
+        if self.f.cur.is_none() {
+            return;
+        }
+        let mut targets: Vec<String> = Vec::new();
+        for scope in self.f.env.iter().skip(from_depth) {
+            for (name, info) in scope.iter() {
+                if needs_drop(&info.ty, self.items) {
+                    targets.push(name.clone());
+                }
+            }
+        }
+        for name in targets {
+            self.emit(&Some(Place::local(name)), Access::ScopeExit, span);
+        }
     }
 
     /// Is `place` a partial move out of a `drop`-hooked struct (design §1.6)?

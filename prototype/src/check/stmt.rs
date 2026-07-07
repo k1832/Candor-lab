@@ -15,6 +15,7 @@ impl<'a> Checker<'a> {
         for s in &b.stmts {
             self.check_stmt(s);
         }
+        self.emit_scope_exits(self.f.env.len() - 1, b.span);
         self.pop_scope();
     }
 
@@ -23,6 +24,7 @@ impl<'a> Checker<'a> {
         for s in &b.stmts {
             self.check_stmt(s);
         }
+        self.emit_scope_exits(self.f.env.len() - 1, b.span);
         let diverged = self.cur_get().is_none();
         self.pop_scope();
         if diverged {
@@ -101,16 +103,22 @@ impl<'a> Checker<'a> {
         self.f.blocks[b].join_span = span;
     }
     pub(super) fn loops_push(&mut self, cont: usize, brk: usize) {
-        self.f.loops.push((cont, brk));
+        let depth = self.f.env.len();
+        self.f.loops.push((cont, brk, depth));
     }
     pub(super) fn loops_pop(&mut self) {
         self.f.loops.pop();
     }
     pub(super) fn loops_break(&self) -> Option<usize> {
-        self.f.loops.last().map(|(_, b)| *b)
+        self.f.loops.last().map(|(_, b, _)| *b)
     }
     pub(super) fn loops_continue(&self) -> Option<usize> {
-        self.f.loops.last().map(|(c, _)| *c)
+        self.f.loops.last().map(|(c, _, _)| *c)
+    }
+    /// The env scope depth outside the innermost loop body (§1.6 dual): the
+    /// scopes `break`/`continue` unwinds are `env[depth..]`.
+    pub(super) fn loops_scope_depth(&self) -> Option<usize> {
+        self.f.loops.last().map(|(_, _, d)| *d)
     }
     pub(super) fn in_unsafe_get(&self) -> bool {
         self.f.in_unsafe

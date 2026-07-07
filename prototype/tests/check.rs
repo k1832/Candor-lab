@@ -295,3 +295,106 @@ fn out_marker_on_non_out_param_rejected() {
         "E0308",
     );
 }
+
+// ----- E0309: scope-exit path-independence for needs-drop places ----------
+// The dual of §1.6's move-join rule (finding 2026-07-07): at a needs-drop
+// place's drop point its initialization must be path-independent, else the
+// interpreter would decide the drop from a runtime flag.
+
+/// A drop-hooked struct `R` plus `mk`/`sink` helpers used by the E0309 tests.
+const RDROP: &str = "struct R { v: i64 } drop(write self) { trace((deref self).v); } \
+                     fn mk(n: i64) -> R { return R { v: n }; } \
+                     fn sink(r: R) -> unit { trace(r.v); } ";
+
+#[test]
+fn e0309_conditional_init_of_drop_hooked_rejected() {
+    // The finding's exact repro: initialized on one path, not the other, live to
+    // scope exit — the drop would be a runtime decision.
+    let src = format!("{RDROP}fn f(c: bool) -> unit {{ let x: R; if c {{ x = mk(7); }} return; }}");
+    assert_has(&src, "E0309");
+    // Same shape falling off the end of the body (no explicit `return`).
+    let src2 = format!("{RDROP}fn f(c: bool) -> unit {{ let x: R; if c {{ x = mk(7); }} }}");
+    assert_has(&src2, "E0309");
+}
+
+#[test]
+fn e0309_scalar_and_copy_struct_exempt() {
+    // A drop-inert scalar: MaybeInit at scope exit stays legal.
+    assert_clean("fn f(c: bool) -> unit { let x: i64; if c { x = 7; } return; }");
+    // A copy aggregate is drop-inert too.
+    assert_clean(
+        "copy struct P { a: i64 } fn f(c: bool) -> unit { let x: P; if c { x = P { a: 7 }; } return; }",
+    );
+}
+
+#[test]
+fn e0309_box_bearing_type_rejected() {
+    // Needs-drop transitively via a `Box` field (no drop hook). `clone` produces
+    // it without moving `src`, so the only diagnostic is the scope-exit one.
+    assert_has(
+        "struct BB { b: Box i64 } \
+         fn f(c: bool, src: BB) alloc -> unit { let x: BB; if c { x = clone src; } return; }",
+        "E0309",
+    );
+}
+
+#[test]
+fn e0309_initialized_on_both_branches_ok() {
+    let src = format!(
+        "{RDROP}fn f(c: bool) -> unit {{ let x: R; if c {{ x = mk(7); }} else {{ x = mk(8); }} sink(x); }}"
+    );
+    assert_clean(&src);
+}
+
+#[test]
+fn e0309_join_coherent_consume_variants_ok() {
+    // Consumed on one path, uninitialized on the other: both paths leave the
+    // place drop-free at scope exit (Moved / Uninit), which is path-independent.
+    let a = format!("{RDROP}fn f(c: bool) -> unit {{ let x: R; if c {{ x = mk(7); sink(x); }} return; }}");
+    assert_clean(&a);
+    // Initialized-and-consumed on both paths: Moved on both, still path-independent.
+    let b = format!(
+        "{RDROP}fn f(c: bool) -> unit {{ let x: R; if c {{ x = mk(7); sink(x); }} else {{ x = mk(8); sink(x); }} return; }}"
+    );
+    assert_clean(&b);
+}
+
+#[test]
+fn e0309_early_return_before_scope_exit_ok() {
+    // Initialized then consumed-and-returned on one path; on the other it is
+    // (re)initialized and consumed. State agrees at each *actual* scope exit.
+    let src = format!(
+        "{RDROP}fn f(c: bool) -> unit {{ let x: R; if c {{ x = mk(7); sink(x); return; }} x = mk(8); sink(x); return; }}"
+    );
+    assert_clean(&src);
+}
+
+#[test]
+fn e0309_loop_conditional_init_then_break_ok() {
+    // A back-edge case: `x` is fresh each iteration. On the break path it is
+    // Uninit (never dropped); on the back-edge it is initialized-and-consumed
+    // (Moved). Both scope exits are path-independent, so it is accepted.
+    let src = format!(
+        "{RDROP}fn g(n: i64) -> unit {{ let mut i: i64 = 0; \
+         loop {{ let x: R; if i >= n {{ break; }} x = mk(i); sink(x); i = i + 1; }} return; }}"
+    );
+    assert_clean(&src);
+}
+
+#[test]
+fn e0309_loop_backedge_maybe_init_rejected() {
+    // The unsound shape the rule must catch on a back-edge: `x` is MaybeInit when
+    // the loop body falls through to the header (its scope exit / drop point).
+    let src = format!(
+        "{RDROP}fn g(c: bool) -> unit {{ loop {{ let x: R; if c {{ x = mk(7); }} if c {{ break; }} }} return; }}"
+    );
+    assert_has(&src, "E0309");
+}
+
+#[test]
+fn e0309_move_join_disagreement_still_e0302() {
+    // The move dimension (§1.6 rule 1) is unchanged: a value live on one path and
+    // moved on another is still E0302, independent of the new scope-exit rule.
+    let src = format!("{RDROP}fn f(c: bool) -> unit {{ let x: R = mk(1); if c {{ sink(x); }} return; }}");
+    assert_has(&src, "E0302");
+}

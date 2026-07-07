@@ -8,7 +8,7 @@ use crate::check::dataflow::{Place, Proj};
 use crate::resolve::Items;
 use crate::span::Span;
 use crate::token::ScalarTy;
-use crate::types::{is_copy, ArrayLen, ItemEnv, Type};
+use crate::types::{is_copy, needs_drop, ArrayLen, ItemEnv, Type};
 
 use super::layout::Layout;
 use super::mem::Mem;
@@ -1787,10 +1787,34 @@ impl<'a> Interp<'a> {
         let sc = self.f().scopes.pop().unwrap();
         for l in sc.locals.into_iter().rev() {
             if l.owns {
+                // §1.6 dual (finding 2026-07-07). For a *needs-drop* local the
+                // checker (E0309) now guarantees this scope-exit drop decision
+                // is a static, path-independent fact: the local is either
+                // initialized on every path (always drop) or uninitialized/moved
+                // on every path (always skip) — never conditionally initialized.
+                // The interpreter therefore no longer *decides* a conditional
+                // drop from a runtime flag; the mask read in `drop_value` merely
+                // reflects that static fact. We assert the residual structural
+                // invariant it relies on — a drop-hooked value is never reached
+                // here partially moved, so its whole-value hook decision is
+                // unambiguous (E0303/E0309). Drop-inert (exempt) types keep the
+                // mask purely as their harmless no-op mechanism, unasserted.
+                if needs_drop(&l.ty, self.items) {
+                    debug_assert!(
+                        !(self.ty_is_drop_hooked(&l.ty) && l.mask.partially(&[])),
+                        "needs-drop value `{}` reached scope exit partially moved;                          the checker (E0303/E0309) should have forbidden this",
+                        l.name
+                    );
+                }
                 self.drop_value(l.addr, &l.ty, &l.mask, &mut Vec::new())?;
             }
         }
         Ok(())
+    }
+
+    /// Does `ty` name a struct that declares a `drop` hook (design §1.5)?
+    fn ty_is_drop_hooked(&self, ty: &Type) -> bool {
+        matches!(ty, Type::Named(n) if self.drop_hooks.contains_key(n))
     }
 
     fn drop_stmt_temps(&mut self, base: usize) -> R<()> {
