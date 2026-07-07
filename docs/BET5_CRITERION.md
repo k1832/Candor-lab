@@ -537,8 +537,9 @@ Measurement records: `docs/measurements/baselines/*.json` (per-file rust-count o
 aggregation over each baseline's `src/`; tests excluded). Resulting home-ground M2 KILL ceilings
 (§4.2): allocator `max(0.40, 1.25 × 0.1929) = 0.40`; scheduler `max(0.40, 1.25 × 0.1489) = 0.40`.
 Per the baseline-production ruling (FREEZE_MANIFEST): baselines were authored by Opus-family
-sessions, so the Candor ports may not be (criterion §6.3); the port-authoring model family is
-recorded here when porting begins. Spec-ambiguity rulings from baseline construction:
+sessions, so the Candor ports may not be (criterion §6.3). **Port-authoring model family, recorded
+2026-07-07: Fable (Claude Fable 5)** — with the §6.7 honesty note that the same family orchestrated
+the project (the §6.3 rule constrains baseline/port same-model authorship, which is satisfied). Spec-ambiguity rulings from baseline construction:
 `docs/ADJUDICATIONS.md` R1-R13.
 
 6.7 **Independence: the solo-project honesty clause.** Full third-party independence — separate teams

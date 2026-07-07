@@ -62,9 +62,18 @@ Sources, valve fractions, and idiomaticity confirmations recorded in criterion �
 14); thirteen adjudication rulings in docs/ADJUDICATIONS.md; measurement JSONs in
 docs/measurements/baselines/.
 
-## The freeze instant — PENDING two gates
+## The freeze instant — GATES SATISFIED, 2026-07-07
 
-Criterion §0.1: the freeze instant is the first commit of any Candor basket port. Before it:
-1. **The repository must be public** (publication ruling above — binding).
-2. The deciding authority gives the go-decision; the port-authoring model family (non-Opus, per
-   §6.3 and the baseline ruling) is recorded in §6.6 at that time.
+1. **Repository public:** confirmed 2026-07-07 (github.com/k1832/Candor, visibility PUBLIC). The
+   §6.5 open-comment windows and the public-development-history guarantee are live from this date.
+2. **Go-decision given** by the deciding authority, 2026-07-07. Port-authoring model family:
+   **Fable (Anthropic Claude Fable 5)** — non-Opus per criterion §6.3 and the baseline ruling.
+   Honesty note, recorded as promised: the same model family orchestrated the project and its
+   reviews; the criterion forbids only baseline/port same-model authorship, and this residual is
+   named per §6.7 rather than claimed away.
+
+Per criterion §0.1, **the freeze instant is the first Candor basket port commit after this one**.
+From that commit, BET5_CRITERION.md is frozen: no threshold, metric, definition, or basket change,
+ever. Porting order (§6.4, hardest-first): allocator, scheduler, MMIO state machine, parser,
+arena pass. Ports live under ports/candor/; their development history is pushed publicly as it
+happens.
