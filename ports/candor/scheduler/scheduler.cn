@@ -1,0 +1,1104 @@
+// ============================================================================
+// Candor port: intrusive-list priority scheduler (Bet 5 basket,
+// spec-scheduler.md, frozen).
+//
+// Mechanism (spec 1.1-1.4, for the adjudicator): four strict-priority levels
+// (0 highest .. 3 lowest), each a circular doubly-linked list with a sentinel
+// Link embedded in the Sched struct. The list linkage is INTRUSIVE: every
+// Task embeds a Link { next, prev } of rawptr Link, and the queues thread
+// through those embedded fields — the scheduler owns no task and allocates
+// nothing (spec 5.4). Tasks live in caller-owned storage (the harness's
+// fixed arena, owned by main's vectors); a handle is a rawptr Task into that
+// storage. Tail insert and mid-queue removal are O(1) pointer splices;
+// removal recovers the Task from its interior Link via container_of
+// (offsetof + pointer arithmetic, design 0001 §11.2 — the Link field is
+// deliberately NOT first in Task, so the offset is real).
+//
+// Adjudications honored: R5 (admit is valid only from New/Exited; a BLOCKED
+// task is present, so admitting it is E_ALREADY_QUEUED), R6 (pick_next while
+// a task is RUNNING is a no-op returning none), R14 (implementation above
+// the `// Test harness` marker, harness below).
+//
+// Adaptation of spec 2.1 (flagged for adjudication): `init() -> Scheduler`
+// cannot be a by-value constructor here, because the sentinels are
+// self-referential — moving the returned Sched would invalidate its own
+// interior pointers. The port splits it into `sched_new()` (inert, null
+// links) + `sched_init(write s)` (self-links the sentinels in place at the
+// Sched's final address). Semantics of 2.1 (empty scheduler, all queues
+// empty, no running task) hold after the pair.
+//
+// Task states: a task is ABSENT (New or EXITED — not present), READY (in
+// exactly one run-queue), RUNNING (the single running slot), or BLOCKED
+// (in the blocked set, which is tracked purely by this state field — a
+// blocked task is on no list). Single-membership (spec 3.3) by construction.
+//
+// Errors are values (spec 1.6/2): SchedErr below; the scheduler never
+// faults on any invalid request. Faults (assert) appear only in the test
+// harness, where a failed vector is *meant* to abort the run.
+// ============================================================================
+
+static NPRIO: usize = 4;         // spec 1.4: fixed
+
+// task lifecycle states
+static ST_ABSENT: usize = 0;     // New / EXITED: not present (R5: admit ok)
+static ST_READY: usize = 1;      // in exactly one run-queue
+static ST_RUNNING: usize = 2;    // in the running slot
+static ST_BLOCKED: usize = 3;    // in the blocked set (no list membership)
+
+// The intrusive linkage, embedded in every Task (design 0001 §11.2).
+// rawptr fields are inert in safe code; only the valve below acts on them.
+copy struct Link { next: rawptr Link, prev: rawptr Link }
+
+// The scheduled entity. Caller-owned; the scheduler only threads it onto
+// queues through `link`. `link` is deliberately the LAST field so that
+// container_of does non-trivial offset arithmetic.
+copy struct Task { id: usize, prio: usize, state: usize, link: Link }
+
+// copy markers: small value results, and the harness inspects them via
+// helper calls inside `assert` (contract clauses reject consuming calls,
+// E0708) — same idiom as the allocator port.
+copy enum SchedErr { bad_prio, already_queued, no_running, not_schedulable, not_blocked }
+copy enum SchedRes { ok, err(SchedErr) }
+copy enum PickRes { some(rawptr Task), none }
+
+// queue_dump result (spec 2.9, informative): ordered ids, head first.
+// Capacity 64 = the suite's task-id domain; single-membership (3.3) bounds
+// any one queue by the number of tasks.
+copy struct Dump { ids: [64]usize, n: usize }
+
+// The scheduler: one sentinel Link per level (the rings are threaded through
+// the tasks' embedded links), tracked lengths (for the 3.4 integrity check),
+// and the single RUNNING slot (null = none).
+struct Sched { q: [4]Link, qlen: [4]usize, running: rawptr Task }
+
+// ---------------------------------------------------------------------------
+// Inert constructors (safe: holding/copying a rawptr is safe; only creating
+// one from thin air needs the valve, and null is "no meaning yet")
+// ---------------------------------------------------------------------------
+
+fn link_nil() -> Link {
+    unsafe "null links carry no meaning; they are inert placeholders until the node is spliced into a ring" {
+        return Link { next: ptr_null[Link](), prev: ptr_null[Link]() };
+    }
+}
+
+fn no_task() -> rawptr Task {
+    unsafe "the null handle is the 'no RUNNING task' value; it is only ever null-checked, never dereferenced" {
+        return ptr_null[Task]();
+    }
+}
+
+fn task_new(id: usize) -> Task {
+    return Task { id: id, prio: 0, state: ST_ABSENT, link: link_nil() };
+}
+
+fn sched_new() -> Sched {
+    return Sched { q: [link_nil(); 4], qlen: [0; 4], running: no_task() };
+}
+
+// Self-link the four sentinels at the Sched's final address (see the header
+// note on spec 2.1). After this the Sched must not move; every vector keeps
+// it a local of one function.
+fn sched_init(s: write Sched) -> unit {
+    let mut p: usize = 0;
+    while p < NPRIO {
+        let sent: rawptr Link = qsent(write (deref s), p);
+        unsafe "self-link the level-p sentinel: the empty ring is sentinel.next == sentinel.prev == sentinel; sent points into this live Sched" {
+            ptr_write(sent, Link { next: sent, prev: sent });
+        };
+        (deref s).qlen[p] = 0;
+        p = p + 1;
+    };
+    (deref s).running = no_task();
+}
+
+// ---------------------------------------------------------------------------
+// The valve core: container_of and the intrusive splices (design 0001 §11.2)
+// ---------------------------------------------------------------------------
+
+// address of the level-p sentinel embedded in this Sched
+fn qsent(s: write Sched, p: usize) -> rawptr Link {
+    unsafe "address of an interior field of a live, caller-pinned Sched; the pointer is consumed by ring splices while the Sched stays at this address" {
+        return addr_of_mut((deref s).q[p]);
+    }
+}
+
+// read-only variant for queue_dump / integrity walks
+fn qsent_r(s: read Sched, p: usize) -> rawptr Link {
+    unsafe "address of an interior field of a live, caller-pinned Sched; used only for read-only ring walks" {
+        return addr_of((deref s).q[p]);
+    }
+}
+
+// &task->link: the embedded link of a task handle
+fn t_link(t: rawptr Task) -> rawptr Link {
+    unsafe "t is a handle to a live Task in caller-owned storage; offsetof locates its embedded link field" {
+        return cast_ptr[Link](ptr_offset(cast_ptr[u8](t),
+                                         conv isize (offsetof(Task, link))));
+    }
+}
+
+// container_of: recover the Task from a pointer to its embedded link
+fn task_of(l: rawptr Link) -> rawptr Task {
+    unsafe "l is the `link` field of a live Task (container_of via offsetof, design 0001 §11.2); no other Link ever enters a ring except the sentinels, which are never passed here" {
+        return cast_ptr[Task](ptr_offset(cast_ptr[u8](l),
+                                         0 - conv isize (offsetof(Task, link))));
+    }
+}
+
+// splice n in before the sentinel (queue tail). O(1). Re-reads each node
+// before writing it, so the empty ring (tail == sentinel) is handled by the
+// same three writes.
+fn list_insert_tail(sent: rawptr Link, n: rawptr Link) -> unit {
+    unsafe "sent is a live ring's sentinel and n an unlinked node: sent.prev is the current tail (== sent when empty); the three whole-node writes below only retarget next/prev words of live links" {
+        let tail: rawptr Link = (ptr_read(sent)).prev;
+        ptr_write(n, Link { next: sent, prev: tail });
+        let tv: Link = ptr_read(tail);
+        ptr_write(tail, Link { next: n, prev: tv.prev });
+        let sv: Link = ptr_read(sent);
+        ptr_write(sent, Link { next: sv.next, prev: n });
+    }
+}
+
+// unlink n from wherever it is in its ring. O(1), no scan (spec 1.3): the
+// mid-list removal the spec exists to force. n's own links are nulled after
+// the splice (hygiene: a dangling stale link never looks linked).
+fn list_remove(n: rawptr Link) -> unit {
+    unsafe "n is linked; its neighbors are valid nodes of the same ring (design 0001 §11.2); the second neighbor is re-read after the first write so the two-node ring (both neighbors the sentinel) splices correctly" {
+        let nv: Link = ptr_read(n);
+        let prev: rawptr Link = nv.prev;
+        let next: rawptr Link = nv.next;
+        let pv: Link = ptr_read(prev);
+        ptr_write(prev, Link { next: next, prev: pv.prev });
+        let xv: Link = ptr_read(next);
+        ptr_write(next, Link { next: xv.next, prev: prev });
+        ptr_write(n, Link { next: ptr_null[Link](), prev: ptr_null[Link]() });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Field access through a handle. A rawptr has no safe field projection, so
+// every read/write of a task's fields is a valve op; reads copy the whole
+// POD Task, writes are field-precise (offsetof) so they can never clobber
+// the embedded link words with a stale copy.
+// ---------------------------------------------------------------------------
+
+fn t_id(t: rawptr Task) -> usize {
+    unsafe "t is a handle to a live Task in caller-owned storage" {
+        return (ptr_read(t)).id;
+    }
+}
+
+fn t_prio(t: rawptr Task) -> usize {
+    unsafe "t is a handle to a live Task in caller-owned storage" {
+        return (ptr_read(t)).prio;
+    }
+}
+
+fn t_state(t: rawptr Task) -> usize {
+    unsafe "t is a handle to a live Task in caller-owned storage" {
+        return (ptr_read(t)).state;
+    }
+}
+
+fn t_set_prio(t: rawptr Task, v: usize) -> unit {
+    unsafe "in-place store to the prio field only (offsetof-addressed), leaving the embedded link words untouched" {
+        ptr_write(cast_ptr[usize](ptr_offset(cast_ptr[u8](t),
+                                             conv isize (offsetof(Task, prio)))), v);
+    }
+}
+
+fn t_set_state(t: rawptr Task, v: usize) -> unit {
+    unsafe "in-place store to the state field only (offsetof-addressed), leaving the embedded link words untouched" {
+        ptr_write(cast_ptr[usize](ptr_offset(cast_ptr[u8](t),
+                                             conv isize (offsetof(Task, state)))), v);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The operation set (spec 2). All errors are values.
+// ---------------------------------------------------------------------------
+
+// spec 2.2. E_BAD_PRIO checked first (spec's listing order; precedence when
+// both apply is not fixed by the spec — flagged in the port README).
+// R5: valid only from ABSENT (New/Exited); READY, RUNNING and BLOCKED are
+// all "present", so each is E_ALREADY_QUEUED.
+fn admit(s: write Sched, t: rawptr Task, prio: usize) -> SchedRes {
+    if prio >= NPRIO { return SchedRes::err(SchedErr::bad_prio); }
+    if t_state(t) != ST_ABSENT { return SchedRes::err(SchedErr::already_queued); }
+    t_set_prio(t, prio);
+    t_set_state(t, ST_READY);
+    list_insert_tail(qsent(write (deref s), prio), t_link(t));
+    (deref s).qlen[prio] = (deref s).qlen[prio] + 1;
+    return SchedRes::ok;
+}
+
+// spec 2.3 + R6: while a task is RUNNING this is a no-op returning none.
+// Otherwise: head of the lowest-numbered non-empty level, removed from its
+// ring, marked RUNNING.
+fn pick_next(s: write Sched) -> PickRes {
+    if !is_null((deref s).running) { return PickRes::none; }
+    let mut p: usize = 0;
+    while p < NPRIO {
+        if (deref s).qlen[p] > 0 {
+            let sent: rawptr Link = qsent(write (deref s), p);
+            let mut head: rawptr Link = sent;
+            unsafe "the ring is non-empty (qlen > 0), so sentinel.next is a task's embedded link" {
+                head = (ptr_read(sent)).next;
+            }
+            list_remove(head);
+            (deref s).qlen[p] = (deref s).qlen[p] - 1;
+            let t: rawptr Task = task_of(head);
+            t_set_state(t, ST_RUNNING);
+            (deref s).running = t;
+            return PickRes::some(t);
+        }
+        p = p + 1;
+    }
+    return PickRes::none;
+}
+
+// spec 2.4: RUNNING -> tail of its own level; no task RUNNING afterwards.
+fn yield_current(s: write Sched) -> SchedRes {
+    if is_null((deref s).running) { return SchedRes::err(SchedErr::no_running); }
+    let t: rawptr Task = (deref s).running;
+    (deref s).running = no_task();
+    t_set_state(t, ST_READY);
+    let p: usize = t_prio(t);
+    list_insert_tail(qsent(write (deref s), p), t_link(t));
+    (deref s).qlen[p] = (deref s).qlen[p] + 1;
+    return SchedRes::ok;
+}
+
+// spec 2.5: READY (mid-ring removal, O(1) via the handle) or RUNNING ->
+// BLOCKED; anything else is E_NOT_SCHEDULABLE.
+fn block(s: write Sched, t: rawptr Task) -> SchedRes {
+    let st: usize = t_state(t);
+    if st == ST_READY {
+        list_remove(t_link(t));
+        let p: usize = t_prio(t);
+        (deref s).qlen[p] = (deref s).qlen[p] - 1;
+        t_set_state(t, ST_BLOCKED);
+        return SchedRes::ok;
+    }
+    if st == ST_RUNNING {
+        (deref s).running = no_task();
+        t_set_state(t, ST_BLOCKED);
+        return SchedRes::ok;
+    }
+    return SchedRes::err(SchedErr::not_schedulable);
+}
+
+// spec 2.6: BLOCKED -> tail of its priority level. The prio field already
+// carries any set_priority recorded while blocked (spec 2.7 / T20).
+fn wake(s: write Sched, t: rawptr Task) -> SchedRes {
+    if t_state(t) != ST_BLOCKED { return SchedRes::err(SchedErr::not_blocked); }
+    t_set_state(t, ST_READY);
+    let p: usize = t_prio(t);
+    list_insert_tail(qsent(write (deref s), p), t_link(t));
+    (deref s).qlen[p] = (deref s).qlen[p] + 1;
+    return SchedRes::ok;
+}
+
+// spec 2.7: READY -> remove from its current ring, insert at the tail of
+// level prio (read literally: this holds even when prio equals the current
+// level, i.e. a same-level reschedule moves the task to the tail — flagged
+// in the port README). RUNNING/BLOCKED -> record only; takes effect at the
+// next enqueue.
+fn set_priority(s: write Sched, t: rawptr Task, prio: usize) -> SchedRes {
+    if prio >= NPRIO { return SchedRes::err(SchedErr::bad_prio); }
+    let st: usize = t_state(t);
+    if st == ST_ABSENT { return SchedRes::err(SchedErr::not_schedulable); }
+    if st == ST_READY {
+        list_remove(t_link(t));
+        let old: usize = t_prio(t);
+        (deref s).qlen[old] = (deref s).qlen[old] - 1;
+        t_set_prio(t, prio);
+        list_insert_tail(qsent(write (deref s), prio), t_link(t));
+        (deref s).qlen[prio] = (deref s).qlen[prio] + 1;
+        return SchedRes::ok;
+    }
+    t_set_prio(t, prio);
+    return SchedRes::ok;
+}
+
+// spec 2.8: remove from all structures (O(1)); EXITED == ABSENT here, so the
+// task is re-admittable afterwards (R5).
+fn exit_task(s: write Sched, t: rawptr Task) -> SchedRes {
+    let st: usize = t_state(t);
+    if st == ST_ABSENT { return SchedRes::err(SchedErr::not_schedulable); }
+    if st == ST_READY {
+        list_remove(t_link(t));
+        let p: usize = t_prio(t);
+        (deref s).qlen[p] = (deref s).qlen[p] - 1;
+    }
+    if st == ST_RUNNING { (deref s).running = no_task(); }
+    t_set_state(t, ST_ABSENT);
+    return SchedRes::ok;
+}
+
+// spec 2.9 (informative, test-only): ordered ids of run-queue p, head first.
+fn queue_dump(s: read Sched, p: usize) -> Dump {
+    let mut d: Dump = Dump { ids: [0; 64], n: 0 };
+    let sent: rawptr Link = qsent_r(read (deref s), p);
+    unsafe "read-only walk of ring p: every node reachable from the sentinel is the embedded link of a live READY task in caller-owned storage" {
+        let mut cur: rawptr Link = (ptr_read(sent)).next;
+        while cur != sent {
+            d.ids[d.n] = (ptr_read(task_of(cur))).id;
+            d.n = d.n + 1;
+            cur = (ptr_read(cur)).next;
+        }
+    }
+    return d;
+}
+
+// ===========================================================================
+// Test harness — the frozen vector suite T1-T20 (spec §4, rulings R5/R6).
+// Harness faults (assert) are the intended failure mode for a broken vector.
+// The T19 shadow model below is deliberately in the SAFE gears (indices and
+// arrays): it is the language-neutral test oracle of spec 4.2, not the
+// measured scheduler.
+// ===========================================================================
+
+fn err_code(e: SchedErr) -> i64 {
+    match e {
+        case SchedErr::bad_prio => return 1,
+        case SchedErr::already_queued => return 2,
+        case SchedErr::no_running => return 3,
+        case SchedErr::not_schedulable => return 4,
+        case SchedErr::not_blocked => return 5,
+    }
+}
+
+fn expect_ok(r: SchedRes) -> unit {
+    match r {
+        case SchedRes::ok => {},
+        case SchedRes::err(_) => assert(false),
+    }
+}
+
+fn expect_err(r: SchedRes, want: i64) -> unit {
+    match r {
+        case SchedRes::ok => assert(false),
+        case SchedRes::err(e) => assert(err_code(e) == want),
+    }
+}
+
+fn expect_pick(r: PickRes, id: usize) -> unit {
+    match r {
+        case PickRes::some(t) => assert(t_id(t) == id),
+        case PickRes::none => assert(false),
+    }
+}
+
+fn expect_none(r: PickRes) -> unit {
+    match r {
+        case PickRes::some(_) => assert(false),
+        case PickRes::none => {},
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Caller-owned task storage: a fixed arena of 64 Tasks (the suite's id
+// domain), local to each vector. Handles are rawptr Task into it.
+// (Wrapped in a struct: a borrow-mode parameter of fixed-array type does not
+// parse — allocator-port friction note 1.)
+// ---------------------------------------------------------------------------
+
+struct Arena { t: [64]Task }
+
+fn arena_new() -> Arena {
+    let mut ar: Arena = Arena { t: [task_new(0); 64] };
+    let mut i: usize = 0;
+    while i < 64 {
+        ar.t[i].id = i;
+        i = i + 1;
+    }
+    return ar;
+}
+
+fn arena_base(ar: write Arena) -> rawptr Task {
+    unsafe "address of the caller-owned task arena; the arena is a local of the calling vector and outlives every handle derived from this base" {
+        return cast_ptr[Task](addr_of_mut((deref ar).t));
+    }
+}
+
+// handle for task id (spec: a handle permits O(1) access to the embedded links)
+fn th(base: rawptr Task, id: usize) -> rawptr Task {
+    unsafe "id < 64: element address inside the live 64-Task arena" {
+        return ptr_offset(base, conv isize (id));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// List-integrity + single-membership oracle (spec 3.3/3.4). Walks ring p
+// forward asserting the doubly-linked invariants: every node's prev is the
+// node walked from (node.next.prev == node and node.prev.next == node over
+// the whole ring), the walk closes back at the sentinel, no cycle beyond the
+// ring (64-node guard), reachable count == tracked qlen; each member is
+// READY and queued at its own level. Occupancy per id accumulates in occ.
+// ---------------------------------------------------------------------------
+
+struct Occ { n: [64]usize }
+
+fn check_ring(s: read Sched, p: usize, occ: write Occ) -> usize {
+    let sent: rawptr Link = qsent_r(read (deref s), p);
+    let mut n: usize = 0;
+    unsafe "forward walk of ring p: nodes are the embedded links of live tasks in the caller-owned arena; reads only" {
+        let mut prev: rawptr Link = sent;
+        let mut cur: rawptr Link = (ptr_read(sent)).next;
+        while cur != sent {
+            assert(n < 64);                          // cycle guard
+            let cv: Link = ptr_read(cur);
+            assert(cv.prev == prev);                 // back-link integrity (3.4)
+            let tv: Task = ptr_read(task_of(cur));
+            assert(tv.state == ST_READY);            // membership => READY (3.3)
+            assert(tv.prio == p);                    // queued at its own level
+            (deref occ).n[tv.id] = (deref occ).n[tv.id] + 1;
+            prev = cur;
+            cur = cv.next;
+            n = n + 1;
+        }
+        let sv: Link = ptr_read(sent);
+        assert(sv.prev == prev);                     // tail closes the ring
+    }
+    assert(n == (deref s).qlen[p]);                  // reachable == tracked
+    return n;
+}
+
+fn check_integrity(s: read Sched) -> unit {
+    let mut occ: Occ = Occ { n: [0; 64] };
+    let mut p: usize = 0;
+    while p < NPRIO {
+        let n: usize = check_ring(read (deref s), p, write occ);
+        assert(n <= 64);
+        p = p + 1;
+    }
+    // single membership across rings: no id appears twice
+    let mut id: usize = 0;
+    while id < 64 {
+        assert(occ.n[id] <= 1);
+        id = id + 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dump helpers for the numbered vectors
+// ---------------------------------------------------------------------------
+
+fn dump_len(s: read Sched, p: usize) -> usize {
+    return queue_dump(read (deref s), p).n;
+}
+
+fn dump_at(s: read Sched, p: usize, i: usize) -> usize {
+    return queue_dump(read (deref s), p).ids[i];
+}
+
+// ---------------------------------------------------------------------------
+// Nominal vectors
+// ---------------------------------------------------------------------------
+
+// T1: admit 0,1,2 at prio 1; dump(1) == [0,1,2].
+fn vec_t1() -> unit {
+    let mut ar: Arena = arena_new();
+    let base: rawptr Task = arena_base(write ar);
+    let mut s: Sched = sched_new();
+    sched_init(write s);
+    expect_ok(admit(write s, th(base, 0), 1));
+    expect_ok(admit(write s, th(base, 1), 1));
+    expect_ok(admit(write s, th(base, 2), 1));
+    assert(dump_len(read s, 1) == 3);
+    assert(dump_at(read s, 1, 0) == 0);
+    assert(dump_at(read s, 1, 1) == 1);
+    assert(dump_at(read s, 1, 2) == 2);
+    check_integrity(read s);
+}
+
+// T2: after T1's setup, pick_next -> 0, then (after yield_current) 1, then 2.
+fn vec_t2() -> unit {
+    let mut ar: Arena = arena_new();
+    let base: rawptr Task = arena_base(write ar);
+    let mut s: Sched = sched_new();
+    sched_init(write s);
+    expect_ok(admit(write s, th(base, 0), 1));
+    expect_ok(admit(write s, th(base, 1), 1));
+    expect_ok(admit(write s, th(base, 2), 1));
+    expect_pick(pick_next(write s), 0);
+    expect_ok(yield_current(write s));
+    expect_pick(pick_next(write s), 1);
+    expect_ok(yield_current(write s));
+    expect_pick(pick_next(write s), 2);
+}
+
+// T3: admit 5 at prio 0 while level 1 is non-empty; pick_next -> 5 (3.1).
+fn vec_t3() -> unit {
+    let mut ar: Arena = arena_new();
+    let base: rawptr Task = arena_base(write ar);
+    let mut s: Sched = sched_new();
+    sched_init(write s);
+    expect_ok(admit(write s, th(base, 6), 1));
+    expect_ok(admit(write s, th(base, 5), 0));
+    expect_pick(pick_next(write s), 5);
+}
+
+// T4: admit [10,11] at prio 2; pick_next -> 10; yield_current;
+// dump(2) == [11,10]; pick_next -> 11.
+fn vec_t4() -> unit {
+    let mut ar: Arena = arena_new();
+    let base: rawptr Task = arena_base(write ar);
+    let mut s: Sched = sched_new();
+    sched_init(write s);
+    expect_ok(admit(write s, th(base, 10), 2));
+    expect_ok(admit(write s, th(base, 11), 2));
+    expect_pick(pick_next(write s), 10);
+    expect_ok(yield_current(write s));
+    assert(dump_len(read s, 2) == 2);
+    assert(dump_at(read s, 2, 0) == 11);
+    assert(dump_at(read s, 2, 1) == 10);
+    expect_pick(pick_next(write s), 11);
+}
+
+// ---------------------------------------------------------------------------
+// Priority / round-robin
+// ---------------------------------------------------------------------------
+
+// helper: pick must yield `id`; the picked task then exits (descheduling per
+// R6 so the next pick can proceed).
+fn pick_exit(s: write Sched, base: rawptr Task, id: usize) -> unit {
+    expect_pick(pick_next(write (deref s)), id);
+    expect_ok(exit_task(write (deref s), th(base, id)));
+}
+
+// T5: admit 20@p0, 21@p2, 22@p1, 23@p0; pick order MUST be 20,23,22,21.
+fn vec_t5() -> unit {
+    let mut ar: Arena = arena_new();
+    let base: rawptr Task = arena_base(write ar);
+    let mut s: Sched = sched_new();
+    sched_init(write s);
+    expect_ok(admit(write s, th(base, 20), 0));
+    expect_ok(admit(write s, th(base, 21), 2));
+    expect_ok(admit(write s, th(base, 22), 1));
+    expect_ok(admit(write s, th(base, 23), 0));
+    pick_exit(write s, base, 20);
+    pick_exit(write s, base, 23);
+    pick_exit(write s, base, 22);
+    pick_exit(write s, base, 21);
+    expect_none(pick_next(write s));
+}
+
+// T6: p0 = [20,23], 21@p2; set_priority(21, 0) -> dump(0) == [20,23,21].
+fn vec_t6() -> unit {
+    let mut ar: Arena = arena_new();
+    let base: rawptr Task = arena_base(write ar);
+    let mut s: Sched = sched_new();
+    sched_init(write s);
+    expect_ok(admit(write s, th(base, 20), 0));
+    expect_ok(admit(write s, th(base, 23), 0));
+    expect_ok(admit(write s, th(base, 21), 2));
+    expect_ok(set_priority(write s, th(base, 21), 0));
+    assert(dump_len(read s, 0) == 3);
+    assert(dump_at(read s, 0, 0) == 20);
+    assert(dump_at(read s, 0, 1) == 23);
+    assert(dump_at(read s, 0, 2) == 21);
+    assert(dump_len(read s, 2) == 0);
+    check_integrity(read s);
+}
+
+// ---------------------------------------------------------------------------
+// Mid-list removal / re-insertion
+// ---------------------------------------------------------------------------
+
+// T7: admit [30,31,32,33]@p1; block(32) (middle) -> dump(1) == [30,31,33],
+// integrity holds; wake(32) -> dump(1) == [30,31,33,32].
+fn vec_t7() -> unit {
+    let mut ar: Arena = arena_new();
+    let base: rawptr Task = arena_base(write ar);
+    let mut s: Sched = sched_new();
+    sched_init(write s);
+    expect_ok(admit(write s, th(base, 30), 1));
+    expect_ok(admit(write s, th(base, 31), 1));
+    expect_ok(admit(write s, th(base, 32), 1));
+    expect_ok(admit(write s, th(base, 33), 1));
+    expect_ok(block(write s, th(base, 32)));
+    assert(dump_len(read s, 1) == 3);
+    assert(dump_at(read s, 1, 0) == 30);
+    assert(dump_at(read s, 1, 1) == 31);
+    assert(dump_at(read s, 1, 2) == 33);
+    check_integrity(read s);
+    expect_ok(wake(write s, th(base, 32)));
+    assert(dump_len(read s, 1) == 4);
+    assert(dump_at(read s, 1, 0) == 30);
+    assert(dump_at(read s, 1, 1) == 31);
+    assert(dump_at(read s, 1, 2) == 33);
+    assert(dump_at(read s, 1, 3) == 32);
+    check_integrity(read s);
+}
+
+// T8: admit [40,41,42]@p1; exit(41) (middle) -> dump(1) == [40,42], integrity
+// holds; exit(41) again MUST error E_NOT_SCHEDULABLE.
+fn vec_t8() -> unit {
+    let mut ar: Arena = arena_new();
+    let base: rawptr Task = arena_base(write ar);
+    let mut s: Sched = sched_new();
+    sched_init(write s);
+    expect_ok(admit(write s, th(base, 40), 1));
+    expect_ok(admit(write s, th(base, 41), 1));
+    expect_ok(admit(write s, th(base, 42), 1));
+    expect_ok(exit_task(write s, th(base, 41)));
+    assert(dump_len(read s, 1) == 2);
+    assert(dump_at(read s, 1, 0) == 40);
+    assert(dump_at(read s, 1, 1) == 42);
+    check_integrity(read s);
+    expect_err(exit_task(write s, th(base, 41)), 4);
+}
+
+// T9: admit 50@p1, pick -> 50, block(50), admit 51@p1, pick -> 51,
+// yield_current, wake(50); dump(1) == [51,50].
+fn vec_t9() -> unit {
+    let mut ar: Arena = arena_new();
+    let base: rawptr Task = arena_base(write ar);
+    let mut s: Sched = sched_new();
+    sched_init(write s);
+    expect_ok(admit(write s, th(base, 50), 1));
+    expect_pick(pick_next(write s), 50);
+    expect_ok(block(write s, th(base, 50)));
+    expect_ok(admit(write s, th(base, 51), 1));
+    expect_pick(pick_next(write s), 51);
+    expect_ok(yield_current(write s));
+    expect_ok(wake(write s, th(base, 50)));
+    assert(dump_len(read s, 1) == 2);
+    assert(dump_at(read s, 1, 0) == 51);
+    assert(dump_at(read s, 1, 1) == 50);
+    check_integrity(read s);
+}
+
+// ---------------------------------------------------------------------------
+// Boundary
+// ---------------------------------------------------------------------------
+
+// T10: pick_next on an empty scheduler returns none (a value, not an error).
+fn vec_t10() -> unit {
+    let mut s: Sched = sched_new();
+    sched_init(write s);
+    expect_none(pick_next(write s));
+}
+
+// T11: all four levels populated; drain via repeated pick_next+exit; order is
+// strictly level 0 first, then 1, 2, 3, FIFO within each; ends at none.
+fn vec_t11() -> unit {
+    let mut ar: Arena = arena_new();
+    let base: rawptr Task = arena_base(write ar);
+    let mut s: Sched = sched_new();
+    sched_init(write s);
+    expect_ok(admit(write s, th(base, 1), 0));
+    expect_ok(admit(write s, th(base, 2), 0));
+    expect_ok(admit(write s, th(base, 11), 1));
+    expect_ok(admit(write s, th(base, 12), 1));
+    expect_ok(admit(write s, th(base, 21), 2));
+    expect_ok(admit(write s, th(base, 22), 2));
+    expect_ok(admit(write s, th(base, 31), 3));
+    expect_ok(admit(write s, th(base, 32), 3));
+    pick_exit(write s, base, 1);
+    pick_exit(write s, base, 2);
+    pick_exit(write s, base, 11);
+    pick_exit(write s, base, 12);
+    pick_exit(write s, base, 21);
+    pick_exit(write s, base, 22);
+    pick_exit(write s, base, 31);
+    pick_exit(write s, base, 32);
+    expect_none(pick_next(write s));
+}
+
+// T12: admit the same id twice without exit -> E_ALREADY_QUEUED. Also the
+// R5 corollary: a BLOCKED task is present, so admitting it errors the same.
+fn vec_t12() -> unit {
+    let mut ar: Arena = arena_new();
+    let base: rawptr Task = arena_base(write ar);
+    let mut s: Sched = sched_new();
+    sched_init(write s);
+    expect_ok(admit(write s, th(base, 7), 1));
+    expect_err(admit(write s, th(base, 7), 1), 2);
+    expect_ok(block(write s, th(base, 7)));
+    expect_err(admit(write s, th(base, 7), 1), 2);   // R5: BLOCKED is present
+}
+
+// ---------------------------------------------------------------------------
+// Error vectors
+// ---------------------------------------------------------------------------
+
+// T13: admit(prio=4) -> E_BAD_PRIO.
+fn vec_t13() -> unit {
+    let mut ar: Arena = arena_new();
+    let base: rawptr Task = arena_base(write ar);
+    let mut s: Sched = sched_new();
+    sched_init(write s);
+    expect_err(admit(write s, th(base, 0), 4), 1);
+}
+
+// T14: set_priority(task, 9) -> E_BAD_PRIO.
+fn vec_t14() -> unit {
+    let mut ar: Arena = arena_new();
+    let base: rawptr Task = arena_base(write ar);
+    let mut s: Sched = sched_new();
+    sched_init(write s);
+    expect_ok(admit(write s, th(base, 7), 1));
+    expect_err(set_priority(write s, th(base, 7), 9), 1);
+}
+
+// T15: wake a READY (not blocked) task -> E_NOT_BLOCKED.
+fn vec_t15() -> unit {
+    let mut ar: Arena = arena_new();
+    let base: rawptr Task = arena_base(write ar);
+    let mut s: Sched = sched_new();
+    sched_init(write s);
+    expect_ok(admit(write s, th(base, 7), 1));
+    expect_err(wake(write s, th(base, 7)), 5);
+}
+
+// T16: block an already-BLOCKED task -> E_NOT_SCHEDULABLE.
+fn vec_t16() -> unit {
+    let mut ar: Arena = arena_new();
+    let base: rawptr Task = arena_base(write ar);
+    let mut s: Sched = sched_new();
+    sched_init(write s);
+    expect_ok(admit(write s, th(base, 7), 1));
+    expect_ok(block(write s, th(base, 7)));
+    expect_err(block(write s, th(base, 7)), 4);
+}
+
+// T17: yield_current with no RUNNING task -> E_NO_RUNNING.
+fn vec_t17() -> unit {
+    let mut s: Sched = sched_new();
+    sched_init(write s);
+    expect_err(yield_current(write s), 3);
+}
+
+// T18: exit an unknown (never-admitted) id -> E_NOT_SCHEDULABLE.
+fn vec_t18() -> unit {
+    let mut ar: Arena = arena_new();
+    let base: rawptr Task = arena_base(write ar);
+    let mut s: Sched = sched_new();
+    sched_init(write s);
+    expect_err(exit_task(write s, th(base, 9)), 4);
+}
+
+// ---------------------------------------------------------------------------
+// T20: set_priority on a BLOCKED task takes effect at wake (spec §2.7).
+// ---------------------------------------------------------------------------
+
+fn vec_t20() -> unit {
+    let mut ar: Arena = arena_new();
+    let base: rawptr Task = arena_base(write ar);
+    let mut s: Sched = sched_new();
+    sched_init(write s);
+    expect_ok(admit(write s, th(base, 61), 0));
+    expect_ok(admit(write s, th(base, 62), 0));
+    assert(dump_len(read s, 0) == 2);
+    assert(dump_at(read s, 0, 0) == 61);
+    assert(dump_at(read s, 0, 1) == 62);
+    expect_ok(admit(write s, th(base, 60), 2));
+    expect_ok(block(write s, th(base, 60)));
+    expect_ok(set_priority(write s, th(base, 60), 0));
+    assert(t_prio(th(base, 60)) == 0);               // prio field updated now
+    assert(dump_len(read s, 0) == 2);                // no run-queue change yet
+    assert(dump_at(read s, 0, 0) == 61);
+    assert(dump_at(read s, 0, 1) == 62);
+    assert(dump_len(read s, 2) == 0);
+    expect_ok(wake(write s, th(base, 60)));          // -> tail of level 0
+    assert(dump_len(read s, 0) == 3);
+    assert(dump_at(read s, 0, 0) == 61);
+    assert(dump_at(read s, 0, 1) == 62);
+    assert(dump_at(read s, 0, 2) == 60);
+    assert(dump_len(read s, 2) == 0);
+    check_integrity(read s);
+}
+
+// ---------------------------------------------------------------------------
+// T19: deterministic xorshift64 stress (spec 4.1-4.5), seed
+// 0x9E3779B97F4A7C15, 20000 steps, ids 0..63, per-step shadow-model
+// comparison + list-integrity + single-membership assertions.
+//
+// The shadow model is the language-neutral reference of spec 4.2, kept in
+// the safe gears (plain arrays and indices — it is the oracle, not the
+// measured scheduler): four ordered id lists Q[0..3], a running slot
+// (64 = none), and per-task state/priority mirrors updated by the exact
+// rules of spec §2 (with R5/R6).
+// ---------------------------------------------------------------------------
+
+// xorshift64 (Marsaglia), exactly spec 4.1 — same construction as the
+// allocator port: no bitwise operators in the language, so XOR is a bit loop
+// and the shifts are wrapping multiplies / unsigned divides by powers of two.
+fn xor64(a: u64, b: u64) -> u64 {
+    let mut r: u64 = 0u64;
+    let mut pa: u64 = a;
+    let mut pb: u64 = b;
+    let mut bit: u64 = 1u64;
+    let mut i: u64 = 0u64;
+    while i < 64u64 {
+        if pa % 2u64 != pb % 2u64 {
+            wrapping { r = r + bit; }
+        }
+        pa = pa / 2u64;
+        pb = pb / 2u64;
+        wrapping { bit = bit * 2u64; }   // wraps to 0 on the final doubling
+        i = i + 1u64;
+    }
+    return r;
+}
+
+fn xs_next(state: write u64) -> u64 {
+    let mut x: u64 = deref state;
+    wrapping {
+        x = xor64(x, x * 8192u64);      // x ^= x << 13
+        x = xor64(x, x / 128u64);       // x ^= x >> 7  (u64 / is a logical shift)
+        x = xor64(x, x * 131072u64);    // x ^= x << 17
+    }
+    deref state = x;
+    return x;
+}
+
+struct Shadow {
+    q: [4][64]usize,   // Q[p]: ordered ids, head first
+    qn: [4]usize,      // length of Q[p]
+    st: [64]usize,     // per-task state mirror (ST_* codes)
+    pr: [64]usize,     // per-task recorded priority
+    run: usize,        // running id, 64 = none
+}
+
+fn shadow_new() -> Shadow {
+    return Shadow { q: [[0; 64]; 4], qn: [0; 4], st: [0; 64], pr: [0; 64], run: 64 };
+}
+
+fn sh_enq(sh: write Shadow, p: usize, id: usize) -> unit {
+    (deref sh).q[p][(deref sh).qn[p]] = id;
+    (deref sh).qn[p] = (deref sh).qn[p] + 1;
+}
+
+// remove id from Q[p] preserving the order of the others (spec 3.5)
+fn sh_remove(sh: write Shadow, p: usize, id: usize) -> unit {
+    let n: usize = (deref sh).qn[p];
+    let mut i: usize = 0;
+    while i < n && (deref sh).q[p][i] != id {
+        i = i + 1;
+    }
+    assert(i < n);   // the shadow says it is queued here
+    while i + 1 < n {
+        (deref sh).q[p][i] = (deref sh).q[p][i + 1];
+        i = i + 1;
+    };
+    (deref sh).qn[p] = n - 1;
+}
+
+// --- per-op stress steps: drive scheduler and shadow by the same §2 rules;
+// a "skip" draw (spec 4.3) still calls the scheduler and asserts the exact
+// error value, then leaves both models unchanged. ---
+
+fn t19_admit(s: write Sched, sh: write Shadow, base: rawptr Task, id: usize, p: usize) -> unit {
+    if (deref sh).st[id] != ST_ABSENT {
+        expect_err(admit(write (deref s), th(base, id), p), 2);   // present (R5)
+        return;
+    }
+    expect_ok(admit(write (deref s), th(base, id), p));
+    (deref sh).st[id] = ST_READY;
+    (deref sh).pr[id] = p;
+    sh_enq(write (deref sh), p, id);
+}
+
+fn t19_pick(s: write Sched, sh: write Shadow) -> unit {
+    if (deref sh).run != 64 {
+        expect_none(pick_next(write (deref s)));   // R6: no-op while RUNNING
+        return;
+    }
+    let mut p: usize = 0;
+    while p < NPRIO && (deref sh).qn[p] == 0 {
+        p = p + 1;
+    }
+    if p == NPRIO {
+        expect_none(pick_next(write (deref s)));
+        return;
+    }
+    let id: usize = (deref sh).q[p][0];
+    expect_pick(pick_next(write (deref s)), id);
+    sh_remove(write (deref sh), p, id);
+    (deref sh).st[id] = ST_RUNNING;
+    (deref sh).run = id;
+}
+
+fn t19_yield(s: write Sched, sh: write Shadow) -> unit {
+    if (deref sh).run == 64 {
+        expect_err(yield_current(write (deref s)), 3);
+        return;
+    }
+    expect_ok(yield_current(write (deref s)));
+    let id: usize = (deref sh).run;
+    (deref sh).st[id] = ST_READY;
+    let p: usize = (deref sh).pr[id];
+    sh_enq(write (deref sh), p, id);
+    (deref sh).run = 64;
+}
+
+fn t19_block(s: write Sched, sh: write Shadow, base: rawptr Task, id: usize) -> unit {
+    let st: usize = (deref sh).st[id];
+    if st == ST_READY {
+        expect_ok(block(write (deref s), th(base, id)));
+        let p: usize = (deref sh).pr[id];
+        sh_remove(write (deref sh), p, id);
+        (deref sh).st[id] = ST_BLOCKED;
+    } else if st == ST_RUNNING {
+        expect_ok(block(write (deref s), th(base, id)));
+        (deref sh).st[id] = ST_BLOCKED;
+        (deref sh).run = 64;
+    } else {
+        expect_err(block(write (deref s), th(base, id)), 4);
+    }
+}
+
+fn t19_wake(s: write Sched, sh: write Shadow, base: rawptr Task, id: usize) -> unit {
+    if (deref sh).st[id] != ST_BLOCKED {
+        expect_err(wake(write (deref s), th(base, id)), 5);
+        return;
+    }
+    expect_ok(wake(write (deref s), th(base, id)));
+    (deref sh).st[id] = ST_READY;
+    let p: usize = (deref sh).pr[id];
+    sh_enq(write (deref sh), p, id);
+}
+
+fn t19_setprio(s: write Sched, sh: write Shadow, base: rawptr Task, id: usize, p: usize) -> unit {
+    let st: usize = (deref sh).st[id];
+    if st == ST_ABSENT {
+        expect_err(set_priority(write (deref s), th(base, id), p), 4);
+        return;
+    }
+    expect_ok(set_priority(write (deref s), th(base, id), p));
+    if st == ST_READY {
+        let old: usize = (deref sh).pr[id];
+        sh_remove(write (deref sh), old, id);
+        (deref sh).pr[id] = p;
+        sh_enq(write (deref sh), p, id);
+    } else {
+        (deref sh).pr[id] = p;   // RUNNING/BLOCKED: recorded, applied at enqueue
+    }
+}
+
+fn t19_exit(s: write Sched, sh: write Shadow, base: rawptr Task, id: usize) -> unit {
+    let st: usize = (deref sh).st[id];
+    if st == ST_ABSENT {
+        expect_err(exit_task(write (deref s), th(base, id)), 4);
+        return;
+    }
+    expect_ok(exit_task(write (deref s), th(base, id)));
+    if st == ST_READY {
+        let p: usize = (deref sh).pr[id];
+        sh_remove(write (deref sh), p, id);
+    }
+    if st == ST_RUNNING {
+        (deref sh).run = 64;
+    };
+    (deref sh).st[id] = ST_ABSENT;
+}
+
+// queue_dump(p) must equal shadow Q[p], id for id (spec 4.4)
+fn t19_check_dump(s: read Sched, sh: read Shadow, p: usize) -> unit {
+    let d: Dump = queue_dump(read (deref s), p);
+    assert(d.n == (deref sh).qn[p]);
+    let mut i: usize = 0;
+    while i < d.n {
+        assert(d.ids[i] == (deref sh).q[p][i]);
+        i = i + 1;
+    }
+}
+
+// per-step assertions (spec 4.4): dump equality, list integrity (3.4),
+// single membership (3.3), and RUNNING/BLOCKED/EXITED classification.
+fn t19_check(s: read Sched, sh: read Shadow, base: rawptr Task) -> unit {
+    let mut occ: Occ = Occ { n: [0; 64] };
+    let mut p: usize = 0;
+    while p < NPRIO {
+        let n: usize = check_ring(read (deref s), p, write occ);
+        assert(n == (deref sh).qn[p]);
+        t19_check_dump(read (deref s), read (deref sh), p);
+        p = p + 1;
+    }
+    let run: rawptr Task = (deref s).running;
+    if (deref sh).run == 64 {
+        assert(is_null(run));
+    } else {
+        assert(!is_null(run));
+        assert(t_id(run) == (deref sh).run);
+        assert(t_state(run) == ST_RUNNING);
+    }
+    let mut id: usize = 0;
+    while id < 64 {
+        assert(t_state(th(base, id)) == (deref sh).st[id]);   // classification
+        assert(t_prio(th(base, id)) == (deref sh).pr[id]);    // recorded prio
+        if (deref sh).st[id] == ST_READY {
+            assert(occ.n[id] == 1);    // in exactly one run-queue
+        } else {
+            assert(occ.n[id] == 0);    // in no run-queue (3.3)
+        }
+        id = id + 1;
+    }
+}
+
+fn vec_t19() -> unit {
+    let mut ar: Arena = arena_new();
+    let base: rawptr Task = arena_base(write ar);
+    let mut s: Sched = sched_new();
+    sched_init(write s);
+    let mut sh: Shadow = shadow_new();
+    let mut state: u64 = 0x9E3779B97F4A7C15u64;   // spec 4.1 seed
+    let mut step: usize = 0;
+    while step < 20000 {
+        let w: u64 = xs_next(write state);
+        let id: usize = conv usize ((w / 8u64) % 64u64);      // (w >> 3) mod 64
+        let op: u64 = w % 8u64;                               // w and 0x7
+        let p: usize = conv usize ((w / 512u64) % 4u64);      // (w >> 9) mod 4
+        if op == 0u64 || op == 1u64 {
+            t19_admit(write s, write sh, base, id, p);
+        } else if op == 2u64 {
+            t19_pick(write s, write sh);
+        } else if op == 3u64 {
+            t19_yield(write s, write sh);
+        } else if op == 4u64 {
+            t19_block(write s, write sh, base, id);
+        } else if op == 5u64 {
+            t19_wake(write s, write sh, base, id);
+        } else if op == 6u64 {
+            t19_setprio(write s, write sh, base, id, p);
+        } else {
+            t19_exit(write s, write sh, base, id);
+        }
+        t19_check(read s, read sh, base);
+        step = step + 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// main: every vector on a fresh scheduler + fresh caller-owned arena.
+// Sentinel 777 on full success; any failure faults first.
+// ---------------------------------------------------------------------------
+
+fn main() -> i64 {
+    vec_t1();
+    vec_t2();
+    vec_t3();
+    vec_t4();
+    vec_t5();
+    vec_t6();
+    vec_t7();
+    vec_t8();
+    vec_t9();
+    vec_t10();
+    vec_t11();
+    vec_t12();
+    vec_t13();
+    vec_t14();
+    vec_t15();
+    vec_t16();
+    vec_t17();
+    vec_t18();
+    vec_t20();
+    vec_t19();
+    return 777;   // sentinel: every vector passed
+}
