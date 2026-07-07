@@ -124,3 +124,12 @@ ratio 0.474, decisive).
    authored-only reading cuts both ways across time.
 3. The standing evidence: the load claim passed decisively on every metric and every program;
    value-first's cost concentrates precisely and only where P12 v4.1 already concedes it.
+
+## §9 review ruling — 2026-07-08
+
+**Bet 5 is PROVISIONALLY CONFIRMED on this basket** (philosophy amendment v4.2). The registered
+self-contained yardstick governs the scheduler (the authored-only 2-vs-47 gap is recorded as an
+ecosystem-bootstrap fact, owned by Bets 4/6, not a memory-model defect); the allocator-class
+concession stands. Binding commitments: safe rawptr field projection and reborrow ergonomics
+enter the next design round, and the scheduler is re-ported and re-measured under the frozen
+successor rules before any syntax freeze — returning to review if the numbers worsen.
