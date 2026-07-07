@@ -99,3 +99,18 @@ id is a conforming enforcement of spec 2.3's liveness requirement (fault = bug m
 no capacity requirement. — **R24 (arena idiomaticity).** Confirmed idiomatic per §11.5's sketch;
 zero valve regions, zero cell-substitutable candidates (nothing to tag). M2 value-favorable
 verdict: 0.0000 against the 0.15 ceiling — clean pass.
+
+## 2026-07-07 — MMIO port scoring batch
+
+**R25 (mmio).** M11's "every scenario" read as reachable-prefix (M5/M10's own traces contradict
+the literal reading). — **R26 (mmio).** M14 for M8-with-recovery counts DATA writes across both
+attempts. — **R27 (mmio).** The spec-3.4 per-word stall reset is trace-unobservable under M1-M10
+(mutation-verified by the port author); implemented per spec regardless; recorded so the next
+reader need not re-derive it. — **R28 (mmio idiomaticity + verdict).** Confirmed idiomatic: the
+valve is two one-pointer-op functions (reg_read/reg_write), the thinnest seam the design permits;
+device model correctly harness-side via fn-pointer hooks; no cell-substitutable candidates (MMIO
+volatile access has no checked-runtime alternative). Valve-line 0.0469 passes the 0.15 ceiling;
+valve-FUNCTION 2/8 = 0.2500 breaches the 0.20 function ceiling. Any "fix" would be gaming
+(inlining the seam raises valve lines; padding with functions is padding), so the breach stands
+as measured and joins the denominator-compression observation for the §9 proceeding: the ideal
+valve architecture fails the function-fraction ceiling purely because the program is 8 functions.

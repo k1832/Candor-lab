@@ -9,7 +9,7 @@ commitment — including unfavorable ones.
 |---|---|---|---|---|---|---|
 | Allocator | YES — 22/22 vectors, sentinel 777, 21m20s | **0.6292** | 0.6250 | max(0.40, 1.25×0.1929)=0.40 | 0.0617 vs 0.2943 | **KILL threshold breached** |
 | Intrusive scheduler | YES — 20/20 vectors, sentinel 777, ~25s | **0.4120** | 0.8750 | max(0.40, 1.25×0.1489)=0.40 | 0.2948 vs 0.5132 | **KILL threshold breached** |
-| MMIO state machine | pending | | | 0.15 abs | vs 0.1667 | |
+| MMIO state machine | YES — M1-M10 byte-exact, sentinel 777, ~0.02s | 0.0469 | **0.2500** | 0.15 line / 0.20 fn abs | 0.1183 vs 0.1667 | **KILL threshold breached (fn fraction)** |
 | Parser | pending | | | 0.15 abs | vs 0.4150 | |
 | Arena pass | YES — 29/29 vectors, sentinel 777, ~25ms | **0.0000** | 0.0000 | 0.15 abs | 0.0991 vs 0.2051 | **pass** |
 
@@ -40,7 +40,16 @@ units/statement (−52%). M2: 0.0000 vs the 0.15 value-favorable ceiling — cle
 notes in the port README (reborrow ceremony in recursive walkers; no i64::MIN literal; `out` is
 a reserved word). Rulings R21-R24.
 
-## Measurement observation (both home-ground programs)
+## MMIO — recorded 2026-07-07
+
+Completed (M5 pass, M1-M10 byte-exact incl. recovery scenarios; suite ~0.02s). Annotation 0.1183
+vs Rust 0.1667 (−29%). Valve-line 0.0469 — well under the 0.15 ceiling. Valve-FUNCTION 2/8 =
+0.2500 vs the 0.20 ceiling: **breached**, by the thinnest possible valve (two one-pointer-op
+register accessors, the exact architecture design 0001 §11.3 prescribes) sitting in an
+8-function program. Ruling R28: no honest refactor reduces the fraction, so the breach stands
+as measured — the purest instance yet of the fraction-vs-density artifact.
+
+## Measurement observation (home-ground programs; now also MMIO)
 
 Observation recorded for the eventual §9 proceeding, per §0.3 (defects are published, not
 patched): the valve-line *fraction* is sensitive to total program size. The Candor port
