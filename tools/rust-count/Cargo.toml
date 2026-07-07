@@ -1,0 +1,22 @@
+[package]
+name = "rust-count"
+version = "0.1.0"
+edition = "2021"
+description = "Bet 5 measurement instrument (Rust side): syn-based annotation/valve/copy counter over the frozen unit table (docs/BET5_UNIT_TABLE.md)."
+
+# Standalone: its own workspace root so it is never pulled into the prototype crate.
+[workspace]
+
+[lib]
+name = "rust_count"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rust-count"
+path = "src/main.rs"
+
+[dependencies]
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -5,6 +5,9 @@
 //!   candor-proto check <file>   -- parse + resolve + Stage 2 check;
 //!                                  print JSON diagnostics (one per line),
 //!                                  exit 0 if clean, 1 if any error.
+//!   candor-proto count <file>   -- parse + check, then emit the frozen Bet 5
+//!                                  unit-table counts as JSON (exit 0), or a
+//!                                  parse-error JSON (exit 1).
 
 use std::process::ExitCode;
 
@@ -14,8 +17,9 @@ fn main() -> ExitCode {
         (Some("parse"), Some(path)) => run_parse(path),
         (Some("check"), Some(path)) => run_check(path),
         (Some("run"), Some(path)) => run_run(path),
+        (Some("count"), Some(path)) => run_count(path),
         _ => {
-            eprintln!("usage: candor-proto (parse|check|run) <file>");
+            eprintln!("usage: candor-proto (parse|check|run|count) <file>");
             ExitCode::from(2)
         }
     }
@@ -90,6 +94,23 @@ fn run_run(path: &str) -> ExitCode {
         }
         candor_proto::RunResult::ParseError(d) => {
             println!("{}", d.to_json());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_count(path: &str) -> ExitCode {
+    let src = match read(path) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    match candor_proto::count_source(&src) {
+        Ok(counts) => {
+            println!("{}", counts.to_json_pretty());
+            ExitCode::SUCCESS
+        }
+        Err(diag) => {
+            println!("{}", diag.to_json());
             ExitCode::FAILURE
         }
     }

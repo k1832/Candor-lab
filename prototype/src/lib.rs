@@ -6,6 +6,7 @@
 
 pub mod ast;
 pub mod check;
+pub mod count;
 pub mod diag;
 pub mod interp;
 pub mod lexer;
@@ -22,6 +23,15 @@ use diag::Diag;
 pub fn parse_source(src: &str) -> Result<Program, Diag> {
     let tokens = lexer::lex(src)?;
     parser::parse(tokens)
+}
+
+/// Parse (and run the checker for its side effect / admissibility note), then
+/// count the program against the frozen unit table (`docs/BET5_UNIT_TABLE.md`).
+/// Counting is purely syntactic over the AST; a parse error is returned as-is.
+pub fn count_source(src: &str) -> Result<count::Counts, Diag> {
+    let program = parse_source(src)?;
+    let _diags = check::check_program(&program);
+    Ok(count::count_program(&program, src))
 }
 
 /// Parse then run the Stage 2 static checker. Returns all diagnostics (empty
