@@ -727,3 +727,115 @@ fn r2_copy_reads_through_deref_and_index_accepted() {
          fn box_rd(b: Box i64) alloc -> i64 { let v: i64 = deref b; return unbox(b); }",
     );
 }
+
+// ---- Soundness review #3 (2026-07-07): contracts read-only + ensures dataflow,
+// and immutable statics --------------------------------------------------------
+
+#[test]
+fn ensures_read_of_body_moved_param_is_e0301() {
+    // Fix 1(b): `ensures` is analyzed against the post-body state at each return.
+    // The body moved `x`, so the clause's read of `x.v` is the ordinary E0301.
+    assert_has(
+        "struct R { v: i64 } \
+         fn f(x: R) ensures(x.v == 7) -> i64 { let y: R = x; return y.v; }",
+        "E0301",
+    );
+}
+
+#[test]
+fn ensures_unbox_then_deref_is_e0301() {
+    // The body `unbox`es the Box param; the clause dereferences the freed box —
+    // a use-after-free that is now the ordinary use-of-moved diagnostic.
+    assert_has(
+        "struct R { v: i64 } \
+         fn f(bx: Box R) ensures((deref bx).v == 7) alloc -> i64 { let r: R = unbox(bx); return r.v; }",
+        "E0301",
+    );
+}
+
+#[test]
+fn ensures_reading_live_param_is_clean() {
+    // Control: a clause reading a still-live param passes the dataflow check.
+    assert_clean("struct R { v: i64 } fn f(x: R) ensures(x.v == 7) -> i64 { return x.v; }");
+}
+
+#[test]
+fn contract_write_borrow_is_e0708() {
+    // Fix 1(a) read-only rule: a `write`-borrow inside a contract is rejected.
+    assert_has(
+        "fn g(p: write i64) -> bool { return true; } \
+         fn f(y: i64) ensures(g(write y)) -> i64 { return y; }",
+        "E0708",
+    );
+}
+
+#[test]
+fn contract_out_arg_is_e0708() {
+    // Read-only rule: an `out` argument inside a contract is rejected.
+    assert_has(
+        "fn g(p: out i64) -> bool { p = 0; return true; } \
+         fn f() -> i64 { let mut r: i64; assert(g(out r)); return r; }",
+        "E0708",
+    );
+}
+
+#[test]
+fn contract_call_taking_by_take_is_e0708() {
+    // Read-only rule: a call taking a non-copy argument by `take` inside a
+    // contract consumes it and is rejected.
+    assert_has(
+        "struct R { v: i64 } \
+         fn consume(r: R) -> bool { return r.v == 0; } \
+         fn f(x: R) ensures(consume(x)) -> i64 { return 0; }",
+        "E0708",
+    );
+}
+
+#[test]
+fn contract_read_borrow_and_copy_take_are_clean() {
+    // Read-only rule permits reads, `read`-borrows, and copy-`take` calls.
+    assert_clean(
+        "fn peek(p: read i64) -> bool { return (deref p) == 0; } \
+         fn dbl(n: i64) -> bool { return n == n; } \
+         fn f(y: i64) ensures(peek(read y)) requires(dbl(y)) -> i64 { return y; }",
+    );
+}
+
+#[test]
+fn static_assignment_is_e0311() {
+    // Fix 2: statics are immutable.
+    assert_has(
+        "static COUNTER: i64 = 0; fn f() -> i64 { COUNTER = 5; return COUNTER; }",
+        "E0311",
+    );
+}
+
+#[test]
+fn static_write_borrow_is_e0311() {
+    assert_has(
+        "static COUNTER: i64 = 0; \
+         fn g(p: write i64) -> unit { return; } \
+         fn f() -> i64 { g(write COUNTER); return COUNTER; }",
+        "E0311",
+    );
+}
+
+#[test]
+fn static_out_arg_is_e0311() {
+    assert_has(
+        "static COUNTER: i64 = 0; \
+         fn g(p: out i64) -> unit { p = 1; return; } \
+         fn f() -> i64 { g(out COUNTER); return COUNTER; }",
+        "E0311",
+    );
+}
+
+#[test]
+fn static_read_and_read_borrow_are_clean() {
+    // Reading and `read`-borrowing a static stay legal.
+    assert_clean(
+        "static COUNTER: i64 = 7; \
+         fn g(p: read i64) -> i64 { return deref p; } \
+         fn f() -> i64 { return g(read COUNTER) + COUNTER; }",
+    );
+}

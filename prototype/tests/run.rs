@@ -478,3 +478,13 @@ fn drop_hooked_uninit_on_all_taken_paths_no_drop() {
     let r = run(&src);
     assert!(r.trace.is_empty(), "expected no drop, got {:?}", r.trace);
 }
+
+#[test]
+fn ensures_reading_live_param_runs() {
+    // Review #3 control: a clause reading a still-live param checks clean and is
+    // evaluated at the normal return without touching moved/freed state.
+    let src = "struct R { v: i64 } \
+               fn f(x: R) ensures(x.v == 7) -> i64 { return x.v; } \
+               fn main() -> i64 { return f(R { v: 7 }); }";
+    assert_eq!(run(src).ret, 7);
+}

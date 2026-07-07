@@ -95,6 +95,22 @@ unreachable for accepted programs (a `debug_assert` records this). §2.1/§2.4 c
 (it had described the interpreter's mark-root-moved as `init.rs` behavior). A retest #3 in a fresh session follows;
 counts remain inadmissible until it passes.
 
+Retest #3 (fresh session, 2026-07-07) **failed** with a new accept-invalid at the one seam no prior
+review touched: **contracts × dataflow**. `check_fn` type-checked `ensures` with `cur = None` — off the
+CFG — so a clause's reads/moves/borrows reached **no** analysis, while the interpreter evaluated the
+clause after the body and before drops. A function that `unbox`-ed its `Box` param and whose `ensures`
+dereferenced that param checked clean and read freed heap at runtime; the same held for reads of any
+body-moved (incl. drop-hooked) param. `requires` was unaffected (checked in the entry block). This
+falsified claims (a)/(c) for contract expressions. A sibling observation: assignment to a `static` was
+accepted and silently mutated it. **RESOLVED** by the deciding authority: **(1) contract clauses are
+read-only** — no moves, `write`-borrows, `out` arguments, or consuming/mutating calls inside a
+`requires`/`ensures`/`assert` condition (new checker error **E0708**); **(2) `ensures` accesses are
+analyzed against the post-body state at every normal return** — a read of a moved/consumed place is the
+ordinary **E0301**, as if written at the return; **(3) statics are immutable** — assignment, `write`-borrow,
+or `out`-passing of a static is a new checker error **E0311**. Design 0001 §7.3 gains rules (1)/(2) and
+§8.2 gains rule (3); the new §2.7 sub-argument below discharges the contract boundary. A retest #4 in a
+fresh session follows; counts remain inadmissible until it passes.
+
 ---
 
 ## 1. The claim, stated precisely and honestly
@@ -367,6 +383,40 @@ never suppresses one.
 The discharge is bounded by the same model caveat as the rest (§1): faults are defined against the prototype
 interpreter's trapping semantics, which has no optimizer and does not exercise P5's fault window.
 
+### 2.7 The contract boundary (serving (a), (c)) — review #3
+
+A contract clause is a place where source expressions are *evaluated at runtime* (P8: enforced level). Two
+seams therefore have to be closed for claims (a) (no use-after-free) and (c) (no use-after-move) to hold for
+those expressions as much as for the body.
+
+- **Read-only rule (`check/*`, E0708).** A `requires`/`ensures`/`assert` condition may not move a non-`copy`
+  value, take a `write`-borrow, pass an `out` argument, or call a function that takes any argument by `take`
+  (non-copy), `write`, or `out`. This is enforced at the same classification points the body uses:
+  `emit_place_action` flags a non-copy `Move`, an exclusive `Borrow`, or an `OutArg`; the call sites
+  (`check_user_call`, the indirect-call arm, `check_out_arg`) flag a consuming callee and an `out` place.
+  Reads, `read`-borrows, and copy-`take` calls pass. The rationale is P8: a check that consumes or mutates
+  the state it inspects is incoherent, and (relevant here) a clause that *moved* a value would leave the
+  interpreter's post-body drop schedule inconsistent with the checker's. Restricting clauses to reads makes
+  their meaning stable across a future non-interpreting implementation.
+- **Return-point dataflow (`check_fn`, `init.rs`, E0301).** Instead of checking `ensures` off the CFG, the
+  checker re-emits each clause's accesses into **every normal-return block** (`Term::Return`/`FallThrough`),
+  where they are analyzed by the same definite-assignment+move pass (§2.1) against the move/init state the
+  body leaves at that return. A clause that reads a param the body moved, or dereferences a `Box` the body
+  `unbox`-ed, is then the ordinary **E0301** — carrying a note that the access is in a contract. The analysis
+  is done **once per return block against that block's own out-state**, not against a meet of the return
+  states. That is the precise reading of the runtime semantics (the clause runs at each return, over exactly
+  that return's state) and it is sound: a place moved on the path to a given return is `Moved` in that
+  block's state, so its clause read is rejected; a place still live there is `Init` and accepted. A meet would
+  be sound only paired with an initialized-on-all-return-paths demand, which would additionally reject clauses
+  that are well-defined at every actual return — strictly more conservative for no soundness gain. Because the
+  read-only rule forbids clause moves, an *accepted* clause emits only reads and `read`-borrows, so the
+  re-emission never perturbs the body's own move/init fixpoint (reads do not change state). The interpreter is
+  unchanged: it still evaluates each clause at the return before drops — but an accepted program can no longer
+  make that evaluation touch moved or freed state. This restores (a)/(c) for contract expressions and turns
+  review #2's demanded disclosure of the gap into a discharge. Regression and control tests
+  (moved-param read, `unbox`-then-deref, live-param positive, the three read-only-rule rejections, and the
+  static-immutability set) live in `tests/check.rs`/`tests/run.rs`.
+
 ---
 
 ## 3. Known conservatisms (reject-valid; harmless to soundness; relevant to measurement bias)
@@ -442,14 +492,17 @@ Design 0001 §11 makes every worked example a fixture and requires re-verificati
   `11_4_parser`, `11_5_arena`) check with **zero diagnostics**.
 - `tests/run_golden.rs` — all five execute to completion under the interpreter.
 
-Observed: the full suite (`cargo test`) is green — 33 unit + 61 `check` (including the five review #1
-regression sets: total return-provenance, reassignment/`out` drop points, nested partial move, and the
-box-drop/`unbox` free side, with their positive controls) + 5 `check_fixtures` + 14 `count` + 6 `golden` +
-30 `loans` (including the four S1 negative tests and the copy-payload positive control) + 34 `run` + 5
-`run_golden`, **188 tests, 0 failures**. This discharges the §11 obligation for the accept/reject boundary
-and at runtime; it does not, and cannot, substitute for the argument above — passing fixtures show the
-checker accepts what it should, not that it rejects everything unsound. (The `11_4_parser` runnable fixture
-gained an `alloc` marker on `eval_owned`, which `unbox`es the owned AST — the free side of finding 4.)
+Standing invariant: the full suite (`cargo test`) is **green — every test passes, zero failures** — and is
+kept so at each freeze step; the live count is whatever CI and the repo report, not a number pinned in this
+hashed document (which would only rot). The suite spans the unit tests, the `check` negative/positive
+snippets (including the review #1 regression sets — total return-provenance, reassignment/`out` drop
+points, nested partial move, the box-drop/`unbox` free side — the review #2 opaque-move E0310 set, and the
+review #3 contract-boundary and static-immutability sets, each with positive controls), the five
+`check_fixtures` and five `run_golden` basket fixtures, and the `count`, `golden`, `loans`, and `run`
+suites. This discharges the §11 obligation for the accept/reject boundary and at runtime; it does not, and
+cannot, substitute for the argument above — passing fixtures show the checker accepts what it should, not
+that it rejects everything unsound. (The `11_4_parser` runnable fixture gained an `alloc` marker on
+`eval_owned`, which `unbox`es the owned AST — the free side of finding 4.)
 
 ---
 

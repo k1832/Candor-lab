@@ -93,6 +93,11 @@ to.
      `POOL_VTABLE`/`MY_VTABLE` as "top-level values" without a declaration
      syntax; `static` is the minimal representable form. (`::` stays reserved
      for variants, so `static` does not collide with anything.)
+     **Statics are immutable** (soundness review #3, 2026-07-07): the checker
+     rejects assignment to, `write`-borrow of, or `out`-passing of a static
+     (E0311); reading and `read`-borrowing stay legal. A mutable global is a
+     recorded future design question (concurrency, P9), not an accident of the
+     prototype.
    - **`borrow T` / `borrow_mut T` type keywords** (0001 §2.1 names them) are
      accepted in type position for completeness even though §11 never spells a
      borrow *type* (borrows are introduced by `read`/`write` modes and

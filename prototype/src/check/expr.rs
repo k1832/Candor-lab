@@ -49,6 +49,7 @@ impl<'a> Checker<'a> {
                 op: PrefixOp::Write,
                 expr,
             } => {
+                self.reject_static_mutation(expr, "`write`-borrow", e.span);
                 let t = self.check_expr(expr, Use::BorrowExcl);
                 Type::BorrowMut(Box::new(t))
             }
@@ -147,7 +148,11 @@ impl<'a> Checker<'a> {
                 Type::Never
             }
             ExprKind::Assert(cond) => {
+                // An `assert` condition is a read-only contract clause (review #3).
+                let saved = self.f_in_contract();
+                self.set_in_contract(true);
                 let t = self.check_expr(cond, Use::Value);
+                self.set_in_contract(saved);
                 self.expect_bool(&t, cond.span, "an `assert`");
                 Type::unit()
             }
@@ -742,6 +747,7 @@ impl<'a> Checker<'a> {
                     self.check_expr(a, Use::Value);
                 }
                 self.push_call_group(group);
+                self.reject_consuming_call(fp.params.iter().map(|(m, t)| (*m, t)), span);
                 if fp.alloc {
                     self.note_alloc(span, "indirect call through an `alloc` fn-pointer (§6.1)");
                 }
@@ -756,6 +762,31 @@ impl<'a> Checker<'a> {
                     span,
                 ));
                 Type::Error
+            }
+        }
+    }
+
+    /// Apply the read-only contract rule to a call site (review #3): if any
+    /// parameter is passed by `write`, `out`, or `take` of a non-`copy` type, the
+    /// call consumes or mutates its argument and is rejected inside a contract
+    /// clause. `read`-mode and copy-`take` arguments are fine.
+    fn reject_consuming_call<'p>(
+        &mut self,
+        params: impl Iterator<Item = (ParamMode, &'p Type)>,
+        span: Span,
+    ) {
+        if !self.f.in_contract {
+            return;
+        }
+        for (mode, ty) in params {
+            let consumes = match mode {
+                ParamMode::Write | ParamMode::Out => true,
+                ParamMode::Take => !is_copy(ty, self.items),
+                ParamMode::Read => false,
+            };
+            if consumes {
+                self.reject_in_contract(span, "a call that consumes or mutates an argument");
+                return;
             }
         }
     }
@@ -784,6 +815,10 @@ impl<'a> Checker<'a> {
         }
         let group: Vec<usize> = per_arg.iter().flatten().copied().collect();
         self.push_call_group(group);
+        // A contract clause is read-only: a call that takes any argument by
+        // `take` (non-copy), `write`, or `out` consumes or mutates it and is
+        // rejected (review #3, 2026-07-07). `read`-mode and copy-`take` are fine.
+        self.reject_consuming_call(sig.params.iter().map(|p| (p.mode, &p.decl_ty)), span);
         if sig.alloc {
             self.note_alloc(span, format!("call to `alloc` function `{}` (§6.3)", sig.name));
         }
@@ -851,6 +886,7 @@ impl<'a> Checker<'a> {
     }
 
     fn check_out_arg(&mut self, arg: &Expr, expected: &Type) {
+        self.reject_static_mutation(arg, "pass as `out`", arg.span);
         let (t, place) = self.check_place(arg);
         match &place {
             Some(p) => {
@@ -1383,7 +1419,7 @@ fn join_types(a: Type, b: Type) -> Type {
 }
 
 /// The canonical root binding of the place an expression denotes.
-fn expr_place_root(e: &Expr) -> Option<String> {
+pub(super) fn expr_place_root(e: &Expr) -> Option<String> {
     match &e.kind {
         ExprKind::Paren(i) => expr_place_root(i),
         ExprKind::Ident(n) => Some(n.clone()),

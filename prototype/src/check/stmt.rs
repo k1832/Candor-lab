@@ -74,6 +74,7 @@ impl<'a> Checker<'a> {
                 }
             }
             StmtKind::Assign { target, value } => {
+                self.reject_static_mutation(target, "assign to", s.span);
                 let (tt, place) = self.check_place(target);
                 self.clear_carried();
                 self.check_against(value, &tt);
@@ -150,6 +151,12 @@ impl<'a> Checker<'a> {
     }
     pub(super) fn in_ensures_get(&self) -> bool {
         self.f.in_ensures
+    }
+    pub(super) fn f_in_contract(&self) -> bool {
+        self.f.in_contract
+    }
+    pub(super) fn set_in_contract(&mut self, v: bool) {
+        self.f.in_contract = v;
     }
     pub(super) fn ret_ty_clone(&self) -> Type {
         self.f.ret_ty.clone()

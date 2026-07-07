@@ -155,6 +155,11 @@ pub struct Action {
     pub span: Span,
     /// True when the root is a tracked local (param/let/binding).
     pub tracked: bool,
+    /// True when this access originates from a contract clause (`ensures`)
+    /// re-emitted at a return point (review #3, 2026-07-07): a diagnostic on it
+    /// notes the contract position so a use-of-moved read reads as coming from
+    /// the clause, not the body.
+    pub contract: bool,
 }
 
 #[derive(Clone, Debug)]

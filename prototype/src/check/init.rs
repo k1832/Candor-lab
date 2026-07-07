@@ -194,7 +194,7 @@ fn apply(
     match &a.access {
         Access::Read | Access::Borrow(_) => {
             if let Some(d) = report.as_deref_mut() {
-                require_init(st, key, out_params, a.span, d);
+                require_init(st, key, out_params, a.span, a.contract, d);
             }
         }
         Access::Move {
@@ -212,7 +212,7 @@ fn apply(
                 // move-trackable at index granularity in the prototype's place
                 // model. (0001 §1.6/§2.1; 0003 §2.1/§2.4.)
                 if let Some(d) = report.as_deref_mut() {
-                    require_init(st, &root, out_params, a.span, d);
+                    require_init(st, &root, out_params, a.span, a.contract, d);
                     d.push(
                         Diag::error(
                             "E0310",
@@ -240,7 +240,7 @@ fn apply(
                 st.set(&root, St::Moved);
             } else {
                 if let Some(d) = report.as_deref_mut() {
-                    require_init(st, key, out_params, a.span, d);
+                    require_init(st, key, out_params, a.span, a.contract, d);
                     if *drop_hooked_partial {
                         d.push(
                             Diag::error(
@@ -258,7 +258,7 @@ fn apply(
         Access::Assign { needs_drop, box_paths } => {
             if opaque {
                 if let Some(d) = report.as_deref_mut() {
-                    require_init(st, &root, out_params, a.span, d);
+                    require_init(st, &root, out_params, a.span, a.contract, d);
                 }
             } else {
                 // The OLD value at this place is dropped by the reassignment
@@ -285,7 +285,7 @@ fn apply(
         Access::OutArg { needs_drop, box_paths } => {
             if opaque {
                 if let Some(d) = report.as_deref_mut() {
-                    require_init(st, &root, out_params, a.span, d);
+                    require_init(st, &root, out_params, a.span, a.contract, d);
                 }
             } else {
                 // Passing a place as `out` drops its old value at the call site —
@@ -391,21 +391,36 @@ fn out_drop_diag(place: &Place, span: Span) -> Diag {
     )
 }
 
-fn require_init(st: &FlowState, place: &Place, out_params: &[String], span: Span, diags: &mut Vec<Diag>) {
+fn require_init(
+    st: &FlowState,
+    place: &Place,
+    out_params: &[String],
+    span: Span,
+    contract: bool,
+    diags: &mut Vec<Diag>,
+) {
     let s = st.get(place);
     if s == St::Init {
         return;
     }
     let is_out = out_params.contains(&place.root) && place.is_direct() && place.proj.is_empty();
+    // Contract clauses (`ensures`) are analyzed against the post-body state at
+    // each return point, so a read of a body-moved place reads the same as if
+    // written at the return (review #3, 2026-07-07): note the contract position.
+    let contract_note = "this access is in an `ensures` clause, checked against the post-body state at the return point (review #3, 2026-07-07)";
     match s {
-        St::Moved => diags.push(
-            Diag::error(
+        St::Moved => {
+            let mut d = Diag::error(
                 "E0301",
                 format!("use of moved value `{}`", place.display()),
                 span,
             )
-            .with_note("value was moved out on an earlier path (§1.2)", None),
-        ),
+            .with_note("value was moved out on an earlier path (§1.2)", None);
+            if contract {
+                d = d.with_note(contract_note, None);
+            }
+            diags.push(d);
+        }
         St::Uninit | St::MaybeInit => {
             if is_out {
                 diags.push(

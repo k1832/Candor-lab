@@ -55,6 +55,12 @@ struct FnState {
     out_params: Vec<String>,
     in_unsafe: bool,
     in_ensures: bool,
+    /// Inside a `requires`/`ensures`/`assert` condition: contract clauses are
+    /// read-only (review #3, 2026-07-07). Gates the E0708 read-only rule.
+    in_contract: bool,
+    /// Set while re-emitting `ensures` accesses at return points: marks the
+    /// emitted actions as contract-origin (for the E0301 note).
+    emit_contract: bool,
     blocks: Vec<CfgBlock>,
     cur: Option<usize>,
     /// (continue target, break target, env scope depth) per enclosing loop.
@@ -88,6 +94,8 @@ impl FnState {
             out_params: Vec::new(),
             in_unsafe: false,
             in_ensures: false,
+            in_contract: false,
+            emit_contract: false,
             blocks: Vec::new(),
             cur: None,
             loops: Vec::new(),
@@ -177,6 +185,7 @@ impl<'a> Checker<'a> {
                 access,
                 span,
                 tracked: true,
+                contract: self.f.emit_contract,
             });
         }
     }
@@ -188,6 +197,10 @@ impl<'a> Checker<'a> {
                 if is_copy(ty, self.items) {
                     Access::Read
                 } else {
+                    // A contract clause is read-only: moving a non-copy value out
+                    // of it is rejected (review #3, 2026-07-07). Copy reads above
+                    // are fine; only genuine moves reach here.
+                    self.reject_in_contract(span, "moving a non-`copy` value");
                     let (movable, dh) = match place {
                         Some(p) => (self.local_movable(&p.root), self.is_drop_hooked_partial(p)),
                         None => (true, false),
@@ -203,6 +216,7 @@ impl<'a> Checker<'a> {
                 Access::Borrow(LoanKind::Shared)
             }
             Use::BorrowExcl => {
+                self.reject_in_contract(span, "a `write`-borrow");
                 self.record_borrow(place, LoanKind::Excl, span);
                 Access::Borrow(LoanKind::Excl)
             }
@@ -210,10 +224,13 @@ impl<'a> Checker<'a> {
                 needs_drop: needs_drop(ty, self.items),
                 box_paths: box_subpaths(ty, self.items),
             },
-            Use::Out => Access::OutArg {
-                needs_drop: needs_drop(ty, self.items),
-                box_paths: box_subpaths(ty, self.items),
-            },
+            Use::Out => {
+                self.reject_in_contract(span, "an `out` argument");
+                Access::OutArg {
+                    needs_drop: needs_drop(ty, self.items),
+                    box_paths: box_subpaths(ty, self.items),
+                }
+            }
             Use::ReadOnly => Access::Read,
         };
         self.emit(place, access, span);
@@ -350,6 +367,61 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The read-only contract rule (review #3, 2026-07-07; design 0001 §7.3):
+    /// inside a `requires`/`ensures`/`assert` condition, moves of non-copy
+    /// values, `write`-borrows, `out` arguments, and calls that consume or mutate
+    /// an argument are rejected — a check that consumes or mutates is incoherent
+    /// under P8. A no-op outside a contract clause.
+    fn reject_in_contract(&mut self, span: Span, what: &str) {
+        if self.f.in_contract {
+            self.diags.push(
+                Diag::error(
+                    "E0708",
+                    format!("{what} is not allowed inside a contract clause"),
+                    span,
+                )
+                .with_note(
+                    "`requires`/`ensures`/`assert` conditions are read-only: no moves, `write`-borrows, `out` arguments, or calls that take an argument by `take` (non-copy), `write`, or `out` (P8; review #3, 2026-07-07)",
+                    None,
+                ),
+            );
+        }
+    }
+
+    /// The static name a place expression roots at, if that root is a `static`
+    /// item not shadowed by a local. Statics are immutable (review #3,
+    /// 2026-07-07): used to reject assignment / `write`-borrow / `out` of a
+    /// static. `None` for locals, unknown names, and non-place expressions.
+    pub(super) fn static_place_root(&self, e: &Expr) -> Option<String> {
+        let root = expr::expr_place_root(e)?;
+        if self.lookup_local(&root).is_some() {
+            return None;
+        }
+        if self.items.statics.contains_key(&root) {
+            Some(root)
+        } else {
+            None
+        }
+    }
+
+    /// Reject a mutating use of a `static` (assignment / `write`-borrow / `out`).
+    /// Statics are immutable; reading and `read`-borrowing stay legal.
+    fn reject_static_mutation(&mut self, e: &Expr, verb: &str, span: Span) {
+        if let Some(name) = self.static_place_root(e) {
+            self.diags.push(
+                Diag::error(
+                    "E0311",
+                    format!("cannot {verb} the immutable `static` `{name}`"),
+                    span,
+                )
+                .with_note(
+                    "statics hold vtables and constants and are immutable; reading and `read`-borrowing are allowed (a mutable global is a recorded future design question, not an accident) (review #3, 2026-07-07)",
+                    None,
+                ),
+            );
+        }
+    }
+
     fn note_alloc(&mut self, span: Span, reason: impl Into<String>) {
         self.f.alloc.note(span, reason);
     }
@@ -384,11 +456,14 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // requires clauses are ordinary boolean expressions (design §7.3).
+        // requires clauses are ordinary boolean expressions checked in the entry
+        // block (design §7.3). They are read-only (review #3, 2026-07-07).
+        self.f.in_contract = true;
         for r in &f.requires {
             let t = self.check_expr(r, Use::Value);
             self.expect_bool(&t, r.span, "a `requires` clause");
         }
+        self.f.in_contract = false;
 
         self.check_block_stmts(&f.body);
 
@@ -398,16 +473,51 @@ impl<'a> Checker<'a> {
             self.set_term(cur, Term::FallThrough);
         }
 
-        // ensures clauses may reference `result` (design §7.3).
+        // ensures clauses may reference `result` (design §7.3) and are read-only
+        // (review #3, 2026-07-07). Checked in two passes:
+        //
+        //   Pass 1 (type + read-only, reported once, off the CFG): type-check
+        //   each clause, flag `result` misuse, and apply the read-only rule.
+        //
+        //   Pass 2 (dataflow, per return point): re-emit each clause's accesses
+        //   into every normal-return block, against that block's post-body state.
+        //   A read of a place moved/consumed by the body is then the ordinary
+        //   E0301, exactly as if the read were written at the return. We analyze
+        //   *once per return block* (not against a meet of the return states):
+        //   it is the simpler option — it reuses the existing per-block emit and
+        //   the init dataflow with no extra meet machinery — and it is sound and
+        //   maximally precise, since each clause is evaluated at runtime at each
+        //   return and here meets exactly that return's own state (a meet would
+        //   additionally demand initialized-on-all-return-paths, rejecting
+        //   programs whose clause is well-defined at every actual return). The
+        //   direct diagnostics pass 2 re-raises duplicate pass 1's, so they are
+        //   truncated away; only the emitted actions (driving E0301) persist.
         self.f.in_ensures = true;
+        self.f.in_contract = true;
         let saved = self.f.cur;
-        self.f.cur = None; // contract exprs are not part of the CFG
+        self.f.cur = None; // pass 1: contract exprs are not part of the CFG
         for e in &f.ensures {
             let t = self.check_expr(e, Use::Value);
             self.expect_bool(&t, e.span, "an `ensures` clause");
         }
+        if !f.ensures.is_empty() {
+            let diag_mark = self.diags.len();
+            let ret_blocks: Vec<usize> = (0..self.f.blocks.len())
+                .filter(|&b| matches!(self.f.blocks[b].term, Term::Return | Term::FallThrough))
+                .collect();
+            self.f.emit_contract = true;
+            for b in ret_blocks {
+                self.f.cur = Some(b);
+                for e in &f.ensures {
+                    self.check_expr(e, Use::Value);
+                }
+            }
+            self.f.emit_contract = false;
+            self.diags.truncate(diag_mark);
+        }
         self.f.cur = saved;
         self.f.in_ensures = false;
+        self.f.in_contract = false;
 
         // Run the value-gear dataflow over the finished CFG.
         let mut cfg = Cfg {
