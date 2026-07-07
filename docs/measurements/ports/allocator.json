@@ -1,0 +1,79 @@
+{
+  "table_version": "1",
+  "annotation_units": {
+    "a": 4,
+    "b": 0,
+    "c": 0,
+    "d": 6,
+    "per_site": [
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 3576,
+        "end": 3893
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 4190,
+        "end": 4203
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 4589,
+        "end": 7149
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 7446,
+        "end": 7459
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 7795,
+        "end": 9974
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 10384,
+        "end": 10397
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 10799,
+        "end": 11494
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 11828,
+        "end": 12423
+      },
+      {
+        "class": "a",
+        "kind": "read_param",
+        "start": 12891,
+        "end": 12903
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 12996,
+        "end": 13252
+      }
+    ]
+  },
+  "value_copy_units": 0,
+  "logical_statements": 162,
+  "valve": {
+    "lines": 112,
+    "functions": 5,
+    "total_lines": 178,
+    "total_functions": 8
+  }
+}

@@ -45,3 +45,18 @@ enforces by construction; spec §1.2 explicitly permits index arenas.
 
 *All thirteen rulings adopt the baseline authors' flagged resolutions after review; none required a
 baseline change beyond R1's vendoring. Objection window: open; none received as of this writing.*
+
+## 2026-07-07 — Allocator port scoring batch
+
+**R14 (measurement symmetry).** The Candor language is single-file, so a port carries its vector
+harness in-file; the Rust baselines were measured over `src/` excluding `tests/`. Ruling: the
+measured Candor artifact is the implementation section, mechanically delimited by the first
+line matching `// Test harness` (everything above it); the harness below is excluded. Split
+verified to parse and check standalone. Applies to all five ports.
+
+**R15 (allocator idiomaticity + cell-substitutability).** The scored allocator port is confirmed
+idiomatic: unsafe blocks wrap genuinely interleaved free-list pointer work (per design 0001's own
+§11.1 idiom and its §10.3 rejection of per-expression unsafe); justification strings are true;
+no artificial valve inflation or minimization found. Cell-substitutable tags: **none** — every
+unsafe region is raw-pointer arithmetic no checked-runtime alternative could replace. The §4.2
+relief path therefore does not apply, and the measured M2 breach stands as measured.
