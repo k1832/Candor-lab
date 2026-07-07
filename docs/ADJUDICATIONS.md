@@ -83,3 +83,9 @@ harness, which is its proper place as test oracle); valves concentrated in splic
 field accessors exactly as design §11.2 predicts; justifications true. Cell-substitutable tags:
 **none** — intrusive pointer traversal has no checked-runtime substitute. The measured M2 breach
 (0.4120 > 0.40) stands as measured.
+
+**R20 (porting order).** §6.4's hardest-first rule exists so the bet's worst case is confronted
+before easy wins manufacture momentum. With both home-ground programs (allocator, scheduler)
+completed, scored, and their KILL breaches published, that purpose is fully discharged; the three
+value-favorable ports (MMIO in progress, parser, arena) may proceed in parallel. All five are
+still attempted and scored; nothing about the order of the remaining three can mask anything.
