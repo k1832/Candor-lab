@@ -8,7 +8,7 @@ commitment — including unfavorable ones.
 | Program | M5 complete | Valve-line | Valve-fn | Ceiling (M2) | Ann/stmt (Candor vs Rust) | M2 verdict |
 |---|---|---|---|---|---|---|
 | Allocator | YES — 22/22 vectors, sentinel 777, 21m20s | **0.6292** | 0.6250 | max(0.40, 1.25×0.1929)=0.40 | 0.0617 vs 0.2943 | **KILL threshold breached** |
-| Intrusive scheduler | pending | | | max(0.40, 1.25×0.1489)=0.40 | vs 0.5132 | |
+| Intrusive scheduler | YES — 20/20 vectors, sentinel 777, ~25s | **0.4120** | 0.8750 | max(0.40, 1.25×0.1489)=0.40 | 0.2948 vs 0.5132 | **KILL threshold breached** |
 | MMIO state machine | pending | | | 0.15 abs | vs 0.1667 | |
 | Parser | pending | | | 0.15 abs | vs 0.4150 | |
 | Arena pass | pending | | | 0.15 abs | vs 0.2051 | |
@@ -21,6 +21,18 @@ the Rust baseline** (0.0617 vs 0.2943 units/statement — a 79% reduction, far p
 0.40**. No cell-substitutable regions exist to invoke §4.2's relief path (ruling R15), so under
 the frozen decision rule §5.1(b) this is a standing KILL condition, to be enacted with the full
 basket's evidence after all five ports are attempted (§6.4 requires all five regardless).
+
+## Scheduler — recorded 2026-07-07
+
+Completed (M5 pass, T1-T20 incl. the 20k-step stress; suite ~25s). Annotation load 0.2948 vs
+Rust 0.5132 units/statement — a 43% reduction. Valve-line fraction **0.4120 vs the 0.40
+ceiling — the second home-ground KILL breach, by 0.012**. Zero cell-substitutable regions
+(ruling R19); idiomaticity confirmed, intrusiveness verified in the measured artifact. Port
+friction notes (README): rawptr's lack of safe field projection puts ~10 one-line accessors in
+the valve; explicit call-site reborrows are a steady tax; one prototype parser bug worked around
+with defensive semicolons (recorded as a known prototype issue, not fixed mid-experiment).
+
+## Measurement observation (both home-ground programs)
 
 Observation recorded for the eventual §9 proceeding, per §0.3 (defects are published, not
 patched): the valve-line *fraction* is sensitive to total program size. The Candor port

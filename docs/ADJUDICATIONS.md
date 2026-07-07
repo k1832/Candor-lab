@@ -60,3 +60,26 @@ idiomatic: unsafe blocks wrap genuinely interleaved free-list pointer work (per 
 no artificial valve inflation or minimization found. Cell-substitutable tags: **none** — every
 unsafe region is raw-pointer arithmetic no checked-runtime alternative could replace. The §4.2
 relief path therefore does not apply, and the measured M2 breach stands as measured.
+
+## 2026-07-07 — Scheduler port scoring batch
+
+**R14 clarification.** The harness marker is the first line *beginning with* `// Test harness`
+(column 0), not any line containing the phrase — prose mentions in header comments do not split.
+(Surfaced by the scheduler port's header referencing the marker; the allocator measurement is
+unaffected: its marker line was already the first such line.)
+
+**R16 (scheduler).** Splitting spec 2.1's `init() -> Scheduler` into `sched_new()` plus in-place
+`sched_init(write s)` is a conforming reading: self-referential sentinel nodes cannot survive a
+by-value move in any language with move semantics, and the spec's interface names are indicative,
+not binding (spec §2 preamble). — **R17 (scheduler).** Unspecified `admit` error precedence:
+E_BAD_PRIO before presence, as ported; recorded as the adjudicated order. — **R18 (scheduler).**
+`set_priority` to the same READY level is move-to-tail, the literal reading; the shadow model
+agrees and T19 exercises it.
+
+**R19 (scheduler idiomaticity + cell-substitutability).** Scored port confirmed idiomatic:
+linkage genuinely embedded (rawptr Link fields, offsetof-based container_of — no owning-container
+or index dodge in the measured scheduler; the safe index-based shadow model lives in the excluded
+harness, which is its proper place as test oracle); valves concentrated in splice/container_of/
+field accessors exactly as design §11.2 predicts; justifications true. Cell-substitutable tags:
+**none** — intrusive pointer traversal has no checked-runtime substitute. The measured M2 breach
+(0.4120 > 0.40) stands as measured.
