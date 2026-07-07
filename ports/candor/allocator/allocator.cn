@@ -1,0 +1,805 @@
+// ============================================================================
+// Candor port: general-purpose allocator (Bet 5 basket, spec-allocator.md)
+//
+// Mechanism (spec 1.5, recorded for the adjudicator): a single address-ordered
+// first-fit free list threaded through the free blocks themselves, with
+// adjacent-block coalescing performed on every free (merge with the previous
+// and/or next free block when the spans touch). In-band metadata.
+//
+// Declared per-block overhead: HDR = 40 bytes (spec 3.6 / A22, HDR <= 64).
+// Every live block carries a 40-byte header immediately below its payload:
+//     payload-40: chunk_start   (address of the block's whole span)
+//     payload-32: chunk_size    (bytes of the whole span, header included)
+//     payload-24: payload_size  (the caller's requested size)
+//     payload-16: align         (the caller's requested alignment, kept for realloc)
+//     payload-8:  magic         (MAGIC_LIVE / MAGIC_FREE, best-effort validity)
+// A free block stores its free-list node in its first 16 bytes:
+//     f+0: size (bytes of the free span)    f+8: next (address, 0 = end of list)
+// The magic word sits at payload-8, above the 16 free-node bytes, so freeing a
+// zero-gap block never clobbers its own stomped MAGIC_FREE (A18).
+//
+// Errors are values (spec 2): AllocErr below; nothing in the allocator faults
+// on any input. Faults (assert) appear only in the test harness, where a
+// failed vector is *meant* to abort the run.
+// ============================================================================
+
+static HDR: usize = 40;          // declared per-block overhead (spec 3.6, <= 64)
+static MIN_FREE: usize = 16;     // smallest carveable free block (size + next)
+static MAX_ALIGN: usize = 4096;  // spec 1.3
+static REGION_LEN: usize = 1048576;              // MIN_REGION = 1 MiB (spec 1.7)
+static MAGIC_LIVE: usize = 0xC0DEA110CA7E11FEusize;
+static MAGIC_FREE: usize = 0xC0DEA110CA7EDEADusize;
+static ONES: usize = 0x0101010101010101;         // byte-replication factor for fills
+
+// The allocator: manages exactly [base, end); free_head is the address of the
+// lowest free block (0 = none). Plain owned value, passed by `write` borrow.
+struct Heap { base: usize, end: usize, free_head: usize }
+
+// copy markers: results are small value handles, and a non-copy enum cannot be
+// passed to a helper inside an `assert` (contract clauses reject consuming
+// calls, E0708) — copy is both natural and required by the harness style here.
+copy enum AllocErr { invalid_size, invalid_align, out_of_memory, invalid_ptr }
+copy enum AllocRes { ok(usize), err(AllocErr) }   // payload address, or error value
+copy enum FreeRes { ok, err(AllocErr) }
+
+// ---------------------------------------------------------------------------
+// Safe arithmetic helpers (value gear)
+// ---------------------------------------------------------------------------
+
+fn align_up(x: usize, a: usize) requires(a > 0) ensures(result % a == 0) -> usize {
+    return (x + a - 1) / a * a;
+}
+
+fn is_pow2(a: usize) -> bool {
+    if a == 0 { return false; }
+    let mut x: usize = a;
+    while x % 2 == 0 { x = x / 2; }
+    return x == 1;
+}
+
+fn pow2(k: usize) requires(k <= 63) -> usize {
+    let mut r: usize = 1;
+    let mut i: usize = 0;
+    while i < k { r = r * 2; i = i + 1; }
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// init (spec 2.1)
+// ---------------------------------------------------------------------------
+
+fn heap_init(base: usize, len: usize) requires(len >= 64) -> Heap {
+    unsafe "the caller hands [base, base+len) to this allocator as exclusively owned raw bytes; the initial free-list node lands at base, inside that span" {
+        ptr_write(addr_to_ptr[usize](base), len);        // free node: size
+        ptr_write(addr_to_ptr[usize](base + 8), 0);      // free node: next = end
+    }
+    return Heap { base: base, end: base + len, free_head: base };
+}
+
+// ---------------------------------------------------------------------------
+// alloc (spec 2.2) — first-fit walk, carve, splice
+// ---------------------------------------------------------------------------
+
+fn heap_alloc(h: write Heap, size: usize, align: usize) -> AllocRes {
+    // error checks are values, in spec 2.2's order
+    if size == 0 { return AllocRes::err(AllocErr::invalid_size); }
+    if align == 0 { return AllocRes::err(AllocErr::invalid_align); }
+    if !is_pow2(align) { return AllocRes::err(AllocErr::invalid_align); }
+    if align > MAX_ALIGN { return AllocRes::err(AllocErr::invalid_align); }
+
+    unsafe "free-list walk/carve/splice: every address read or written below is either a free-list node reachable from free_head or a header slot of the chunk being carved, all inside [base, end) which this Heap exclusively owns" {
+        let mut prev: usize = 0;                       // 0 = head position
+        let mut cur: usize = (deref h).free_head;
+        while cur != 0 {
+            let fsize: usize = ptr_read(addr_to_ptr[usize](cur));
+            let next: usize = ptr_read(addr_to_ptr[usize](cur + 8));
+            let payload: usize = align_up(cur + HDR, align);
+            let chunk_end: usize = payload + size;
+            if chunk_end <= cur + fsize {
+                // fits here. front gap from alignment: keep it free if it is
+                // big enough to be a block, otherwise absorb it into the chunk.
+                let gap: usize = payload - HDR - cur;
+                let mut cs: usize = cur;
+                let mut front_kept: bool = false;
+                if gap >= MIN_FREE {
+                    ptr_write(addr_to_ptr[usize](cur), gap);   // shrink in place
+                    cs = cur + gap;
+                    front_kept = true;
+                }
+                // tail remainder: new free block, or absorbed slack.
+                let mut csize: usize = chunk_end - cs;
+                let mut succ: usize = next;
+                let rem: usize = cur + fsize - chunk_end;
+                if rem >= MIN_FREE {
+                    ptr_write(addr_to_ptr[usize](chunk_end), rem);
+                    ptr_write(addr_to_ptr[usize](chunk_end + 8), next);
+                    succ = chunk_end;
+                } else {
+                    csize = csize + rem;
+                }
+                // splice the list around the carved chunk
+                if front_kept {
+                    ptr_write(addr_to_ptr[usize](cur + 8), succ);
+                } else {
+                    if prev == 0 { (deref h).free_head = succ; }
+                    else { ptr_write(addr_to_ptr[usize](prev + 8), succ); }
+                }
+                // stamp the live-block header
+                ptr_write(addr_to_ptr[usize](payload - 40), cs);
+                ptr_write(addr_to_ptr[usize](payload - 32), csize);
+                ptr_write(addr_to_ptr[usize](payload - 24), size);
+                ptr_write(addr_to_ptr[usize](payload - 16), align);
+                ptr_write(addr_to_ptr[usize](payload - 8), MAGIC_LIVE);
+                return AllocRes::ok(payload);
+            }
+            prev = cur;
+            cur = next;
+        }
+    }
+    return AllocRes::err(AllocErr::out_of_memory);
+}
+
+// ---------------------------------------------------------------------------
+// free (spec 2.3) — validate, then insert with adjacent coalescing
+// ---------------------------------------------------------------------------
+
+fn heap_free(h: write Heap, p: usize) -> FreeRes {
+    // range rejection first: null, below the first possible payload, or past
+    // the region. Nothing is dereferenced until p-HDR is known in-bounds.
+    if p < (deref h).base + HDR { return FreeRes::err(AllocErr::invalid_ptr); }
+    if p > (deref h).end { return FreeRes::err(AllocErr::invalid_ptr); }
+
+    unsafe "header read at p-40..p, magic stomp, and free-list splice: p-HDR was range-checked above, the header's span fields are validated before use, and list nodes are reachable from free_head — all inside [base, end)" {
+        if ptr_read(addr_to_ptr[usize](p - 8)) != MAGIC_LIVE {
+            return FreeRes::err(AllocErr::invalid_ptr);   // freed, stale, or interior
+        }
+        let cs: usize = ptr_read(addr_to_ptr[usize](p - 40));
+        let csize: usize = ptr_read(addr_to_ptr[usize](p - 32));
+        // header sanity: the span must contain the header and stay in-region
+        if cs < (deref h).base { return FreeRes::err(AllocErr::invalid_ptr); }
+        if cs > p - HDR { return FreeRes::err(AllocErr::invalid_ptr); }
+        if csize < HDR { return FreeRes::err(AllocErr::invalid_ptr); }
+        if cs + csize > (deref h).end { return FreeRes::err(AllocErr::invalid_ptr); }
+        if cs + csize < p { return FreeRes::err(AllocErr::invalid_ptr); }
+        ptr_write(addr_to_ptr[usize](p - 8), MAGIC_FREE);  // double-free tripwire (A18)
+
+        // address-ordered insertion point
+        let mut prev: usize = 0;
+        let mut cur: usize = (deref h).free_head;
+        while cur != 0 && cur < cs {
+            prev = cur;
+            cur = ptr_read(addr_to_ptr[usize](cur + 8));
+        }
+        // coalesce with the following block if the spans touch
+        let mut nsize: usize = csize;
+        let mut succ: usize = cur;
+        if cur != 0 && cs + csize == cur {
+            nsize = nsize + ptr_read(addr_to_ptr[usize](cur));
+            succ = ptr_read(addr_to_ptr[usize](cur + 8));
+        }
+        // coalesce with the preceding block if the spans touch
+        if prev != 0 && prev + ptr_read(addr_to_ptr[usize](prev)) == cs {
+            ptr_write(addr_to_ptr[usize](prev), ptr_read(addr_to_ptr[usize](prev)) + nsize);
+            ptr_write(addr_to_ptr[usize](prev + 8), succ);
+        } else {
+            ptr_write(addr_to_ptr[usize](cs), nsize);
+            ptr_write(addr_to_ptr[usize](cs + 8), succ);
+            if prev == 0 { (deref h).free_head = cs; }
+            else { ptr_write(addr_to_ptr[usize](prev + 8), cs); }
+        }
+    }
+    return FreeRes::ok;
+}
+
+// ---------------------------------------------------------------------------
+// realloc (spec 2.4) — in place when the span already holds it, else
+// alloc-new (with the ORIGINAL alignment), copy, free-old. On OOM the
+// original block is untouched. Error precedence per ruling R3.
+// ---------------------------------------------------------------------------
+
+fn heap_realloc(h: write Heap, p: usize, new_size: usize) -> AllocRes {
+    if new_size == 0 { return AllocRes::err(AllocErr::invalid_size); }   // R3: before ptr validity
+    if p < (deref h).base + HDR { return AllocRes::err(AllocErr::invalid_ptr); }
+    if p > (deref h).end { return AllocRes::err(AllocErr::invalid_ptr); }
+
+    let mut old_size: usize = 0;
+    let mut old_align: usize = 0;
+    let mut fits: bool = false;
+    unsafe "header read at p-40..p: p-HDR was range-checked above and the magic word gates every field read; the block belongs to this Heap's region" {
+        if ptr_read(addr_to_ptr[usize](p - 8)) != MAGIC_LIVE {
+            return AllocRes::err(AllocErr::invalid_ptr);
+        }
+        let cs: usize = ptr_read(addr_to_ptr[usize](p - 40));
+        let csize: usize = ptr_read(addr_to_ptr[usize](p - 32));
+        old_size = ptr_read(addr_to_ptr[usize](p - 24));
+        old_align = ptr_read(addr_to_ptr[usize](p - 16));
+        if p + new_size <= cs + csize {
+            ptr_write(addr_to_ptr[usize](p - 24), new_size);   // shrink / slack grow in place
+            fits = true;
+        }
+    }
+    if fits { return AllocRes::ok(p); }
+
+    match heap_alloc(write (deref h), new_size, old_align) {
+        case AllocRes::err(e) => return AllocRes::err(e),      // original stays live, unchanged
+        case AllocRes::ok(np) => {
+            let mut n: usize = old_size;
+            if new_size < n { n = new_size; }
+            unsafe "copies min(old,new) bytes from the old live block to the freshly carved one; both spans are in-region and disjoint (the old chunk was not on the free list when the new one was carved)" {
+                let mut i: usize = 0;
+                while i + 8 <= n {
+                    ptr_write(addr_to_ptr[usize](np + i), ptr_read(addr_to_ptr[usize](p + i)));
+                    i = i + 8;
+                }
+                while i < n {
+                    ptr_write(addr_to_ptr[u8](np + i), ptr_read(addr_to_ptr[u8](p + i)));
+                    i = i + 1;
+                }
+            }
+            match heap_free(write (deref h), p) {
+                case FreeRes::ok => return AllocRes::ok(np),
+                case FreeRes::err(_) => panic("realloc: freeing the still-live source block cannot fail"),
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// free_bytes (spec 2.5, informative only)
+// ---------------------------------------------------------------------------
+
+fn free_bytes(h: read Heap) -> usize {
+    let mut total: usize = 0;
+    let mut cur: usize = (deref h).free_head;
+    unsafe "read-only free-list walk over nodes reachable from free_head, all inside [base, end)" {
+        while cur != 0 {
+            total = total + ptr_read(addr_to_ptr[usize](cur));
+            cur = ptr_read(addr_to_ptr[usize](cur + 8));
+        }
+    }
+    return total;
+}
+
+// ===========================================================================
+// Test harness — the frozen vector suite (spec §4, rulings R2/R3/R4).
+// Harness faults (assert) are the intended failure mode for a broken vector.
+// ===========================================================================
+
+fn code(e: AllocErr) -> i64 {
+    match e {
+        case AllocErr::invalid_size => return 1,
+        case AllocErr::invalid_align => return 2,
+        case AllocErr::out_of_memory => return 3,
+        case AllocErr::invalid_ptr => return 4,
+    }
+}
+
+fn expect_ok(r: AllocRes) -> usize {
+    match r {
+        case AllocRes::ok(p) => return p,
+        case AllocRes::err(_) => { assert(false); return 0; }
+    }
+}
+
+fn expect_err(r: AllocRes, want: i64) -> unit {
+    match r {
+        case AllocRes::ok(_) => assert(false),
+        case AllocRes::err(e) => assert(code(e) == want),
+    }
+}
+
+fn expect_free_ok(r: FreeRes) -> unit {
+    match r {
+        case FreeRes::ok => {},
+        case FreeRes::err(_) => assert(false),
+    }
+}
+
+fn expect_free_err(r: FreeRes, want: i64) -> unit {
+    match r {
+        case FreeRes::ok => assert(false),
+        case FreeRes::err(e) => assert(code(e) == want),
+    }
+}
+
+// fill a block with one byte value, word-at-a-time (8 bytes per store)
+fn write_fill(p: usize, size: usize, fill: u8) -> unit {
+    let w: usize = conv usize (fill) * ONES;
+    unsafe "the harness only fills blocks the allocator just returned live: [p, p+size) is in-region and usable" {
+        let mut i: usize = 0;
+        while i + 8 <= size {
+            ptr_write(addr_to_ptr[usize](p + i), w);
+            i = i + 8;
+        }
+        while i < size {
+            ptr_write(addr_to_ptr[u8](p + i), fill);
+            i = i + 1;
+        }
+    }
+}
+
+// verify every byte of a block equals its fill (spec 3.5), word-at-a-time
+fn check_fill(p: usize, size: usize, fill: u8) -> bool {
+    let w: usize = conv usize (fill) * ONES;
+    unsafe "the harness only checks blocks it recorded as live: [p, p+size) is in-region" {
+        let mut i: usize = 0;
+        while i + 8 <= size {
+            if ptr_read(addr_to_ptr[usize](p + i)) != w { return false; }
+            i = i + 8;
+        }
+        while i < size {
+            if ptr_read(addr_to_ptr[u8](p + i)) != fill { return false; }
+            i = i + 1;
+        }
+    }
+    return true;
+}
+
+// disjointness of two byte ranges (spec 3.4)
+fn disjoint(a: usize, alen: usize, b: usize, blen: usize) -> bool {
+    return a + alen <= b || b + blen <= a;
+}
+
+// OOM-tolerant wrappers: return the payload address, or 0 on E_OUT_OF_MEMORY
+// (0 is never a payload — payloads sit at base+HDR or above). Any other error
+// is a suite bug and faults. These exist because the checker false-positives
+// (E0304 "possibly-uninitialized") on locals used around a `match` that sits
+// lexically inside a `while`, so the loops below must not contain a match —
+// see the FRICTION notes in the port README.
+fn alloc_or_zero(h: write Heap, size: usize, align: usize) -> usize {
+    match heap_alloc(write (deref h), size, align) {
+        case AllocRes::ok(p) => return p,
+        case AllocRes::err(e) => {
+            assert(code(e) == 3);
+            return 0;
+        }
+    }
+}
+
+fn realloc_or_zero(h: write Heap, p: usize, nsize: usize) -> usize {
+    match heap_realloc(write (deref h), p, nsize) {
+        case AllocRes::ok(np) => return np,
+        case AllocRes::err(e) => {
+            assert(code(e) == 3);
+            return 0;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Nominal vectors
+// ---------------------------------------------------------------------------
+
+// A1: alloc(16, 1) succeeds; write 16 bytes; read back equal.
+fn vec_a1(base: usize) -> unit {
+    let mut h: Heap = heap_init(base, REGION_LEN);
+    let p: usize = expect_ok(heap_alloc(write h, 16, 1));
+    write_fill(p, 16, 0x11u8);
+    assert(check_fill(p, 16, 0x11u8));
+}
+
+// A2: alloc(1, 1) succeeds (minimum size).
+fn vec_a2(base: usize) -> unit {
+    let mut h: Heap = heap_init(base, REGION_LEN);
+    let p: usize = expect_ok(heap_alloc(write h, 1, 1));
+    write_fill(p, 1, 0x22u8);
+    assert(check_fill(p, 1, 0x22u8));
+}
+
+// A3: alloc(4096, 4096) succeeds; pointer is 4096-aligned.
+fn vec_a3(base: usize) -> unit {
+    let mut h: Heap = heap_init(base, REGION_LEN);
+    let p: usize = expect_ok(heap_alloc(write h, 4096, 4096));
+    assert(p % 4096 == 0);
+}
+
+// A4: ten alloc(1000, 8); all 8-aligned and pairwise non-overlapping (3.4).
+fn vec_a4(base: usize) -> unit {
+    let mut h: Heap = heap_init(base, REGION_LEN);
+    let mut ps: [10]usize = [0; 10];
+    let mut i: usize = 0;
+    while i < 10 {
+        ps[i] = expect_ok(heap_alloc(write h, 1000, 8));
+        assert(ps[i] % 8 == 0);
+        i = i + 1;
+    }
+    let mut x: usize = 0;
+    while x < 10 {
+        let mut y: usize = x + 1;
+        while y < 10 {
+            assert(disjoint(ps[x], 1000, ps[y], 1000));
+            y = y + 1;
+        }
+        x = x + 1;
+    }
+}
+
+// A5: fill first block 0xA5, alloc a second, fill 0x5A; first still 0xA5 (3.5).
+fn vec_a5(base: usize) -> unit {
+    let mut h: Heap = heap_init(base, REGION_LEN);
+    let p1: usize = expect_ok(heap_alloc(write h, 64, 64));
+    write_fill(p1, 64, 0xA5u8);
+    let p2: usize = expect_ok(heap_alloc(write h, 64, 64));
+    write_fill(p2, 64, 0x5Au8);
+    assert(check_fill(p1, 64, 0xA5u8));
+}
+
+// A6: alloc(100, 64) filled 0xC3, realloc to 400: first 100 bytes preserved,
+// result 64-aligned (realloc preserves original alignment, 2.4), 400 usable.
+fn vec_a6(base: usize) -> unit {
+    let mut h: Heap = heap_init(base, REGION_LEN);
+    let p: usize = expect_ok(heap_alloc(write h, 100, 64));
+    write_fill(p, 100, 0xC3u8);
+    let q: usize = expect_ok(heap_realloc(write h, p, 400));
+    assert(check_fill(q, 100, 0xC3u8));
+    assert(q % 64 == 0);
+    assert(q >= h.base && q + 400 <= h.end);
+    write_fill(q, 400, 0x3Cu8);            // prove all 400 bytes usable
+    assert(check_fill(q, 400, 0x3Cu8));
+}
+
+// A7: realloc a 400-byte block down to 50; first 50 bytes preserved.
+fn vec_a7(base: usize) -> unit {
+    let mut h: Heap = heap_init(base, REGION_LEN);
+    let p: usize = expect_ok(heap_alloc(write h, 400, 8));
+    write_fill(p, 400, 0x77u8);
+    let q: usize = expect_ok(heap_realloc(write h, p, 50));
+    assert(check_fill(q, 50, 0x77u8));
+}
+
+// ---------------------------------------------------------------------------
+// Boundary vectors
+// ---------------------------------------------------------------------------
+
+// A8: alignments 1,2,4,...,4096 with size 32; each pointer honors its alignment.
+fn vec_a8(base: usize) -> unit {
+    let mut h: Heap = heap_init(base, REGION_LEN);
+    let mut al: usize = 1;
+    while al <= 4096 {
+        let p: usize = expect_ok(heap_alloc(write h, 32, al));
+        assert(p % al == 0);
+        al = al * 2;
+    }
+}
+
+// A9: largest single block (reported via free_bytes) succeeds; one more byte OOMs.
+fn vec_a9(base: usize) -> unit {
+    let mut h: Heap = heap_init(base, REGION_LEN);
+    let fb: usize = free_bytes(read h);
+    let largest: usize = fb - HDR;
+    expect_err(heap_alloc(write h, largest + 1, 1), 3);   // one more byte: E_OUT_OF_MEMORY
+    let p: usize = expect_ok(heap_alloc(write h, largest, 1));
+    assert(p >= h.base && p + largest <= h.end);
+    expect_err(heap_alloc(write h, 1, 1), 3);             // region exactly full now
+}
+
+// shared body for A10/A11: allocate 1024-byte blocks until full, returning K.
+// (FRICTION NOTE: `ps: write [1024]usize` does not parse — after a borrow mode
+// the parser reads `[` as a region-variable bracket, so a borrow-mode parameter
+// of fixed-array type cannot be spelled. Wrapping the array in a struct is the
+// workaround.)
+struct Blocks { ps: [1024]usize }
+
+fn fill_region(h: write Heap, bl: write Blocks) -> usize {
+    let mut k: usize = 0;
+    let mut going: bool = true;
+    while going {
+        let p: usize = alloc_or_zero(write (deref h), 1024, 1);
+        if p == 0 {
+            going = false;
+        } else {
+            (deref bl).ps[k] = p;
+            k = k + 1;
+        }
+    }
+    return k;
+}
+
+// A10: alloc K x 1024 until full, free all K in order, then a single
+// alloc(K*1024 - 64, 1) MUST succeed (3.6 coalescing; 64 per R4).
+fn vec_a10(base: usize) -> unit {
+    let mut h: Heap = heap_init(base, REGION_LEN);
+    let mut bl: Blocks = Blocks { ps: [0; 1024] };
+    let k: usize = fill_region(write h, write bl);
+    assert(k > 900);
+    let mut i: usize = 0;
+    while i < k {
+        expect_free_ok(heap_free(write h, bl.ps[i]));
+        i = i + 1;
+    }
+    let p: usize = expect_ok(heap_alloc(write h, k * 1024 - 64, 1));
+    assert(p >= h.base && p + (k * 1024 - 64) <= h.end);
+}
+
+// A11: same, but free in reverse order, then (fresh) in interleaved order;
+// both followed by the A10-style full-span allocation succeeding.
+fn vec_a11(base: usize) -> unit {
+    // reverse order
+    let mut h: Heap = heap_init(base, REGION_LEN);
+    let mut bl: Blocks = Blocks { ps: [0; 1024] };
+    let k: usize = fill_region(write h, write bl);
+    let mut i: usize = k;
+    while i > 0 {
+        i = i - 1;
+        expect_free_ok(heap_free(write h, bl.ps[i]));
+    }
+    let p: usize = expect_ok(heap_alloc(write h, k * 1024 - 64, 1));
+    assert(p >= h.base);
+
+    // interleaved order: evens ascending, then odds ascending
+    let mut h2: Heap = heap_init(base, REGION_LEN);
+    let mut bl2: Blocks = Blocks { ps: [0; 1024] };
+    let k2: usize = fill_region(write h2, write bl2);
+    let mut j: usize = 0;
+    while j < k2 {
+        expect_free_ok(heap_free(write h2, bl2.ps[j]));
+        j = j + 2;
+    }
+    j = 1;
+    while j < k2 {
+        expect_free_ok(heap_free(write h2, bl2.ps[j]));
+        j = j + 2;
+    }
+    let p2: usize = expect_ok(heap_alloc(write h2, k2 * 1024 - 64, 1));
+    assert(p2 >= h2.base);
+}
+
+// ---------------------------------------------------------------------------
+// Error vectors
+// ---------------------------------------------------------------------------
+
+// A12: alloc(0, 8) -> E_INVALID_SIZE.
+// A13: alloc(16, 0) -> E_INVALID_ALIGN.
+// A14: alloc(16, 3) -> E_INVALID_ALIGN (not a power of two).
+// A15: alloc(16, 8192) -> E_INVALID_ALIGN (> MAX_ALIGN).
+// A16: alloc(2 MiB, 1) on a 1 MiB region -> E_OUT_OF_MEMORY.
+fn vec_a12_to_a16(base: usize) -> unit {
+    let mut h: Heap = heap_init(base, REGION_LEN);
+    expect_err(heap_alloc(write h, 0, 8), 1);          // A12
+    expect_err(heap_alloc(write h, 16, 0), 2);         // A13
+    expect_err(heap_alloc(write h, 16, 3), 2);         // A14
+    expect_err(heap_alloc(write h, 16, 8192), 2);      // A15
+    expect_err(heap_alloc(write h, 2097152, 1), 3);    // A16
+}
+
+// A17: free of null / out-of-range pointers -> E_INVALID_PTR.
+fn vec_a17(base: usize) -> unit {
+    let mut h: Heap = heap_init(base, REGION_LEN);
+    expect_free_err(heap_free(write h, 0), 4);                    // null
+    expect_free_err(heap_free(write h, base + REGION_LEN + 4096), 4);  // past the region
+    expect_free_err(heap_free(write h, base + 1), 4);             // below any payload
+}
+
+// A18: double free -> second free is E_INVALID_PTR.
+fn vec_a18(base: usize) -> unit {
+    let mut h: Heap = heap_init(base, REGION_LEN);
+    let p: usize = expect_ok(heap_alloc(write h, 32, 8));
+    expect_free_ok(heap_free(write h, p));
+    expect_free_err(heap_free(write h, p), 4);
+}
+
+// A19: realloc(new_size = 0) -> E_INVALID_SIZE (checked before ptr validity, R3).
+fn vec_a19(base: usize) -> unit {
+    let mut h: Heap = heap_init(base, REGION_LEN);
+    let p: usize = expect_ok(heap_alloc(write h, 32, 8));
+    expect_err(heap_realloc(write h, p, 0), 1);
+}
+
+// A20: realloc that cannot fit -> E_OUT_OF_MEMORY; original block stays live
+// and unchanged (verified by fill bytes, then freed).
+fn vec_a20(base: usize) -> unit {
+    let mut h: Heap = heap_init(base, REGION_LEN);
+    let p: usize = expect_ok(heap_alloc(write h, 500000, 8));
+    write_fill(p, 500000, 0xABu8);
+    expect_err(heap_realloc(write h, p, 2000000), 3);
+    assert(check_fill(p, 500000, 0xABu8));      // unchanged
+    expect_free_ok(heap_free(write h, p));      // still live
+}
+
+// ---------------------------------------------------------------------------
+// A21: deterministic xorshift64 stress (spec 4.1-4.5).
+// seed 0x2545F4914F6CDD1D, 20000 steps, 256 slots; per-step assertions over
+// all non-empty slots: in-bounds, alignment, size, pairwise non-overlap,
+// fill integrity. The language has no bitwise operators, so XOR is a bit
+// loop and shifts are wrapping multiply / unsigned divide by powers of two.
+// ---------------------------------------------------------------------------
+
+fn xor64(a: u64, b: u64) -> u64 {
+    let mut r: u64 = 0u64;
+    let mut pa: u64 = a;
+    let mut pb: u64 = b;
+    let mut bit: u64 = 1u64;
+    let mut i: u64 = 0u64;
+    while i < 64u64 {
+        if pa % 2u64 != pb % 2u64 {
+            wrapping { r = r + bit; }
+        }
+        pa = pa / 2u64;
+        pb = pb / 2u64;
+        wrapping { bit = bit * 2u64; }   // wraps to 0 on the final doubling
+        i = i + 1u64;
+    }
+    return r;
+}
+
+// xorshift64 (Marsaglia), exactly spec 4.1: verified against the reference
+// sequence 9181757771948286951, 16460966181113277408, 3825608052996350135.
+fn xs_next(state: write u64) -> u64 {
+    let mut x: u64 = deref state;
+    wrapping {
+        x = xor64(x, x * 8192u64);      // x ^= x << 13
+        x = xor64(x, x / 128u64);       // x ^= x >> 7  (u64 / is a logical shift)
+        x = xor64(x, x * 131072u64);    // x ^= x << 17
+    }
+    deref state = x;
+    return x;
+}
+
+// The 256 stress slots (spec 4.2): p = payload address (0 = empty slot),
+// s = size, a = align, f = fill byte. One struct so the step functions can
+// borrow the whole slot table. (FRICTION NOTE: the op bodies live in separate
+// functions because writing `sp[slot] = ...` under the op-dispatch if/else
+// inside the step loop trips a checker false positive — E0304 "possibly-
+// uninitialized" on the fully-initialized array; see the port README.)
+struct Slots { p: [256]usize, s: [256]usize, a: [256]usize, f: [256]usize }
+
+// ALLOC step (op 0/1): only if the slot is empty; on OOM the slot stays empty.
+fn a21_alloc(h: write Heap, sl: write Slots, slot: usize, w: u64) -> unit {
+    if (deref sl).p[slot] != 0 { return; }   // occupied: no-op
+    let size: usize = conv usize ((w / 1024u64) % 4096u64) + 1;       // ((w>>10) mod 4096)+1
+    let align: usize = pow2(conv usize ((w / 16777216u64) % 5u64));   // 1<<((w>>24) mod 5)
+    let fill: usize = conv usize ((w / 4294967296u64) % 256u64);      // (w>>32) and 0xFF
+    let p: usize = alloc_or_zero(write (deref h), size, align);
+    if p != 0 {
+        write_fill(p, size, conv u8 (fill));
+        (deref sl).p[slot] = p;
+        (deref sl).s[slot] = size;
+        (deref sl).a[slot] = align;
+        (deref sl).f[slot] = fill;
+    }
+}
+
+// FREE step (op 2): verify fill first (3.5), then free and mark empty.
+fn a21_free(h: write Heap, sl: write Slots, slot: usize) -> unit {
+    if (deref sl).p[slot] == 0 { return; }   // empty: no-op
+    assert(check_fill((deref sl).p[slot], (deref sl).s[slot], conv u8 ((deref sl).f[slot])));
+    expect_free_ok(heap_free(write (deref h), (deref sl).p[slot]));
+    (deref sl).p[slot] = 0;
+}
+
+// REALLOC step (op 3): verify fill, realloc; on success rewrite fill and
+// update the slot; on OOM the old block must remain live and unchanged.
+fn a21_realloc(h: write Heap, sl: write Slots, slot: usize, w: u64) -> unit {
+    if (deref sl).p[slot] == 0 { return; }   // empty: no-op
+    let nsize: usize = conv usize ((w / 1024u64) % 4096u64) + 1;
+    assert(check_fill((deref sl).p[slot], (deref sl).s[slot], conv u8 ((deref sl).f[slot])));
+    let np: usize = realloc_or_zero(write (deref h), (deref sl).p[slot], nsize);
+    if np != 0 {
+        write_fill(np, nsize, conv u8 ((deref sl).f[slot]));
+        (deref sl).p[slot] = np;
+        (deref sl).s[slot] = nsize;
+    } else {
+        assert(check_fill((deref sl).p[slot], (deref sl).s[slot], conv u8 ((deref sl).f[slot])));
+    }
+}
+
+// Per-step assertions (spec 4.4) over all non-empty slots: in-bounds (3.1),
+// alignment (3.2), size (3.3), fill integrity (3.5), pairwise non-overlap (3.4).
+fn a21_check(h: read Heap, sl: read Slots) -> unit {
+    let mut live: [256]usize = [0; 256];   // indices of non-empty slots
+    let mut m: usize = 0;
+    let mut j: usize = 0;
+    while j < 256 {
+        if (deref sl).p[j] != 0 {
+            assert((deref sl).p[j] >= (deref h).base + HDR
+                && (deref sl).p[j] + (deref sl).s[j] <= (deref h).end);      // 3.1
+            assert((deref sl).p[j] % (deref sl).a[j] == 0);                  // 3.2
+            assert((deref sl).s[j] >= 1);                                    // 3.3
+            assert(check_fill((deref sl).p[j], (deref sl).s[j], conv u8 ((deref sl).f[j])));  // 3.5
+            live[m] = j;
+            m = m + 1;
+        }
+        j = j + 1;
+    }
+    let mut x: usize = 0;
+    while x < m {                                                            // 3.4
+        let mut y: usize = x + 1;
+        while y < m {
+            assert(disjoint((deref sl).p[live[x]], (deref sl).s[live[x]],
+                            (deref sl).p[live[y]], (deref sl).s[live[y]]));
+            y = y + 1;
+        }
+        x = x + 1;
+    }
+}
+
+fn vec_a21(base: usize) -> unit {
+    let mut h: Heap = heap_init(base, REGION_LEN);
+    let mut sl: Slots = Slots { p: [0; 256], s: [0; 256], a: [0; 256], f: [0; 256] };
+    let mut state: u64 = 0x2545F4914F6CDD1Du64;   // spec 4.1 seed
+    let mut step: usize = 0;
+    while step < 20000 {
+        let w: u64 = xs_next(write state);
+        let slot: usize = conv usize ((w / 4u64) % 256u64);   // (w >> 2) mod 256
+        let op: u64 = w % 4u64;                               // w and 0x3
+        if op == 0u64 || op == 1u64 {
+            a21_alloc(write h, write sl, slot, w);
+        } else if op == 2u64 {
+            a21_free(write h, write sl, slot);
+        } else {
+            a21_realloc(write h, write sl, slot, w);
+        }
+        a21_check(read h, read sl);
+        step = step + 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A22 (ruling R2): partial coalescing of an adjacent middle run, on a region
+// of exactly ten 1 KiB blocks. Ten alloc(1024-HDR, 1) lay b0..b9 back to
+// back; free only b3,b4,b5; alloc(3*1024-HDR, 1) MUST succeed, and can only
+// fit if the middle three coalesced into one 3 KiB free span. The seven
+// still-live blocks are filled and re-verified (3.5).
+// ---------------------------------------------------------------------------
+
+fn vec_a22(base: usize) -> unit {
+    let mut h: Heap = heap_init(base, 10 * 1024);   // exactly ten blocks (R2)
+    let mut b: [10]usize = [0; 10];
+    let mut i: usize = 0;
+    while i < 10 {
+        b[i] = expect_ok(heap_alloc(write h, 1024 - HDR, 1));
+        write_fill(b[i], 1024 - HDR, conv u8 (0x30 + i));
+        i = i + 1;
+    }
+    // the ten blocks must sit back to back, one per KiB
+    i = 1;
+    while i < 10 {
+        assert(b[i] == b[i - 1] + 1024);
+        i = i + 1;
+    }
+    expect_free_ok(heap_free(write h, b[3]));
+    expect_free_ok(heap_free(write h, b[4]));
+    expect_free_ok(heap_free(write h, b[5]));
+    let p: usize = expect_ok(heap_alloc(write h, 3 * 1024 - HDR, 1));   // the anti-cheat alloc
+    write_fill(p, 3 * 1024 - HDR, 0xEEu8);
+    // the seven live blocks were never disturbed
+    i = 0;
+    while i < 10 {
+        if i < 3 || i > 5 {
+            assert(check_fill(b[i], 1024 - HDR, conv u8 (0x30 + i)));
+        }
+        i = i + 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// main: the caller-provided region is a 1 MiB byte array local to main; its
+// address anchors every heap the vectors build. Sentinel 777 on full success.
+// ---------------------------------------------------------------------------
+
+fn main() -> i64 {
+    let mut region: [1048576]u8 = [0u8; 1048576];
+    let mut base: usize = 0;
+    unsafe "region is a live local of main for the entire run; taking its address only anchors the heaps, and every later access stays inside its 1 MiB" {
+        base = ptr_to_addr(cast_ptr[u8](addr_of_mut(region)));
+    }
+    vec_a1(base);
+    vec_a2(base);
+    vec_a3(base);
+    vec_a4(base);
+    vec_a5(base);
+    vec_a6(base);
+    vec_a7(base);
+    vec_a8(base);
+    vec_a9(base);
+    vec_a10(base);
+    vec_a11(base);
+    vec_a12_to_a16(base);
+    vec_a17(base);
+    vec_a18(base);
+    vec_a19(base);
+    vec_a20(base);
+    vec_a21(base);
+    vec_a22(base);
+    return 777;   // sentinel: every vector passed
+}
