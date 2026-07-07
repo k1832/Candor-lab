@@ -11,7 +11,7 @@ commitment — including unfavorable ones.
 | Intrusive scheduler | YES — 20/20 vectors, sentinel 777, ~25s | **0.4120** | 0.8750 | max(0.40, 1.25×0.1489)=0.40 | 0.2948 vs 0.5132 | **KILL threshold breached** |
 | MMIO state machine | pending | | | 0.15 abs | vs 0.1667 | |
 | Parser | pending | | | 0.15 abs | vs 0.4150 | |
-| Arena pass | pending | | | 0.15 abs | vs 0.2051 | |
+| Arena pass | YES — 29/29 vectors, sentinel 777, ~25ms | **0.0000** | 0.0000 | 0.15 abs | 0.0991 vs 0.2051 | **pass** |
 
 ## Allocator — recorded 2026-07-07
 
@@ -31,6 +31,14 @@ ceiling — the second home-ground KILL breach, by 0.012**. Zero cell-substituta
 friction notes (README): rawptr's lack of safe field projection puts ~10 one-line accessors in
 the valve; explicit call-site reborrows are a steady tax; one prototype parser bug worked around
 with defensive semicolons (recorded as a known prototype issue, not fixed mid-experiment).
+
+## Arena — recorded 2026-07-07
+
+Completed (M5 pass, AR1-AR29, ~25ms). Zero valve regions — even the backing array needed no Box,
+so §11.5's "valve sealed inside the backing" never arises. Annotation 0.0991 vs Rust 0.2051
+units/statement (−52%). M2: 0.0000 vs the 0.15 value-favorable ceiling — clean pass. Friction
+notes in the port README (reborrow ceremony in recursive walkers; no i64::MIN literal; `out` is
+a reserved word). Rulings R21-R24.
 
 ## Measurement observation (both home-ground programs)
 

@@ -89,3 +89,13 @@ before easy wins manufacture momentum. With both home-ground programs (allocator
 completed, scored, and their KILL breaches published, that purpose is fully discharged; the three
 value-favorable ports (MMIO in progress, parser, arena) may proceed in parallel. All five are
 still attempted and scored; nothing about the order of the remaining three can mask anything.
+
+## 2026-07-07 — Arena port scoring batch
+
+**R21 (arena).** `fold` returning a `FoldOut` struct (no tuples in Candor) is conforming; interface
+names/shapes are indicative (spec §2 preamble). — **R22 (arena).** `arena_get` faulting on a dead
+id is a conforming enforcement of spec 2.3's liveness requirement (fault = bug manifesting, P7).
+— **R23 (arena).** Fixed capacity 256 is a port constant adequate to every vector; the spec sets
+no capacity requirement. — **R24 (arena idiomaticity).** Confirmed idiomatic per §11.5's sketch;
+zero valve regions, zero cell-substitutable candidates (nothing to tag). M2 value-favorable
+verdict: 0.0000 against the 0.15 ceiling — clean pass.
