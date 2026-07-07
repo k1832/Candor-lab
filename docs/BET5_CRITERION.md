@@ -51,6 +51,7 @@ pre-registration is never silently retrofitted to match a result already seen.
 | 11 | 2026-07-06 | §4.6, §5.3 | M6 depended on a spec pack that may not exist at Bet 5 time and was near-certain to fire | M6 demoted to supplementary evidence alongside M7 (no WARN, feeds no counts); "in context" defined as frozen grammar + memory-model design doc + basket specs; §5.3 counts WARNs only from M1, M1b, M2, M3, M4 | Review finding 11 | deciding authority (k1832), adversarial review #1 |
 | 12 | 2026-07-06 | §4.2, §5.1(b) | Prototype valve set (unsafe-only) is a strict subset of P12's (checked-runtime OR unsafe); M2's home-ground ceiling could false-KILL on an artifact of the dropped checked-cell valve | Cell-substitutable tagging added: adjudicator-confirmed tags reported; M2 evaluated on the full count, but a KILL that would be reversed by excluding confirmed cell-substitutable regions becomes a mandatory §9 review instead of an automatic KILL | Memory-model adversarial review #1, finding 10 | deciding authority (k1832) |
 | 13 | 2026-07-07 | §6.2 step (i), §3.1, §3.7 | Step (i) artifacts existed unhashed | Freeze step (i) declared COMPLETE: checker-soundness argument passed independent retest #4 after three failed rounds (12 findings fixed, docs/reviews/); all step-(i) artifact hashes recorded in docs/FREEZE_MANIFEST.md at commit 0e8c6fe; prototype memory-model syntax frozen per §3.1. Step (ii) spec hashes recorded there too, pending the publication ruling. No metric, threshold, or definition changed | Administrative completion record | deciding authority (k1832) |
+| 14 | 2026-07-07 | §6.6 | Baseline table empty | Step (iii) baselines recorded: five Rust baselines (two adapted from independently sourced crates with engines vendored per adjudication R1, three commissioned from Opus-family sessions blind to the Candor design docs), all suites green, frozen at commit b689860 with measured valve fractions; thirteen §6.5 adjudication rulings recorded in docs/ADJUDICATIONS.md with the open-comment window running from repository publication. No metric, threshold, or definition changed | Administrative completion record; adjudication batch R1-R13 | deciding authority (k1832) |
 
 ---
 
@@ -526,11 +527,19 @@ KILL (§4.2) and in M3 (§4.3).
 
 | Program | Source (repo / author) | Commit hash | Valve-line fraction (measured) | Valve-function fraction (measured) | Idiomaticity confirmed by | Date |
 |---------|------------------------|-------------|--------------------------------|------------------------------------|---------------------------|------|
-| Allocator | *(to be recorded before freeze)* | — | — | — | — | — |
-| Intrusive scheduler | — | — | — | — | — | — |
-| MMIO state machine | — | — | — | — | — | — |
-| Parser | — | — | — | — | — | — |
-| Arena compiler pass | — | — | — | — | — | — |
+| Allocator | adapted: linked_list_allocator 0.10.6 (rust-osdev; engine vendored per ruling R1) + commissioned adaptation, Opus-family session | `b689860` (this repo, baselines/rust/allocator) | 0.1929 | 0.6842 | deciding authority (k1832); §6.5 comment window runs from publication | 2026-07-07 |
+| Intrusive scheduler | adapted: intrusive-collections 0.10.2 (Amanieu; used subset vendored per R1) + commissioned policy layer, Opus-family session | `b689860` (baselines/rust/scheduler) | 0.1489 | 0.5000 | same | 2026-07-07 |
+| MMIO state machine | commissioned, Opus-family session blind to Candor design docs | `b689860` (baselines/rust/mmio) | 0.0231 | 0.1154 | same | 2026-07-07 |
+| Parser | commissioned, Opus-family session blind to Candor design docs | `b689860` (baselines/rust/parser) | 0.0000 | 0.0000 | same | 2026-07-07 |
+| Arena compiler pass | commissioned, Opus-family session blind to Candor design docs | `b689860` (baselines/rust/arena) | 0.0000 | 0.0000 | same | 2026-07-07 |
+
+Measurement records: `docs/measurements/baselines/*.json` (per-file rust-count output, additive
+aggregation over each baseline's `src/`; tests excluded). Resulting home-ground M2 KILL ceilings
+(§4.2): allocator `max(0.40, 1.25 × 0.1929) = 0.40`; scheduler `max(0.40, 1.25 × 0.1489) = 0.40`.
+Per the baseline-production ruling (FREEZE_MANIFEST): baselines were authored by Opus-family
+sessions, so the Candor ports may not be (criterion §6.3); the port-authoring model family is
+recorded here when porting begins. Spec-ambiguity rulings from baseline construction:
+`docs/ADJUDICATIONS.md` R1-R13.
 
 6.7 **Independence: the solo-project honesty clause.** Full third-party independence — separate teams
 for spec-authoring, baseline sourcing, classification, and adjudication — is **not available to a

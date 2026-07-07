@@ -54,8 +54,17 @@ different model family, recorded in §6.6 alongside the baselines.
 | docs/basket/spec-parser.md | 86947fcc090e9fe1c930c40ac58c35d74dd2a66c4c697d1a90e7f673ce92c0a0 |
 | docs/basket/spec-scheduler.md | d3433acfb0a6fc57a087986f185c652369ab92971e9d21afd7b906c833745ce9 |
 
-## Step (iii) — Rust baselines: NOT STARTED
+## Step (iii) — Rust baselines: COMPLETE, 2026-07-07
 
-Baseline sources, commit hashes, adjudicated idiomaticity, and measured valve fractions are
-recorded in criterion §6.6 when chosen. The freeze instant (criterion §0.1) is the first commit
-of any Candor basket port after step (iii) completes.
+All five baselines built, suites green, frozen at commit `b689860` (allocator 22 vectors,
+scheduler 20 incl. the 20k-step stress, MMIO 12 with byte-exact traces, parser 33, arena 29).
+Sources, valve fractions, and idiomaticity confirmations recorded in criterion §6.6 (ledger row
+14); thirteen adjudication rulings in docs/ADJUDICATIONS.md; measurement JSONs in
+docs/measurements/baselines/.
+
+## The freeze instant — PENDING two gates
+
+Criterion §0.1: the freeze instant is the first commit of any Candor basket port. Before it:
+1. **The repository must be public** (publication ruling above — binding).
+2. The deciding authority gives the go-decision; the port-authoring model family (non-Opus, per
+   §6.3 and the baseline ruling) is recorded in §6.6 at that time.

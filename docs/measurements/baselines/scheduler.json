@@ -1,0 +1,967 @@
+{
+ "annotation_units": {
+  "a": 78,
+  "b": 12,
+  "c": 0,
+  "d": 46
+ },
+ "derived": {
+  "annotation_per_stmt": 0.5132,
+  "annotation_units_total": 136,
+  "copy_per_stmt": 0.0038,
+  "valve_function_fraction": 0.5,
+  "valve_line_fraction": 0.1489
+ },
+ "logical_statements": 265,
+ "per_file": {
+  "baselines/rust/scheduler/src/lib.rs": {
+   "annotation_units": {
+    "a": 22,
+    "b": 0,
+    "c": 0,
+    "d": 4,
+    "per_site": [
+     {
+      "class": "d",
+      "end": 2569,
+      "kind": "cell",
+      "start": 2561
+     },
+     {
+      "class": "d",
+      "end": 2593,
+      "kind": "cell",
+      "start": 2582
+     },
+     {
+      "class": "a",
+      "end": 2990,
+      "kind": "ref_self",
+      "start": 2989
+     },
+     {
+      "class": "a",
+      "end": 3089,
+      "kind": "ref_self",
+      "start": 3088
+     },
+     {
+      "class": "a",
+      "end": 3197,
+      "kind": "ref_self",
+      "start": 3196
+     },
+     {
+      "class": "a",
+      "end": 4149,
+      "kind": "ref_mut_self",
+      "start": 4148
+     },
+     {
+      "class": "a",
+      "end": 4166,
+      "kind": "ref",
+      "start": 4165
+     },
+     {
+      "class": "d",
+      "end": 4446,
+      "kind": "unsafe_block",
+      "start": 4392
+     },
+     {
+      "class": "a",
+      "end": 4573,
+      "kind": "ref_mut_self",
+      "start": 4572
+     },
+     {
+      "class": "a",
+      "end": 4590,
+      "kind": "ref",
+      "start": 4589
+     },
+     {
+      "class": "d",
+      "end": 4935,
+      "kind": "unsafe_block",
+      "start": 4884
+     },
+     {
+      "class": "a",
+      "end": 5361,
+      "kind": "ref_mut_self",
+      "start": 5360
+     },
+     {
+      "class": "a",
+      "end": 5378,
+      "kind": "ref",
+      "start": 5377
+     },
+     {
+      "class": "a",
+      "end": 6178,
+      "kind": "ref_mut_self",
+      "start": 6177
+     },
+     {
+      "class": "a",
+      "end": 6748,
+      "kind": "ref_mut_self",
+      "start": 6747
+     },
+     {
+      "class": "a",
+      "end": 7198,
+      "kind": "ref_mut_self",
+      "start": 7197
+     },
+     {
+      "class": "a",
+      "end": 7215,
+      "kind": "ref",
+      "start": 7214
+     },
+     {
+      "class": "a",
+      "end": 7821,
+      "kind": "ref_mut_self",
+      "start": 7820
+     },
+     {
+      "class": "a",
+      "end": 7838,
+      "kind": "ref",
+      "start": 7837
+     },
+     {
+      "class": "a",
+      "end": 8399,
+      "kind": "ref_mut_self",
+      "start": 8398
+     },
+     {
+      "class": "a",
+      "end": 8416,
+      "kind": "ref",
+      "start": 8415
+     },
+     {
+      "class": "a",
+      "end": 9015,
+      "kind": "ref_mut_self",
+      "start": 9014
+     },
+     {
+      "class": "a",
+      "end": 9032,
+      "kind": "ref",
+      "start": 9031
+     },
+     {
+      "class": "a",
+      "end": 9457,
+      "kind": "ref_self",
+      "start": 9456
+     },
+     {
+      "class": "a",
+      "end": 9866,
+      "kind": "ref_self",
+      "start": 9865
+     },
+     {
+      "class": "a",
+      "end": 10278,
+      "kind": "ref_self",
+      "start": 10277
+     }
+    ]
+   },
+   "logical_statements": 82,
+   "value_copy_units": 1,
+   "valve": {
+    "functions": 2,
+    "lines": 4,
+    "total_functions": 18,
+    "total_lines": 261
+   }
+  },
+  "baselines/rust/scheduler/src/vendored_intrusive/adapter.rs": {
+   "annotation_units": {
+    "a": 8,
+    "b": 0,
+    "c": 0,
+    "d": 4,
+    "per_site": [
+     {
+      "class": "d",
+      "end": 2587,
+      "kind": "unsafe_fn",
+      "start": 2585
+     },
+     {
+      "class": "a",
+      "end": 2608,
+      "kind": "ref_self",
+      "start": 2607
+     },
+     {
+      "class": "d",
+      "end": 2720,
+      "kind": "rawptr_const",
+      "start": 2674
+     },
+     {
+      "class": "d",
+      "end": 2869,
+      "kind": "unsafe_fn",
+      "start": 2867
+     },
+     {
+      "class": "a",
+      "end": 2889,
+      "kind": "ref_self",
+      "start": 2888
+     },
+     {
+      "class": "d",
+      "end": 2956,
+      "kind": "rawptr_const",
+      "start": 2910
+     },
+     {
+      "class": "a",
+      "end": 3074,
+      "kind": "ref_self",
+      "start": 3073
+     },
+     {
+      "class": "a",
+      "end": 3084,
+      "kind": "ref",
+      "start": 3083
+     },
+     {
+      "class": "a",
+      "end": 3181,
+      "kind": "ref_mut_self",
+      "start": 3180
+     },
+     {
+      "class": "a",
+      "end": 3195,
+      "kind": "ref_mut",
+      "start": 3194
+     },
+     {
+      "class": "a",
+      "end": 3289,
+      "kind": "ref_self",
+      "start": 3288
+     },
+     {
+      "class": "a",
+      "end": 3299,
+      "kind": "ref",
+      "start": 3298
+     }
+    ]
+   },
+   "logical_statements": 8,
+   "value_copy_units": 0,
+   "valve": {
+    "functions": 2,
+    "lines": 8,
+    "total_functions": 5,
+    "total_lines": 196
+   }
+  },
+  "baselines/rust/scheduler/src/vendored_intrusive/link_ops.rs": {
+   "annotation_units": {
+    "a": 2,
+    "b": 0,
+    "c": 0,
+    "d": 2,
+    "per_site": [
+     {
+      "class": "d",
+      "end": 1041,
+      "kind": "unsafe_fn",
+      "start": 1039
+     },
+     {
+      "class": "a",
+      "end": 1056,
+      "kind": "ref_mut_self",
+      "start": 1055
+     },
+     {
+      "class": "d",
+      "end": 1281,
+      "kind": "unsafe_fn",
+      "start": 1279
+     },
+     {
+      "class": "a",
+      "end": 1296,
+      "kind": "ref_mut_self",
+      "start": 1295
+     }
+    ]
+   },
+   "logical_statements": 7,
+   "value_copy_units": 0,
+   "valve": {
+    "functions": 2,
+    "lines": 2,
+    "total_functions": 2,
+    "total_lines": 35
+   }
+  },
+  "baselines/rust/scheduler/src/vendored_intrusive/linked_list.rs": {
+   "annotation_units": {
+    "a": 36,
+    "b": 12,
+    "c": 0,
+    "d": 26,
+    "per_site": [
+     {
+      "class": "d",
+      "end": 1574,
+      "kind": "unsafe_fn",
+      "start": 1572
+     },
+     {
+      "class": "a",
+      "end": 1581,
+      "kind": "ref_self",
+      "start": 1580
+     },
+     {
+      "class": "d",
+      "end": 1774,
+      "kind": "unsafe_fn",
+      "start": 1772
+     },
+     {
+      "class": "a",
+      "end": 1781,
+      "kind": "ref_self",
+      "start": 1780
+     },
+     {
+      "class": "d",
+      "end": 1975,
+      "kind": "unsafe_fn",
+      "start": 1973
+     },
+     {
+      "class": "a",
+      "end": 1986,
+      "kind": "ref_mut_self",
+      "start": 1985
+     },
+     {
+      "class": "d",
+      "end": 2188,
+      "kind": "unsafe_fn",
+      "start": 2186
+     },
+     {
+      "class": "a",
+      "end": 2199,
+      "kind": "ref_mut_self",
+      "start": 2198
+     },
+     {
+      "class": "d",
+      "end": 2587,
+      "kind": "cell",
+      "start": 2560
+     },
+     {
+      "class": "d",
+      "end": 2626,
+      "kind": "cell",
+      "start": 2599
+     },
+     {
+      "class": "a",
+      "end": 3106,
+      "kind": "ref_self",
+      "start": 3105
+     },
+     {
+      "class": "d",
+      "end": 4012,
+      "kind": "unsafe_fn",
+      "start": 4010
+     },
+     {
+      "class": "a",
+      "end": 4027,
+      "kind": "ref_mut_self",
+      "start": 4026
+     },
+     {
+      "class": "d",
+      "end": 4242,
+      "kind": "unsafe_fn",
+      "start": 4240
+     },
+     {
+      "class": "a",
+      "end": 4257,
+      "kind": "ref_mut_self",
+      "start": 4256
+     },
+     {
+      "class": "d",
+      "end": 4413,
+      "kind": "unsafe_fn",
+      "start": 4411
+     },
+     {
+      "class": "a",
+      "end": 4420,
+      "kind": "ref_self",
+      "start": 4419
+     },
+     {
+      "class": "d",
+      "end": 4539,
+      "kind": "unsafe_fn",
+      "start": 4537
+     },
+     {
+      "class": "a",
+      "end": 4546,
+      "kind": "ref_self",
+      "start": 4545
+     },
+     {
+      "class": "d",
+      "end": 4665,
+      "kind": "unsafe_fn",
+      "start": 4663
+     },
+     {
+      "class": "a",
+      "end": 4676,
+      "kind": "ref_mut_self",
+      "start": 4675
+     },
+     {
+      "class": "d",
+      "end": 4808,
+      "kind": "unsafe_fn",
+      "start": 4806
+     },
+     {
+      "class": "a",
+      "end": 4819,
+      "kind": "ref_mut_self",
+      "start": 4818
+     },
+     {
+      "class": "d",
+      "end": 4945,
+      "kind": "unsafe_fn",
+      "start": 4943
+     },
+     {
+      "class": "a",
+      "end": 4993,
+      "kind": "ref_mut",
+      "start": 4992
+     },
+     {
+      "class": "d",
+      "end": 5337,
+      "kind": "unsafe_fn",
+      "start": 5335
+     },
+     {
+      "class": "a",
+      "end": 5379,
+      "kind": "ref_mut",
+      "start": 5378
+     },
+     {
+      "class": "d",
+      "end": 5511,
+      "kind": "unsafe_fn",
+      "start": 5509
+     },
+     {
+      "class": "a",
+      "end": 5548,
+      "kind": "ref_mut",
+      "start": 5547
+     },
+     {
+      "class": "b",
+      "end": 6100,
+      "kind": "region_decl",
+      "start": 6098
+     },
+     {
+      "class": "a",
+      "end": 6229,
+      "kind": "ref",
+      "start": 6228
+     },
+     {
+      "class": "b",
+      "end": 6231,
+      "kind": "region_use",
+      "start": 6229
+     },
+     {
+      "class": "b",
+      "end": 6257,
+      "kind": "region_decl",
+      "start": 6255
+     },
+     {
+      "class": "a",
+      "end": 6546,
+      "kind": "ref_self",
+      "start": 6545
+     },
+     {
+      "class": "a",
+      "end": 6563,
+      "kind": "ref",
+      "start": 6562
+     },
+     {
+      "class": "b",
+      "end": 6565,
+      "kind": "region_use",
+      "start": 6563
+     },
+     {
+      "class": "d",
+      "end": 6674,
+      "kind": "unsafe_block",
+      "start": 6619
+     },
+     {
+      "class": "a",
+      "end": 7031,
+      "kind": "ref_mut_self",
+      "start": 7030
+     },
+     {
+      "class": "d",
+      "end": 7169,
+      "kind": "unsafe_block",
+      "start": 7116
+     },
+     {
+      "class": "b",
+      "end": 7335,
+      "kind": "region_decl",
+      "start": 7333
+     },
+     {
+      "class": "a",
+      "end": 7464,
+      "kind": "ref_mut",
+      "start": 7463
+     },
+     {
+      "class": "b",
+      "end": 7466,
+      "kind": "region_use",
+      "start": 7464
+     },
+     {
+      "class": "b",
+      "end": 7496,
+      "kind": "region_decl",
+      "start": 7494
+     },
+     {
+      "class": "a",
+      "end": 7918,
+      "kind": "ref_mut_self",
+      "start": 7917
+     },
+     {
+      "class": "d",
+      "end": 8056,
+      "kind": "unsafe_block",
+      "start": 8003
+     },
+     {
+      "class": "a",
+      "end": 8510,
+      "kind": "ref_mut_self",
+      "start": 8509
+     },
+     {
+      "class": "d",
+      "end": 9433,
+      "kind": "unsafe_block",
+      "start": 8580
+     },
+     {
+      "class": "a",
+      "end": 9821,
+      "kind": "ref_mut_self",
+      "start": 9820
+     },
+     {
+      "class": "d",
+      "end": 10376,
+      "kind": "unsafe_block",
+      "start": 9886
+     },
+     {
+      "class": "a",
+      "end": 11060,
+      "kind": "ref_mut_self",
+      "start": 11059
+     },
+     {
+      "class": "d",
+      "end": 11643,
+      "kind": "unsafe_block",
+      "start": 11217
+     },
+     {
+      "class": "a",
+      "end": 11937,
+      "kind": "ref_self",
+      "start": 11936
+     },
+     {
+      "class": "a",
+      "end": 12134,
+      "kind": "ref_mut_self",
+      "start": 12133
+     },
+     {
+      "class": "d",
+      "end": 12450,
+      "kind": "unsafe_fn",
+      "start": 12448
+     },
+     {
+      "class": "a",
+      "end": 12481,
+      "kind": "ref_mut_self",
+      "start": 12480
+     },
+     {
+      "class": "d",
+      "end": 12547,
+      "kind": "rawptr_const",
+      "start": 12504
+     },
+     {
+      "class": "a",
+      "end": 12867,
+      "kind": "ref_mut_self",
+      "start": 12866
+     },
+     {
+      "class": "a",
+      "end": 13087,
+      "kind": "ref_self",
+      "start": 13086
+     },
+     {
+      "class": "a",
+      "end": 13523,
+      "kind": "ref_mut_self",
+      "start": 13522
+     },
+     {
+      "class": "d",
+      "end": 14003,
+      "kind": "unsafe_block",
+      "start": 13706
+     },
+     {
+      "class": "a",
+      "end": 14119,
+      "kind": "ref_mut_self",
+      "start": 14118
+     },
+     {
+      "class": "a",
+      "end": 14386,
+      "kind": "ref_mut_self",
+      "start": 14385
+     },
+     {
+      "class": "a",
+      "end": 14653,
+      "kind": "ref_mut_self",
+      "start": 14652
+     },
+     {
+      "class": "b",
+      "end": 14949,
+      "kind": "region_decl",
+      "start": 14947
+     },
+     {
+      "class": "a",
+      "end": 15137,
+      "kind": "ref",
+      "start": 15136
+     },
+     {
+      "class": "b",
+      "end": 15139,
+      "kind": "region_use",
+      "start": 15137
+     },
+     {
+      "class": "b",
+      "end": 15164,
+      "kind": "region_decl",
+      "start": 15162
+     },
+     {
+      "class": "a",
+      "end": 15264,
+      "kind": "ref",
+      "start": 15263
+     },
+     {
+      "class": "b",
+      "end": 15266,
+      "kind": "region_use",
+      "start": 15264
+     },
+     {
+      "class": "a",
+      "end": 15333,
+      "kind": "ref_mut_self",
+      "start": 15332
+     },
+     {
+      "class": "a",
+      "end": 15354,
+      "kind": "ref",
+      "start": 15353
+     },
+     {
+      "class": "b",
+      "end": 15356,
+      "kind": "region_use",
+      "start": 15354
+     },
+     {
+      "class": "d",
+      "end": 15617,
+      "kind": "unsafe_block",
+      "start": 15567
+     },
+     {
+      "class": "d",
+      "end": 15688,
+      "kind": "unsafe_block",
+      "start": 15642
+     }
+    ]
+   },
+   "logical_statements": 137,
+   "value_copy_units": 0,
+   "valve": {
+    "functions": 22,
+    "lines": 131,
+    "total_functions": 33,
+    "total_lines": 444
+   }
+  },
+  "baselines/rust/scheduler/src/vendored_intrusive/mod.rs": {
+   "annotation_units": {
+    "a": 0,
+    "b": 0,
+    "c": 0,
+    "d": 0,
+    "per_site": []
+   },
+   "logical_statements": 0,
+   "value_copy_units": 0,
+   "valve": {
+    "functions": 0,
+    "lines": 0,
+    "total_functions": 0,
+    "total_lines": 16
+   }
+  },
+  "baselines/rust/scheduler/src/vendored_intrusive/pointer_ops.rs": {
+   "annotation_units": {
+    "a": 5,
+    "b": 0,
+    "c": 0,
+    "d": 6,
+    "per_site": [
+     {
+      "class": "d",
+      "end": 1495,
+      "kind": "unsafe_fn",
+      "start": 1493
+     },
+     {
+      "class": "a",
+      "end": 1506,
+      "kind": "ref_self",
+      "start": 1505
+     },
+     {
+      "class": "d",
+      "end": 1537,
+      "kind": "rawptr_const",
+      "start": 1519
+     },
+     {
+      "class": "a",
+      "end": 1657,
+      "kind": "ref_self",
+      "start": 1656
+     },
+     {
+      "class": "d",
+      "end": 1704,
+      "kind": "rawptr_const",
+      "start": 1686
+     },
+     {
+      "class": "a",
+      "end": 2149,
+      "kind": "ref_self",
+      "start": 2148
+     },
+     {
+      "class": "d",
+      "end": 2520,
+      "kind": "unsafe_fn",
+      "start": 2518
+     },
+     {
+      "class": "a",
+      "end": 2531,
+      "kind": "ref_self",
+      "start": 2530
+     },
+     {
+      "class": "d",
+      "end": 2550,
+      "kind": "rawptr_const",
+      "start": 2542
+     },
+     {
+      "class": "a",
+      "end": 2651,
+      "kind": "ref_self",
+      "start": 2650
+     },
+     {
+      "class": "d",
+      "end": 2687,
+      "kind": "rawptr_const",
+      "start": 2679
+     }
+    ]
+   },
+   "logical_statements": 18,
+   "value_copy_units": 0,
+   "valve": {
+    "functions": 4,
+    "lines": 7,
+    "total_functions": 7,
+    "total_lines": 63
+   }
+  },
+  "baselines/rust/scheduler/src/vendored_intrusive/unsafe_ref.rs": {
+   "annotation_units": {
+    "a": 5,
+    "b": 0,
+    "c": 0,
+    "d": 4,
+    "per_site": [
+     {
+      "class": "d",
+      "end": 1150,
+      "kind": "unsafe_fn",
+      "start": 1148
+     },
+     {
+      "class": "d",
+      "end": 1173,
+      "kind": "rawptr_const",
+      "start": 1165
+     },
+     {
+      "class": "d",
+      "end": 1391,
+      "kind": "rawptr_mut",
+      "start": 1385
+     },
+     {
+      "class": "a",
+      "end": 1497,
+      "kind": "ref_self",
+      "start": 1496
+     },
+     {
+      "class": "a",
+      "end": 1657,
+      "kind": "ref_self",
+      "start": 1656
+     },
+     {
+      "class": "a",
+      "end": 1667,
+      "kind": "ref",
+      "start": 1666
+     },
+     {
+      "class": "a",
+      "end": 1775,
+      "kind": "ref_self",
+      "start": 1774
+     },
+     {
+      "class": "a",
+      "end": 1785,
+      "kind": "ref",
+      "start": 1784
+     },
+     {
+      "class": "d",
+      "end": 1825,
+      "kind": "unsafe_block",
+      "start": 1797
+     }
+    ]
+   },
+   "logical_statements": 13,
+   "value_copy_units": 0,
+   "valve": {
+    "functions": 3,
+    "lines": 7,
+    "total_functions": 5,
+    "total_lines": 53
+   }
+  }
+ },
+ "table_version": "1",
+ "value_copy_units": 1,
+ "valve": {
+  "functions": 35,
+  "lines": 159,
+  "total_functions": 70,
+  "total_lines": 1068
+ }
+}

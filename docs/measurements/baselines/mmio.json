@@ -1,0 +1,288 @@
+{
+ "annotation_units": {
+  "a": 24,
+  "b": 0,
+  "c": 0,
+  "d": 5
+ },
+ "derived": {
+  "annotation_per_stmt": 0.1667,
+  "annotation_units_total": 29,
+  "copy_per_stmt": 0.0,
+  "valve_function_fraction": 0.1154,
+  "valve_line_fraction": 0.0231
+ },
+ "logical_statements": 174,
+ "per_file": {
+  "baselines/rust/mmio/src/constants.rs": {
+   "annotation_units": {
+    "a": 0,
+    "b": 0,
+    "c": 0,
+    "d": 0,
+    "per_site": []
+   },
+   "logical_statements": 13,
+   "value_copy_units": 0,
+   "valve": {
+    "functions": 0,
+    "lines": 0,
+    "total_functions": 0,
+    "total_lines": 14
+   }
+  },
+  "baselines/rust/mmio/src/device.rs": {
+   "annotation_units": {
+    "a": 6,
+    "b": 0,
+    "c": 0,
+    "d": 0,
+    "per_site": [
+     {
+      "class": "a",
+      "end": 1988,
+      "kind": "ref_mut_self",
+      "start": 1987
+     },
+     {
+      "class": "a",
+      "end": 2242,
+      "kind": "ref_mut_self",
+      "start": 2241
+     },
+     {
+      "class": "a",
+      "end": 3492,
+      "kind": "ref_mut_self",
+      "start": 3491
+     },
+     {
+      "class": "a",
+      "end": 4657,
+      "kind": "ref_mut_self",
+      "start": 4656
+     },
+     {
+      "class": "a",
+      "end": 4923,
+      "kind": "ref_mut_self",
+      "start": 4922
+     },
+     {
+      "class": "a",
+      "end": 5229,
+      "kind": "ref_mut_self",
+      "start": 5228
+     }
+    ]
+   },
+   "logical_statements": 60,
+   "value_copy_units": 0,
+   "valve": {
+    "functions": 0,
+    "lines": 0,
+    "total_functions": 7,
+    "total_lines": 176
+   }
+  },
+  "baselines/rust/mmio/src/driver.rs": {
+   "annotation_units": {
+    "a": 9,
+    "b": 0,
+    "c": 0,
+    "d": 0,
+    "per_site": [
+     {
+      "class": "a",
+      "end": 1107,
+      "kind": "ref_self",
+      "start": 1106
+     },
+     {
+      "class": "a",
+      "end": 1117,
+      "kind": "ref",
+      "start": 1116
+     },
+     {
+      "class": "a",
+      "end": 1361,
+      "kind": "ref_mut_self",
+      "start": 1360
+     },
+     {
+      "class": "a",
+      "end": 1755,
+      "kind": "ref_mut_self",
+      "start": 1754
+     },
+     {
+      "class": "a",
+      "end": 2075,
+      "kind": "ref_mut_self",
+      "start": 2074
+     },
+     {
+      "class": "a",
+      "end": 2513,
+      "kind": "ref_mut_self",
+      "start": 2512
+     },
+     {
+      "class": "a",
+      "end": 2549,
+      "kind": "ref_mut",
+      "start": 2548
+     },
+     {
+      "class": "a",
+      "end": 3848,
+      "kind": "ref_mut_self",
+      "start": 3847
+     },
+     {
+      "class": "a",
+      "end": 3884,
+      "kind": "ref_mut",
+      "start": 3883
+     }
+    ]
+   },
+   "logical_statements": 69,
+   "value_copy_units": 0,
+   "valve": {
+    "functions": 0,
+    "lines": 0,
+    "total_functions": 8,
+    "total_lines": 148
+   }
+  },
+  "baselines/rust/mmio/src/hal.rs": {
+   "annotation_units": {
+    "a": 9,
+    "b": 0,
+    "c": 0,
+    "d": 5,
+    "per_site": [
+     {
+      "class": "a",
+      "end": 837,
+      "kind": "ref",
+      "start": 836
+     },
+     {
+      "class": "a",
+      "end": 1195,
+      "kind": "ref_mut_self",
+      "start": 1194
+     },
+     {
+      "class": "a",
+      "end": 1237,
+      "kind": "ref_mut_self",
+      "start": 1236
+     },
+     {
+      "class": "a",
+      "end": 1626,
+      "kind": "ref_self",
+      "start": 1625
+     },
+     {
+      "class": "a",
+      "end": 1636,
+      "kind": "ref_mut",
+      "start": 1635
+     },
+     {
+      "class": "a",
+      "end": 2204,
+      "kind": "ref_mut_self",
+      "start": 2203
+     },
+     {
+      "class": "a",
+      "end": 2408,
+      "kind": "ref_mut_self",
+      "start": 2407
+     },
+     {
+      "class": "d",
+      "end": 2887,
+      "kind": "rawptr_mut",
+      "start": 2880
+     },
+     {
+      "class": "d",
+      "end": 3155,
+      "kind": "unsafe_fn",
+      "start": 3153
+     },
+     {
+      "class": "d",
+      "end": 3173,
+      "kind": "rawptr_mut",
+      "start": 3166
+     },
+     {
+      "class": "a",
+      "end": 3258,
+      "kind": "ref_mut_self",
+      "start": 3257
+     },
+     {
+      "class": "d",
+      "end": 3446,
+      "kind": "unsafe_block",
+      "start": 3378
+     },
+     {
+      "class": "a",
+      "end": 3468,
+      "kind": "ref_mut_self",
+      "start": 3467
+     },
+     {
+      "class": "d",
+      "end": 3738,
+      "kind": "unsafe_block",
+      "start": 3593
+     }
+    ]
+   },
+   "logical_statements": 32,
+   "value_copy_units": 0,
+   "valve": {
+    "functions": 3,
+    "lines": 11,
+    "total_functions": 11,
+    "total_lines": 128
+   }
+  },
+  "baselines/rust/mmio/src/lib.rs": {
+   "annotation_units": {
+    "a": 0,
+    "b": 0,
+    "c": 0,
+    "d": 0,
+    "per_site": []
+   },
+   "logical_statements": 0,
+   "value_copy_units": 0,
+   "valve": {
+    "functions": 0,
+    "lines": 0,
+    "total_functions": 0,
+    "total_lines": 10
+   }
+  }
+ },
+ "table_version": "1",
+ "value_copy_units": 0,
+ "valve": {
+  "functions": 3,
+  "lines": 11,
+  "total_functions": 26,
+  "total_lines": 476
+ }
+}
