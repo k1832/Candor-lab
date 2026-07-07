@@ -62,6 +62,20 @@ scope exit is a mechanism for exempt types and an internal debug assertion for n
 semantic drop-flag decision. §1.5/§10.6's "no runtime drop flags" claim therefore holds as written for
 safe code, and §2.1's discharge is complete. The example above (`f(c)`) is now a checker error.
 
+**EXTENDED (2026-07-07, soundness review #1 finding 2; `docs/reviews/2026-07-07-soundness-review-1.md`).**
+The re-review found the first resolution *incomplete*: it closed the **scope-exit** drop point but not the
+**reassignment** drop point, though §1.5 defines a reassignment as also dropping the value the place
+currently holds. A needs-drop place `MaybeInit` at a *whole-binding reassignment* was still accepted, and the
+interpreter still consulted the runtime `MoveMask` to decide the old value's drop — the same drop flag, at a
+second drop point. The deciding authority accepted the finding in the strict direction again: **E0309 now
+covers the reassignment drop point too** (and the caller-side `out`-argument drop point, which §3.1 makes the
+same drop site), with a message distinguishing "at reassignment"/"as `out`" from "at scope exit". Design 0001
+§1.6 rule 3 now lists **both** drop points. With this extension the "no runtime drop flags" claim holds for
+*every* drop point of a needs-drop value — scope exit (via `return`/`break`/`continue` or block end) and
+reassignment/`out`. The full history is kept visible per the ledger discipline: the mechanism claim was found
+false (§0 top), resolved for the move dimension and the scope-exit init dimension (RESOLVED), then completed
+for the reassignment/`out` init dimension (this note).
+
 ---
 
 ## 1. The claim, stated precisely and honestly
@@ -98,8 +112,9 @@ more).
    by a human/LLM session, not a mechanized theorem.
 3. **No claim beyond the interpreter's model.** The prototype has no optimizer and traps precisely
    (§7.1); it does not exercise P5's fault window. Soundness here is soundness against *this* model.
-4. **The §0 auxiliary-claim hole** ("no runtime drop flags") is explicitly *not* discharged; see §0
-   and §4.
+4. **The §0 auxiliary-claim ("no runtime drop flags")** is now *discharged* for the safe fragment, at every
+   drop point of a needs-drop value (scope exit and reassignment/`out`), following soundness review #1 findings
+   1–2; see §0 and §4. The residual is the general informality of the argument, not this claim.
 
 ---
 
@@ -212,10 +227,17 @@ Stage 3 is NLL-lite: backward liveness of borrow-carrying bindings plus a confli
   `push(write v, read v[0])` is a false positive it deliberately reports rather than accepts.
 - **All-paths-return (E0810).** A non-unit function with any reachable `FallThrough` terminator is
   rejected, so a returned borrow's provenance check (below) is not bypassed by falling off the end.
-- **Return provenance (E0806/E0807/E0808).** `check_return_provenance` rejects returning a borrow of a
-  local or of an owned (`take`) parameter, and enforces that an explicitly region-tagged return
-  derives from the region's parameter — a borrow may not outlive its body (§3.3), checked body-locally
-  because no region crosses a signature (NN#17).
+- **Return provenance (E0806/E0807/E0808), now TOTAL (review #1 finding 1).** `check_return_provenance`
+  rejects returning a borrow of a local or of an owned (`take`) parameter, and enforces that an explicitly
+  region-tagged return derives from the region's parameter — a borrow may not outlive its body (§3.3),
+  checked body-locally because no region crosses a signature (NN#17). The walk is **total**: it recurses
+  into **every `match` arm** and **`if` branch** (each tail must independently pass the region check) and,
+  crucially, an **unrecognized** borrow-producing shape is **rejected** (provenance `None` ⇒ E0806), never
+  skipped. The prior code returned on `None` for `Match`/`Block` shapes, so a borrow of a local laundered
+  through a `match` escaped E0806 and the interpreter read a torn-down stack slot — the review's decisive
+  accept-invalid repro (`fn pick(s) -> borrow i64 { let x; return match s { .. => read x } }`). Block tails
+  carry no borrow (a block evaluates to unit/never — no tail expression, `check_block_value`), so they are
+  handled as such, not skipped. The repro and its controls are regression tests (`tests/check.rs`).
 
 ### 2.3 Pattern bindings (serving (b), (c))
 
@@ -240,10 +262,17 @@ Stage 3 is NLL-lite: backward liveness of borrow-carrying bindings plus a confli
 
 ### 2.4 Effects (serving (d), NN#7)
 
-`check/effects.rs` tracks one boolean. `note_alloc` records the first allocation site — `box`
-(`check/expr.rs` ~827), `clone` of a `bears_box` value (~60), a call to an `alloc`-marked function
-(~731), and an indirect call through an `alloc`-typed fn-pointer (~689). `AllocEffect::finish` emits
-**E0401** if a non-`alloc` function has any such site. Function-pointer types carry the effect in the
+`check/effects.rs` tracks one boolean. `note_alloc` records the first allocation site. The enumeration is
+now **both sides of the allocator** (review #1 finding 4): the *alloc* side — `box`, `clone` of a
+`bears_box` value, a call to an `alloc`-marked function, an indirect call through an `alloc`-typed
+fn-pointer — **and the *free* side** — `unbox` (frees the box storage), and any **drop of a `Box`-bearing
+value the checker schedules**: a scope-exit drop of a needs-drop box-bearing local, a reassignment-drop or
+`out`-drop of one, a box-bearing temporary dying at statement end, and a function-exit drop of an owned
+box-bearing parameter still live on some path. The box-drop sites are detected precisely by
+`check/init.rs::analyze` against the final move state (a box moved out on every path frees nothing and is
+*not* marked; a partially-moved struct is checked field-granularly, so a live box field is caught even when
+a sibling was moved), and fed back through `note_alloc`. `AllocEffect::finish` emits **E0401** if a
+non-`alloc` function has any such site, naming the drop site (P4). Function-pointer types carry the effect in the
 type (`types::FnPtrTy`), and `assignable`/`check_against` reject assigning an `alloc` function to a
 non-`alloc` pointer (**E0402**) while permitting the reverse (upper-bound conservatism, §6.1). There is
 no vtable special case: `AllocVtable` fields are `alloc`-typed, so every indirect call through them is
@@ -264,6 +293,39 @@ moved value via `ptr_read`; and the liveness of `ctx`/`vt` behind every `Alloc` 
 (§6.1, stated in `pool_handle`'s justification in §11.1). The checker enforces the *boundary* (where
 unsafety may appear and that it is greppable and justified), not the *truth* of these obligations —
 that is what P1 buys and what claims (a)–(e) explicitly exclude.
+
+### 2.6 Fault delivery (discharging (e)) — review #1 finding 5
+
+Claim (e) is that every *defined fault condition* halts execution at the faulting operation rather than
+producing a value derived from it. It is discharged by enumerating the fault sites and showing the checker
+never suppresses one.
+
+- **The fault sites are closed and enumerated** (`interp/mod.rs::FaultKind`, raised in `interp/eval.rs`):
+  arithmetic **overflow** (incl. **negation** of `INT_MIN`) and integer **division/remainder by zero**; array/slice
+  **bounds**; **conv** lossy narrowing (**ConvLoss**); a failed **`assert`**, **`requires`**, or **`ensures`**;
+  and an explicit **`panic`**. Each is raised at the operation and propagated as `Ctl::Fault`, unwinding to the
+  top without yielding the operation's would-be result — the interpreter has no path that both raises a fault
+  and returns a derived value.
+- **The checker never *skips* a fault.** There is exactly one construct that changes fault behavior, and it
+  **redefines** the operation rather than skipping the check: the lexically-scoped arithmetic **regimes**
+  `wrapping { .. }` / `saturating { .. }` (`ExprKind::Wrapping`/`Saturating`; `interp/eval.rs::regime_block`).
+  Inside them, overflow and conv-loss are **total, defined results** (two's-complement wrap, or clamp to the
+  type bound) — not an un-checked operation with UB, but a *different specified semantics* chosen by the
+  author in a greppable block. Every *other* fault (div-by-zero, bounds, assert/requires/ensures, panic) still
+  fires inside a regime block; only overflow/conv-loss are redefined, and only lexically. This is redefinition,
+  not suppression.
+- **`unsafe` is excluded, by construction and by the claim.** Raw-pointer operations are unchecked (§2.5);
+  claims (a)–(e) hold for the safe fragment only. A regime block grants no such power — move, borrow, bounds,
+  div-by-zero, and the non-redefined faults all still run inside it.
+- **The two fall-off-with-no-value paths are closed.** A fault-relevant hole would be a program that reaches a
+  point *needing a value* without producing one: a non-exhaustive `match` (falls through with no arm) and a
+  non-unit function that runs off its end. Both are static errors — **E0601** exhaustiveness
+  (`check/patterns.rs`) and **E0810** all-paths-return (`check/loans.rs`) — so no accepted program reaches a
+  use of a value that a skipped fault or a missing arm would have had to produce. This is why (a)/(e) lean on
+  exhaustiveness and all-paths-return (cross-referenced from §2.3).
+
+The discharge is bounded by the same model caveat as the rest (§1): faults are defined against the prototype
+interpreter's trapping semantics, which has no optimizer and does not exercise P5's fault window.
 
 ---
 
@@ -295,12 +357,13 @@ record for Bet 5.
 
 Stated specifically, not reassuringly.
 
-- **The "no runtime drop flags" claim is refuted for conditional initialization (§0).** This is the
-  thinnest part of the whole argument. The safety claims (a)–(e) survive — the interpreter's
-  `MoveMask`-guarded drop is correct — but design 0001 §1.5/§10.6's *mechanism* claim does not hold as
-  written, and the discharge the task requested succeeds only for the move dimension. Adjudication
-  (correct the doc, or add a checker rule rejecting owned-on-some-path-only locals at scope exit) is
-  deferred to the independent review.
+- **The "no runtime drop flags" claim is now discharged at every drop point (§0, review #1 findings 1–2).**
+  What was the thinnest part of the argument is resolved in the strict direction: E0309 rejects a needs-drop
+  place that is `MaybeInit` at *any* of its drop points — scope exit **and** reassignment/`out` — so the drop
+  schedule for needs-drop values is static in both the move and the initialization dimension, and the
+  interpreter's `MoveMask` consultation is a mechanism for exempt types and a debug assertion for needs-drop
+  ones, never a semantic drop-flag decision. The residual is the general informality of the argument, not a
+  known unsound drop path.
 - **Soundness is asserted against the interpreter, which is itself unverified.** There is no
   independent model; `interp/` *is* the semantics. A bug in the interpreter (e.g. in `MoveMask`
   bookkeeping, layout, or the init-byte guard) could make an "accepted, safe" program misbehave without
@@ -313,9 +376,13 @@ Stated specifically, not reassuringly.
 - **`clone` effect rests on `bears_box` reachability.** `bears_box` walks named types with a cycle
   guard; a box reachable only through a type shape the walk mis-handles would under-mark the effect.
   Reviewed as correct for the basket's shapes, not proven for all.
-- **Regions are checked by expression-shape provenance** (`borrow_provenance`), a syntactic walk. A
-  borrow laundered through a shape the walk does not recognize would return `None` (no provenance) and
-  escape the E0806/E0808 check. No such shape is known in the basket; this is a completeness caveat.
+- **Regions are checked by expression-shape provenance** (`borrow_provenance`), a syntactic walk — but the
+  walk is now **total** (review #1 finding 1, §2.2). It recurses into every `match` arm and `if` branch, and
+  an unrecognized borrow-producing shape is **rejected** (`None` ⇒ E0806), not skipped. The earlier draft
+  rated the skip a "completeness caveat"; the review correctly re-rated it an accept-invalid memory-unsafety
+  (a returned borrow of a local escaping through a `match`), and it is fixed: an unrecognized shape can now
+  only cause a *reject-valid* (a sound borrow the syntactic walk fails to recognize), never an accept-invalid.
+  That residual conservatism is the honest caveat here.
 - **The argument is informal.** Per P18 and §1, this is not mechanized; the residual risk is exactly
   the gap between a reviewed informal argument and a proof.
 
@@ -330,11 +397,14 @@ Design 0001 §11 makes every worked example a fixture and requires re-verificati
   `11_4_parser`, `11_5_arena`) check with **zero diagnostics**.
 - `tests/run_golden.rs` — all five execute to completion under the interpreter.
 
-Observed: the full suite (`cargo test`) is green — 33 unit + 35 `check` + 5 `check_fixtures` + 6
-`golden` + 30 `loans` (including the four S1 negative tests and the copy-payload positive control) +
-32 `run` + 5 `run_golden`, 0 failures. This discharges the §11 obligation for the accept/reject
-boundary and at runtime; it does not, and cannot, substitute for the argument above — passing
-fixtures show the checker accepts what it should, not that it rejects everything unsound.
+Observed: the full suite (`cargo test`) is green — 33 unit + 61 `check` (including the five review #1
+regression sets: total return-provenance, reassignment/`out` drop points, nested partial move, and the
+box-drop/`unbox` free side, with their positive controls) + 5 `check_fixtures` + 14 `count` + 6 `golden` +
+30 `loans` (including the four S1 negative tests and the copy-payload positive control) + 34 `run` + 5
+`run_golden`, **188 tests, 0 failures**. This discharges the §11 obligation for the accept/reject boundary
+and at runtime; it does not, and cannot, substitute for the argument above — passing fixtures show the
+checker accepts what it should, not that it rejects everything unsound. (The `11_4_parser` runnable fixture
+gained an `alloc` marker on `eval_owned`, which `unbox`es the owned AST — the free side of finding 4.)
 
 ---
 

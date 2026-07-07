@@ -552,10 +552,67 @@ impl<'a> Checker<'a> {
 
     /// Check that a returned borrow's provenance is a region-legal input, not a
     /// local (design §3.3): a borrow may not outlive the body it was born in.
+    ///
+    /// Provenance is **total** (finding 1 of 2026-07-07): every borrow-producing
+    /// shape is either recognized and checked, recursed into (a `match` arm, an
+    /// `if` branch), or — if unrecognized — REJECTED (`None` ⇒ E0806), never
+    /// skipped. Skipping let a borrow of a local laundered through a `match`
+    /// escape the region check and dangle.
     fn check_return_provenance(&mut self, e: &Expr) {
+        match &e.kind {
+            ExprKind::Paren(i) => self.check_return_provenance(i),
+            ExprKind::Match { arms, .. } => {
+                // Every arm's tail value must independently derive from a legal
+                // input region.
+                for arm in arms {
+                    self.check_return_provenance(&arm.body);
+                }
+            }
+            ExprKind::If {
+                then_blk,
+                else_blk,
+                ..
+            } => {
+                // A block evaluates to unit/never (below), so the `then` block
+                // never carries a borrow tail; the borrow value of an `if` is the
+                // `else` expression. Recurse into whatever can carry it.
+                self.check_return_block_tail(then_blk);
+                if let Some(els) = else_blk {
+                    self.check_return_provenance(els);
+                }
+            }
+            ExprKind::Block(b) => self.check_return_block_tail(b),
+            // Diverging shapes yield no borrow value to escape the body.
+            ExprKind::Return(_) | ExprKind::Break | ExprKind::Continue | ExprKind::Panic(_) => {}
+            _ => self.check_return_root(e),
+        }
+    }
+
+    /// A block evaluates to unit or never in this prototype (`check_block_value`
+    /// returns `unit`/`never`; a `Block` has no tail expression), so it can never
+    /// produce a borrow value — there is no borrow provenance to check. Present so
+    /// the walk stays *total*: block tails are handled (as carrying no borrow),
+    /// not silently skipped (finding 1 of 2026-07-07; the reviewer's note that
+    /// blocks evaluate to unit/never, verified against `check_block_value`).
+    fn check_return_block_tail(&mut self, _b: &Block) {}
+
+    /// The base case of the total provenance walk: an atomic borrow-producing
+    /// expression. Its provenance root must be a region-legal input parameter;
+    /// an unrecognized shape (`None`) is rejected E0806, never skipped.
+    fn check_return_root(&mut self, e: &Expr) {
         let root = match self.borrow_provenance(e) {
+            None => {
+                self.diags.push(
+                    Diag::error(
+                        "E0806",
+                        "returned borrow does not provably derive from an input; it may borrow a local that does not outlive the body",
+                        e.span,
+                    )
+                    .with_note("return an owned value, or a borrow whose provenance is a `read`/`write`/slice parameter (§3.3)", None),
+                );
+                return;
+            }
             Some(r) => r,
-            None => return,
         };
         let found = self
             .f
@@ -797,7 +854,14 @@ impl<'a> Checker<'a> {
         let (t, place) = self.check_place(arg);
         match &place {
             Some(p) => {
-                self.emit(&place, Access::OutArg, arg.span);
+                self.emit(
+                    &place,
+                    Access::OutArg {
+                        needs_drop: needs_drop(&t, self.items),
+                        box_paths: box_subpaths(&t, self.items),
+                    },
+                    arg.span,
+                );
                 // `out place` is an exclusive loan on the slot for the call (§3.1).
                 let id = self.new_temp_loan(p.canonical(), LoanKind::Excl, arg.span);
                 self.set_carried(vec![id], Some(p.canonical().root));
@@ -837,6 +901,9 @@ impl<'a> Checker<'a> {
             }
             "unbox" => {
                 let b = self.arg0(args, span, "unbox");
+                // `unbox` frees the box storage through the stored handle — the
+                // free side of the alloc effect (finding 4; §6.2/§6.3).
+                self.note_alloc(span, "`unbox` frees the box storage (§6.2/§6.3)");
                 match b {
                     Type::Box(inner) => *inner,
                     Type::Error => Type::Error,
@@ -1141,7 +1208,14 @@ impl<'a> Checker<'a> {
             }
             for bd in &binds {
                 self.add_local(&bd.name, bd.ty.clone(), bd.movable);
-                self.emit(&Some(Place::local(bd.name.clone())), Access::Assign, bd.span);
+                self.emit(
+                    &Some(Place::local(bd.name.clone())),
+                    Access::Assign {
+                        needs_drop: needs_drop(&bd.ty, self.items),
+                        box_paths: box_subpaths(&bd.ty, self.items),
+                    },
+                    bd.span,
+                );
                 // A borrowed-scrutinee binding is a reborrow of a scrutinee
                 // sub-place: it carries a loan restricting the scrutinee (§8.2.1).
                 if let Some(scp) = &sc_place {

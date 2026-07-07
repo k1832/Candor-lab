@@ -206,8 +206,14 @@ impl<'a> Checker<'a> {
                 self.record_borrow(place, LoanKind::Excl, span);
                 Access::Borrow(LoanKind::Excl)
             }
-            Use::Assign => Access::Assign,
-            Use::Out => Access::OutArg,
+            Use::Assign => Access::Assign {
+                needs_drop: needs_drop(ty, self.items),
+                box_paths: box_subpaths(ty, self.items),
+            },
+            Use::Out => Access::OutArg {
+                needs_drop: needs_drop(ty, self.items),
+                box_paths: box_subpaths(ty, self.items),
+            },
             Use::ReadOnly => Access::Read,
         };
         self.emit(place, access, span);
@@ -223,32 +229,52 @@ impl<'a> Checker<'a> {
         if self.f.cur.is_none() {
             return;
         }
-        let mut targets: Vec<String> = Vec::new();
+        let mut targets: Vec<(String, Vec<Vec<String>>)> = Vec::new();
         for scope in self.f.env.iter().skip(from_depth) {
             for (name, info) in scope.iter() {
                 if needs_drop(&info.ty, self.items) {
-                    targets.push(name.clone());
+                    targets.push((name.clone(), box_subpaths(&info.ty, self.items)));
                 }
             }
         }
-        for name in targets {
-            self.emit(&Some(Place::local(name)), Access::ScopeExit, span);
+        for (name, box_paths) in targets {
+            self.emit(&Some(Place::local(name)), Access::ScopeExit { box_paths }, span);
         }
     }
 
-    /// Is `place` a partial move out of a `drop`-hooked struct (design §1.6)?
+    /// Is `place` a partial move whose path crosses a `drop`-hooked struct
+    /// (design §1.6 rule 2)? The check walks every *proper* prefix of the
+    /// projection — the root place and each intermediate place up to, but not
+    /// including, the moved sub-place. If any prefix's type declares a `drop`
+    /// hook, moving a nested field out would leave that value partially moved and
+    /// silently skip its hook (finding 3 of 2026-07-07, nested partial move).
     fn is_drop_hooked_partial(&self, place: &Place) -> bool {
         if !place.is_direct() || place.proj.is_empty() {
             return false;
         }
-        match self.lookup_local(&place.root).map(|l| l.ty.clone()) {
-            Some(Type::Named(n)) => self
-                .items
-                .lookup_struct(&n)
-                .map(|s| s.has_drop)
-                .unwrap_or(false),
-            _ => false,
+        let mut ty = match self.lookup_local(&place.root).map(|l| l.ty.clone()) {
+            Some(t) => t,
+            None => return false,
+        };
+        for proj in &place.proj {
+            if let Type::Named(n) = &ty {
+                if self.items.lookup_struct(n).map(|s| s.has_drop).unwrap_or(false) {
+                    return true;
+                }
+            }
+            let next = match (&ty, proj) {
+                (Type::Named(n), dataflow::Proj::Field(f)) => self
+                    .items
+                    .lookup_struct(n)
+                    .and_then(|st| st.fields.iter().find(|(fn_, _)| fn_ == f).map(|(_, t)| t.clone())),
+                _ => None,
+            };
+            ty = match next {
+                Some(t) => t,
+                None => return false,
+            };
         }
+        false
     }
 
     /// Create a loan on `place`'s conflict-granularity anchor (design §2.2/§2.3)
@@ -391,7 +417,21 @@ impl<'a> Checker<'a> {
         };
         cfg.compute_preds();
         let out_params = self.f.out_params.clone();
-        init::analyze(&cfg, &entry_state, &out_params, &mut self.diags);
+        // Owned (non-out) parameters that own a `Box`: dropping one that is still
+        // live at function exit frees, so the body is allocator-effecting
+        // (finding 4 of 2026-07-07; §6.3). The interpreter drops the parameter
+        // scope on return (`interp/eval.rs` `call`), so this drop obligation is
+        // real and static-schedulable here.
+        let param_box: Vec<(String, Vec<Vec<String>>)> = sig
+            .params
+            .iter()
+            .filter(|p| p.mode != ParamMode::Out && bears_box(&p.lowered, self.items))
+            .map(|p| (p.name.clone(), box_subpaths(&p.lowered, self.items)))
+            .collect();
+        let box_drop_sites = init::analyze(&cfg, &entry_state, &out_params, &param_box, &mut self.diags);
+        for (span, reason) in box_drop_sites {
+            self.note_alloc(span, reason);
+        }
 
         // Stage 3: NLL-lite loan liveness + XOR/move/write conflict scan,
         // same-call overlap, and all-paths-return (design §2.2/§2.3/§3.1/§7.4).

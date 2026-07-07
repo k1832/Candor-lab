@@ -137,17 +137,17 @@ fn transfer(set: &mut HashSet<String>, a: &Action) {
         Access::Decl => {
             set.remove(&root);
         }
-        Access::Assign => {
+        Access::Assign { .. } => {
             if a.place.proj.is_empty() {
                 set.remove(&root); // whole-binding rebind: a definition
             } else {
                 set.insert(root); // write *through* a borrow: a use of it
             }
         }
-        Access::Read | Access::Borrow(_) | Access::OutArg | Access::Move { .. } => {
+        Access::Read | Access::Borrow(_) | Access::OutArg { .. } | Access::Move { .. } => {
             set.insert(root);
         }
-        Access::ScopeExit => {} // a drop point is neither a use nor a def of a loan
+        Access::ScopeExit { .. } => {} // a drop point is neither a use nor a def of a loan
     }
 }
 
@@ -173,9 +173,9 @@ fn classify(a: &Action) -> AccessKind {
     match &a.access {
         Access::Read => AccessKind::Read,
         Access::Move { .. } => AccessKind::Move,
-        Access::Assign | Access::OutArg => AccessKind::Write,
+        Access::Assign { .. } | Access::OutArg { .. } => AccessKind::Write,
         Access::Borrow(k) => AccessKind::Borrow(*k),
-        Access::Decl | Access::ScopeExit => AccessKind::None,
+        Access::Decl | Access::ScopeExit { .. } => AccessKind::None,
     }
 }
 

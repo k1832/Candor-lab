@@ -155,9 +155,13 @@ fn copy_semantics_use_after_copy() {
 
 #[test]
 fn partial_move_then_reassign_then_use() {
+    // `t` receives a `Box` by value and lets it die (free), and `f` frees `s.b`
+    // (never moved out) at scope exit -- both are allocator-effecting, so both
+    // carry the `alloc` marker (finding 4 of 2026-07-07; §6.2/§6.3). The partial
+    // move / reassign / re-use pattern itself stays accepted.
     assert_clean(
-        "struct S { a: Box i64, b: Box i64 } fn t(x: Box i64) -> unit { } \
-         fn f(s: S, n: Box i64) -> unit { t(s.a); s.a = n; t(s.a); }",
+        "struct S { a: Box i64, b: Box i64 } fn t(x: Box i64) alloc -> unit { } \
+         fn f(s: S, n: Box i64) alloc -> unit { t(s.a); s.a = n; t(s.a); }",
     );
 }
 
@@ -397,4 +401,199 @@ fn e0309_move_join_disagreement_still_e0302() {
     // moved on another is still E0302, independent of the new scope-exit rule.
     let src = format!("{RDROP}fn f(c: bool) -> unit {{ let x: R = mk(1); if c {{ sink(x); }} return; }}");
     assert_has(&src, "E0302");
+}
+
+// ==========================================================================
+// 2026-07-07 soundness review #1 — the five accepted findings, as regression
+// tests. Repros and controls from `target/scratch-review/` (f1..f4, c1..c6).
+// ==========================================================================
+
+// ---- Finding 1: return-borrow provenance is TOTAL (E0806) ----------------
+
+#[test]
+fn f2_borrow_of_local_through_match_rejected() {
+    // The decisive repro: a borrow of a local laundered through a `match` must
+    // not escape the region check. Provenance recurses into every arm.
+    assert_has(
+        "enum Sel { a, b } \
+         fn pick(s: Sel) -> borrow i64 { let x: i64 = 5; \
+         return match s { case Sel::a => read x, case Sel::b => read x, }; }",
+        "E0806",
+    );
+}
+
+#[test]
+fn f2b_borrow_of_local_direct_still_rejected() {
+    // The direct control stays rejected.
+    assert_has(
+        "fn pick() -> borrow i64 { let x: i64 = 5; return read x; }",
+        "E0806",
+    );
+}
+
+#[test]
+fn borrow_of_param_through_match_accepted() {
+    // The legal counterpart: each arm derives from the sole borrow parameter, so
+    // the launder is region-legal and accepted (provenance total, not blanket).
+    assert_clean(
+        "struct T { v: i64 } enum Sel { a, b } \
+         fn pick(t: read T, s: Sel) -> borrow i64 { \
+         return match s { case Sel::a => read (deref t).v, \
+                          case Sel::b => read (deref t).v, }; }",
+    );
+}
+
+// ---- Finding 2: reassignment & out-argument drop points (E0309) ----------
+
+#[test]
+fn f1_reassignment_of_maybe_init_needs_drop_rejected() {
+    // Whole-binding reassignment of a needs-drop place that is MaybeInit: the
+    // old value's drop would be a runtime decision (the drop flag the resolution
+    // claimed to remove).
+    assert_has(
+        "struct R { v: i64 } drop(write self) { trace((deref self).v); } \
+         fn mk(n: i64) -> R { return R { v: n }; } \
+         fn f(c: bool) -> unit { let x: R; if c { x = mk(1); } x = mk(2); return; }",
+        "E0309",
+    );
+}
+
+#[test]
+fn f1b_scope_exit_of_maybe_init_needs_drop_still_rejected() {
+    // The original scope-exit drop point stays rejected (the first resolution).
+    assert_has(
+        "struct R { v: i64 } drop(write self) { trace((deref self).v); } \
+         fn mk(n: i64) -> R { return R { v: n }; } \
+         fn f(c: bool) -> unit { let x: R; if c { x = mk(1); } return; }",
+        "E0309",
+    );
+}
+
+#[test]
+fn out_arg_drop_point_of_maybe_init_needs_drop_rejected() {
+    // Passing a MaybeInit needs-drop place as `out` drops its old value at the
+    // call — the same drop point as a reassignment (finding 2, out path).
+    assert_has(
+        "struct R { v: i64 } drop(write self) { trace((deref self).v); } \
+         fn mk(n: i64) -> R { return R { v: n }; } \
+         fn fill(o: out R) -> unit { o = mk(9); } \
+         fn f(c: bool) -> unit { let x: R; if c { x = mk(1); } fill(out x); return; }",
+        "E0309",
+    );
+}
+
+#[test]
+fn reassignment_of_definitely_init_needs_drop_ok() {
+    // Reassigning a place that is Init on every path is a static drop — accepted.
+    assert_clean(
+        "struct R { v: i64 } drop(write self) { trace((deref self).v); } \
+         fn mk(n: i64) -> R { return R { v: n }; } \
+         fn f() -> unit { let mut x: R = mk(1); x = mk(2); return; }",
+    );
+}
+
+// ---- Finding 3: nested partial move out of a drop-hooked struct (E0303) ---
+
+#[test]
+fn f4_nested_partial_move_through_hooked_intermediate_rejected() {
+    // `Outer` has no hook but the intermediate `Outer.a : A` does — moving
+    // `outer.a.leaf` out would skip `A`'s hook. Every proper prefix is walked.
+    assert_has(
+        "struct Leaf { v: i64 } struct A { leaf: Leaf } drop(write self) { trace(1); } \
+         struct Outer { a: A } \
+         fn f() -> i64 { let outer: Outer = Outer { a: A { leaf: Leaf { v: 1 } } }; \
+         let l: Leaf = outer.a.leaf; return l.v; }",
+        "E0303",
+    );
+}
+
+#[test]
+fn f4b_direct_partial_move_of_hooked_still_rejected() {
+    // The direct (root is the hooked struct) control stays rejected.
+    assert_has(
+        "struct Leaf { v: i64 } struct A { leaf: Leaf } drop(write self) { trace(1); } \
+         fn f() -> i64 { let a: A = A { leaf: Leaf { v: 1 } }; let l: Leaf = a.leaf; return l.v; }",
+        "E0303",
+    );
+}
+
+#[test]
+fn legal_partial_move_no_hook_on_path_accepted() {
+    // No `drop` hook anywhere on the projection path: the partial move stays
+    // legal (the rule is non-vacuous, not blanket).
+    assert_clean(
+        "struct Leaf { v: i64 } struct A { leaf: Leaf } struct Outer { a: A } \
+         fn f() -> i64 { let outer: Outer = Outer { a: A { leaf: Leaf { v: 1 } } }; \
+         let l: Leaf = outer.a.leaf; return l.v; }",
+    );
+}
+
+// ---- Finding 4: the free side of the alloc effect (E0401) -----------------
+
+#[test]
+fn f3_unbox_in_nonalloc_rejected() {
+    // `unbox` frees the box storage — allocator work.
+    assert_has(
+        "struct T { v: i64 } fn unboxes(b: Box T) -> i64 { return unbox(b).v; }",
+        "E0401",
+    );
+}
+
+#[test]
+fn f3_box_param_dropped_in_nonalloc_rejected() {
+    // A `Box` received by value and let die (dropped at function exit) frees.
+    assert_has(
+        "struct T { v: i64 } fn frees(b: Box T) -> unit { return; }",
+        "E0401",
+    );
+}
+
+#[test]
+fn f3_box_free_accepted_when_marked_alloc() {
+    // The same two functions with the honest `alloc` marker check clean.
+    assert_clean(
+        "struct T { v: i64 } \
+         fn unboxes(b: Box T) alloc -> i64 { return unbox(b).v; } \
+         fn frees(b: Box T) alloc -> unit { return; }",
+    );
+}
+
+#[test]
+fn box_reassignment_drop_is_alloc() {
+    // Reassigning an initialized `Box` binding frees the old box.
+    assert_has(
+        "fn f(b: Box i64, n: Box i64) -> unit { b = n; return; }",
+        "E0401",
+    );
+}
+
+#[test]
+fn drop_hooked_nonbox_param_not_alloc() {
+    // Precision: a drop hook that owns no `Box` does not allocate — dropping it
+    // must not force the marker (only a `Box` drop frees).
+    assert_clean(
+        "struct R { v: i64 } drop(write self) { trace((deref self).v); } \
+         fn f(r: R) -> unit { return; }",
+    );
+}
+
+#[test]
+fn box_param_moved_out_not_alloc() {
+    // Precision: a box passed straight through (moved out, never dropped here)
+    // does not allocate — the disposition's "lets it die", not conservatism.
+    assert_clean("fn pass(b: Box i64) -> Box i64 { return b; }");
+}
+
+// ---- c1..c6 coverage controls (core machinery survived the attack) --------
+// c1 (E0807), c3 (E0401 clone), c4 (E0701), c5 (E0805), c6/c2 (E0802) are
+// already covered by existing tests (loans.rs / check.rs). The one new code is
+// c2's E0401 via `unbox`, covered by `f3_unbox_in_nonalloc_rejected` above.
+
+#[test]
+fn c1_two_borrow_params_return_needs_region() {
+    assert_has(
+        "struct T { v: i64 } \
+         fn f[r](a: write[r] T, b: write T) -> borrow_mut i64 { return write (deref b).v; }",
+        "E0807",
+    );
 }

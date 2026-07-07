@@ -21,8 +21,18 @@ use crate::check::dataflow::*;
 use crate::diag::Diag;
 use crate::span::Span;
 
-/// Run the analysis, pushing diagnostics.
-pub fn analyze(cfg: &Cfg, entry: &FlowState, out_params: &[String], diags: &mut Vec<Diag>) {
+/// Run the analysis, pushing diagnostics. Returns the box-drop sites (span +
+/// provenance message) the checker's own drop scheduling produces — a scope-exit
+/// drop, a reassignment/out drop, or a function-exit drop of a still-live
+/// `Box`-bearing place — each of which frees and so makes the enclosing function
+/// allocator-effecting (finding 4 of 2026-07-07; §6.2/§6.3).
+pub fn analyze(
+    cfg: &Cfg,
+    entry: &FlowState,
+    out_params: &[String],
+    param_box: &[(String, Vec<Vec<String>>)],
+    diags: &mut Vec<Diag>,
+) -> Vec<(Span, String)> {
     let n = cfg.blocks.len();
     let reach = reachable(cfg);
 
@@ -45,7 +55,7 @@ pub fn analyze(cfg: &Cfg, entry: &FlowState, out_params: &[String], diags: &mut 
             let in_b = incoming(cfg, b, entry, &out_state, &reach, &visited, None);
             let mut st = in_b;
             for a in &cfg.blocks[b].actions {
-                apply(&mut st, a, out_params, None);
+                apply(&mut st, a, out_params, None, None);
             }
             visited[b] = true;
             if st != out_state[b] {
@@ -56,6 +66,7 @@ pub fn analyze(cfg: &Cfg, entry: &FlowState, out_params: &[String], diags: &mut 
     }
 
     // --- Reporting pass ----------------------------------------------------
+    let mut alloc_sites: Vec<(Span, String)> = Vec::new();
     for &b in &order {
         let mut disagree: Vec<String> = Vec::new();
         let in_b = incoming(cfg, b, entry, &out_state, &reach, &visited, Some(&mut disagree));
@@ -77,7 +88,7 @@ pub fn analyze(cfg: &Cfg, entry: &FlowState, out_params: &[String], diags: &mut 
         }
         let mut st = in_b;
         for a in &cfg.blocks[b].actions {
-            apply(&mut st, a, out_params, Some(diags));
+            apply(&mut st, a, out_params, Some(diags), Some(&mut alloc_sites));
         }
         if matches!(cfg.blocks[b].term, Term::Return | Term::FallThrough) {
             for op in out_params {
@@ -92,8 +103,46 @@ pub fn analyze(cfg: &Cfg, entry: &FlowState, out_params: &[String], diags: &mut 
                     );
                 }
             }
+            // Function-exit drop of an owned `Box`-bearing parameter that is still
+            // live (not moved out on this path): the box is freed here, so the
+            // function is allocator-effecting (finding 4; §6.3).
+            for (name, paths) in param_box {
+                if let Some(msg) = box_drop_here(&st, name, &[], paths) {
+                    alloc_sites.push((cfg.blocks[b].join_span, msg));
+                }
+            }
         }
     }
+    alloc_sites
+}
+
+/// If any `Box`-reaching sub-place of `root`+`base_proj` (per `paths`) is still
+/// live (`Init`/`MaybeInit`) in `st`, its drop frees: return a provenance message
+/// naming the freeing place. `None` when every box sub-place is already gone
+/// (moved out / never initialized) — no free happens here.
+fn box_drop_here(
+    st: &FlowState,
+    root: &str,
+    base_proj: &[Proj],
+    paths: &[Vec<String>],
+) -> Option<String> {
+    for bp in paths {
+        let mut proj = base_proj.to_vec();
+        for f in bp {
+            proj.push(Proj::Field(f.clone()));
+        }
+        let pl = Place {
+            root: root.to_string(),
+            proj,
+        };
+        if matches!(st.get(&pl), St::Init | St::MaybeInit) {
+            return Some(format!(
+                "drop of `Box`-bearing place `{}` frees (§6.2/§6.3)",
+                pl.display()
+            ));
+        }
+    }
+    None
 }
 
 fn incoming(
@@ -132,13 +181,19 @@ fn incoming(
     acc
 }
 
-fn apply(st: &mut FlowState, a: &Action, out_params: &[String], report: Option<&mut Vec<Diag>>) {
+fn apply(
+    st: &mut FlowState,
+    a: &Action,
+    out_params: &[String],
+    mut report: Option<&mut Vec<Diag>>,
+    mut alloc: Option<&mut Vec<(Span, String)>>,
+) {
     let opaque = !a.place.is_direct();
     let root = Place::local(a.place.root.clone());
     let key = if opaque { &root } else { &a.place };
     match &a.access {
         Access::Read | Access::Borrow(_) => {
-            if let Some(d) = report {
+            if let Some(d) = report.as_deref_mut() {
                 require_init(st, key, out_params, a.span, d);
             }
         }
@@ -147,11 +202,11 @@ fn apply(st: &mut FlowState, a: &Action, out_params: &[String], report: Option<&
             drop_hooked_partial,
         } => {
             if opaque {
-                if let Some(d) = report {
+                if let Some(d) = report.as_deref_mut() {
                     require_init(st, &root, out_params, a.span, d);
                 }
             } else {
-                if let Some(d) = report {
+                if let Some(d) = report.as_deref_mut() {
                     require_init(st, key, out_params, a.span, d);
                     if *drop_hooked_partial {
                         d.push(
@@ -167,28 +222,60 @@ fn apply(st: &mut FlowState, a: &Action, out_params: &[String], report: Option<&
                 st.set(&a.place, St::Moved);
             }
         }
-        Access::Assign => {
+        Access::Assign { needs_drop, box_paths } => {
             if opaque {
-                if let Some(d) = report {
+                if let Some(d) = report.as_deref_mut() {
                     require_init(st, &root, out_params, a.span, d);
                 }
             } else {
+                // The OLD value at this place is dropped by the reassignment
+                // (§1.5). Check its drop point BEFORE overwriting the state.
+                // E0309 is scoped to a *whole-binding* reassignment (per the
+                // disposition); the box-drop (free) side applies to any direct
+                // place, including a box-typed field, since freeing it is
+                // allocator work regardless of granularity (finding 4).
+                if *needs_drop && a.place.proj.is_empty() {
+                    if let Some(d) = report.as_deref_mut() {
+                        if st.get(&a.place) == St::MaybeInit {
+                            d.push(reassign_drop_diag(&a.place, a.span));
+                        }
+                    }
+                }
+                if let Some(al) = alloc.as_deref_mut() {
+                    if let Some(msg) = box_drop_here(st, &a.place.root, &a.place.proj, box_paths) {
+                        al.push((a.span, msg));
+                    }
+                }
                 st.set(&a.place, St::Init);
             }
         }
-        Access::OutArg => {
+        Access::OutArg { needs_drop, box_paths } => {
             if opaque {
-                if let Some(d) = report {
+                if let Some(d) = report.as_deref_mut() {
                     require_init(st, &root, out_params, a.span, d);
                 }
             } else {
+                // Passing a place as `out` drops its old value at the call site —
+                // the same drop point as a reassignment (finding 2).
+                if *needs_drop && a.place.proj.is_empty() {
+                    if let Some(d) = report.as_deref_mut() {
+                        if st.get(&a.place) == St::MaybeInit {
+                            d.push(out_drop_diag(&a.place, a.span));
+                        }
+                    }
+                }
+                if let Some(al) = alloc.as_deref_mut() {
+                    if let Some(msg) = box_drop_here(st, &a.place.root, &a.place.proj, box_paths) {
+                        al.push((a.span, msg));
+                    }
+                }
                 st.set(&a.place, St::Init);
             }
         }
         Access::Decl => {
             st.set(&a.place, St::Uninit);
         }
-        Access::ScopeExit => {
+        Access::ScopeExit { box_paths } => {
             // The dual of §1.6's move-join rule (finding 2026-07-07): at a
             // needs-drop place's drop point its initialization must be
             // path-independent. `MaybeInit` here means it is initialized on
@@ -217,8 +304,58 @@ fn apply(st: &mut FlowState, a: &Action, out_params: &[String], report: Option<&
                     );
                 }
             }
+            // A still-live `Box`-bearing local dropped here frees (finding 4).
+            if let Some(al) = alloc {
+                if let Some(msg) = box_drop_here(st, &a.place.root, &a.place.proj, box_paths) {
+                    al.push((a.span, msg));
+                }
+            }
         }
     }
+}
+
+/// The reassignment drop-point diagnostic (finding 2 of 2026-07-07): whole-binding
+/// reassignment of a needs-drop place in a `MaybeInit` state — the old value's
+/// drop would be a runtime decision. Same code as the scope-exit rule (E0309),
+/// message distinguishing the reassignment drop point.
+fn reassign_drop_diag(place: &Place, span: Span) -> Diag {
+    Diag::error(
+        "E0309",
+        format!(
+            "reassigning `{}` here drops its old value, but it may be initialized on only some paths reaching this reassignment",
+            place.display()
+        ),
+        span,
+    )
+    .with_note(
+        "its type runs drop work, so the drop dropped by this reassignment must be a static fact, not a runtime decision (§1.5/§1.6 rule 3)",
+        None,
+    )
+    .with_note(
+        "initialize it on every path, consume it on every path, or narrow its scope (finding 2 of 2026-07-07)",
+        None,
+    )
+}
+
+/// The out-argument drop-point diagnostic (finding 2): passing a needs-drop place
+/// in a `MaybeInit` state as `out` drops its old value at the call site.
+fn out_drop_diag(place: &Place, span: Span) -> Diag {
+    Diag::error(
+        "E0309",
+        format!(
+            "passing `{}` as `out` drops its old value at the call, but it may be initialized on only some paths reaching this call",
+            place.display()
+        ),
+        span,
+    )
+    .with_note(
+        "an `out` argument is the same drop point as a reassignment; its drop must be a static fact, not a runtime decision (§3.1/§1.5)",
+        None,
+    )
+    .with_note(
+        "initialize it on every path, consume it on every path, or narrow its scope (finding 2 of 2026-07-07)",
+        None,
+    )
 }
 
 fn require_init(st: &FlowState, place: &Place, out_params: &[String], span: Span, diags: &mut Vec<Diag>) {

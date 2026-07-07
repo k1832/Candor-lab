@@ -3,7 +3,7 @@
 //! — recorded as an `Assign` action for Stage 4).
 
 use crate::ast::*;
-use crate::types::Type;
+use crate::types::{bears_box, box_subpaths, needs_drop, Type};
 
 use super::dataflow::{Access, Place};
 use crate::ast::{ExprKind, PrefixOp};
@@ -50,8 +50,14 @@ impl<'a> Checker<'a> {
                             }
                             None => self.check_expr(e, Use::Value),
                         };
+                        let nd = needs_drop(&t, self.items);
+                        let bp = box_subpaths(&t, self.items);
                         self.add_local(name, t, true);
-                        self.emit(&Some(Place::local(name.clone())), Access::Assign, s.span);
+                        self.emit(
+                            &Some(Place::local(name.clone())),
+                            Access::Assign { needs_drop: nd, box_paths: bp },
+                            s.span,
+                        );
                         // A borrow value landing in a binding anchors its loan(s)
                         // to this binding's live range (design §2.3).
                         if carries_borrow(self, e) {
@@ -72,7 +78,14 @@ impl<'a> Checker<'a> {
                 self.clear_carried();
                 self.check_against(value, &tt);
                 if place.is_some() {
-                    self.emit(&place, Access::Assign, s.span);
+                    self.emit(
+                        &place,
+                        Access::Assign {
+                            needs_drop: needs_drop(&tt, self.items),
+                            box_paths: box_subpaths(&tt, self.items),
+                        },
+                        s.span,
+                    );
                 }
                 if let (true, Some(p)) = (carries_borrow(self, value), &place) {
                     if p.proj.is_empty() {
@@ -86,7 +99,16 @@ impl<'a> Checker<'a> {
                 }
             }
             StmtKind::Expr(e) => {
-                self.check_expr(e, Use::Value);
+                let t = self.check_expr(e, Use::Value);
+                // A `Box`-bearing temporary is dropped (freed) at the end of the
+                // statement that created it (§1.5) — the free side of the alloc
+                // effect (finding 4; §6.2/§6.3).
+                if bears_box(&t, self.items) {
+                    self.note_alloc(
+                        e.span,
+                        "a `Box`-bearing temporary is dropped (freed) at the end of this statement (§6.2/§6.3)",
+                    );
+                }
             }
         }
     }

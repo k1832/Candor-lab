@@ -68,7 +68,7 @@ fn parse_expr(a: read Alloc, s: slice u8, pos: write usize) alloc
 }
 
 // ADAPTED: consume the owned AST, freeing each Box, and compute its value.
-fn eval_owned(e: Expr) -> i64 {
+fn eval_owned(e: Expr) alloc -> i64 {
     match e {
         case Expr::num(n) => return n,
         case Expr::add(l, r) => return eval_owned(unbox(l)) + eval_owned(unbox(r)),

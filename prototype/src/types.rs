@@ -236,6 +236,63 @@ fn needs_drop_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> bool
     }
 }
 
+/// The field-paths within `ty` that reach a `Box` — the sub-places whose drop
+/// calls `free`, so a scope-exit/reassignment drop of any of them is allocator
+/// work (design 0001 §6.2/§6.3; finding 4 of 2026-07-07). Returns `[[]]` for a
+/// bare `Box T`/`BoxResult T`. Aggregates only field-granular tracking follows
+/// (structs); an array element or enum payload is not a named place, so a
+/// box reached through one yields the path to that array/enum aggregate — the
+/// whole-aggregate drop is what frees, checked at that granularity.
+pub fn box_subpaths(ty: &Type, env: &dyn ItemEnv) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    box_subpaths_rec(ty, env, &mut Vec::new(), &mut Vec::new(), &mut out);
+    out
+}
+
+fn box_subpaths_rec(
+    ty: &Type,
+    env: &dyn ItemEnv,
+    prefix: &mut Vec<String>,
+    stack: &mut Vec<String>,
+    out: &mut Vec<Vec<String>>,
+) {
+    match ty {
+        Type::Box(_) | Type::BoxResult(_) => out.push(prefix.clone()),
+        Type::Array(elem, _) => {
+            // No index-granular place tracking: if the element bears a box, the
+            // whole-array drop at `prefix` is the freeing point.
+            if bears_box(elem, env) {
+                out.push(prefix.clone());
+            }
+        }
+        Type::Named(n) => {
+            if stack.iter().any(|s| s == n) {
+                return;
+            }
+            stack.push(n.clone());
+            if let Some(s) = env.lookup_struct(n) {
+                for (fname, fty) in &s.fields {
+                    prefix.push(fname.clone());
+                    box_subpaths_rec(fty, env, prefix, stack, out);
+                    prefix.pop();
+                }
+            } else if let Some(e) = env.lookup_enum(n) {
+                // Enum payloads are not named field places; a box in any variant
+                // frees at the whole-enum drop point `prefix`.
+                if e
+                    .variants
+                    .iter()
+                    .any(|v| v.payload.iter().any(|t| bears_box(t, env)))
+                {
+                    out.push(prefix.clone());
+                }
+            }
+            stack.pop();
+        }
+        _ => {}
+    }
+}
+
 /// Does a value of `ty` own one or more `Box`es (so `clone` allocates, §1.4/§6.3)?
 pub fn bears_box(ty: &Type, env: &dyn ItemEnv) -> bool {
     bears_box_rec(ty, env, &mut Vec::new())

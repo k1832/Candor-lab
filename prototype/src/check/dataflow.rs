@@ -114,12 +114,25 @@ pub enum Access {
         movable: bool,
         drop_hooked_partial: bool,
     },
-    /// Store into the place (definite assignment gen).
-    Assign,
+    /// Store into the place (definite assignment gen). `needs_drop` is true when
+    /// the place's type runs drop work, so a *reassignment* (whole binding in a
+    /// `MaybeInit` state) is a path-dependent drop point — rejected E0309 (§1.6
+    /// rule 3 extended to the reassignment drop point; finding 2 of 2026-07-07).
+    /// `box_paths` are the field-paths (relative to the place) reaching a `Box`,
+    /// so the old value's drop frees — allocator work (finding 4).
+    Assign {
+        needs_drop: bool,
+        box_paths: Vec<Vec<String>>,
+    },
     /// Take a borrow (shared/exclusive) — Stage 3 loan point.
     Borrow(LoanKind),
-    /// Caller-side `out` argument: the place is initialized after the call.
-    OutArg,
+    /// Caller-side `out` argument: the place is initialized after the call, and
+    /// the caller's old value is dropped at the call site — the same drop point as
+    /// a reassignment (finding 2). Same fields as `Assign`.
+    OutArg {
+        needs_drop: bool,
+        box_paths: Vec<Vec<String>>,
+    },
     /// Introduce an uninitialized local (`let x;`).
     Decl,
     /// A place leaves scope here (a drop point). Emitted only for *needs-drop*
@@ -127,7 +140,12 @@ pub enum Access {
     /// initialization state to be path-independent at this point, else the
     /// interpreter would decide the drop from a runtime flag (finding
     /// 2026-07-07). A no-op for dataflow state; a reporting-only check.
-    ScopeExit,
+    /// `box_paths` are the field-paths (relative to the place) that reach a `Box`;
+    /// a drop of any still live here frees, making the enclosing function
+    /// allocator-effecting (finding 4 of 2026-07-07).
+    ScopeExit {
+        box_paths: Vec<Vec<String>>,
+    },
 }
 
 #[derive(Clone, Debug)]
