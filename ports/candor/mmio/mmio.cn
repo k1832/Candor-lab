@@ -1,0 +1,930 @@
+// ============================================================================
+// Candor port: driver-like state machine over MMIO (Bet 5 basket,
+// spec-mmio.md, frozen).
+//
+// Mechanism (spec 1.1-1.4, for the adjudicator): the driver of spec §3 —
+// init with a poll-cap timeout and RESET recovery, read/write transfer
+// paths, fault recovery with exactly one retry, IRQ_ACK completion — over
+// the 5-register device window of spec §2.1. Every device access goes
+// through exactly two valve functions, reg_read / reg_write, each one
+// volatile-equivalent ptr op (addr_to_ptr + ptr_read/ptr_write) at the
+// device's register addresses. The FSM logic, bit tests, and the whole §3
+// algorithm are safe value gear (enums + match), per design 0001 §11.3.
+//
+// Architecture (design 0001 §11.3, and the R14 split): the register words
+// genuinely live in memory at [base, base+0x14) — the valve's loads and
+// stores are real. What real hardware would do on each bus cycle (advance
+// the device FSM, drive the next STATUS value) is simulated by the harness
+// device model below the `// Test harness` marker; the driver reaches it
+// only through two fn-pointer hooks carried in the Dev handle (on_write
+// fires after the store; on_read fires before the load and leaves the
+// value the device presents in the register word). In a real deployment
+// the hooks are no-ops of the hardware itself; nothing in the measured
+// section names or depends on the simulation, and the implementation
+// section checks standalone (R14).
+//
+// Adjudications honored: R7 (err_at is an ordered per-transfer-attempt
+// schedule, consumed one entry per START), R8 (CTRL bit-rules evaluated
+// independently in spec 2.4's listed order), R9 (dev_init / dev_transfer
+// are public entry points; M6 drives dev_transfer without re-init), R14
+// (implementation above the marker, harness below).
+//
+// Errors are values (spec 1.3/3.6): PollRes/InitRes/RecovRes/XferRes/RunRes
+// below; the driver never faults on any in-scope device behavior. Faults
+// (assert) appear only in the test harness, where a failed vector is
+// *meant* to abort the run.
+// ============================================================================
+
+// --- register map (spec 2.1): word-addressed 32-bit registers ---
+static OFF_CTRL: usize = 0x00;
+static OFF_STATUS: usize = 0x04;
+static OFF_CMD: usize = 0x08;
+static OFF_DATA: usize = 0x0C;
+static OFF_LEN: usize = 0x10;
+
+// --- STATUS bits (spec 2.2) ---
+static ST_READY: u32 = 0x01u32;
+static ST_BUSY: u32 = 0x02u32;
+static ST_DONE: u32 = 0x04u32;
+static ST_ERROR: u32 = 0x08u32;
+static ST_TIMEOUT: u32 = 0x10u32;
+
+// --- CTRL bits (spec 2.2); the composite 0x03 is the ENABLE|START value
+// spec §3 fixes (the language has no bitwise OR — the literal is the spec's).
+static CTRL_ENABLE: u32 = 0x01u32;
+static CTRL_START: u32 = 0x02u32;
+static CTRL_RESET: u32 = 0x04u32;
+static CTRL_IRQ_ACK: u32 = 0x08u32;
+static CTRL_ENABLE_START: u32 = 0x03u32;
+
+// --- command codes (spec 2.2) ---
+static CMD_READ: u32 = 0x01u32;
+static CMD_WRITE: u32 = 0x02u32;
+
+static MAX_POLLS: usize = 8;    // spec 2.2
+
+// The device handle. base is the MMIO window address; ctx is an opaque
+// word the driver never interprets, passed through to the bus-cycle hooks
+// (the standard callback-context idiom). The hooks are the simulation seam:
+// on_write fires after the valve's store, on_read before its load.
+copy struct Dev {
+    base: usize,
+    ctx: usize,
+    on_write: fn(ctx: usize, off: usize, val: u32) -> unit,
+    on_read: fn(ctx: usize, off: usize) -> unit,
+}
+
+// Transfer buffer (spec 3.4). Wrapped in a struct: a borrow-mode parameter
+// of fixed-array type does not parse (allocator-port friction note 1).
+// 8 words covers every vector (max LEN is 3).
+struct Buf { w: [8]u32 }
+
+// ---------------------------------------------------------------------------
+// The valve: the register-access seam, one ptr op each (design 0001 §11.3).
+// ---------------------------------------------------------------------------
+
+fn reg_write(d: read Dev, off: usize, val: u32) -> unit {
+    unsafe "device MMIO window at [base, base+0x14): volatile-equivalent store of one register word" {
+        ptr_write(addr_to_ptr[u32]((deref d).base + off), val);
+    };
+    ((deref d).on_write)((deref d).ctx, off, val);   // the hardware reacts to the bus cycle
+}
+
+fn reg_read(d: read Dev, off: usize) -> u32 {
+    ((deref d).on_read)((deref d).ctx, off);         // the hardware drives the bus
+    unsafe "device MMIO window at [base, base+0x14): volatile-equivalent load of one register word" {
+        return ptr_read(addr_to_ptr[u32]((deref d).base + off));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Safe value gear: bit test (no bitwise operators in the language).
+// ---------------------------------------------------------------------------
+
+fn bit_set(v: u32, bit: u32) -> bool {
+    return (v / bit) % 2u32 == 1u32;
+}
+
+// ---------------------------------------------------------------------------
+// The driver algorithm (spec §3). All results are values.
+// ---------------------------------------------------------------------------
+
+copy enum PollRes { ok, timeout }
+copy enum InitRes { ok, timeout }
+copy enum RecovRes { ok, fatal }
+copy enum XferRes { ok, xfer_error, xfer_timeout }
+copy enum RunRes { ok, dev_fatal }
+
+// spec 3.1: up to MAX_POLLS STATUS reads; READY -> ok, TIMEOUT bit or poll
+// exhaustion -> timeout.
+fn poll_ready(d: read Dev) -> PollRes {
+    let mut i: usize = 0;
+    while i < MAX_POLLS {
+        let st: u32 = reg_read(read (deref d), OFF_STATUS);
+        if bit_set(st, ST_READY) { return PollRes::ok; }
+        if bit_set(st, ST_TIMEOUT) { return PollRes::timeout; }
+        i = i + 1;
+    }
+    return PollRes::timeout;
+}
+
+// spec 3.2 (public entry point, R9)
+fn dev_init(d: read Dev) -> InitRes {
+    reg_write(read (deref d), OFF_CTRL, CTRL_RESET);
+    match poll_ready(read (deref d)) {
+        case PollRes::timeout => return InitRes::timeout,
+        case PollRes::ok => {}
+    }
+    reg_write(read (deref d), OFF_CTRL, CTRL_ENABLE);
+    return InitRes::ok;
+}
+
+// spec 3.3: same access sequence as init; failure is FATAL, not TIMEOUT.
+fn dev_recover(d: read Dev) -> RecovRes {
+    reg_write(read (deref d), OFF_CTRL, CTRL_RESET);
+    match poll_ready(read (deref d)) {
+        case PollRes::timeout => return RecovRes::fatal,
+        case PollRes::ok => {}
+    }
+    reg_write(read (deref d), OFF_CTRL, CTRL_ENABLE);
+    return RecovRes::ok;
+}
+
+// spec 3.4 (public entry point, R9; precondition: device READY)
+fn dev_transfer(d: read Dev, cmd: u32, n: usize, buf: write Buf) -> XferRes {
+    // step 1
+    reg_write(read (deref d), OFF_LEN, conv u32 (n));
+    reg_write(read (deref d), OFF_CMD, cmd);
+    reg_write(read (deref d), OFF_CTRL, CTRL_ENABLE_START);
+    // step 2
+    let mut transferred: usize = 0;
+    let mut stall: usize = 0;
+    // step 3
+    loop {
+        if cmd == CMD_WRITE && transferred < n {
+            reg_write(read (deref d), OFF_DATA, (deref buf).w[transferred]);
+            transferred = transferred + 1;
+            stall = 0;   // writing a word is forward progress: per-word stall reset (spec 3.4)
+        }
+        let st: u32 = reg_read(read (deref d), OFF_STATUS);
+        if bit_set(st, ST_ERROR) { return XferRes::xfer_error; }
+        if bit_set(st, ST_TIMEOUT) { return XferRes::xfer_timeout; }
+        if bit_set(st, ST_DONE) { break; }
+        // otherwise st & BUSY holds
+        if cmd == CMD_READ {
+            (deref buf).w[transferred] = reg_read(read (deref d), OFF_DATA);
+            transferred = transferred + 1;
+            stall = 0;
+        } else {
+            // CMD_WRITE with nothing to read this poll
+            stall = stall + 1;
+            if stall >= MAX_POLLS { return XferRes::xfer_timeout; }
+        }
+    }
+    // step 4
+    reg_write(read (deref d), OFF_CTRL, CTRL_IRQ_ACK);
+    return XferRes::ok;
+}
+
+// spec 3.5: the composed per-scenario path — init (with one RESET recovery),
+// transfer (with one recover-and-retry), DEV_FATAL as a value (spec 3.6).
+fn dev_run(d: read Dev, cmd: u32, n: usize, buf: write Buf) -> RunRes {
+    // step 1
+    match dev_init(read (deref d)) {
+        case InitRes::ok => {},
+        case InitRes::timeout => {
+            match dev_recover(read (deref d)) {
+                case RecovRes::fatal => return RunRes::dev_fatal,
+                case RecovRes::ok => {}
+            }
+        }
+    }
+    // step 2
+    let mut failed: bool = false;
+    match dev_transfer(read (deref d), cmd, n, write (deref buf)) {
+        case XferRes::ok => {},
+        case XferRes::xfer_error => { failed = true; },
+        case XferRes::xfer_timeout => { failed = true; },
+    }
+    if !failed { return RunRes::ok; }
+    // step 3: one recovery, one retry
+    match dev_recover(read (deref d)) {
+        case RecovRes::fatal => return RunRes::dev_fatal,
+        case RecovRes::ok => {}
+    }
+    // step 4
+    match dev_transfer(read (deref d), cmd, n, write (deref buf)) {
+        case XferRes::ok => return RunRes::ok,
+        case XferRes::xfer_error => return RunRes::dev_fatal,
+        case XferRes::xfer_timeout => return RunRes::dev_fatal,
+    }
+}
+
+// Test harness — the simulated device of spec §2 (the test double), trace
+// recording, and the frozen scenario suite M1-M10 with byte-exact trace
+// comparison plus the M11-M14 cross-checks (spec §4). The device FSM below
+// is deliberately in the safe gears (copy enum + match); its only valve is
+// the whole-struct load/store of the Sim at its context address (the §11.1
+// Pool idiom) and the one store that presents a read value on the bus.
+
+static NO_ERR: usize = 9999;     // err_at sentinel: no fault armed
+static RESET_DELAY: usize = 1;   // spec 2.2
+
+// The 7 device states (spec 2.3).
+copy enum DevState { uninit, resetting, inited, ready, active, complete, fault }
+
+fn ds_code(s: DevState) -> usize {
+    match s {
+        case DevState::uninit => return 0,
+        case DevState::resetting => return 1,
+        case DevState::inited => return 2,
+        case DevState::ready => return 3,
+        case DevState::active => return 4,
+        case DevState::complete => return 5,
+        case DevState::fault => return 6,
+    }
+}
+
+// The simulated device (spec 2.3-2.5) plus the recorded trace (spec 4.1).
+// len/cmd are the device's internal latches of the LEN/CMD register writes;
+// the register words themselves live at [base, base+0x14).
+struct Sim {
+    base: usize,           // the register window this device is wired to
+    ds: DevState,
+    rem: u32,              // words remaining in the active transfer
+    data_out: u32,         // read counter
+    len: u32,
+    cmd: u32,
+    reset_ctr: usize,
+    stuck: bool,
+    stuck_first: bool,     // scenario flag init_stuck_first (armed until consumed)
+    stuck_persists: bool,  // scenario flag stuck_persists (spec 2.5, M10)
+    err_sched: [4]usize,   // ordered per-transfer-attempt fault schedule (R7)
+    err_n: usize,
+    err_i: usize,          // next schedule entry to consume
+    err_cur: usize,        // fault index armed for the current transfer (NO_ERR = none)
+    lat_done: bool,        // latched DONE / ERROR bits
+    lat_err: bool,
+    visited: [7]usize,     // M11: device states visited, by ds_code
+    t_op: [64]usize,       // trace: 0 = W, 1 = R
+    t_off: [64]usize,      // trace: register offset
+    t_val: [64]usize,      // trace: written / device-returned value
+    t_n: usize,
+}
+
+fn sim_new(base: usize, stuck_first: bool, stuck_persists: bool) -> Sim {
+    let mut s: Sim = Sim {
+        base: base, ds: DevState::uninit, rem: 0u32, data_out: 0u32,
+        len: 0u32, cmd: 0u32, reset_ctr: 0, stuck: false,
+        stuck_first: stuck_first, stuck_persists: stuck_persists,
+        err_sched: [0; 4], err_n: 0, err_i: 0, err_cur: NO_ERR,
+        lat_done: false, lat_err: false, visited: [0; 7],
+        t_op: [0; 64], t_off: [0; 64], t_val: [0; 64], t_n: 0,
+    };
+    s.visited[0] = 1;   // initial state UNINIT (spec 2.4)
+    return s;
+}
+
+// append one entry to the per-transfer-attempt fault schedule (R7)
+fn sim_arm_err(s: write Sim, idx: usize) -> unit {
+    (deref s).err_sched[(deref s).err_n] = idx;
+    (deref s).err_n = (deref s).err_n + 1;
+}
+
+fn set_ds(s: write Sim, ds: DevState) -> unit {
+    (deref s).ds = ds;
+    (deref s).visited[ds_code(ds)] = 1;
+}
+
+// record one MMIO access; M12 (registers touched are exactly §2.1's five)
+// is asserted on every access.
+fn trace_rec(s: write Sim, op: usize, off: usize, val: u32) -> unit {
+    assert(off == OFF_CTRL || off == OFF_STATUS || off == OFF_CMD
+        || off == OFF_DATA || off == OFF_LEN);
+    assert((deref s).t_n < 64);
+    (deref s).t_op[(deref s).t_n] = op;
+    (deref s).t_off[(deref s).t_n] = off;
+    (deref s).t_val[(deref s).t_n] = conv usize (val);
+    (deref s).t_n = (deref s).t_n + 1;
+}
+
+// whole-struct load/store of the device at its context address (§11.1 idiom)
+fn sim_load(ctx: usize) -> Sim {
+    unsafe "ctx is the address of the running vector's live Sim local; whole-struct load" {
+        return ptr_read(addr_to_ptr[Sim](ctx));
+    }
+}
+
+fn sim_store(ctx: usize, s: Sim) -> unit {
+    unsafe "ctx is the address of the running vector's live Sim local; whole-struct store" {
+        ptr_write(addr_to_ptr[Sim](ctx), s);
+    }
+}
+
+// CTRL write reaction (spec 2.4 on-write). Per R8 the bit rules are
+// evaluated independently, in the listed order.
+fn dev_ctrl(s: write Sim, val: u32) -> unit {
+    if bit_set(val, CTRL_RESET) {
+        if (deref s).stuck_first {
+            // first RESET with init_stuck_first armed: wedge and consume the flag
+            (deref s).stuck = true;
+            set_ds(write (deref s), DevState::resetting);
+            (deref s).stuck_first = false;
+        } else {
+            set_ds(write (deref s), DevState::resetting);
+            (deref s).reset_ctr = RESET_DELAY;
+            (deref s).lat_done = false;
+            (deref s).lat_err = false;
+            (deref s).err_cur = NO_ERR;
+            if !(deref s).stuck_persists { (deref s).stuck = false; }
+        }
+    }
+    if bit_set(val, CTRL_ENABLE) {
+        match (deref s).ds {
+            case DevState::inited => set_ds(write (deref s), DevState::ready),
+            case _ => {}
+        }
+    }
+    if bit_set(val, CTRL_START) {
+        match (deref s).ds {
+            case DevState::ready => {
+                set_ds(write (deref s), DevState::active);
+                (deref s).rem = (deref s).len;
+                (deref s).data_out = 0u32;
+                // R7: consume the next fault-schedule entry for this attempt
+                if (deref s).err_i < (deref s).err_n {
+                    (deref s).err_cur = (deref s).err_sched[(deref s).err_i];
+                    (deref s).err_i = (deref s).err_i + 1;
+                } else {
+                    (deref s).err_cur = NO_ERR;
+                }
+            }
+            case _ => {}
+        }
+    }
+    if bit_set(val, CTRL_IRQ_ACK) {
+        (deref s).lat_done = false;
+        (deref s).lat_err = false;
+        match (deref s).ds {
+            case DevState::complete => set_ds(write (deref s), DevState::ready),
+            case _ => {}
+        }
+    }
+}
+
+// STATUS read: return a status word AND advance (spec 2.4 on-read).
+// The device FSM's heart — safe enum + match.
+fn dev_status(s: write Sim) -> u32 {
+    match (deref s).ds {
+        case DevState::uninit => return 0x00u32,
+        case DevState::resetting => {
+            if (deref s).stuck { return ST_BUSY; }   // never leaves
+            if (deref s).reset_ctr > 0 {
+                (deref s).reset_ctr = (deref s).reset_ctr - 1;
+                return ST_BUSY;
+            }
+            set_ds(write (deref s), DevState::inited);
+            return ST_READY;
+        }
+        case DevState::inited => return ST_READY,
+        case DevState::ready => return ST_READY,
+        case DevState::active => {
+            let idx: usize = conv usize ((deref s).len - (deref s).rem);
+            if (deref s).err_cur != NO_ERR && idx == (deref s).err_cur {
+                set_ds(write (deref s), DevState::fault);
+                (deref s).lat_err = true;
+                return ST_ERROR;
+            }
+            if (deref s).rem > 0u32 {
+                (deref s).rem = (deref s).rem - 1u32;
+                return ST_BUSY;
+            }
+            set_ds(write (deref s), DevState::complete);
+            (deref s).lat_done = true;
+            return 0x05u32;   // READY|DONE
+        }
+        case DevState::complete => return 0x05u32,   // READY|DONE until IRQ_ACK
+        case DevState::fault => return ST_ERROR,     // ERROR until a RESET
+    }
+}
+
+// DATA read: the read-FIFO port (spec 2.4 on-read)
+fn dev_data(s: write Sim) -> u32 {
+    match (deref s).ds {
+        case DevState::active => {
+            if (deref s).cmd == CMD_READ {
+                let v: u32 = (deref s).data_out;
+                (deref s).data_out = (deref s).data_out + 1u32;
+                return v;
+            }
+            return 0u32;
+        }
+        case _ => return 0u32,
+    }
+}
+
+// --- the two bus-cycle hooks wired into the Dev handle ---
+
+// after the driver's store: latch and react (spec 2.4 on-write)
+fn dev_on_write(ctx: usize, off: usize, val: u32) -> unit {
+    let mut s: Sim = sim_load(ctx);
+    trace_rec(write s, 0, off, val);
+    if off == OFF_CTRL {
+        dev_ctrl(write s, val);
+    } else if off == OFF_LEN {
+        s.len = val;
+    } else if off == OFF_CMD {
+        s.cmd = val;
+    }
+    // OFF_DATA while ACTIVE and CMD_WRITE: accept one word, no state advance
+    // (spec 2.4) — nothing to update.
+    sim_store(ctx, s);
+}
+
+// before the driver's load: advance the FSM and present the value the
+// device drives on the bus in the register word the valve is about to read.
+fn dev_on_read(ctx: usize, off: usize) -> unit {
+    let mut s: Sim = sim_load(ctx);
+    let mut v: u32 = 0u32;
+    if off == OFF_STATUS {
+        v = dev_status(write s);
+    } else if off == OFF_DATA {
+        v = dev_data(write s);
+    } else {
+        // unreachable for the §3 driver; present the latched word for totality
+        unsafe "readback of a latched register word inside the live window" {
+            v = ptr_read(addr_to_ptr[u32](s.base + off));
+        }
+    }
+    unsafe "present v on the bus: store into the register word inside the live window" {
+        ptr_write(addr_to_ptr[u32](s.base + off), v);
+    };
+    trace_rec(write s, 1, off, v);
+    sim_store(ctx, s);
+}
+
+// ---------------------------------------------------------------------------
+// Expected traces (spec §4 notation, W/R + offset + value) and comparison.
+// ---------------------------------------------------------------------------
+
+struct Exp { op: [64]usize, off: [64]usize, val: [64]usize, n: usize }
+
+fn exp_new() -> Exp {
+    return Exp { op: [0; 64], off: [0; 64], val: [0; 64], n: 0 };
+}
+
+fn ew(e: write Exp, off: usize, val: usize) -> unit {
+    (deref e).op[(deref e).n] = 0;
+    (deref e).off[(deref e).n] = off;
+    (deref e).val[(deref e).n] = val;
+    (deref e).n = (deref e).n + 1;
+}
+
+fn er(e: write Exp, off: usize, val: usize) -> unit {
+    (deref e).op[(deref e).n] = 1;
+    (deref e).off[(deref e).n] = off;
+    (deref e).val[(deref e).n] = val;
+    (deref e).n = (deref e).n + 1;
+}
+
+// successful init / recover: W CTRL=04, R ST=02, R ST=01, W CTRL=01 (M1/M5)
+fn exp_init_ok(e: write Exp) -> unit {
+    ew(write (deref e), OFF_CTRL, 0x04);
+    er(write (deref e), OFF_STATUS, 0x02);
+    er(write (deref e), OFF_STATUS, 0x01);
+    ew(write (deref e), OFF_CTRL, 0x01);
+}
+
+// stuck init attempt: W CTRL=04, then R ST=02 x8, poll exhausted (M7/M10)
+fn exp_init_stuck(e: write Exp) -> unit {
+    ew(write (deref e), OFF_CTRL, 0x04);
+    let mut i: usize = 0;
+    while i < 8 {
+        er(write (deref e), OFF_STATUS, 0x02);
+        i = i + 1;
+    }
+}
+
+// complete WRITE transfer of n words from buf (M1/M3/M4 pattern)
+fn exp_xfer_write_ok(e: write Exp, n: usize, buf: read Buf) -> unit {
+    ew(write (deref e), OFF_LEN, n);
+    ew(write (deref e), OFF_CMD, 0x02);
+    ew(write (deref e), OFF_CTRL, 0x03);
+    let mut i: usize = 0;
+    while i < n {
+        ew(write (deref e), OFF_DATA, conv usize ((deref buf).w[i]));
+        er(write (deref e), OFF_STATUS, 0x02);
+        i = i + 1;
+    }
+    er(write (deref e), OFF_STATUS, 0x05);
+    ew(write (deref e), OFF_CTRL, 0x08);
+}
+
+// complete READ transfer of n words (M2 pattern; DATA returns 0,1,2,...)
+fn exp_xfer_read_ok(e: write Exp, n: usize) -> unit {
+    ew(write (deref e), OFF_LEN, n);
+    ew(write (deref e), OFF_CMD, 0x01);
+    ew(write (deref e), OFF_CTRL, 0x03);
+    let mut i: usize = 0;
+    while i < n {
+        er(write (deref e), OFF_STATUS, 0x02);
+        er(write (deref e), OFF_DATA, i);
+        i = i + 1;
+    }
+    er(write (deref e), OFF_STATUS, 0x05);
+    ew(write (deref e), OFF_CTRL, 0x08);
+}
+
+// byte-exact comparison (spec 4.1): same length, order, ops, registers, values
+fn check_trace(s: read Sim, e: read Exp) -> unit {
+    assert((deref s).t_n == (deref e).n);
+    let mut i: usize = 0;
+    while i < (deref e).n {
+        assert((deref s).t_op[i] == (deref e).op[i]);
+        assert((deref s).t_off[i] == (deref e).off[i]);
+        assert((deref s).t_val[i] == (deref e).val[i]);
+        i = i + 1;
+    }
+}
+
+// M13: two runs of the same scenario yield byte-identical traces
+fn cmp_traces(a: read Sim, b: read Sim) -> unit {
+    assert((deref a).t_n == (deref b).t_n);
+    let mut i: usize = 0;
+    while i < (deref a).t_n {
+        assert((deref a).t_op[i] == (deref b).t_op[i]);
+        assert((deref a).t_off[i] == (deref b).t_off[i]);
+        assert((deref a).t_val[i] == (deref b).t_val[i]);
+        i = i + 1;
+    }
+}
+
+// M14: the W DATA entries of the trace, in order, equal want[0..k]
+fn check_data_writes(s: read Sim, want: read Buf, k: usize) -> unit {
+    let mut seen: usize = 0;
+    let mut i: usize = 0;
+    while i < (deref s).t_n {
+        if (deref s).t_op[i] == 0 && (deref s).t_off[i] == OFF_DATA {
+            assert(seen < k);
+            assert((deref s).t_val[i] == conv usize ((deref want).w[seen]));
+            seen = seen + 1;
+        }
+        i = i + 1;
+    }
+    assert(seen == k);
+}
+
+fn vis(s: read Sim, code: usize) -> bool {
+    return (deref s).visited[code] == 1;
+}
+
+// M11: the nominal chain UNINIT->RESETTING->INITED->READY->ACTIVE was visited
+fn check_chain(s: read Sim) -> unit {
+    assert(vis(read (deref s), 0) && vis(read (deref s), 1) && vis(read (deref s), 2)
+        && vis(read (deref s), 3) && vis(read (deref s), 4));
+}
+
+// ---------------------------------------------------------------------------
+// Result expectations (all results are values; a wrong one faults here)
+// ---------------------------------------------------------------------------
+
+fn expect_run_ok(r: RunRes) -> unit {
+    match r {
+        case RunRes::ok => {},
+        case RunRes::dev_fatal => assert(false),
+    }
+}
+
+fn expect_run_fatal(r: RunRes) -> unit {
+    match r {
+        case RunRes::ok => assert(false),
+        case RunRes::dev_fatal => {},
+    }
+}
+
+fn expect_xfer_ok(t: XferRes) -> unit {
+    match t {
+        case XferRes::ok => {},
+        case XferRes::xfer_error => assert(false),
+        case XferRes::xfer_timeout => assert(false),
+    }
+}
+
+fn expect_init_ok(r: InitRes) -> unit {
+    match r {
+        case InitRes::ok => {},
+        case InitRes::timeout => assert(false),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scenario rigs. Each vector owns a fresh 5-word register window and a fresh
+// Sim, both locals whose addresses anchor the device for the vector's
+// duration. Scenarios reused by M13 are factored to return their Sim.
+// ---------------------------------------------------------------------------
+
+// M1: init + WRITE 2 words [0xAA, 0xBB]
+fn run_m1() -> Sim {
+    let mut regs: [5]u32 = [0u32; 5];
+    let mut base: usize = 0;
+    unsafe "regs is this vector's live 5-word register window; its address anchors the device" {
+        base = ptr_to_addr(cast_ptr[u32](addr_of_mut(regs)));
+    }
+    let mut sim: Sim = sim_new(base, false, false);
+    let mut ctx: usize = 0;
+    unsafe "sim is a live local of this vector; the bus-cycle hooks act on it through this address" {
+        ctx = ptr_to_addr(addr_of_mut(sim));
+    }
+    let d: Dev = Dev { base: base, ctx: ctx, on_write: dev_on_write, on_read: dev_on_read };
+    let mut buf: Buf = Buf { w: [0xAAu32, 0xBBu32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32] };
+    expect_run_ok(dev_run(read d, CMD_WRITE, 2, write buf));
+    return sim;
+}
+
+fn vec_m1() -> unit {
+    let sim: Sim = run_m1();
+    let mut e: Exp = exp_new();
+    exp_init_ok(write e);
+    let want: Buf = Buf { w: [0xAAu32, 0xBBu32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32] };
+    exp_xfer_write_ok(write e, 2, read want);
+    check_trace(read sim, read e);
+    check_data_writes(read sim, read want, 2);   // M14
+    check_chain(read sim);                       // M11
+    assert(vis(read sim, 5));                    // ... ending in COMPLETE
+}
+
+// M2: init + READ 3 words; buf == [0, 1, 2]
+fn vec_m2() -> unit {
+    let mut regs: [5]u32 = [0u32; 5];
+    let mut base: usize = 0;
+    unsafe "regs is this vector's live 5-word register window; its address anchors the device" {
+        base = ptr_to_addr(cast_ptr[u32](addr_of_mut(regs)));
+    }
+    let mut sim: Sim = sim_new(base, false, false);
+    let mut ctx: usize = 0;
+    unsafe "sim is a live local of this vector; the bus-cycle hooks act on it through this address" {
+        ctx = ptr_to_addr(addr_of_mut(sim));
+    }
+    let d: Dev = Dev { base: base, ctx: ctx, on_write: dev_on_write, on_read: dev_on_read };
+    let mut buf: Buf = Buf { w: [0u32; 8] };
+    expect_run_ok(dev_run(read d, CMD_READ, 3, write buf));
+    assert(buf.w[0] == 0u32 && buf.w[1] == 1u32 && buf.w[2] == 2u32);   // M14
+    let mut e: Exp = exp_new();
+    exp_init_ok(write e);
+    exp_xfer_read_ok(write e, 3);
+    check_trace(read sim, read e);
+    check_chain(read sim);
+    assert(vis(read sim, 5));
+}
+
+// M3: init + WRITE 1 word [0x77]
+fn vec_m3() -> unit {
+    let mut regs: [5]u32 = [0u32; 5];
+    let mut base: usize = 0;
+    unsafe "regs is this vector's live 5-word register window; its address anchors the device" {
+        base = ptr_to_addr(cast_ptr[u32](addr_of_mut(regs)));
+    }
+    let mut sim: Sim = sim_new(base, false, false);
+    let mut ctx: usize = 0;
+    unsafe "sim is a live local of this vector; the bus-cycle hooks act on it through this address" {
+        ctx = ptr_to_addr(addr_of_mut(sim));
+    }
+    let d: Dev = Dev { base: base, ctx: ctx, on_write: dev_on_write, on_read: dev_on_read };
+    let mut buf: Buf = Buf { w: [0x77u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32] };
+    expect_run_ok(dev_run(read d, CMD_WRITE, 1, write buf));
+    let mut e: Exp = exp_new();
+    exp_init_ok(write e);
+    exp_xfer_write_ok(write e, 1, read buf);
+    check_trace(read sim, read e);
+    check_data_writes(read sim, read buf, 1);   // M14
+    check_chain(read sim);
+    assert(vis(read sim, 5));
+}
+
+// M4: init + transfer LEN 0 (immediate DONE)
+fn vec_m4() -> unit {
+    let mut regs: [5]u32 = [0u32; 5];
+    let mut base: usize = 0;
+    unsafe "regs is this vector's live 5-word register window; its address anchors the device" {
+        base = ptr_to_addr(cast_ptr[u32](addr_of_mut(regs)));
+    }
+    let mut sim: Sim = sim_new(base, false, false);
+    let mut ctx: usize = 0;
+    unsafe "sim is a live local of this vector; the bus-cycle hooks act on it through this address" {
+        ctx = ptr_to_addr(addr_of_mut(sim));
+    }
+    let d: Dev = Dev { base: base, ctx: ctx, on_write: dev_on_write, on_read: dev_on_read };
+    let mut buf: Buf = Buf { w: [0u32; 8] };
+    expect_run_ok(dev_run(read d, CMD_WRITE, 0, write buf));
+    let mut e: Exp = exp_new();
+    exp_init_ok(write e);
+    exp_xfer_write_ok(write e, 0, read buf);   // W LEN=0, W CMD=2, W CTRL=3, R ST=5, W CTRL=8
+    check_trace(read sim, read e);
+    check_chain(read sim);
+    assert(vis(read sim, 5));
+}
+
+// M5: init only, no transfer; device reaches READY
+fn vec_m5() -> unit {
+    let mut regs: [5]u32 = [0u32; 5];
+    let mut base: usize = 0;
+    unsafe "regs is this vector's live 5-word register window; its address anchors the device" {
+        base = ptr_to_addr(cast_ptr[u32](addr_of_mut(regs)));
+    }
+    let mut sim: Sim = sim_new(base, false, false);
+    let mut ctx: usize = 0;
+    unsafe "sim is a live local of this vector; the bus-cycle hooks act on it through this address" {
+        ctx = ptr_to_addr(addr_of_mut(sim));
+    }
+    let d: Dev = Dev { base: base, ctx: ctx, on_write: dev_on_write, on_read: dev_on_read };
+    expect_init_ok(dev_init(read d));
+    let mut e: Exp = exp_new();
+    exp_init_ok(write e);
+    check_trace(read sim, read e);
+    assert(ds_code(sim.ds) == 3);   // device reached READY
+}
+
+// M6 (state coverage / R9): M2 followed by another WRITE 2 with no re-init;
+// the device returned to READY via IRQ_ACK, so dev_transfer is driven
+// directly. The second sub-trace equals M1's transfer portion.
+fn vec_m6() -> unit {
+    let mut regs: [5]u32 = [0u32; 5];
+    let mut base: usize = 0;
+    unsafe "regs is this vector's live 5-word register window; its address anchors the device" {
+        base = ptr_to_addr(cast_ptr[u32](addr_of_mut(regs)));
+    }
+    let mut sim: Sim = sim_new(base, false, false);
+    let mut ctx: usize = 0;
+    unsafe "sim is a live local of this vector; the bus-cycle hooks act on it through this address" {
+        ctx = ptr_to_addr(addr_of_mut(sim));
+    }
+    let d: Dev = Dev { base: base, ctx: ctx, on_write: dev_on_write, on_read: dev_on_read };
+    let mut buf: Buf = Buf { w: [0u32; 8] };
+    expect_run_ok(dev_run(read d, CMD_READ, 3, write buf));
+    let mut buf2: Buf = Buf { w: [0xAAu32, 0xBBu32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32] };
+    expect_xfer_ok(dev_transfer(read d, CMD_WRITE, 2, write buf2));   // no re-init (R9)
+    let mut e: Exp = exp_new();
+    exp_init_ok(write e);
+    exp_xfer_read_ok(write e, 3);
+    exp_xfer_write_ok(write e, 2, read buf2);
+    check_trace(read sim, read e);
+    check_chain(read sim);
+    assert(vis(read sim, 5));
+    assert(ds_code(sim.ds) == 3);   // READY -> ACTIVE -> COMPLETE -> READY cycling
+}
+
+// M7: init timeout (init_stuck_first) -> recover -> WRITE 1 [0x77]
+fn vec_m7() -> unit {
+    let mut regs: [5]u32 = [0u32; 5];
+    let mut base: usize = 0;
+    unsafe "regs is this vector's live 5-word register window; its address anchors the device" {
+        base = ptr_to_addr(cast_ptr[u32](addr_of_mut(regs)));
+    }
+    let mut sim: Sim = sim_new(base, true, false);   // init_stuck_first armed
+    let mut ctx: usize = 0;
+    unsafe "sim is a live local of this vector; the bus-cycle hooks act on it through this address" {
+        ctx = ptr_to_addr(addr_of_mut(sim));
+    }
+    let d: Dev = Dev { base: base, ctx: ctx, on_write: dev_on_write, on_read: dev_on_read };
+    let mut buf: Buf = Buf { w: [0x77u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32] };
+    expect_run_ok(dev_run(read d, CMD_WRITE, 1, write buf));
+    let mut e: Exp = exp_new();
+    exp_init_stuck(write e);   // poll exhausted -> TIMEOUT
+    exp_init_ok(write e);      // recover succeeds
+    exp_xfer_write_ok(write e, 1, read buf);
+    check_trace(read sim, read e);
+    check_data_writes(read sim, read buf, 1);
+    check_chain(read sim);     // M11: timeout path, then the full chain
+    assert(vis(read sim, 5));
+}
+
+// M8: transfer fault at idx 1 -> recover -> retry WRITE 3 [0x11,0x22,0x33]
+fn run_m8() -> Sim {
+    let mut regs: [5]u32 = [0u32; 5];
+    let mut base: usize = 0;
+    unsafe "regs is this vector's live 5-word register window; its address anchors the device" {
+        base = ptr_to_addr(cast_ptr[u32](addr_of_mut(regs)));
+    }
+    let mut sim: Sim = sim_new(base, false, false);
+    sim_arm_err(write sim, 1);   // R7: one schedule entry — first attempt faults at idx 1
+    let mut ctx: usize = 0;
+    unsafe "sim is a live local of this vector; the bus-cycle hooks act on it through this address" {
+        ctx = ptr_to_addr(addr_of_mut(sim));
+    }
+    let d: Dev = Dev { base: base, ctx: ctx, on_write: dev_on_write, on_read: dev_on_read };
+    let mut buf: Buf = Buf { w: [0x11u32, 0x22u32, 0x33u32, 0u32, 0u32, 0u32, 0u32, 0u32] };
+    expect_run_ok(dev_run(read d, CMD_WRITE, 3, write buf));
+    return sim;
+}
+
+fn vec_m8() -> unit {
+    let sim: Sim = run_m8();
+    let mut e: Exp = exp_new();
+    exp_init_ok(write e);
+    // first attempt: faults on the second STATUS poll (idx 1)
+    ew(write e, OFF_LEN, 0x03);
+    ew(write e, OFF_CMD, 0x02);
+    ew(write e, OFF_CTRL, 0x03);
+    ew(write e, OFF_DATA, 0x11);
+    er(write e, OFF_STATUS, 0x02);
+    ew(write e, OFF_DATA, 0x22);
+    er(write e, OFF_STATUS, 0x08);   // ERROR -> abort
+    exp_init_ok(write e);            // recover
+    let want: Buf = Buf { w: [0x11u32, 0x22u32, 0x33u32, 0u32, 0u32, 0u32, 0u32, 0u32] };
+    exp_xfer_write_ok(write e, 3, read want);   // retry completes
+    check_trace(read sim, read e);
+    // M14 (per the trace): DATA writes are attempt-1's two words then the retry's three
+    let dw: Buf = Buf { w: [0x11u32, 0x22u32, 0x11u32, 0x22u32, 0x33u32, 0u32, 0u32, 0u32] };
+    check_data_writes(read sim, read dw, 5);
+    check_chain(read sim);
+    assert(vis(read sim, 6) && vis(read sim, 5));   // M11: FAULT path and COMPLETE
+}
+
+// M9: unrecoverable — err_at=0 armed for both attempts; DEV_FATAL as a value
+fn vec_m9() -> unit {
+    let mut regs: [5]u32 = [0u32; 5];
+    let mut base: usize = 0;
+    unsafe "regs is this vector's live 5-word register window; its address anchors the device" {
+        base = ptr_to_addr(cast_ptr[u32](addr_of_mut(regs)));
+    }
+    let mut sim: Sim = sim_new(base, false, false);
+    sim_arm_err(write sim, 0);   // R7: one entry per attempt
+    sim_arm_err(write sim, 0);
+    let mut ctx: usize = 0;
+    unsafe "sim is a live local of this vector; the bus-cycle hooks act on it through this address" {
+        ctx = ptr_to_addr(addr_of_mut(sim));
+    }
+    let d: Dev = Dev { base: base, ctx: ctx, on_write: dev_on_write, on_read: dev_on_read };
+    let mut buf: Buf = Buf { w: [0x11u32, 0x22u32, 0x33u32, 0u32, 0u32, 0u32, 0u32, 0u32] };
+    expect_run_fatal(dev_run(read d, CMD_WRITE, 3, write buf));
+    let mut e: Exp = exp_new();
+    exp_init_ok(write e);
+    // each attempt: one DATA word written, then ERROR on the first poll
+    let mut a: usize = 0;
+    while a < 2 {
+        ew(write e, OFF_LEN, 0x03);
+        ew(write e, OFF_CMD, 0x02);
+        ew(write e, OFF_CTRL, 0x03);
+        ew(write e, OFF_DATA, 0x11);
+        er(write e, OFF_STATUS, 0x08);
+        if a == 0 { exp_init_ok(write e); }   // the recover between attempts
+        a = a + 1;
+    }
+    check_trace(read sim, read e);   // trace ends here: no access after the second fault
+    check_chain(read sim);
+    assert(vis(read sim, 6));        // M11: FAULT path
+    assert(!vis(read sim, 5));       // never COMPLETE
+}
+
+// M10: init timeout unrecoverable (init_stuck_first + stuck_persists)
+fn vec_m10() -> unit {
+    let mut regs: [5]u32 = [0u32; 5];
+    let mut base: usize = 0;
+    unsafe "regs is this vector's live 5-word register window; its address anchors the device" {
+        base = ptr_to_addr(cast_ptr[u32](addr_of_mut(regs)));
+    }
+    let mut sim: Sim = sim_new(base, true, true);   // armed AND persists
+    let mut ctx: usize = 0;
+    unsafe "sim is a live local of this vector; the bus-cycle hooks act on it through this address" {
+        ctx = ptr_to_addr(addr_of_mut(sim));
+    }
+    let d: Dev = Dev { base: base, ctx: ctx, on_write: dev_on_write, on_read: dev_on_read };
+    let mut buf: Buf = Buf { w: [0x77u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32] };
+    expect_run_fatal(dev_run(read d, CMD_WRITE, 1, write buf));
+    let mut e: Exp = exp_new();
+    exp_init_stuck(write e);   // init: poll exhausted
+    exp_init_stuck(write e);   // recover: still stuck (stuck_persists), poll exhausted
+    check_trace(read sim, read e);   // trace ends here; DEV_FATAL was a value, no crash
+    assert(vis(read sim, 0) && vis(read sim, 1));   // M11: only UNINIT/RESETTING
+    assert(!vis(read sim, 2));                      // never left RESETTING
+}
+
+// M13: re-running a scenario yields a byte-identical trace (nominal + recovery)
+fn vec_m13() -> unit {
+    let a1: Sim = run_m1();
+    let a2: Sim = run_m1();
+    cmp_traces(read a1, read a2);
+    let b1: Sim = run_m8();
+    let b2: Sim = run_m8();
+    cmp_traces(read b1, read b2);
+}
+
+// ---------------------------------------------------------------------------
+// main: every scenario on a fresh register window + fresh device.
+// Sentinel 777 on full success; any failure faults first.
+// ---------------------------------------------------------------------------
+
+fn main() -> i64 {
+    vec_m1();
+    vec_m2();
+    vec_m3();
+    vec_m4();
+    vec_m5();
+    vec_m6();
+    vec_m7();
+    vec_m8();
+    vec_m9();
+    vec_m10();
+    vec_m13();
+    return 777;   // sentinel: every scenario passed
+}
