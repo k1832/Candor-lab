@@ -176,3 +176,19 @@ fn valve_statements_rawptr_declaration_is_not_a_valve_statement() {
     assert_eq!(c2.logical_statements, 1);
     assert_eq!(c2.valve_statements, 0);
 }
+
+#[test]
+fn cross_counter_fixture_valve_statements() {
+    // Shared cross-counter fixture: the paired Candor (.cn) and Rust (.rs) files
+    // express the same shapes, and both counters must report the SAME
+    // valve_statements. Hand-computed = 6 (per-fn derivation in the fixture
+    // header). This is the Candor half; tools/rust-count asserts 6 on the .rs.
+    let path = format!(
+        "{}/tests/fixtures/count/cross_counter.cn",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let c = counts(&src);
+    assert_eq!(c.valve_statements, 6);
+    assert_eq!(c.unit_ext_version, "2");
+}

@@ -79,6 +79,10 @@ silently retrofitted to a result already seen.
 | 3 | 2026-07-07 | §4.3, §6.2(d), §6.3, §7.2 | V2 zero-baseline floor re-derived on the statement unit (`valve_statements / logical_statements`), carrying v1's 0.15/0.08 margins; decision-rule and field-mapping references updated to match | Review finding 3 (accepted) — the floor must not revert to the condemned line-fraction unit | deciding authority (k1832) |
 | 4 | 2026-07-07 | §4.5 | stdlib-substitutable keyed solely to the frozen spec's required features (a spec §2.4 required-feature valve is never substitutable); the soft "prototype lacks a stdlib" limb deleted | Review finding 4 (accepted) | deciding authority (k1832) |
 | 5 | 2026-07-07 | §5.2 | Allocator-class carve-out restated as a KILL→mandatory-review reversal under §6.4, never a silent pass | Review finding 5 (accepted) | deciding authority (k1832) |
+| 6 | 2026-07-08 | Appendix A | A.1 gains authored-vs-vendored `V_rust` columns for the two home-ground baselines (scheduler 2 authored / 87 vendored; allocator 17 authored / 69 vendored); new **A.1b** discloses the authored-only-denominator outcomes (allocator 96/17, scheduler 47/2) | Re-confirmation review #2, dispositions 1-2 (accepted), `docs/reviews/2026-07-08-criterion2-review-2.md` | deciding authority (k1832) |
+| 7 | 2026-07-08 | §6.4, §6.6 | Baseline-sensitivity rule added: a home-ground program whose registered and authored-only verdicts DIVERGE is recorded baseline-sensitive and routes into the mandatory §6.4 review — never a clean pass, never an auto-KILL from the unregistered alternative; the §9 yardstick question is stated verbatim | Re-confirmation review #2, dispositions 1-2 (accepted) | deciding authority (k1832) |
+| 8 | 2026-07-08 | §4.1 | Statement-merging under-count acknowledged, with its four mitigations named (AST statement definition, canonical form, symmetric application, public port history) | Re-confirmation review #2, disposition 3 (accepted) | deciding authority (k1832) |
+| 9 | 2026-07-08 | §4.1 | Shared hand-checked cross-counter fixture added (paired `.cn`/`.rs`), asserting an identical `valve_statements` count on both counters | Re-confirmation review #2, disposition 4 (accepted) | deciding authority (k1832) |
 
 ---
 
@@ -158,6 +162,13 @@ old ruler, and the seat of defect (i). The correction carries finding 4 into the
   `table_version` "1" field unchanged and recomputed identically. The freeze-before-ratification
   requirement finding 1 imposed is **discharged by this work**; the re-measured counts live in
   `docs/measurements/{ports,baselines}/<prog>.v2.json` and are tabulated in Appendix A.
+  A **shared hand-checked cross-counter fixture** (review #2 disposition 4) guards the two
+  implementations against drift: paired minimal artifacts
+  (`prototype/tests/fixtures/count/cross_counter.cn`,
+  `tools/rust-count/tests/fixtures/cross_counter.rs`) express the same valve shapes — a statement
+  before, an `unsafe` block holding two statements, a statement after, and a whole-function valve
+  region (Candor a body-spanning `unsafe` block, Rust an `unsafe fn`) — and both counters assert the
+  **same** `valve_statements` (6) on their respective side, hand-computed in the fixtures' headers.
 - **VSE demoted to a reported-only cross-check (finding 1).** The old fallback
   `VSE = valve_lines × (logical_statements / total_lines)` is **no longer operative** — the direct
   count supersedes it. VSE survives in Appendix A **only** as a reported cross-check, with its named
@@ -172,6 +183,18 @@ old ruler, and the seat of defect (i). The correction carries finding 4 into the
   the density-corrected statement unit it is 1.116 (a WARN). The unit is chosen for methodological
   consistency with v1, not for the direction it happens to push — it in fact pushes *against* the bet
   on the hardest program.
+- **Statement-merging under-count (acknowledged, review #2 disposition 3).** Because the operative
+  unit is the *logical statement*, code that packs several operations into a single statement
+  (chained calls, combined `let`s) lowers the valve-statement count relative to the same work spread
+  across more statements — a potential **under-count** of valve content and a residual degree of
+  freedom a port author could in principle exploit. Four mitigations bound it: (1) the **AST
+  statement definition** is fixed by the frozen unit table — the counter walks AST statement nodes,
+  not author-formatted lines, so "one statement" is not a stylistic choice; (2) both artifacts are
+  held to the same **canonical form** under that table; (3) the definition is applied
+  **symmetrically** to the Candor and Rust sides by the two counters, which assert an identical
+  `valve_statements` on the shared cross-counter fixture (this §4.1); and (4) the **public port
+  history** leaves every artifact and its commit auditable, so any statement-packing to move the
+  count is visible in the record.
 
 4.2 **Primary gating metric V1 — spec-relative valve content (comparative, all non-carve-out
 programs).** Both languages implement the **same frozen functional spec** (v1 §2.3), so the idiomatic
@@ -353,6 +376,7 @@ valve metric (V1/V2)** — the function-fraction feeds no count (§4.4); M6/M7 r
   mandatory review;
 - **Two or more** WARN triggers in total → mandatory review;
 - A carve-out or stdlib-substitutable **reversal** outcome (§4.5, §5) → mandatory review.
+- A home-ground **baseline-sensitive divergence** (§6.6) → mandatory review.
 - A mandatory review **cannot silently pass**: the authority produces a recorded §0.5 ledger ruling —
   *proceed*, *re-scope the design*, or *escalate to KILL* — with reasoning and any dissent.
 
@@ -360,6 +384,23 @@ valve metric (V1/V2)** — the function-fraction feeds no count (§4.4); M6/M7 r
 home-ground program triggers any WARN, the *ordering claim* is **PROVISIONALLY CONFIRMED on this
 basket** (scope-limited exactly as v1 §5.4; a pass licenses the syntax freeze per philosophy §3/§8.5
 and nothing more). "Provisional" and "on this basket" are load-bearing.
+
+6.6 **Baseline-sensitivity rule (review #2, dispositions 1-2).** A **home-ground** program (the
+allocator or the scheduler, philosophy §3) whose **registered verdict** — §4.2's `R_valve` on the
+full same-spec Rust baseline (Appendix A.1) — and its **authored-only verdict** — the same `R_valve`
+recomputed against only the baseline's *authored* valve statements, excluding vendored crate
+machinery (Appendix A.1b) — **DIVERGE** is recorded as **baseline-sensitive**. A baseline-sensitive
+program **routes into the mandatory §6.4 review** (the same review the allocator's home-ground WARN
+already forces): it is **never recorded as a clean pass**, and the divergence is **never converted
+into an automatic KILL** from the unregistered authored-only alternative — rewriting the denominator
+rule after seeing that it decides the verdict would be exactly the retrofit §0 forbids, in either
+direction. On the exact unit the scheduler is baseline-sensitive (registered `47/89 = 0.528` pass /
+authored-only `47/2 ≈ 23.5` KILL); the allocator already routes to this review as a home-ground WARN
+and a conceded allocator-class carve-out (§5). The **yardstick question the §9 review must answer** —
+the question the data cannot settle, put to it verbatim from the review record — is whether R1's
+self-contained artifact or the authored-valve figure is the true measure of "idiomatic Rust's
+inherent valve demand," and symmetrically whether a real Candor ecosystem would eventually provide
+the same machinery.
 
 ---
 
@@ -445,18 +486,42 @@ after ratification.
 
 **A.1 — Operative successor metric (exact unit; `V = valve_statements`).**
 
-| Program | V_candor | V_rust | R_valve = V_c / V_r | Metric | Verdict (V1/V2) | Routing |
-|---|---|---|---|---|---|---|
-| Allocator | 96 | 86 | **1.116** | V1 | **WARN** (>1.00, ≤1.25) | home-ground WARN → mandatory §6.4 review; also allocator-class carve-out → no auto-KILL (§5) |
-| Scheduler | 47 | 89 | 0.528 | V1 | pass | gates normally (§5.3); no WARN |
-| MMIO | 3 | 6 | 0.500 | V1 | pass | — |
-| Parser | 9 | 0 | `V_rust = 0` → V2 | V2 | pass (`9/311 = 0.0289` ≤ 0.08) | — |
-| Arena | 0 | 0 | `V_rust = 0` → V2 | V2 | pass (`0/111 = 0.0000`) | — |
+| Program | V_candor | V_rust | V_rust authored | V_rust vendored | R_valve = V_c / V_r | Metric | Verdict (V1/V2) | Routing |
+|---|---|---|---|---|---|---|---|---|
+| Allocator | 96 | 86 | 17 (`lib.rs`) | 69 (`vendored_llalloc.rs`) | **1.116** | V1 | **WARN** (>1.00, ≤1.25) | home-ground WARN → mandatory §6.4 review; baseline-sensitive (A.1b); allocator-class carve-out → no auto-KILL (§5) |
+| Scheduler | 47 | 89 | 2 (`lib.rs`) | 87 (`vendored_intrusive/*`) | 0.528 | V1 | pass (registered) | gates by default (§5.3); **baseline-sensitive** — verdicts diverge (A.1b) → mandatory §6.4 review (§6.6) |
+| MMIO | 3 | 6 | 6 | 0 (no vendored code) | 0.500 | V1 | pass | — |
+| Parser | 9 | 0 | 0 | 0 (no vendored code) | `V_rust = 0` → V2 | V2 | pass (`9/311 = 0.0289` ≤ 0.08) | — |
+| Arena | 0 | 0 | 0 | 0 (no vendored code) | `V_rust = 0` → V2 | V2 | pass (`0/111 = 0.0000`) | — |
 
 On the exact unit **no program triggers an automatic valve KILL**; the sole valve WARN (allocator,
 home-ground) routes to a mandatory §6.4 review. This is a materially different outcome from v1's three
 valve KILLs (A.3) and is the direct effect of correcting defect (i): the allocator carries **1.116×**
 — not v1's 3.26× line-fraction — the idiomatic-Rust valve *content* once density is removed.
+
+**A.1b — Authored-only denominator (home-ground baselines; the divergence dispositions 1-2 confront).**
+Recomputes `R_valve` against **only** the *authored* valve statements of each Rust baseline —
+excluding vendored crate machinery — after the finding that the scheduler's registered denominator is
+98% vendored (per-file: `lib.rs` 2 authored, `vendored_intrusive/*` 87; the allocator's `lib.rs` 17
+authored, `vendored_llalloc.rs` 69). This denominator is **not the registered rule** (A.1 is); it is
+disclosed so the home-ground sensitivity is visible, and it routes divergence to review, never to an
+automatic KILL (§6.6).
+
+| Program | V_candor | V_rust authored | R_valve (authored-only) | Authored-only verdict | Registered verdict (A.1) | Status |
+|---|---|---|---|---|---|---|
+| Allocator | 96 | 17 | 5.647 | KILL (>1.25) | WARN | baseline-sensitive; already home-ground WARN + conceded carve-out → mandatory §6.4 review |
+| Scheduler | 47 | 2 | 23.5 | KILL (>1.25) | pass | **baseline-sensitive** — verdicts DIVERGE → mandatory §6.4 review (§6.6) |
+| MMIO | 3 | 6 | 0.500 | pass | pass | unchanged (single-file baseline; no vendored code) |
+| Parser | 9 | 0 | `V_rust = 0` → V2 | pass | pass | unchanged |
+| Arena | 0 | 0 | `V_rust = 0` → V2 | pass | pass | unchanged |
+
+The two home-ground programs both compute KILL on the authored-only denominator (allocator
+`96/17 = 5.647`, scheduler `47/2 = 23.5`); the non-home-ground programs are single-file baselines
+with no vendored split, so their verdicts are unchanged. The scheduler's registered pass (0.528) and
+authored-only KILL (23.5) **diverge**, making it baseline-sensitive under §6.6: it is recorded as
+such and routed to the mandatory §6.4 review, never a clean pass and never an automatic KILL. Whether
+the registered or the authored-only denominator is the true measure is the §9 yardstick question
+(§6.6), which the data cannot settle.
 
 **A.2 — Rejected raw-absolute-valve-lines alternative (no density normalization; §4.6).** Same 1.25
 KILL / 1.00 WARN margins applied to raw valve *lines*; zero-baseline programs fall to v1's absolute

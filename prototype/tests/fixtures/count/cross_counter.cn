@@ -1,0 +1,29 @@
+// Shared cross-counter fixture (Candor side).
+// Paired with tools/rust-count/tests/fixtures/cross_counter.rs; both counters
+// must report the SAME valve_statements. Hand-computed total = 6.
+//
+// fn worker: a statement before, an unsafe block holding two statements, a
+//   statement after. Valve statements = the unsafe-block statement itself
+//   (its span is coincident with the valve region: it intersects without
+//   strictly enclosing it, i.e. the "partly inside" / partial-overlap case)
+//   plus the two inner lets = 3. The enclosing fn and the before/after lets
+//   sit outside the valve and are excluded.
+// fn wrapped: an entire function body made a valve region. Candor expresses
+//   this with a body-spanning unsafe block (Rust uses `unsafe fn`; see the
+//   .rs pair). Valve statements = the unsafe-block statement + two inner
+//   lets = 3.
+// Total valve_statements = 3 + 3 = 6.
+fn worker() -> unit {
+    let before = 0;
+    unsafe "x" {
+        let a = 1;
+        let b = 2;
+    }
+    let after = 3;
+}
+fn wrapped() -> unit {
+    unsafe "y" {
+        let p = 1;
+        let q = 2;
+    }
+}
