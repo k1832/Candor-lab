@@ -1,0 +1,349 @@
+{
+  "table_version": "1",
+  "annotation_units": {
+    "a": 43,
+    "b": 0,
+    "c": 0,
+    "d": 12,
+    "per_site": [
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 2096,
+        "end": 2105
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 2143,
+        "end": 2152
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 2173,
+        "end": 2182
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 2189,
+        "end": 2198
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 2269,
+        "end": 2278
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 2284,
+        "end": 2302
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 2365,
+        "end": 2374
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 2406,
+        "end": 2415
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 2422,
+        "end": 2975
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 2996,
+        "end": 3005
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 3012,
+        "end": 3021
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 3157,
+        "end": 3174
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 3191,
+        "end": 3503
+      },
+      {
+        "class": "a",
+        "kind": "slice_param",
+        "start": 5266,
+        "end": 5277
+      },
+      {
+        "class": "a",
+        "kind": "read_param",
+        "start": 8662,
+        "end": 8673
+      },
+      {
+        "class": "a",
+        "kind": "read_param",
+        "start": 8956,
+        "end": 8967
+      },
+      {
+        "class": "a",
+        "kind": "read_param",
+        "start": 9432,
+        "end": 9445
+      },
+      {
+        "class": "a",
+        "kind": "read_param",
+        "start": 9631,
+        "end": 9644
+      },
+      {
+        "class": "a",
+        "kind": "read_param",
+        "start": 10770,
+        "end": 10783
+      },
+      {
+        "class": "a",
+        "kind": "slice_param",
+        "start": 10785,
+        "end": 10796
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 10798,
+        "end": 10814
+      },
+      {
+        "class": "a",
+        "kind": "read_param",
+        "start": 10980,
+        "end": 10993
+      },
+      {
+        "class": "a",
+        "kind": "slice_param",
+        "start": 10995,
+        "end": 11006
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 11008,
+        "end": 11024
+      },
+      {
+        "class": "a",
+        "kind": "read_param",
+        "start": 11323,
+        "end": 11336
+      },
+      {
+        "class": "a",
+        "kind": "slice_param",
+        "start": 11338,
+        "end": 11349
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 11351,
+        "end": 11367
+      },
+      {
+        "class": "a",
+        "kind": "read_param",
+        "start": 12080,
+        "end": 12093
+      },
+      {
+        "class": "a",
+        "kind": "slice_param",
+        "start": 12095,
+        "end": 12106
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 12108,
+        "end": 12124
+      },
+      {
+        "class": "a",
+        "kind": "read_param",
+        "start": 12697,
+        "end": 12710
+      },
+      {
+        "class": "a",
+        "kind": "slice_param",
+        "start": 12712,
+        "end": 12723
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 12725,
+        "end": 12741
+      },
+      {
+        "class": "a",
+        "kind": "read_param",
+        "start": 12954,
+        "end": 12967
+      },
+      {
+        "class": "a",
+        "kind": "slice_param",
+        "start": 12969,
+        "end": 12980
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 12982,
+        "end": 12998
+      },
+      {
+        "class": "a",
+        "kind": "read_param",
+        "start": 13786,
+        "end": 13799
+      },
+      {
+        "class": "a",
+        "kind": "slice_param",
+        "start": 13801,
+        "end": 13812
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 13814,
+        "end": 13830
+      },
+      {
+        "class": "a",
+        "kind": "read_param",
+        "start": 14066,
+        "end": 14079
+      },
+      {
+        "class": "a",
+        "kind": "slice_param",
+        "start": 14081,
+        "end": 14092
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 14094,
+        "end": 14110
+      },
+      {
+        "class": "a",
+        "kind": "read_param",
+        "start": 15332,
+        "end": 15345
+      },
+      {
+        "class": "a",
+        "kind": "slice_param",
+        "start": 15347,
+        "end": 15358
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 15360,
+        "end": 15376
+      },
+      {
+        "class": "a",
+        "kind": "read_param",
+        "start": 16765,
+        "end": 16778
+      },
+      {
+        "class": "a",
+        "kind": "slice_param",
+        "start": 16780,
+        "end": 16791
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 17695,
+        "end": 17707
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 17860,
+        "end": 17872
+      },
+      {
+        "class": "a",
+        "kind": "slice_param",
+        "start": 17874,
+        "end": 17885
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 18068,
+        "end": 18080
+      },
+      {
+        "class": "a",
+        "kind": "slice_param",
+        "start": 19045,
+        "end": 19056
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 19058,
+        "end": 19070
+      },
+      {
+        "class": "a",
+        "kind": "slice_param",
+        "start": 20406,
+        "end": 20417
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 20419,
+        "end": 20431
+      }
+    ]
+  },
+  "value_copy_units": 0,
+  "logical_statements": 311,
+  "valve": {
+    "lines": 15,
+    "functions": 3,
+    "total_lines": 368,
+    "total_functions": 30
+  }
+}

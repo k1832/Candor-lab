@@ -10,7 +10,7 @@ commitment — including unfavorable ones.
 | Allocator | YES — 22/22 vectors, sentinel 777, 21m20s | **0.6292** | 0.6250 | max(0.40, 1.25×0.1929)=0.40 | 0.0617 vs 0.2943 | **KILL threshold breached** |
 | Intrusive scheduler | YES — 20/20 vectors, sentinel 777, ~25s | **0.4120** | 0.8750 | max(0.40, 1.25×0.1489)=0.40 | 0.2948 vs 0.5132 | **KILL threshold breached** |
 | MMIO state machine | YES — M1-M10 byte-exact, sentinel 777, ~0.02s | 0.0469 | **0.2500** | 0.15 line / 0.20 fn abs | 0.1183 vs 0.1667 | **KILL threshold breached (fn fraction)** |
-| Parser | pending | | | 0.15 abs | vs 0.4150 | |
+| Parser | YES — P1-P32, sentinel 777, ~0.03s | 0.0408 | 0.1000 | 0.15 line / 0.20 fn abs | 0.1768 vs 0.4150 | **pass** |
 | Arena pass | YES — 29/29 vectors, sentinel 777, ~25ms | **0.0000** | 0.0000 | 0.15 abs | 0.0991 vs 0.2051 | **pass** |
 
 ## Allocator — recorded 2026-07-07
@@ -60,3 +60,41 @@ the fraction differs mostly because Candor needed far less safe scaffolding. Whe
 "the valve is the program" (the criterion's intent for the 0.40 ceiling) or "the denominator
 shrank" is exactly the kind of question §0.3 reserves for the public amendment, not for silent
 reinterpretation. The number is recorded as the frozen rules compute it.
+
+## Parser — recorded 2026-07-07
+
+Completed (M5 pass, P1-P32, ~0.03s). Annotation 0.1768 vs Rust 0.4150 (−57%). Valve confined to
+the bump-allocator infrastructure exactly as §11.4 predicts: 0.0408 line / 0.1000 function —
+clean pass. Rulings R29-R31.
+
+---
+
+# FINAL VERDICT under the frozen decision rule (§5)
+
+All five programs attempted and completed — **M5: pass.**
+
+**M1 (annotation load):** Candor aggregate 0.1624 weighted / 0.1502 mean vs Rust 0.3427 / 0.3189.
+Worse ratio **0.474** against a KILL line of 0.90 and WARN of 0.75 — a **53% aggregate reduction.
+Decisive pass.** The bet's core cognitive-load claim is confirmed on this basket.
+
+**M1b (combined load):** ratio 0.472 vs KILL 1.0 / WARN 0.85 — **pass** (Candor used zero value
+copies; the feared annotation-for-copies trade never materialized). **M4:** no WARN (0 vs 1 copies).
+
+**M2 (valve ambiency):** allocator **0.6292 > 0.40 — KILL**; scheduler **0.4120 > 0.40 — KILL**;
+MMIO valve-function **0.2500 > 0.20 — KILL** (valve-line 0.0469 passes); parser pass; arena pass.
+No cell-substitutable relief applies anywhere (rulings R15, R19, R28: every valve is genuine
+pointer/MMIO work with no checked-runtime substitute).
+
+**M3:** WARN on both home-ground programs (Candor more valve-dependent than the Rust baselines,
+whose unsafe partly hides in prior scaffolding density).
+
+**Verdict: §5.1(b) fires three times. Bet 5 is KILLED as pre-registered.** Per §7.2 the verdict
+is enacted as a §9 amendment naming Bet 5 and P12, with this record as evidence. Alongside it,
+per §0.3, the criterion-defect observations are published, not retrofitted: every M2 breach is
+partly or wholly a *fraction-vs-density* artifact — Candor implements the same specs in 2-5x
+fewer statements, so identical absolute valve content yields a 2-5x higher fraction, and MMIO's
+breach consists of the design's own prescribed ideal architecture (a two-function one-op valve
+seam) inside an eight-function program. The allocator's 63% valve-line fraction is the one
+breach that likely survives any denominator correction. What a future re-registration should
+measure instead (absolute valve content against spec-mandated pointer work, or fractions
+normalized to the baseline's density) belongs to the amendment proceeding, not to this record.

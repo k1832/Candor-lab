@@ -114,3 +114,13 @@ valve-FUNCTION 2/8 = 0.2500 breaches the 0.20 function ceiling. Any "fix" would 
 (inlining the seam raises valve lines; padding with functions is padding), so the breach stands
 as measured and joins the denominator-compression observation for the §9 proceeding: the ideal
 valve architecture fails the function-fraction ceiling purely because the program is 8 functions.
+
+## 2026-07-07 — Parser port scoring batch and basket completion
+
+**R29 (parser).** `f(` at EOF reports E_UNEXPECTED_EOF at len (expression-or-`)` position);
+E_EXPECTED_RPAREN reserved for post-expression positions — a conforming refinement of R10.
+— **R30 (parser).** A lex-invalid character where `)` is demanded reports E_UNEXPECTED_CHAR,
+generalizing P27 over R11. — **R31 (parser idiomaticity + verdict).** Confirmed idiomatic per
+§11.4 (owned Box AST over borrowed input; valve = bump-allocator infrastructure only, two unsafe
+blocks). Valve-line 0.0408 vs 0.15: pass. Valve-function 3/30 = 0.1000, not strictly above the
+0.10 WARN line: no WARN. No cell-substitutable candidates.
