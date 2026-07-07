@@ -76,7 +76,7 @@ Drop order is specified precisely because a reviewer must be able to predict res
 
 ### 1.6 Partial moves — allowed, but only statically
 
-Moving a **single field** out of a struct (or one element out of an array by a constant index) is permitted **when the type has no `drop` hook**. The remaining fields are still owned and are destroyed individually at scope end; the moved-out field is not.
+Moving a **single field** out of a struct is permitted **when the type has no `drop` hook**. The remaining fields are still owned and are destroyed individually at scope end; the moved-out field is not. Moving one **element** out of an array by a constant index is permitted only for **`copy`** element types in the prototype: the place model tracks an index at whole-array granularity (a single index covers every element, §2.2), so a *non-copy* element move is not finely trackable and is rejected (checker error **E0310**). Index-granular move tracking is beyond the prototype's place model; the narrowing is a recorded conservatism (soundness review #2, 2026-07-07).
 
 Two hard restrictions keep this implementable without runtime bookkeeping:
 
@@ -97,7 +97,7 @@ Borrows are produced by keyword operators on places:
 - `read place` → a **shared borrow** of the place. Type: `& T` written `borrow T`. Read-only, aliasable, `copy`.
 - `write place` → an **exclusive borrow** of the place. Type: `borrow_mut T`. Read-write, unique, **moves** (not `copy`). Requires the place to be mutable (a `let mut` local, or reachable through an existing exclusive borrow).
 
-Dereference: `deref b` is a **place** denoting the borrowed storage. On the right of `=` it reads (copying if `copy`, or serving as a place to re-borrow); on the left it writes: `deref b = v` (only if `b` is exclusive).
+Dereference: `deref b` is a **place** denoting the borrowed storage. On the right of `=` it reads (copying if `copy`, or serving as a place to re-borrow); on the left it writes: `deref b = v` (only if `b` is exclusive). A read through `deref` **never moves the pointee out**: moving a non-copy value out through a `deref` is **ill-formed** — it would hollow out the value the borrow lends or the `Box` owns, and the deref read was only ever defined as a copy-or-reborrow — so it is rejected (checker error **E0310**). To take ownership of a `Box` pointee, use `unbox` (§6.2). (Ruling, soundness review #2, 2026-07-07.)
 
 A borrow of a place through another borrow is a **reborrow**: `write (deref b)` where `b` is exclusive yields a fresh exclusive borrow constrained to not outlive `b`, and `read (deref b)` yields a fresh **shared** borrow of the pointee. Reborrows are how borrows are passed down the call stack.
 

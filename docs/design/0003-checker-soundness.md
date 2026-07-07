@@ -76,6 +76,25 @@ reassignment/`out`. The full history is kept visible per the ledger discipline: 
 false (§0 top), resolved for the move dimension and the scope-exit init dimension (RESOLVED), then completed
 for the reassignment/`out` init dimension (this note).
 
+**RETEST FAILED, THEN RESOLVED (2026-07-07, soundness re-review #2; `docs/reviews/2026-07-07-soundness-review-2.md`).**
+The retest of the finding-1/2 repair (freeze step (i)) failed in a fresh session: it found a **new accept-invalid**
+adjacent to review #1 finding 3. `init.rs::apply` treated a **move of an opaque place** (one whose projection
+crosses `Proj::Deref` or `Proj::Index`) as a plain read of the root — it never set `Moved` and never ran the
+drop-hooked-partial check — while the interpreter divergently marked the whole root moved. A non-copy value could
+therefore be moved out through a `deref` (`let taken = (deref bx).inner;`) and the box then `unbox`-ed, running a
+run-exactly-once drop hook **twice** (double-free, NN#1); the same held through a `write` borrow with no `Box`, and
+for a drop-hooked array element by constant index (bypassing §1.6). A sibling symptom was a false **E0401** (a
+non-`alloc` function partially moving through a box deref reported as "frees" though the runtime leaks). Root cause:
+design 0001 never defined a move of a non-copy value out through a `deref`. **RESOLVED in the strict direction** by
+the deciding authority: **moving a non-copy value out of any place whose path contains a `deref` or index is
+rejected (new checker error E0310)** — `unbox` is the defined `Box` extraction, a borrow's deref was only ever a
+copy-or-reborrow, and array index-granularity is beyond the place model (0001 §1.6 narrowed to `copy` element types;
+§2.1 gains the deref clarification). The checker now also marks the whole root moved at the opaque move, so it and the
+interpreter agree on the (rejected) program's move state, and the interpreter's whole-root opaque-move path is
+unreachable for accepted programs (a `debug_assert` records this). §2.1/§2.4 corrected; §3 conservatism #5 corrected
+(it had described the interpreter's mark-root-moved as `init.rs` behavior). A retest #3 in a fresh session follows;
+counts remain inadmissible until it passes.
+
 ---
 
 ## 1. The claim, stated precisely and honestly
@@ -138,6 +157,16 @@ fields for partial-move tracking (§1.6).
   uninitialized) on `Uninit`/`MaybeInit`. An opaque place (through `deref`/index, `!is_direct`) is
   required-init at its *root*, conservatively. This is (a) and the read half of (c): no accepted
   program reaches a read of a non-`Init` place.
+- **A non-copy move out of an opaque place is rejected (E0310).** A `copy` value read through
+  `deref`/index is an `Access::Read` (it copies), so a `Move` whose place is opaque is a genuine
+  non-copy move out through a `deref` or index. `apply` rejects it as **E0310** (ruling of soundness
+  review #2, 2026-07-07): through a borrow such a move would hollow out the lender's value (§2.1's
+  deref read was only ever copy-or-reborrow); through a `Box` the defined extraction is `unbox`; for
+  arrays index-granular move tracking is beyond the place model (§3 conservatism 5). The checker also
+  marks the whole root moved at that point, matching the interpreter, so the two agree on the move
+  state of the (now-rejected) program — closing the divergence that produced the double-drop and the
+  false-free of review #2 findings 1–2. This makes the interpreter's whole-root opaque-move path
+  (`mark_place_moved`) unreachable for any accepted program (a `debug_assert` records the invariant).
 - **TOP-initialization of unvisited edges is correct at fixpoint.** A forward must-analysis must meet
   only over predecessors whose out-state is computed; `incoming` filters predecessors by `reach &&
   visited`. A not-yet-visited edge (notably a loop back-edge on the first pass) contributes identity
@@ -271,7 +300,10 @@ value the checker schedules**: a scope-exit drop of a needs-drop box-bearing loc
 box-bearing parameter still live on some path. The box-drop sites are detected precisely by
 `check/init.rs::analyze` against the final move state (a box moved out on every path frees nothing and is
 *not* marked; a partially-moved struct is checked field-granularly, so a live box field is caught even when
-a sibling was moved), and fed back through `note_alloc`. `AllocEffect::finish` emits **E0401** if a
+a sibling was moved), and fed back through `note_alloc`. A partial move *through a `Box` deref* is no longer
+a box-drop site: it is now rejected outright as an opaque move (E0310, §2.1), and the checker marks the box
+moved, so the false-free that review #2 finding 2 measured (a non-`alloc` function reported as "frees" though
+the runtime leaks) no longer arises — the checker and interpreter agree the box is consumed. `AllocEffect::finish` emits **E0401** if a
 non-`alloc` function has any such site, naming the drop site (P4). Function-pointer types carry the effect in the
 type (`types::FnPtrTy`), and `assignable`/`check_against` reject assigning an `alloc` function to a
 non-`alloc` pointer (**E0402**) while permitting the reverse (upper-bound conservatism, §6.1). There is
@@ -301,11 +333,19 @@ producing a value derived from it. It is discharged by enumerating the fault sit
 never suppresses one.
 
 - **The fault sites are closed and enumerated** (`interp/mod.rs::FaultKind`, raised in `interp/eval.rs`):
-  arithmetic **overflow** (incl. **negation** of `INT_MIN`) and integer **division/remainder by zero**; array/slice
-  **bounds**; **conv** lossy narrowing (**ConvLoss**); a failed **`assert`**, **`requires`**, or **`ensures`**;
-  and an explicit **`panic`**. Each is raised at the operation and propagated as `Ctl::Fault`, unwinding to the
+  the enum has **nine** variants and every one is named here. Eight are in scope of claim (e): arithmetic
+  **`Overflow`** (incl. **negation** of `INT_MIN`) and integer **`DivByZero`** (division/remainder); array/slice
+  **`Bounds`**; **`ConvLoss`** (lossy `conv` narrowing); and a failed **`Assert`**, **`Requires`**, or **`Ensures`**,
+  and an explicit **`Panic`**. Each is raised at the operation and propagated as `Ctl::Fault`, unwinding to the
   top without yielding the operation's would-be result — the interpreter has no path that both raises a fault
   and returns a derived value.
+- **The ninth variant, `BadPointer`, is outside claim (e)'s scope — named and placed, not omitted.** It is
+  raised only at **raw-pointer** operations (an address beyond the memory model on `ptr_read`/`ptr_write`/
+  `ptr_offset`), plus an **init-byte guard** diagnostic aid that traps a read of never-written storage. Both are
+  **unsafe-only** sites: claims (a)–(e) hold for the safe fragment and explicitly exclude raw-pointer meaning
+  (§2.5), so `BadPointer` is not a *defined fault condition* of the safe language that (e) ranges over — it is a
+  best-effort trap on unsafe operations and a debugging guard, deliberately outside (e). Naming it completes the
+  enumeration (closed by construction, not by assertion; review #2 finding 3).
 - **The checker never *skips* a fault.** There is exactly one construct that changes fault behavior, and it
   **redefines** the operation rather than skipping the check: the lexically-scoped arithmetic **regimes**
   `wrapping { .. }` / `saturating { .. }` (`ExprKind::Wrapping`/`Saturating`; `interp/eval.rs::regime_block`).
@@ -343,9 +383,14 @@ record for Bet 5.
    than tracked with fine provenance.
 4. **Explicit call-site reborrows required** (§2.1). Passing a held exclusive borrow bare is a move; a
    reborrow must be spelled `write (deref b)`/`read (deref b)`. No implicit call-site reborrow.
-5. **Opaque places required-init at the root.** A place through `deref`/index is required initialized at
-   its whole root, and a move through `deref`/index marks the whole root moved (`init.rs::apply`,
-   `mark_place_moved`) — finer partial states through indirection are not tracked.
+5. **Opaque places required-init at the root; no non-copy move through indirection.** A place through
+   `deref`/index is required initialized at its whole *root* (finer partial init states through indirection
+   are not tracked). A *non-copy* move out of such a place is not a conservatism but a rejected shape
+   (**E0310**, §2.1/§2.4; ruling of review #2): only `copy` reads pass through a `deref`/index, and the
+   checker marks the whole root moved to agree with the interpreter. (Before review #2 this entry claimed
+   `init.rs` *tracked* the opaque move by marking the root moved — it did not; only the interpreter's
+   `mark_place_moved` did, and the checker silently accepted the move. That divergence was the accept-invalid
+   hole; the entry is corrected here.)
 6. **Compact-default provenance only for the sole borrow parameter.** A borrow return from two-plus
    borrow params with no region variable is rejected (E0807) rather than inferred.
 7. **`copy` is opt-in and structural.** A cheap all-scalar struct without the `copy` marker moves;

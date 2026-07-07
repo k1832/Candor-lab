@@ -371,7 +371,17 @@ impl<'a> Interp<'a> {
         let path = if p.proj.iter().all(|x| matches!(x, Proj::Field(_))) {
             p.field_path()
         } else {
-            Vec::new() // through deref/index: mark the whole root
+            // Whole-root mark for a move through `deref`/index. As of the ruling
+            // of soundness review #2 (2026-07-07) the checker rejects any
+            // non-copy move out of an opaque place (checker error E0310), so this
+            // branch is unreachable for any checker-accepted program; the assert
+            // documents that invariant (a divergence here was the double-drop
+            // hole review #2 found).
+            debug_assert!(
+                false,
+                "opaque (deref/index) move reached the interpreter: the checker must reject it as E0310"
+            );
+            Vec::new()
         };
         self.with_local_mut(&p.root, |l| l.mask.mark(path));
     }

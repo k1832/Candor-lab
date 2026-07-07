@@ -29,6 +29,14 @@ One lesson per entry, one-line summary first.
   parallel with the scaffolding commit. Check parallel-drafted docs for
   references to repo state and fix before review.
 
+- **Every checker soundness hole found so far lived at a SEAM, never inside one
+  analysis.** S1: pattern-bindings × call-loans; drop flags: init-analysis ×
+  interpreter drop points; nested hooks: partial-move × projection depth;
+  free-effect: effects × interpreter drop sites; E0310: move classification ×
+  opaque places (checker/interpreter divergence). When reviewing or extending
+  the checker, attack interactions between analyses and checker-vs-interpreter
+  agreement first; single-analysis internals have held up.
+
 - **§11's own example code leans on an implicit reborrow the model forbids.**
   In 11.4 `peek(s, pos)`/`advance(pos)` pass a bare exclusive-borrow param
   (`pos: write usize`), which the memory model says *moves* it (reborrow needs

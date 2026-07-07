@@ -202,9 +202,42 @@ fn apply(
             drop_hooked_partial,
         } => {
             if opaque {
+                // Moving a non-copy value out of a place whose projection path
+                // crosses a `deref` or index is rejected (ruling of soundness
+                // review #2, 2026-07-07). A copy value read through such a path
+                // is an `Access::Read`, not a `Move`, so reaching this arm means
+                // a genuine non-copy move out of an opaque place: through a
+                // borrow it would hollow out the lender's value; through a `Box`
+                // the defined extraction is `unbox`; array elements are not
+                // move-trackable at index granularity in the prototype's place
+                // model. (0001 §1.6/§2.1; 0003 §2.1/§2.4.)
                 if let Some(d) = report.as_deref_mut() {
                     require_init(st, &root, out_params, a.span, d);
+                    d.push(
+                        Diag::error(
+                            "E0310",
+                            format!(
+                                "cannot move a non-copy value out of `{}`: its place path goes through a `deref` or index",
+                                a.place.display()
+                            ),
+                            a.span,
+                        )
+                        .with_note(
+                            "moving through a `deref` would hollow out the value behind the borrow/pointer, which is never granted (§2.1); use `unbox` to extract a `Box` pointee, or move the whole binding",
+                            None,
+                        )
+                        .with_note(
+                            "reading a `copy` value through `deref`/index is unaffected (it copies); only non-copy moves are rejected — array-element moves are limited to copy element types in the prototype (§1.6; review #2, 2026-07-07)",
+                            None,
+                        ),
+                    );
                 }
+                // Mark the whole root moved — the interpreter's conservative
+                // opaque-move behavior. The program is already E0310-rejected;
+                // matching the interpreter's move state here removes the
+                // checker/interpreter divergence that finding 2 (the false-E0401
+                // free of a box that runtime leaks) grew out of.
+                st.set(&root, St::Moved);
             } else {
                 if let Some(d) = report.as_deref_mut() {
                     require_init(st, key, out_params, a.span, d);

@@ -597,3 +597,133 @@ fn c1_two_borrow_params_return_needs_region() {
         "E0807",
     );
 }
+
+// ---- Soundness review #2 (2026-07-07): opaque non-copy moves rejected (E0310)
+// A non-copy value moved out of a place whose projection path crosses a `deref`
+// or index is rejected. Copy reads through the same paths are unaffected. See
+// docs/reviews/2026-07-07-soundness-review-2.md.
+
+fn assert_lacks(src: &str, code: &str) {
+    let cs = codes(src);
+    assert!(
+        !cs.iter().any(|c| c == code),
+        "expected NO `{code}` for:\n{src}\ngot {cs:?}"
+    );
+}
+
+#[test]
+fn r2_partial_move_through_box_deref_rejected() {
+    // G_partial: the shape the re-review used; formerly a false-E0401 (finding
+    // 2), now the opaque-move error and no spurious free.
+    let src = "struct Leaf { v: i64 } struct A { leaf: Leaf } drop(write self) { trace(1); } \
+         struct W { a: A } \
+         fn f(bx: Box W) alloc -> i64 { let l: Leaf = (deref bx).a.leaf; return l.v; }";
+    assert_has(src, "E0310");
+    assert_lacks(src, "E0401");
+}
+
+#[test]
+fn r2_double_drop_run_shape_rejected() {
+    // G7/G8: move a non-copy field out through the box deref, then `unbox` — the
+    // double-drop the re-review demonstrated. Rejected at the opaque move.
+    assert_has(
+        "struct Inner { v: i64 } struct W { inner: Inner } \
+         fn trigger(bx: Box W) alloc -> unit { let taken: Inner = (deref bx).inner; \
+         let w: W = unbox(bx); return; }",
+        "E0310",
+    );
+}
+
+#[test]
+fn r2_use_after_partial_box_move_rejected() {
+    // G6: partial move through box deref then whole `unbox`.
+    assert_has(
+        "struct Leaf { v: i64 } struct A { leaf: Leaf } drop(write self) { trace(1); } \
+         struct W { a: A } \
+         fn f(bx: Box W) alloc -> i64 { let l1: Leaf = (deref bx).a.leaf; \
+         let w: W = unbox(bx); return l1.v; }",
+        "E0310",
+    );
+}
+
+#[test]
+fn r2_move_through_write_borrow_deref_rejected() {
+    // K2: no Box involved — a non-copy field moved out through an exclusive
+    // borrow's deref would hollow out the lender. Rejected.
+    assert_has(
+        "struct Cell { p: rawptr i64 } \
+         drop(write self) { unsafe \"x\" { let o: i64 = ptr_read((deref self).p); ptr_write((deref self).p, o + 1); } } \
+         struct W { c: Cell } \
+         fn steal(w: write W) -> Cell { let taken: Cell = (deref w).c; return taken; }",
+        "E0310",
+    );
+}
+
+#[test]
+fn r2_array_element_hooked_move_rejected() {
+    // H: a drop-hooked element moved out by constant index — index granularity
+    // is beyond the prototype's place model, so the non-copy element move is
+    // rejected (0001 §1.6 narrowed to copy element types).
+    assert_has(
+        "struct A { v: i64 } drop(write self) { trace(1); } \
+         fn f() -> i64 { let arr: [2]A = [A { v: 1 }, A { v: 2 }]; let x: A = arr[0]; return x.v; }",
+        "E0310",
+    );
+}
+
+#[test]
+fn r2_owned_scrutinee_through_deref_match_rejected() {
+    // The match-head form: an owned scrutinee reached through a `deref` whose
+    // arms move-bind a non-copy payload is the same illegal opaque move.
+    assert_has(
+        "struct P { v: i64 } enum E { some(P), none } \
+         fn f(bx: Box E) alloc -> i64 { \
+         match deref bx { case E::some(p) => { return p.v; } case E::none => { return 0; } } }",
+        "E0310",
+    );
+}
+
+#[test]
+fn r2_direct_partial_move_control_still_e0303() {
+    // G3: the direct (field-only) partial move of a drop-hooked struct keeps its
+    // existing code — the new rule does not swallow the direct rule.
+    let src = "struct Leaf { v: i64 } struct A { leaf: Leaf } drop(write self) { trace(1); } \
+         struct W { a: A } \
+         fn f() -> i64 { let w: W = W { a: A { leaf: Leaf { v: 5 } } }; let l: Leaf = w.a.leaf; return l.v; }";
+    assert_has(src, "E0303");
+    assert_lacks(src, "E0310");
+}
+
+#[test]
+fn r2_move_box_then_use_control_still_e0301() {
+    // I: moving a whole `Box` binding then using it stays a use-after-move.
+    assert_has(
+        "fn sink(b: Box i64) -> unit { return; } \
+         fn f(b: Box i64) alloc -> unit { sink(b); let v: i64 = deref b; return; }",
+        "E0301",
+    );
+}
+
+#[test]
+fn r2_box_forwarded_out_still_clean() {
+    // P1: moving a whole box out is fine (no opaque move, no free here).
+    assert_clean("fn forward(b: Box i64) -> Box i64 { return b; }");
+}
+
+#[test]
+fn r2_box_dropped_in_nonalloc_still_e0401() {
+    // P2: alloc-precision unchanged — a box let die in a non-alloc fn frees.
+    assert_has("fn eat(b: Box i64) -> unit { return; }", "E0401");
+}
+
+#[test]
+fn r2_copy_reads_through_deref_and_index_accepted() {
+    // Positive: reading a `copy` value through `deref` or index still copies and
+    // stays accepted everywhere — the ruling touches only non-copy moves.
+    assert_clean(
+        "struct S { v: i64 } \
+         fn rd(s: read S) -> i64 { return (deref s).v; } \
+         fn arr_rd() -> i64 { let a: [3]i64 = [1, 2, 3]; let x: i64 = a[0]; return x; } \
+         fn box_rd(b: Box i64) alloc -> i64 { let v: i64 = deref b; return unbox(b); }",
+    );
+}
