@@ -1,0 +1,8 @@
+[package]
+name = "mmio"
+version = "0.1.0"
+edition = "2021"
+description = "Idiomatic-Rust baseline for the Bet 5 MMIO driver state machine (spec-mmio.md)."
+
+[lib]
+path = "src/lib.rs"
