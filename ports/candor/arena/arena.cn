@@ -1,0 +1,897 @@
+// ============================================================================
+// Candor port: arena-based compiler pass (Bet 5 basket, spec-arena.md,
+// frozen).
+//
+// Mechanism (spec 1.1-1.3, for the adjudicator): IR nodes live in an Arena --
+// a fixed node array owned by value plus a bump count (design 0001 §11.5's
+// sketch, the plain-fixed-array variant). Cross-node references are u32
+// indices into the same arena: copy scalars stored in enum payloads, the safe
+// index gear (§3.4 satisfied -- no borrow fields, no pointers). Whole-arena
+// release is count = 0; the arena_get liveness check makes every outstanding
+// id of the old generation observably invalid, and the arena is immediately
+// reusable (spec 2.4). fold (spec 2.5) is a single post-order traversal that
+// copies/simplifies into a freshly created dst arena and never writes src
+// (it holds src only by read borrow, so source-unchanged is checker-enforced,
+// observed again structurally in AR25).
+//
+// Rule order (spec 3.2, first-applicable-wins) is written out literally in
+// fold_add/fold_sub/fold_mul/fold_div/fold_neg: (a) constant folding with the
+// wrapping ops of §3.1 (div-by-zero NOT folded), then (b) the algebraic
+// identities in the spec's listed order, then (c) keep the node.
+//
+// Arithmetic (spec 3.1): two's-complement 64-bit wrapping via `wrapping`
+// blocks -- Candor's default regime faults on overflow, so every folding op
+// goes through the w* helpers below. Verified against the toolchain before
+// porting: `/` truncates toward zero (-7/2 == -3), and inside `wrapping`
+// MIN / -1 wraps to MIN, -MIN wraps to MIN, MAX*2 wraps to -2, MIN-1 wraps
+// to MAX -- exactly §3.1's table. Division by zero faults in every regime;
+// the pass never divides by a zero constant (rule (a) keeps the node).
+//
+// Adjudications honored: R13 (AR26's no-dangling under an index arena ==
+// every reachable id resolves within dst), R14 (implementation above the
+// `// Test harness` marker, harness below).
+//
+// Adaptation of spec 2.5 (flagged for adjudication, spec §2 preamble: names
+// indicative): Candor has no tuple type, so `fold(src, root) -> (dst,
+// new_root)` returns a two-field struct FoldOut { dst, new_root }. The index
+// arena has no interior self-references, so moving it out by value is sound.
+//
+// Gear placement (design 0001 §11.5, §12): value + index throughout. There
+// is NO valve in this file -- zero unsafe blocks, zero rawptr. The backing is
+// a plain owned array; §11.5's "valve sealed inside a Box backing" case does
+// not even arise.
+// ============================================================================
+
+// IR node kinds (spec 2.6). Operand fields are u32 NodeIds -- indices into
+// the node's own arena, never pointers. copy: all payloads are copy scalars.
+copy enum Node {
+    cst(i64),        // Const(i64)
+    var(u32),        // Var(id)
+    add(u32, u32),
+    sub(u32, u32),
+    mul(u32, u32),
+    div(u32, u32),
+    neg(u32),
+}
+
+// The arena (spec 2.1): fixed backing owned by value, bump count. Capacity
+// 256 is a port constant (the spec fixes no capacity; the frozen corpus needs
+// < 16 nodes per arena) -- allocating past it faults on the bounds check,
+// which is outside well-formed use (spec 1.4 covers well-formed IR only).
+struct Arena { mem: [256]Node, count: u32 }
+
+fn arena_new() -> Arena {
+    return Arena { mem: [Node::cst(0); 256], count: 0 };
+}
+
+// spec 2.2: append a node (operands are existing ids of this same arena) and
+// return a fresh id, stable until arena_reset.
+fn arena_alloc(ar: write Arena, n: Node) -> u32 {
+    let i: u32 = (deref ar).count;
+    (deref ar).mem[conv usize (i)] = n;    // bounds-checked store
+    (deref ar).count = i + 1;              // checked add
+    return i;
+}
+
+// spec 2.3: the node for a LIVE id of this arena. Node is copy, so the read
+// is a safe owned copy -- no borrow return, no region annotation. The
+// liveness assert is what makes arena_reset observable: ids of the released
+// generation no longer resolve (a dead id is a caller bug, not well-formed
+// use).
+fn arena_get(ar: read Arena, i: u32) -> Node {
+    assert(i < (deref ar).count);
+    return (deref ar).mem[conv usize (i)];
+}
+
+// spec 2.4: whole-arena release. One store invalidates every outstanding id
+// at once (per-node freeing neither required nor possible here); the arena is
+// reusable immediately.
+fn arena_reset(ar: write Arena) -> unit {
+    (deref ar).count = 0;
+}
+
+// ---------------------------------------------------------------------------
+// §3.1 arithmetic: two's-complement wrapping helpers. The default regime
+// faults on overflow (design 0001 §7.2), so each op is wrapped textually.
+// ---------------------------------------------------------------------------
+
+fn wadd(a: i64, b: i64) -> i64 {
+    let mut r: i64 = 0;
+    wrapping { r = a + b; }
+    return r;
+}
+
+fn wsub(a: i64, b: i64) -> i64 {
+    let mut r: i64 = 0;
+    wrapping { r = a - b; }
+    return r;
+}
+
+fn wmul(a: i64, b: i64) -> i64 {
+    let mut r: i64 = 0;
+    wrapping { r = a * b; }
+    return r;
+}
+
+fn wneg(a: i64) -> i64 {
+    let mut r: i64 = 0;
+    wrapping { r = -a; }
+    return r;
+}
+
+// callers guarantee b != 0 (rule (a) keeps div-by-zero unfolded). Candor's /
+// truncates toward zero, and inside wrapping MIN / -1 wraps to MIN -- both
+// verified against the toolchain; exactly §3.1.
+fn wdiv(a: i64, b: i64) -> i64 {
+    let mut r: i64 = 0;
+    wrapping { r = a / b; }
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// Constant queries for the rule matchers
+// ---------------------------------------------------------------------------
+
+fn is_c(n: Node) -> bool {
+    match n {
+        case Node::cst(_) => return true,
+        case _ => return false,
+    }
+}
+
+// value of a Const node; callers gate on is_c first (0 is a don't-care).
+fn c_val(n: Node) -> i64 {
+    match n {
+        case Node::cst(v) => return v,
+        case _ => return 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-kind simplifiers (spec 3.2). Each receives ALREADY-SIMPLIFIED operand
+// ids la/lb in dst, applies the rules in the spec's exact order -- the first
+// `return` that fires is the first applicable rule -- and returns the result
+// id in dst.
+// ---------------------------------------------------------------------------
+
+fn fold_add(dst: write Arena, la: u32, lb: u32) -> u32 {
+    let na: Node = arena_get(read (deref dst), la);
+    let nb: Node = arena_get(read (deref dst), lb);
+    if is_c(na) && is_c(nb) {                                    // (a) fold
+        return arena_alloc(write (deref dst), Node::cst(wadd(c_val(na), c_val(nb))));
+    }
+    if is_c(nb) && c_val(nb) == 0 { return la; }                 // (b) x + 0 -> x
+    if is_c(na) && c_val(na) == 0 { return lb; }                 // (b) 0 + x -> x
+    return arena_alloc(write (deref dst), Node::add(la, lb));    // (c) keep
+}
+
+fn fold_sub(dst: write Arena, la: u32, lb: u32) -> u32 {
+    let na: Node = arena_get(read (deref dst), la);
+    let nb: Node = arena_get(read (deref dst), lb);
+    if is_c(na) && is_c(nb) {                                    // (a) fold
+        return arena_alloc(write (deref dst), Node::cst(wsub(c_val(na), c_val(nb))));
+    }
+    if is_c(nb) && c_val(nb) == 0 { return la; }                 // (b) x - 0 -> x
+    if is_c(na) && c_val(na) == 0 {                              // (b) 0 - x -> Neg(x)
+        return arena_alloc(write (deref dst), Node::neg(lb));
+    }
+    return arena_alloc(write (deref dst), Node::sub(la, lb));    // (c) keep
+}
+
+fn fold_mul(dst: write Arena, la: u32, lb: u32) -> u32 {
+    let na: Node = arena_get(read (deref dst), la);
+    let nb: Node = arena_get(read (deref dst), lb);
+    if is_c(na) && is_c(nb) {                                    // (a) fold
+        return arena_alloc(write (deref dst), Node::cst(wmul(c_val(na), c_val(nb))));
+    }
+    if is_c(nb) && c_val(nb) == 1 { return la; }                 // (b) x * 1 -> x
+    if is_c(na) && c_val(na) == 1 { return lb; }                 // (b) 1 * x -> x
+    if is_c(nb) && c_val(nb) == 0 {                              // (b) x * 0 -> 0
+        return arena_alloc(write (deref dst), Node::cst(0));
+    }
+    if is_c(na) && c_val(na) == 0 {                              // (b) 0 * x -> 0
+        return arena_alloc(write (deref dst), Node::cst(0));
+    }
+    return arena_alloc(write (deref dst), Node::mul(la, lb));    // (c) keep
+}
+
+fn fold_div(dst: write Arena, la: u32, lb: u32) -> u32 {
+    let na: Node = arena_get(read (deref dst), la);
+    let nb: Node = arena_get(read (deref dst), lb);
+    if is_c(na) && is_c(nb) && c_val(nb) != 0 {                  // (a) fold; /0 NOT folded
+        return arena_alloc(write (deref dst), Node::cst(wdiv(c_val(na), c_val(nb))));
+    }
+    if is_c(nb) && c_val(nb) == 1 { return la; }                 // (b) x / 1 -> x
+    return arena_alloc(write (deref dst), Node::div(la, lb));    // (c) keep (incl. x / 0)
+}
+
+fn fold_neg(dst: write Arena, la: u32) -> u32 {
+    let na: Node = arena_get(read (deref dst), la);
+    match na {
+        case Node::cst(c) => {                                   // (a) fold
+            return arena_alloc(write (deref dst), Node::cst(wneg(c)));
+        },
+        case Node::neg(inner) => return inner,                   // (b) Neg(Neg(x)) -> x
+        case _ => {},
+    }
+    return arena_alloc(write (deref dst), Node::neg(la));        // (c) keep
+}
+
+// ---------------------------------------------------------------------------
+// The pass proper (spec 2.5 / 3.2): one post-order traversal. Operands are
+// simplified first (recursively, into dst); then the node's rules run on the
+// simplified operands. src is held by read borrow only -- the checker itself
+// guarantees the source arena is left unmodified.
+// ---------------------------------------------------------------------------
+
+fn fold_into(src: read Arena, dst: write Arena, id: u32) -> u32 {
+    match arena_get(read (deref src), id) {
+        case Node::cst(v) => return arena_alloc(write (deref dst), Node::cst(v)),
+        case Node::var(v) => return arena_alloc(write (deref dst), Node::var(v)),
+        case Node::add(a, b) => {
+            let la: u32 = fold_into(read (deref src), write (deref dst), a);
+            let lb: u32 = fold_into(read (deref src), write (deref dst), b);
+            return fold_add(write (deref dst), la, lb);
+        },
+        case Node::sub(a, b) => {
+            let la: u32 = fold_into(read (deref src), write (deref dst), a);
+            let lb: u32 = fold_into(read (deref src), write (deref dst), b);
+            return fold_sub(write (deref dst), la, lb);
+        },
+        case Node::mul(a, b) => {
+            let la: u32 = fold_into(read (deref src), write (deref dst), a);
+            let lb: u32 = fold_into(read (deref src), write (deref dst), b);
+            return fold_mul(write (deref dst), la, lb);
+        },
+        case Node::div(a, b) => {
+            let la: u32 = fold_into(read (deref src), write (deref dst), a);
+            let lb: u32 = fold_into(read (deref src), write (deref dst), b);
+            return fold_div(write (deref dst), la, lb);
+        },
+        case Node::neg(a) => {
+            let la: u32 = fold_into(read (deref src), write (deref dst), a);
+            return fold_neg(write (deref dst), la);
+        },
+    }
+}
+
+// fold's pair result (see the header adaptation note): dst is independent of
+// src by construction -- it is a freshly created arena holding only copies,
+// and every id in it is dst-relative (R13).
+struct FoldOut { dst: Arena, new_root: u32 }
+
+fn fold(src: read Arena, root: u32) -> FoldOut {
+    let mut dst: Arena = arena_new();
+    let nr: u32 = fold_into(read (deref src), write dst, root);
+    return FoldOut { dst: dst, new_root: nr };
+}
+
+// Test harness — frozen vector suite AR1-AR29 (spec §4, ruling R13/R14).
+// Everything below this marker is the excluded harness: IR builders, the
+// structural-equality oracle, the §3.5 evaluator, and the vectors. Harness
+// faults (assert) are the intended failure mode for a broken vector.
+
+// ---------------------------------------------------------------------------
+// IR construction helpers. NOTE the statement-per-node shape: nested calls
+// like badd(write s, bc(write s, 1), bc(write s, 2)) would place two
+// overlapping loans on s in one argument list (no two-phase borrows, design
+// 0001 §2.3), so every child allocation is its own statement.
+// ---------------------------------------------------------------------------
+
+fn bc(ar: write Arena, v: i64) -> u32 {
+    return arena_alloc(write (deref ar), Node::cst(v));
+}
+
+fn bv(ar: write Arena, v: u32) -> u32 {
+    return arena_alloc(write (deref ar), Node::var(v));
+}
+
+fn badd(ar: write Arena, a: u32, b: u32) -> u32 {
+    return arena_alloc(write (deref ar), Node::add(a, b));
+}
+
+fn bsub(ar: write Arena, a: u32, b: u32) -> u32 {
+    return arena_alloc(write (deref ar), Node::sub(a, b));
+}
+
+fn bmul(ar: write Arena, a: u32, b: u32) -> u32 {
+    return arena_alloc(write (deref ar), Node::mul(a, b));
+}
+
+fn bdiv(ar: write Arena, a: u32, b: u32) -> u32 {
+    return arena_alloc(write (deref ar), Node::div(a, b));
+}
+
+fn bneg(ar: write Arena, a: u32) -> u32 {
+    return arena_alloc(write (deref ar), Node::neg(a));
+}
+
+// i64::MIN cannot be written as a literal (unary minus is an arithmetic op,
+// so -9223372036854775808 overflows under the default regime); construct it
+// by wrapping subtraction.
+fn i64_min() -> i64 {
+    let mut m: i64 = 0;
+    wrapping { m = -9223372036854775807 - 1; }
+    return m;
+}
+
+fn i64_max() -> i64 {
+    return 9223372036854775807;
+}
+
+// ---------------------------------------------------------------------------
+// IR equality (spec 3.3). The spec compares the canonical serialization
+// S(root) fully unfolded; S is injective on unfolded trees, so string
+// equality of S == structural equality of the unfolded trees, which is what
+// this oracle checks recursively (kind, payload, and operands, node for
+// node). Byte-identical S <=> ir_eq true.
+// ---------------------------------------------------------------------------
+
+fn ir_eq(x: read Arena, xi: u32, y: read Arena, yi: u32) -> bool {
+    match arena_get(read (deref x), xi) {
+        case Node::cst(a) => {
+            match arena_get(read (deref y), yi) {
+                case Node::cst(b) => return a == b,
+                case _ => return false,
+            }
+        },
+        case Node::var(a) => {
+            match arena_get(read (deref y), yi) {
+                case Node::var(b) => return a == b,
+                case _ => return false,
+            }
+        },
+        case Node::add(a1, a2) => {
+            match arena_get(read (deref y), yi) {
+                case Node::add(b1, b2) => return ir_eq(read (deref x), a1, read (deref y), b1)
+                                              && ir_eq(read (deref x), a2, read (deref y), b2),
+                case _ => return false,
+            }
+        },
+        case Node::sub(a1, a2) => {
+            match arena_get(read (deref y), yi) {
+                case Node::sub(b1, b2) => return ir_eq(read (deref x), a1, read (deref y), b1)
+                                              && ir_eq(read (deref x), a2, read (deref y), b2),
+                case _ => return false,
+            }
+        },
+        case Node::mul(a1, a2) => {
+            match arena_get(read (deref y), yi) {
+                case Node::mul(b1, b2) => return ir_eq(read (deref x), a1, read (deref y), b1)
+                                              && ir_eq(read (deref x), a2, read (deref y), b2),
+                case _ => return false,
+            }
+        },
+        case Node::div(a1, a2) => {
+            match arena_get(read (deref y), yi) {
+                case Node::div(b1, b2) => return ir_eq(read (deref x), a1, read (deref y), b1)
+                                              && ir_eq(read (deref x), a2, read (deref y), b2),
+                case _ => return false,
+            }
+        },
+        case Node::neg(a1) => {
+            match arena_get(read (deref y), yi) {
+                case Node::neg(b1) => return ir_eq(read (deref x), a1, read (deref y), b1),
+                case _ => return false,
+            }
+        },
+    }
+}
+
+// AR26 / R13: every id reachable from `id` resolves within `ar` (id < count).
+// Under an index arena an id cannot "reference src" -- ids are arena-relative
+// -- so R13 rules this resolution check IS the no-dangling property.
+fn ids_within(ar: read Arena, id: u32) -> bool {
+    if id >= (deref ar).count { return false; }
+    match arena_get(read (deref ar), id) {
+        case Node::cst(_) => return true,
+        case Node::var(_) => return true,
+        case Node::add(a, b) => return ids_within(read (deref ar), a) && ids_within(read (deref ar), b),
+        case Node::sub(a, b) => return ids_within(read (deref ar), a) && ids_within(read (deref ar), b),
+        case Node::mul(a, b) => return ids_within(read (deref ar), a) && ids_within(read (deref ar), b),
+        case Node::div(a, b) => return ids_within(read (deref ar), a) && ids_within(read (deref ar), b),
+        case Node::neg(a) => return ids_within(read (deref ar), a),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// §3.5 evaluator (AR27's oracle only): the arithmetic of §3.1 over a variable
+// assignment. wdiv faults on division by zero, which is exactly the spec's
+// domain restriction -- AR27's assignment performs none.
+// ---------------------------------------------------------------------------
+
+struct Env { v: [4]i64 }
+
+fn eval(ar: read Arena, id: u32, env: read Env) -> i64 {
+    match arena_get(read (deref ar), id) {
+        case Node::cst(c) => return c,
+        case Node::var(v) => return (deref env).v[conv usize (v)],
+        case Node::add(a, b) => {
+            let la: i64 = eval(read (deref ar), a, read (deref env));
+            let lb: i64 = eval(read (deref ar), b, read (deref env));
+            return wadd(la, lb);
+        },
+        case Node::sub(a, b) => {
+            let la: i64 = eval(read (deref ar), a, read (deref env));
+            let lb: i64 = eval(read (deref ar), b, read (deref env));
+            return wsub(la, lb);
+        },
+        case Node::mul(a, b) => {
+            let la: i64 = eval(read (deref ar), a, read (deref env));
+            let lb: i64 = eval(read (deref ar), b, read (deref env));
+            return wmul(la, lb);
+        },
+        case Node::div(a, b) => {
+            let la: i64 = eval(read (deref ar), a, read (deref env));
+            let lb: i64 = eval(read (deref ar), b, read (deref env));
+            return wdiv(la, lb);
+        },
+        case Node::neg(a) => {
+            let la: i64 = eval(read (deref ar), a, read (deref env));
+            return wneg(la);
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The common vector body: fold, compare against the expected IR, and check
+// the standing invariants on every vector -- result ids all resolve within
+// dst (spec 3.4/R13) and the source arena's count is untouched (spec 2.5
+// observability; content immutability is already checker-enforced by fold's
+// read borrow).
+// ---------------------------------------------------------------------------
+
+fn check(src: read Arena, root: u32, exp: read Arena, eroot: u32) -> unit {
+    let n0: u32 = (deref src).count;
+    let fo: FoldOut = fold(read (deref src), root);
+    assert(ir_eq(read fo.dst, fo.new_root, read (deref exp), eroot));
+    assert(ids_within(read fo.dst, fo.new_root));
+    assert((deref src).count == n0);
+}
+
+// ---------------------------------------------------------------------------
+// Shared source builders (used by more than one vector)
+// ---------------------------------------------------------------------------
+
+// AR2 source: (* (c 3) (c 4))
+fn build_ar2(ar: write Arena) -> u32 {
+    let a: u32 = bc(write (deref ar), 3);
+    let b: u32 = bc(write (deref ar), 4);
+    return bmul(write (deref ar), a, b);
+}
+
+// AR15 source: (+ (* (c 2) (c 3)) (v 0))
+fn build_ar15(ar: write Arena) -> u32 {
+    let a: u32 = bc(write (deref ar), 2);
+    let b: u32 = bc(write (deref ar), 3);
+    let m: u32 = bmul(write (deref ar), a, b);
+    let v: u32 = bv(write (deref ar), 0);
+    return badd(write (deref ar), m, v);
+}
+
+// AR17 source: (* (+ (c 1) (c 1)) (+ (v 0) (c 0)))
+fn build_ar17(ar: write Arena) -> u32 {
+    let a: u32 = bc(write (deref ar), 1);
+    let b: u32 = bc(write (deref ar), 1);
+    let l: u32 = badd(write (deref ar), a, b);
+    let v: u32 = bv(write (deref ar), 0);
+    let z: u32 = bc(write (deref ar), 0);
+    let r: u32 = badd(write (deref ar), v, z);
+    return bmul(write (deref ar), l, r);
+}
+
+// AR22 source: (+ (+ (c 1) (c 2)) (+ (c 3) (c 4)))
+fn build_ar22(ar: write Arena) -> u32 {
+    let a: u32 = bc(write (deref ar), 1);
+    let b: u32 = bc(write (deref ar), 2);
+    let l: u32 = badd(write (deref ar), a, b);
+    let c: u32 = bc(write (deref ar), 3);
+    let d: u32 = bc(write (deref ar), 4);
+    let r: u32 = badd(write (deref ar), c, d);
+    return badd(write (deref ar), l, r);
+}
+
+// ---------------------------------------------------------------------------
+// Constant folding
+// ---------------------------------------------------------------------------
+
+// AR1: (+ (c 1) (c 2)) -> (c 3)
+fn vec_ar1() -> unit {
+    let mut s: Arena = arena_new();
+    let a: u32 = bc(write s, 1);
+    let b: u32 = bc(write s, 2);
+    let r: u32 = badd(write s, a, b);
+    let mut e: Arena = arena_new();
+    let er: u32 = bc(write e, 3);
+    check(read s, r, read e, er);
+}
+
+// AR2: (* (c 3) (c 4)) -> (c 12)
+fn vec_ar2() -> unit {
+    let mut s: Arena = arena_new();
+    let r: u32 = build_ar2(write s);
+    let mut e: Arena = arena_new();
+    let er: u32 = bc(write e, 12);
+    check(read s, r, read e, er);
+}
+
+// AR3: (- (c 10) (c 4)) -> (c 6)
+fn vec_ar3() -> unit {
+    let mut s: Arena = arena_new();
+    let a: u32 = bc(write s, 10);
+    let b: u32 = bc(write s, 4);
+    let r: u32 = bsub(write s, a, b);
+    let mut e: Arena = arena_new();
+    let er: u32 = bc(write e, 6);
+    check(read s, r, read e, er);
+}
+
+// AR4: (neg (c 5)) -> (c -5)
+fn vec_ar4() -> unit {
+    let mut s: Arena = arena_new();
+    let a: u32 = bc(write s, 5);
+    let r: u32 = bneg(write s, a);
+    let mut e: Arena = arena_new();
+    let er: u32 = bc(write e, -5);
+    check(read s, r, read e, er);
+}
+
+// AR9: (/ (c 8) (c 2)) -> (c 4)
+fn vec_ar9() -> unit {
+    let mut s: Arena = arena_new();
+    let a: u32 = bc(write s, 8);
+    let b: u32 = bc(write s, 2);
+    let r: u32 = bdiv(write s, a, b);
+    let mut e: Arena = arena_new();
+    let er: u32 = bc(write e, 4);
+    check(read s, r, read e, er);
+}
+
+// AR10: (/ (c 7) (c 2)) -> (c 3)  (trunc toward zero)
+fn vec_ar10() -> unit {
+    let mut s: Arena = arena_new();
+    let a: u32 = bc(write s, 7);
+    let b: u32 = bc(write s, 2);
+    let r: u32 = bdiv(write s, a, b);
+    let mut e: Arena = arena_new();
+    let er: u32 = bc(write e, 3);
+    check(read s, r, read e, er);
+}
+
+// AR11: (/ (c -7) (c 2)) -> (c -3)  (trunc toward zero, not floor)
+fn vec_ar11() -> unit {
+    let mut s: Arena = arena_new();
+    let a: u32 = bc(write s, -7);
+    let b: u32 = bc(write s, 2);
+    let r: u32 = bdiv(write s, a, b);
+    let mut e: Arena = arena_new();
+    let er: u32 = bc(write e, -3);
+    check(read s, r, read e, er);
+}
+
+// ---------------------------------------------------------------------------
+// Algebraic identities
+// ---------------------------------------------------------------------------
+
+// AR5: (+ (v 0) (c 0)) -> (v 0)
+fn vec_ar5() -> unit {
+    let mut s: Arena = arena_new();
+    let a: u32 = bv(write s, 0);
+    let b: u32 = bc(write s, 0);
+    let r: u32 = badd(write s, a, b);
+    let mut e: Arena = arena_new();
+    let er: u32 = bv(write e, 0);
+    check(read s, r, read e, er);
+}
+
+// AR6: (* (v 0) (c 1)) -> (v 0)
+fn vec_ar6() -> unit {
+    let mut s: Arena = arena_new();
+    let a: u32 = bv(write s, 0);
+    let b: u32 = bc(write s, 1);
+    let r: u32 = bmul(write s, a, b);
+    let mut e: Arena = arena_new();
+    let er: u32 = bv(write e, 0);
+    check(read s, r, read e, er);
+}
+
+// AR7: (* (v 0) (c 0)) -> (c 0)
+fn vec_ar7() -> unit {
+    let mut s: Arena = arena_new();
+    let a: u32 = bv(write s, 0);
+    let b: u32 = bc(write s, 0);
+    let r: u32 = bmul(write s, a, b);
+    let mut e: Arena = arena_new();
+    let er: u32 = bc(write e, 0);
+    check(read s, r, read e, er);
+}
+
+// AR8: (/ (v 0) (c 1)) -> (v 0)
+fn vec_ar8() -> unit {
+    let mut s: Arena = arena_new();
+    let a: u32 = bv(write s, 0);
+    let b: u32 = bc(write s, 1);
+    let r: u32 = bdiv(write s, a, b);
+    let mut e: Arena = arena_new();
+    let er: u32 = bv(write e, 0);
+    check(read s, r, read e, er);
+}
+
+// AR13: (neg (neg (v 0))) -> (v 0)
+fn vec_ar13() -> unit {
+    let mut s: Arena = arena_new();
+    let v: u32 = bv(write s, 0);
+    let n1: u32 = bneg(write s, v);
+    let r: u32 = bneg(write s, n1);
+    let mut e: Arena = arena_new();
+    let er: u32 = bv(write e, 0);
+    check(read s, r, read e, er);
+}
+
+// AR14: (- (c 0) (v 0)) -> (neg (v 0))
+fn vec_ar14() -> unit {
+    let mut s: Arena = arena_new();
+    let a: u32 = bc(write s, 0);
+    let b: u32 = bv(write s, 0);
+    let r: u32 = bsub(write s, a, b);
+    let mut e: Arena = arena_new();
+    let ev: u32 = bv(write e, 0);
+    let er: u32 = bneg(write e, ev);
+    check(read s, r, read e, er);
+}
+
+// AR23: (* (c 1) (* (c 1) (v 0))) -> (v 0)  (identity cascade)
+fn vec_ar23() -> unit {
+    let mut s: Arena = arena_new();
+    let c1a: u32 = bc(write s, 1);
+    let c1b: u32 = bc(write s, 1);
+    let v: u32 = bv(write s, 0);
+    let inner: u32 = bmul(write s, c1b, v);
+    let r: u32 = bmul(write s, c1a, inner);
+    let mut e: Arena = arena_new();
+    let er: u32 = bv(write e, 0);
+    check(read s, r, read e, er);
+}
+
+// ---------------------------------------------------------------------------
+// Div-by-zero & wrapping boundaries
+// ---------------------------------------------------------------------------
+
+// AR12: (/ (c 5) (c 0)) -> (/ (c 5) (c 0))  (NOT folded)
+fn vec_ar12() -> unit {
+    let mut s: Arena = arena_new();
+    let a: u32 = bc(write s, 5);
+    let b: u32 = bc(write s, 0);
+    let r: u32 = bdiv(write s, a, b);
+    let mut e: Arena = arena_new();
+    let ea: u32 = bc(write e, 5);
+    let eb: u32 = bc(write e, 0);
+    let er: u32 = bdiv(write e, ea, eb);
+    check(read s, r, read e, er);
+}
+
+// AR24: (/ (v 0) (v 1)) -> (/ (v 0) (v 1))  (variable divisor, unchanged)
+fn vec_ar24() -> unit {
+    let mut s: Arena = arena_new();
+    let a: u32 = bv(write s, 0);
+    let b: u32 = bv(write s, 1);
+    let r: u32 = bdiv(write s, a, b);
+    let mut e: Arena = arena_new();
+    let ea: u32 = bv(write e, 0);
+    let eb: u32 = bv(write e, 1);
+    let er: u32 = bdiv(write e, ea, eb);
+    check(read s, r, read e, er);
+}
+
+// AR19: (* (c MAX) (c 2)) -> (c -2)  (i64::MAX * 2 wraps)
+fn vec_ar19() -> unit {
+    let mut s: Arena = arena_new();
+    let a: u32 = bc(write s, i64_max());
+    let b: u32 = bc(write s, 2);
+    let r: u32 = bmul(write s, a, b);
+    let mut e: Arena = arena_new();
+    let er: u32 = bc(write e, -2);
+    check(read s, r, read e, er);
+}
+
+// AR20: (- (c MIN) (c 1)) -> (c MAX)  (i64::MIN - 1 wraps to i64::MAX)
+fn vec_ar20() -> unit {
+    let mut s: Arena = arena_new();
+    let a: u32 = bc(write s, i64_min());
+    let b: u32 = bc(write s, 1);
+    let r: u32 = bsub(write s, a, b);
+    let mut e: Arena = arena_new();
+    let er: u32 = bc(write e, i64_max());
+    check(read s, r, read e, er);
+}
+
+// AR21: (/ (c MIN) (c -1)) -> (c MIN)  (the single Div overflow case wraps)
+fn vec_ar21() -> unit {
+    let mut s: Arena = arena_new();
+    let a: u32 = bc(write s, i64_min());
+    let b: u32 = bc(write s, -1);
+    let r: u32 = bdiv(write s, a, b);
+    let mut e: Arena = arena_new();
+    let er: u32 = bc(write e, i64_min());
+    check(read s, r, read e, er);
+}
+
+// ---------------------------------------------------------------------------
+// Nested & cascading
+// ---------------------------------------------------------------------------
+
+// AR15: (+ (* (c 2) (c 3)) (v 0)) -> (+ (c 6) (v 0))
+fn vec_ar15() -> unit {
+    let mut s: Arena = arena_new();
+    let r: u32 = build_ar15(write s);
+    let mut e: Arena = arena_new();
+    let ec: u32 = bc(write e, 6);
+    let ev: u32 = bv(write e, 0);
+    let er: u32 = badd(write e, ec, ev);
+    check(read s, r, read e, er);
+}
+
+// AR16: (+ (* (v 0) (c 0)) (c 5)) -> (c 5)  (x*0 -> 0, then 0+5 -> 5)
+fn vec_ar16() -> unit {
+    let mut s: Arena = arena_new();
+    let v: u32 = bv(write s, 0);
+    let z: u32 = bc(write s, 0);
+    let m: u32 = bmul(write s, v, z);
+    let f: u32 = bc(write s, 5);
+    let r: u32 = badd(write s, m, f);
+    let mut e: Arena = arena_new();
+    let er: u32 = bc(write e, 5);
+    check(read s, r, read e, er);
+}
+
+// AR17: (* (+ (c 1) (c 1)) (+ (v 0) (c 0))) -> (* (c 2) (v 0))
+fn vec_ar17() -> unit {
+    let mut s: Arena = arena_new();
+    let r: u32 = build_ar17(write s);
+    let mut e: Arena = arena_new();
+    let ec: u32 = bc(write e, 2);
+    let ev: u32 = bv(write e, 0);
+    let er: u32 = bmul(write e, ec, ev);
+    check(read s, r, read e, er);
+}
+
+// AR22: (+ (+ (c 1) (c 2)) (+ (c 3) (c 4))) -> (c 10)
+fn vec_ar22() -> unit {
+    let mut s: Arena = arena_new();
+    let r: u32 = build_ar22(write s);
+    let mut e: Arena = arena_new();
+    let er: u32 = bc(write e, 10);
+    check(read s, r, read e, er);
+}
+
+// AR18: (+ (v 0) (v 1)) -> (+ (v 0) (v 1))  (no-op; already minimal)
+fn vec_ar18() -> unit {
+    let mut s: Arena = arena_new();
+    let a: u32 = bv(write s, 0);
+    let b: u32 = bv(write s, 1);
+    let r: u32 = badd(write s, a, b);
+    let mut e: Arena = arena_new();
+    let ea: u32 = bv(write e, 0);
+    let eb: u32 = bv(write e, 1);
+    let er: u32 = badd(write e, ea, eb);
+    check(read s, r, read e, er);
+}
+
+// ---------------------------------------------------------------------------
+// Structural / arena invariants
+// ---------------------------------------------------------------------------
+
+// AR25 (independence, spec 3.4): build AR15's source; fold; observe the
+// source structurally unchanged; arena_reset(src); the result must still be
+// (+ (c 6) (v 0)) -- dst holds its own copy of every reachable node.
+fn vec_ar25() -> unit {
+    let mut s: Arena = arena_new();
+    let r: u32 = build_ar15(write s);
+    let mut s2: Arena = arena_new();       // untouched twin, the unchanged-source oracle
+    let r2: u32 = build_ar15(write s2);
+    let fo: FoldOut = fold(read s, r);
+    assert(ir_eq(read s, r, read s2, r2));  // src left unmodified (spec 2.5)
+    arena_reset(write s);                    // whole-arena release of the source
+    assert(s.count == 0);
+    let mut e: Arena = arena_new();
+    let ec: u32 = bc(write e, 6);
+    let ev: u32 = bv(write e, 0);
+    let er: u32 = badd(write e, ec, ev);
+    assert(ir_eq(read fo.dst, fo.new_root, read e, er));   // dst unaffected by the reset
+    assert(ids_within(read fo.dst, fo.new_root));
+}
+
+// AR26 (no dangling, spec 3.4 / R13): for AR17's result, every NodeId
+// reachable from new_root resolves within dst. Ids are dst-relative indices,
+// so resolution-within-dst IS the no-reference-into-src property (R13).
+fn vec_ar26() -> unit {
+    let mut s: Arena = arena_new();
+    let r: u32 = build_ar17(write s);
+    let fo: FoldOut = fold(read s, r);
+    assert(ids_within(read fo.dst, fo.new_root));
+}
+
+// AR27 (semantic equivalence, spec 3.5): AR15 with v0 = 7 evaluates to 13
+// through both the source and the folded result.
+fn vec_ar27() -> unit {
+    let mut s: Arena = arena_new();
+    let r: u32 = build_ar15(write s);
+    let fo: FoldOut = fold(read s, r);
+    let env: Env = Env { v: [7, 0, 0, 0] };
+    assert(eval(read s, r, read env) == 13);
+    assert(eval(read fo.dst, fo.new_root, read env) == 13);
+}
+
+// AR28 (whole-release reuse, spec 2.4): build AR22 in an arena, fold (-> c 10),
+// reset the source arena, reuse THE SAME arena to build AR2, fold -> (c 12).
+fn vec_ar28() -> unit {
+    let mut a: Arena = arena_new();
+    let r1: u32 = build_ar22(write a);
+    let o1: FoldOut = fold(read a, r1);
+    let mut e1: Arena = arena_new();
+    let t1: u32 = bc(write e1, 10);
+    assert(ir_eq(read o1.dst, o1.new_root, read e1, t1));
+    arena_reset(write a);                    // release all AR22 nodes at once
+    assert(a.count == 0);                    // observably empty and reusable
+    let r2: u32 = build_ar2(write a);        // reuse: fresh ids start at 0
+    assert(r2 == 2);                         // 3rd allocation of the new generation
+    let o2: FoldOut = fold(read a, r2);
+    let mut e2: Arena = arena_new();
+    let t2: u32 = bc(write e2, 12);
+    assert(ir_eq(read o2.dst, o2.new_root, read e2, t2));
+    assert(ids_within(read o2.dst, o2.new_root));
+}
+
+// AR29 (determinism, spec 3.6): re-running fold on the same src/root yields a
+// structurally identical result -- and structural identity of unfolded trees
+// is exactly byte-identity of the canonical S (spec 3.3, see ir_eq's note).
+fn vec_ar29() -> unit {
+    let mut s: Arena = arena_new();
+    let r: u32 = build_ar22(write s);
+    let o1: FoldOut = fold(read s, r);
+    let o2: FoldOut = fold(read s, r);
+    assert(ir_eq(read o1.dst, o1.new_root, read o2.dst, o2.new_root));
+    let mut s2: Arena = arena_new();
+    let r2: u32 = build_ar17(write s2);
+    let p1: FoldOut = fold(read s2, r2);
+    let p2: FoldOut = fold(read s2, r2);
+    assert(ir_eq(read p1.dst, p1.new_root, read p2.dst, p2.new_root));
+}
+
+// ---------------------------------------------------------------------------
+// main: every vector on fresh arenas. Sentinel 777 on full success; any
+// failure faults first.
+// ---------------------------------------------------------------------------
+
+fn main() -> i64 {
+    vec_ar1();
+    vec_ar2();
+    vec_ar3();
+    vec_ar4();
+    vec_ar5();
+    vec_ar6();
+    vec_ar7();
+    vec_ar8();
+    vec_ar9();
+    vec_ar10();
+    vec_ar11();
+    vec_ar12();
+    vec_ar13();
+    vec_ar14();
+    vec_ar15();
+    vec_ar16();
+    vec_ar17();
+    vec_ar18();
+    vec_ar19();
+    vec_ar20();
+    vec_ar21();
+    vec_ar22();
+    vec_ar23();
+    vec_ar24();
+    vec_ar25();
+    vec_ar26();
+    vec_ar27();
+    vec_ar28();
+    vec_ar29();
+    return 777;   // sentinel: every vector passed
+}
