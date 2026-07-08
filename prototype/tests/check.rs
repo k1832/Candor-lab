@@ -877,3 +877,125 @@ fn field_ptr_non_rawptr_operand_is_e0510() {
         "E0510",
     );
 }
+
+// ----- E0809: write / exclusive reborrow through a SHARED borrow (§2.1/§2.2) --
+// The XOR hole recorded in 0003 §0 (2026-07-08): `check_place` peeled shared and
+// exclusive borrows identically, so a deref-write through a `read`-borrow was
+// accepted. Every `deref` on the path to a written place must peel an exclusive
+// (`write`) borrow (or a `Box`), never a shared one.
+
+const S_PRE: &str = "struct S { n: i64 } fn mk() -> S { return S { n: 0 }; } \
+     fn setn(s: write S, v: i64) -> unit { (deref s).n = v; } \
+     fn useb(b: read S) -> unit { } ";
+
+// -- the reviewer's repros (must-reject) --
+
+#[test]
+fn xor1_write_through_shared_borrow_is_e0809() {
+    // (deref b1).n = 99 while b2 also shares x: two-line direct XOR violation.
+    assert_has(
+        "struct S { n: i64 } fn mk() -> S { return S { n: 7 }; } \
+         fn f() -> i64 { let mut x: S = mk(); let b1 = read x; let b2 = read x; \
+         (deref b1).n = 99; return (deref b2).n; } \
+         fn main() -> i64 { return f(); }",
+        "E0809",
+    );
+}
+
+#[test]
+fn xor2_shared_param_to_write_param_is_e0809() {
+    // A shared `read` parameter forwarded to a `write`-mode parameter.
+    assert_has(
+        "struct S { n: i64 } fn mk() -> S { return S { n: 7 }; } \
+         fn setn(s: write S, v: i64) -> unit { (deref s).n = v; } \
+         fn viashared(b: read S) -> i64 { setn(b, 99); return (deref b).n; } \
+         fn main() -> i64 { let mut x: S = mk(); let bb = read x; return viashared(bb); }",
+        "E0809",
+    );
+}
+
+// -- disposition (a): assignment through a shared-borrow deref --
+
+#[test]
+fn deref_field_write_through_shared_is_e0809() {
+    assert_has(
+        &format!("{S_PRE}fn f(b: read S) -> unit {{ (deref b).n = 5; }}"),
+        "E0809",
+    );
+}
+
+#[test]
+fn deref_whole_write_through_shared_is_e0809() {
+    assert_has(
+        &format!("{S_PRE}fn f(b: read S) -> unit {{ (deref b) = mk(); }}"),
+        "E0809",
+    );
+}
+
+// -- disposition (b): exclusive reborrow from a shared borrow --
+
+#[test]
+fn write_reborrow_from_shared_arg_is_e0809() {
+    assert_has(
+        &format!("{S_PRE}fn f(b: read S) -> unit {{ setn(write (deref b), 5); }}"),
+        "E0809",
+    );
+}
+
+#[test]
+fn write_reborrow_from_shared_let_is_e0809() {
+    assert_has(
+        &format!("{S_PRE}fn f(b: read S) -> unit {{ let r = write (deref b); }}"),
+        "E0809",
+    );
+}
+
+// -- disposition (c): bare shared borrow to a write-mode parameter --
+
+#[test]
+fn bare_shared_to_write_param_is_e0809() {
+    assert_has(
+        &format!("{S_PRE}fn f(b: read S) -> unit {{ setn(b, 5); }}"),
+        "E0809",
+    );
+}
+
+// -- positives: every legal shape stays clean --
+
+#[test]
+fn write_through_exclusive_field_is_clean() {
+    assert_clean(&format!("{S_PRE}fn f(b: write S) -> unit {{ (deref b).n = 5; }}"));
+}
+
+#[test]
+fn write_through_exclusive_whole_is_clean() {
+    assert_clean(&format!("{S_PRE}fn f(b: write S) -> unit {{ (deref b) = mk(); }}"));
+}
+
+#[test]
+fn bare_exclusive_to_write_param_is_clean() {
+    assert_clean(&format!("{S_PRE}fn f(b: write S) -> unit {{ setn(b, 5); }}"));
+}
+
+#[test]
+fn explicit_exclusive_reborrow_from_exclusive_is_clean() {
+    assert_clean(&format!("{S_PRE}fn f(b: write S) -> unit {{ setn(write (deref b), 5); }}"));
+}
+
+#[test]
+fn shared_read_through_deref_is_clean() {
+    assert_clean(&format!("{S_PRE}fn f(b: read S) -> i64 {{ return (deref b).n; }}"));
+}
+
+#[test]
+fn shared_reborrow_of_shared_is_clean() {
+    // bare and explicit `read (deref b)` shared reborrow of a shared borrow.
+    assert_clean(&format!("{S_PRE}fn f(b: read S) -> unit {{ useb(b); }}"));
+    assert_clean(&format!("{S_PRE}fn f(b: read S) -> unit {{ useb(read (deref b)); }}"));
+}
+
+#[test]
+fn shared_downgrade_from_exclusive_is_clean() {
+    // A shared reborrow of an exclusive borrow (freeze-to-shared) is legal.
+    assert_clean(&format!("{S_PRE}fn f(b: write S) -> unit {{ useb(b); }}"));
+}

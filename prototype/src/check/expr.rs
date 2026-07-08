@@ -50,6 +50,7 @@ impl<'a> Checker<'a> {
                 expr,
             } => {
                 self.reject_static_mutation(expr, "`write`-borrow", e.span);
+                self.reject_write_through_shared(expr, "take a `write`-borrow", e.span);
                 let t = self.check_expr(expr, Use::BorrowExcl);
                 Type::BorrowMut(Box::new(t))
             }
@@ -303,6 +304,102 @@ impl<'a> Checker<'a> {
                     });
                 }
                 other => return (other, place),
+            }
+        }
+    }
+
+    /// Reject a write or exclusive reborrow that passes through a SHARED borrow.
+    /// Design 0001 §2.1/§2.2: `deref b = v` and `write (deref b)` require `b`
+    /// exclusive; every `deref` on the path to a written place must peel a
+    /// `write`-borrow (or a `Box`), never a `read`-borrow. The reviewer's XOR
+    /// hole (0003 §0 2026-07-08) was this check missing — `check_place` peeled
+    /// `Borrow`/`BorrowMut` identically.
+    pub(super) fn reject_write_through_shared(&mut self, e: &Expr, action: &str, span: Span) {
+        let (_, shared) = self.write_path_probe(e);
+        if shared {
+            self.e0809(format!("cannot {action} through a shared (`read`) borrow"), span);
+        }
+    }
+
+    /// Emit the shared-borrow write/reborrow error (§2.1/§2.2).
+    pub(super) fn e0809(&mut self, msg: impl Into<String>, span: Span) {
+        self.diags.push(
+            Diag::error("E0809", msg, span).with_note(
+                "a deref-write or exclusive reborrow requires an exclusive (`write`) borrow; a shared (`read`) borrow may only be read or re-shared (§2.1/§2.2)",
+                None,
+            ),
+        );
+    }
+
+    /// Non-emitting probe for `reject_write_through_shared`: returns the type the
+    /// place `e` holds and whether any `deref` on the path to it peels a SHARED
+    /// borrow. Autoderef steps into a field/index of a borrow count as derefs on
+    /// the path; peeling an exclusive borrow or a `Box` does not set the flag.
+    fn write_path_probe(&self, e: &Expr) -> (Type, bool) {
+        match &e.kind {
+            ExprKind::Paren(i) => self.write_path_probe(i),
+            ExprKind::Ident(name) => {
+                let t = if let Some(li) = self.lookup_local(name) {
+                    li.ty.clone()
+                } else if let Some((t, _)) = self.items.statics.get(name) {
+                    t.clone()
+                } else {
+                    Type::Error
+                };
+                (t, false)
+            }
+            ExprKind::Prefix {
+                op: PrefixOp::Deref,
+                expr,
+            } => {
+                let (t, mut shared) = self.write_path_probe(expr);
+                let inner = match t {
+                    Type::Borrow(x) => {
+                        shared = true;
+                        *x
+                    }
+                    Type::BorrowMut(x) | Type::Box(x) => *x,
+                    _ => Type::Error,
+                };
+                (inner, shared)
+            }
+            ExprKind::Field { base, field } => {
+                let (bt, mut shared) = self.write_path_probe(base);
+                let st = self.autoderef_probe(bt, &mut shared);
+                let fty = match &st {
+                    Type::Named(n) => self
+                        .items
+                        .lookup_struct(n)
+                        .and_then(|s| s.fields.iter().find(|(f, _)| f == field).map(|(_, t)| t.clone()))
+                        .unwrap_or(Type::Error),
+                    _ => Type::Error,
+                };
+                (fty, shared)
+            }
+            ExprKind::Index { base, .. } => {
+                let (bt, mut shared) = self.write_path_probe(base);
+                let st = self.autoderef_probe(bt, &mut shared);
+                let elem = match st {
+                    Type::Array(e, _) | Type::Slice(e) | Type::SliceMut(e) => *e,
+                    _ => Type::Error,
+                };
+                (elem, shared)
+            }
+            _ => (Type::Error, false),
+        }
+    }
+
+    /// Peel borrow/box layers off a base type for the write-path probe, setting
+    /// `shared` if any peeled layer is a SHARED borrow.
+    fn autoderef_probe(&self, mut ty: Type, shared: &mut bool) -> Type {
+        loop {
+            match ty {
+                Type::Borrow(x) => {
+                    *shared = true;
+                    ty = *x;
+                }
+                Type::BorrowMut(x) | Type::Box(x) => ty = *x,
+                other => return other,
             }
         }
     }
@@ -984,6 +1081,16 @@ impl<'a> Checker<'a> {
                 };
             }
             ParamMode::Write => {
+                // Design 0005 shareability gate (0001 §2.1/§2.2): a held SHARED
+                // borrow passed to a write-mode parameter would reborrow
+                // exclusively from shared — rejected E0809, never desugared.
+                if matches!(self.place_borrow_ty(inner), Some(Type::Borrow(_))) {
+                    self.e0809(
+                        "cannot reborrow an exclusive (`write`) borrow from a shared (`read`) borrow passed to a `write`-mode parameter",
+                        inner.span,
+                    );
+                    return;
+                }
                 let expected = Type::BorrowMut(Box::new(decl_ty.clone()));
                 match self.reborrow_desugar(inner, PrefixOp::Write) {
                     Some(node) => self.check_against(&node, &expected),

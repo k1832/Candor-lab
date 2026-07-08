@@ -75,6 +75,7 @@ impl<'a> Checker<'a> {
             }
             StmtKind::Assign { target, value } => {
                 self.reject_static_mutation(target, "assign to", s.span);
+                self.reject_write_through_shared(target, "assign to", s.span);
                 let (tt, place) = self.check_place(target);
                 self.clear_carried();
                 self.check_against(value, &tt);

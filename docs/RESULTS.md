@@ -133,3 +133,12 @@ ecosystem-bootstrap fact, owned by Bets 4/6, not a memory-model defect); the all
 concession stands. Binding commitments: safe rawptr field projection and reborrow ergonomics
 enter the next design round, and the scheduler is re-ported and re-measured under the frozen
 successor rules before any syntax freeze — returning to review if the numbers worsen.
+
+## Soundness-precondition confirmation — 2026-07-08
+
+A pre-existing checker hole (write through a shared borrow, latent through all four original
+soundness reviews) was found by the design-0004/0005 re-review and closed as E0809
+(docs/reviews/2026-07-08-0003-rereview-impl-verification.md). Mandatory measurement-impact check:
+all five checkable and five runnable frozen fixtures and all five scored port artifacts re-run
+under the fixed checker — every one passes with byte-identical checker output. No frozen
+measurement exercised the hole; the Bet 5 record stands. No §3.7 admissibility event.
