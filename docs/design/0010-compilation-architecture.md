@@ -390,9 +390,23 @@ Per §8 sequencing, the arc is staged and honest about what each stage validates
   fault-injection axis. Out-of-subset constructs (aggregates/`Box`/rawptr/slices,
   and thus most §11-basket/corelib fixtures) lower to `Unsupported` and are the
   reported coverage boundary; the gate additionally passes on the `mono3`
-  (generic→monomorphize→scalar) and `bits` corpus fixtures. Aggregates, the flat
-  `interp::mem::Mem` substrate, and full basket/corelib coverage remain to finish
-  the gate.
+  (generic→monomorphize→scalar) and `bits` corpus fixtures. **A2 status (2026-07-08 — partial, remainder named):** the MIR interpreter now
+  runs over the **shared flat `interp::mem::Mem` + `layout.rs` substrate** (values
+  at the oracle's addresses, init-byte guard off as non-semantic), and the subset
+  gained **structs, fixed arrays (bounds-faulting index per INV-CHECK), borrows/
+  deref, the static drop schedule (struct `drop` hooks lowered as MIR fns, incl.
+  monomorphized generic hooks, recursed per layout with no runtime flags), enums +
+  `match` (switch-on-tag + payload binds), by-value aggregate params/args/returns,
+  same-type `?`, and region-parameterized (monomorphized) fns**. `(k, s, θ)`
+  equality holds on 10 corpus fixtures (parity pair, `mono3`, `gdrop`, `genenum`,
+  `mixed`, `propagate`, `arena`, `pair`, `bits`) and new **bounds-fault** and
+  **`?`-adjacent-fault** axes (`tests/stage_a.rs`). **The honest remainder** (still
+  `Unsupported`, so never a silent divergence): `Box`/`Alloc` (box/unbox/clone/
+  drop-free through the vtable), the `rawptr` intrinsics, `slice`/`subslice`/`len`
+  and slice params, interface **method dispatch**, **cross-type `?`** (`From`),
+  static drop **pruning of moved needs-drop aggregates**, and thus the full §11
+  basket run fixtures, the corelib tree/flat, and the stress fixtures — Gate A is
+  **not yet closed on the full corpus**.
 
 - **Stage B — single backend (Cranelift), no optimization, whole-program.** Lower
   MIR→Cranelift IR→native; no incremental artifacts yet (whole-program each

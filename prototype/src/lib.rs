@@ -208,8 +208,18 @@ pub enum MirRunResult {
 fn lower_and_run(program: &ast::Program) -> MirRunResult {
     let mut diags = Vec::new();
     let items = resolve::resolve_program(program, &mut diags);
+    // Integer-valued statics double as named array lengths (shared with the
+    // oracle's `Layout`), so the MIR interpreter sizes aggregates identically.
+    let mut consts = std::collections::HashMap::new();
+    for it in &program.items {
+        if let ast::Item::Static(st) = it {
+            if let ast::ExprKind::IntLit { value, .. } = &st.value.kind {
+                consts.insert(st.name.clone(), *value);
+            }
+        }
+    }
     match mir::lower_checked(program, &items) {
-        Ok(mp) => match mir::interp::run(&mp) {
+        Ok(mp) => match mir::interp::run(&mp, &items, &consts) {
             Ok(run) => MirRunResult::Ok(run),
             Err(f) => MirRunResult::Fault(f),
         },

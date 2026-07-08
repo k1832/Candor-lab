@@ -144,6 +144,84 @@ fn gate_fault_injection_axis() {
 }
 
 // ---------------------------------------------------------------------------
+// 2b. Aggregates over the shared memory substrate (Stage A2): structs, fixed
+//     arrays, borrows/deref, and the drop schedule — full (k, s, θ) equality.
+// ---------------------------------------------------------------------------
+
+const AGGREGATES: &[(&str, bool)] = &[
+    // struct construction + field access
+    ("struct P { x: i64, y: i64 } fn main() -> i64 { let p: P = P { x: 40, y: 2 }; return p.x + p.y; }", false),
+    // struct behind a borrow, deref + field (the parity shape)
+    ("struct P { x: i64, y: i64 } fn get(p: read P) -> i64 { return (deref p).x - (deref p).y; } fn main() -> i64 { let p: P = P { x: 7, y: 5 }; return get(read p); }", false),
+    // nested struct
+    ("struct Inner { v: i64 } struct Outer { a: Inner, b: i64 } fn main() -> i64 { let o: Outer = Outer { a: Inner { v: 10 }, b: 32 }; return o.a.v + o.b; }", false),
+    // fixed array literal + in-bounds index
+    ("fn main() -> i64 { let a: [3]i64 = [10, 20, 30]; let i: usize = 2; return a[i]; }", false),
+    // array element write through an index place
+    ("fn main() -> i64 { let mut a: [3]i64 = [1, 1, 1]; let i: usize = 1; a[i] = 40; return a[0] + a[i] + a[2]; }", false),
+    // array-repeat construction
+    ("fn main() -> i64 { let a: [4]i64 = [11; 4]; let i: usize = 3; return a[i]; }", false),
+];
+
+const ENUMS: &[(&str, bool)] = &[
+    // enum construction + match with a copy payload bind (real syntax)
+    ("enum Opt { None, Some(i64) } fn main() -> i64 { let a: Opt = Opt::Some(5); let b: Opt = Opt::None; let x: i64 = match a { Opt::None => 0, Opt::Some(v) => v }; let y: i64 = match b { Opt::None => 7, Opt::Some(v) => v }; return x + y; }", true),
+    // match returning through arms that `return`
+    ("enum E { A(i64), B } fn pick(e: E) -> i64 { match e { E::A(n) => { return n; } E::B => { return 100; } } } fn main() -> i64 { return pick(E::A(42)) + pick(E::B); }", true),
+    // enum by-value parameter (drop-inert) + wildcard arm
+    ("enum Col { R, G, Bl } fn code(c: Col) -> i64 { return match c { Col::R => 1, Col::G => 2, _ => 3 }; } fn main() -> i64 { return code(Col::R) + code(Col::G) + code(Col::Bl); }", true),
+];
+
+#[test]
+fn gate_enums_match() {
+    for (src, real) in ENUMS {
+        assert_equal(src, *real);
+    }
+}
+
+#[test]
+fn gate_aggregates() {
+    for (src, real) in AGGREGATES {
+        assert_equal(src, *real);
+    }
+}
+
+// The bounds fault (design 0010 §5): an out-of-range index delivers `Bounds` at
+// the index op's span — a fault axis A1 could not express (no arrays).
+const AGGREGATE_FAULTS: &[(&str, bool)] = &[
+    ("fn main() -> i64 { let a: [3]i64 = [1, 2, 3]; let i: usize = 5; return a[i]; }", false),
+    ("fn main() -> i64 { let a: [2]i64 = [7, 8]; let mut i: usize = 0; let mut s: i64 = 0; while i <= 2 { s = s + a[i]; i = i + 1; } return s; }", false),
+];
+
+// The `?`-adjacent fault axis (design 0010 §5/§7): a fault delivered inside a
+// function invoked with `?` must carry the identical `(k, s)` in both engines —
+// the second axis A1 could not express (no result enums / `?`).
+const QUESTION_FAULTS: &[(&str, bool)] = &[
+    // overflow inside a `?`-called function (the fault precedes the `?` unwrap)
+    ("enum R { ok Val(i64), Err } fn step(x: i32) -> R { let y: i32 = x + 1i32; return R::Val(conv i64 (y)); } fn run(x: i32) -> R { let a: i64 = step(x)?; return R::Val(a); } fn main() -> i64 { let r: R = run(2147483647i32); return match r { R::Val(v) => v, R::Err => 0 - 1 }; }", true),
+    // division-by-zero inside a `?`-called function
+    ("enum R { ok Val(i64), Err } fn dv(n: i64, d: i64) -> R { let q: i64 = n / d; return R::Val(q); } fn run() -> R { let a: i64 = dv(10, 0)?; return R::Val(a); } fn main() -> i64 { return match run() { R::Val(v) => v, R::Err => 0 - 1 }; }", true),
+];
+
+#[test]
+fn gate_question_fault_axis() {
+    for (src, real) in QUESTION_FAULTS {
+        let o = oracle(src, *real).expect("faulting program should run");
+        assert!(matches!(o, Outcome::Fault { .. }), "expected a fault:\n{src}");
+        assert_equal(src, *real);
+    }
+}
+
+#[test]
+fn gate_aggregate_fault_axis() {
+    for (src, real) in AGGREGATE_FAULTS {
+        let o = oracle(src, *real).expect("faulting program should run");
+        assert!(matches!(o, Outcome::Fault { kind, .. } if kind == "Bounds"), "expected a Bounds fault:\n{src}");
+        assert_equal(src, *real);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 3. Corpus classification: run every runnable fixture through both engines,
 //    classify in/out of subset, and assert every in-subset one matches. Prints a
 //    coverage summary (visible with `--nocapture`). Out-of-subset is NOT a

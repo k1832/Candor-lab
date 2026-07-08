@@ -73,6 +73,35 @@ pub enum ReplayPolicy {
     Precise,
 }
 
+/// A projection step onto a place (design 0010 §2, INV-CHECK for the fault edge).
+#[derive(Clone, Debug)]
+pub enum Proj {
+    /// `.field` — a compile-time-known byte offset plus the field's type.
+    Field { offset: u64, ty: Type },
+    /// `deref` — read the pointer stored at the current address and continue at
+    /// the pointee (`inner` is the pointee type).
+    Deref { inner: Type },
+    /// `[i]` — a bounds-faulting index (INV-CHECK: the fault edge on every index).
+    /// `stride` is the element stride; `len` the compile-known length (arrays) or
+    /// is ignored for slices (the runtime length is read from the slice header —
+    /// but slices carry `len` == u64::MAX here so the header check is used).
+    Index { index: Operand, stride: u64, len: u64, span: Span },
+}
+
+/// A place: a root local plus a chain of projections (INV-DROP move masks apply
+/// to field paths; the interpreter resolves it to a concrete address).
+#[derive(Clone, Debug)]
+pub struct Place {
+    pub root: LocalId,
+    pub proj: Vec<Proj>,
+}
+
+impl Place {
+    pub fn local(root: LocalId) -> Place {
+        Place { root, proj: Vec::new() }
+    }
+}
+
 pub type LocalId = usize;
 pub type BlockId = usize;
 
@@ -120,6 +149,10 @@ pub enum Rvalue {
         v: Operand,
         fault: Option<FaultEdge>,
     },
+    /// A borrow / `addr_of`: the *address* of a place (a `u64` pointer value).
+    Ref(Place),
+    /// Read a scalar (or pointer-width) value out of a projected place.
+    Load { place: Place, ty: Type },
     /// A direct call to a user function by name (non-generic subset).
     Call { func: String, args: Vec<Operand> },
 }
@@ -131,6 +164,13 @@ pub enum StatementKind {
     /// The `trace(x)` observable (design 0010 §5 / INV-OBS-ORDER): appends `x`
     /// (as `i64`) to the observable trace `θ`.
     Trace(Operand),
+    /// Store a scalar (or pointer) rvalue into a projected place (field / index /
+    /// deref) — the aggregate-construction and field/element-write path (A2).
+    Store(Place, Rvalue),
+    /// Byte-copy an aggregate value of `ty` from one place to another (a copy or a
+    /// move of a whole struct/array/enum — the checker's copy/move facts decide
+    /// which, and a moved source is pruned from the drop schedule statically).
+    CopyVal { dst: Place, src: Place, ty: Type },
     /// A statically-scheduled drop of a local (INV-DROP). In the Stage-A scalar
     /// subset every reachable local is drop-inert, so this is a no-op carrier —
     /// but it is emitted at the exact scheduled point so the invariant is real.
@@ -205,6 +245,10 @@ pub struct MirFn {
 pub struct MirProgram {
     pub fns: Vec<MirFn>,
     pub fn_index: HashMap<String, usize>,
+    /// INV-DROP: nominal struct name -> the MIR function its `drop` hook lowered
+    /// to (design 0010 §5). A monomorphized generic struct's hook is an ordinary
+    /// concrete hook by lowering time; the interpreter calls it at the drop point.
+    pub drop_hooks: HashMap<String, String>,
 }
 
 impl MirProgram {
