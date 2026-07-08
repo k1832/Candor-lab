@@ -35,6 +35,12 @@ explicit `ok` marker for result-shaped enums; constant-conv loss and bare
 over-range literals made compile errors; counts restated on distinct programs;
 migration totality scoped; slice-region spelling designed (OBL-SLICE-REGION).
 
+2026-07-08 — noted per joint adversarial review #1 of designs 0007/0008
+(`docs/reviews/2026-07-08-design-0007-0008-review-1.md`): F1 forward-note added to
+the `>>` reserved-token entry (§3) — once generics land, region parameters are
+declared with the `region` keyword and bare bracketed identifiers are type
+parameters.
+
 ---
 
 ## 1. Principles applied — the token-economics test, operationally
@@ -430,7 +436,11 @@ Every added or changed sigil is walked for ambiguity; each resolves by
 - **`>>` — shift vs future generic close: reserved now.** Candor has no `<…>`
   generic syntax today; when generics arrive (P11, deferred) their bracketing
   **must not** be `<>`, precisely so `>>` stays unambiguously a shift. Recorded
-  as a constraint on the future round.
+  as a constraint on the future round. When that round lands, a generic bracket
+  list declares **region parameters with the `region` keyword** (`fn choose[region
+  r, T]`) and treats **bare bracketed identifiers as type parameters** (0007 §6.1),
+  so the existing region-variable bracket (`fn pick[r]`, 0001 §3.3) and the new
+  type-parameter bracket never collide.
 - **`[T]` slice vs `[N]T` array vs `[…]` literal vs `a[i]` index: position +
   content.** Type position vs expression position is grammatical (0002 §3). Within
   a type, after `[` parse one component; if a Type follows the `]` it is an array

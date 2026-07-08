@@ -9,6 +9,14 @@ suffices), P3/NN#11 (one canonical way), P1/P17/NN#18 (unsafe- and
 boundary-module enumerability), P6 (small core), P9 (subtractively layered
 stdlib), P11/NN#10 (definition-site generics), P13 (clarity-dense syntax).
 
+**Revision history.** 2026-07-08 — revised per joint adversarial review #1 of
+designs 0007/0008 (`docs/reviews/2026-07-08-design-0007-0008-review-1.md`): F5 the
+codegen tier consumes def-site-resolved effects and never re-derives them (§2.4); F6
+manifest honesty — identity plus an optional `freestanding` claim, dependency
+lockfile deferred to package-manager scope (§1, §5); F4 seam — the interface's
+*declaration* module is the placement referent, the uniqueness key is the
+instantiated interface (§Decision, §Consequences).
+
 ## Problem
 
 P20 makes a falsifiable competitive claim in §1 and names its mechanism:
@@ -31,8 +39,8 @@ This document fixes the module *unit*, *interface artifact*, *dependency DAG*,
 the *boundary-module hook* (P17, FFI content deferred), and the *core/std
 layering* (P9). It leaves a named seam for 0007 (interfaces/impls, coherence,
 the orphan rule): the module is the coherence unit; an impl is an ordinary
-item under these visibility and interface rules; 0007 fixes the placement
-predicate.
+item under these visibility and interface rules; 0007 §2.3 fixes that placement predicate — the interface's *declaration* module
+is the referent, and the uniqueness key is the instantiated interface (F4).
 
 ## Decision
 
@@ -55,11 +63,13 @@ truth that can disagree with the first.
   The `foo.cd`-beside-`foo/` rule keeps a directory's body file
   distinguishable in a plain `ls`.
 - **One package declares exactly one thing** the filesystem cannot supply: its
-  globally-unique **name** (for provenance and the lockfile, P16), in a minimal
+  globally-unique **name** (for provenance, P16) plus an **optional verified
+  `freestanding` claim** (§5), in a minimal
   manifest at the package root. Module *structure within* a package is pure
   convention; only package *identity* is declared, because a name unique across
   the ecosystem is irreducibly non-local. That is the entire manifest budget
-  this document spends.
+  this document spends. **A dependency lockfile is *not* part of it** — pinning
+  resolved dependency versions is **package-manager scope, deferred** to that round.
 
 **No textual inclusion, ever.** This is NN-level in P20. A module is never
 spliced into another as source text; nothing is `#include`d, `import`ed as
@@ -152,7 +162,11 @@ expensive, cascading part — type/borrow/effect/contract checking — happens
 Therefore: **the interface artifact of a `pub` generic carries its body as
 serialized, already-checked mid-level IR** (item 3 above), and a downstream
 instantiation performs **zero semantic analysis** — it reads verified IR and
-lowers it to machine code. This does **not** reopen NN#17, because NN#17
+lowers it to machine code. **The IR carries the generic's def-site-resolved
+effects** (its `alloc` marking, including the conservative drop-glue alloc-ness of
+0007 §3.4/§5.2); the codegen tier **consumes** these resolved effects and **never
+re-derives an effect** at instantiation — effect resolution belongs to the once-only
+analysis at the generic's own module, not to codegen. This does **not** reopen NN#17, because NN#17
 forbids *inference across a signature*: nothing about the caller is inferred
 from the generic body, and nothing about the generic is inferred from the
 caller. The body crosses as a *finished proof-carrying artifact*, not as
@@ -193,7 +207,10 @@ read `net::tcp::connect`). `use net::tcp::{connect, listen};` brings named
 items directly. The path separator is **`::`**, lexically distinct from the
 `.` of value/field projection (0006). That distinction is a P2/NN#13 win: a
 reader — and the parser, without a symbol table — tells a *module path*
-(`a::b`) from a *value projection* (`a.b`) by token alone.
+(`a::b`) from a *value projection* (`a.b`) by token alone. The token after
+`::` decides the form with one-token lookahead: an identifier (path segment),
+`{` (group import), or `[` (a generic-value instantiation `name::[T]`,
+design 0007 §6.2.1).
 
 **No glob imports and no glob re-exports.** Every imported name is listed
 explicitly. A glob would (a) hide where a name came from (P2 locality) and (b)
@@ -397,23 +414,27 @@ rebuild) first become measurable.
   package this is more reading than a `pub(crate)` tag would be; we judge it the
   cheaper total cost because it removes a lattice, and the chain is a finite
   walk the language server can render on hover (P16).
-- **Package identity is the one irreducible manifest line.** We claimed "no
+- **Package identity, plus an optional freestanding claim, is the whole manifest budget.** We claimed "no
   configuration where convention suffices," and honored it for module
   structure; a globally-unique package name is the place convention genuinely
-  cannot reach, so one declaration stands. Calling that "no config" would be
+  cannot reach, so one declaration stands, joined only by the opt-in `freestanding` claim (§5); a
+  dependency **lockfile is deferred to package-manager scope**, not spent here.
+  Calling that "no config" would be
   dishonest; it is *minimal* config.
 - **Re-export facades create multiple paths to one name.** We ruled identity to
   the definition site and made multi-path imports idempotent, but a reader who
   sees `std::Foo` and `core::Foo` must still learn they are one entity. The
   toolchain shows canonical provenance; the residual cost is that the facade
   exists at all, accepted because P9's layering requires it.
-- **0007 seam is a real dependency, not a closed question.** Interfaces/impls,
+- **0007 seam — the placement predicate, now fixed by 0007 §2.3.** Interfaces/impls,
   coherence, and the orphan rule need module-level placement rules (an impl
   belongs in the interface's module or the type's module — the orphan rule's
   classic shape). This document fixes only that the module is the coherence
-  unit and an impl is an ordinary item under these `pub`/interface rules; 0007
-  must fix the placement predicate, and until it does, cross-module impls are
-  undesigned.
+  unit and an impl is an ordinary item under these `pub`/interface rules; 0007 §2.3
+  fixes the placement predicate: **the interface's *declaration* module is the
+  placement referent** (where `interface I[…]` is written), and for a generic
+  interface **the uniqueness key is the *instantiated* interface** `(I[args…], T)`,
+  not the bare `I` (F4).
 
 ## Reclassification record
 

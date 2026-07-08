@@ -16,6 +16,16 @@ growth by default"), **P20** (definition-site checking is a compile-speed
 (the memory model this must respect) and 0006 (the syntax whose deferrals this
 discharges). Where they conflict, the higher document wins and this one changes.
 
+**Revision history.** 2026-07-08 — revised per joint adversarial review #1 of
+designs 0007/0008 (`docs/reviews/2026-07-08-design-0007-0008-review-1.md`): F1/F11
+region-vs-type declaration keyword and the declaration-vs-use bracket rule (§6.1);
+F2 polymorphic-recursion def-site error plus a monomorphization depth limit (§5.1);
+F3 `name::[T]` generic-function-value spelling (§6.2); F4 instantiated-interface
+coherence key (§2.3, §7.1); F5 def-site-fixed drop-glue effects, §5.2 corrected
+(§3.4, §5.2); F7 cross-type `?` effect inheritance (§7.1); F8 conv-with-type-param
+unwritable (§8.5); F9 interface compact default and exact impl region match (§3.5);
+F10 `sizeof(T)` discharged by scope (§5.1).
+
 **What this is.** The definition-site-checked polymorphism P11 mandates: the
 `interface` construct and its bounds, their copyability/effect/loan interactions
 with 0001, the instantiation strategy, and the delimiter under the no-`<>`
@@ -139,13 +149,23 @@ rule:
 > An `impl I for T` may be declared **only in the module that defines `T`, or the
 > module that defines `I`** (the standard orphan rule).
 
+**For a generic interface, the placement referent is the interface's *declaration*
+module** (where `interface I[…]` is written), independent of any instantiation: an
+`impl From[E1] for T` may be declared in `T`'s module or in `From`'s declaration
+module, whatever `E1` is. **The uniqueness key, by contrast, is the *instantiated*
+interface** `(I[args…], T)` (next bullet) — placement keyed on the interface's
+declaration, coherence on its instantiation.
+
 Why this suffices without Rust's coherence engine:
 
 - **Finding an impl is a two-place lookup, not a search.** Both candidate homes are
   named by the type expression itself and reachable in the module DAG (P20) — no
   global scan; coherence is per-module over explicit names (P20 invalidation intact).
 - **Uniqueness is free** because there are no blanket or overlapping impls (§1.1):
-  each `(I, T)` pair has at most one impl, a duplicate is a compile error, and there
+  each `(I[args…], T)` pair has at most one impl — the coherence key is the
+  **instantiated** interface, so `impl From[E1] for T` and `impl From[E3] for T`
+  coexist (distinct keys), while a second `impl From[E1] for T` is a duplicate and a
+  compile error, and there
   is **no impl lattice, no negative reasoning, no specialization order** — the three
   pieces that make Rust coherence heavy, all absent because §1.1 refused what needs
   them.
@@ -216,7 +236,9 @@ effects are upper bounds) and bars that instance from the no-alloc ground floor.
 Blast radius is small: a container's own `drop` already frees its `Box` backing and
 is `alloc`-marked regardless of `T`, so `T`'s drop-effect rides inside an already-
 `alloc` op; the marker bites only a pure stack aggregate that owns-and-drops a bare
-`T`.
+`T`. This marker is fixed **once at the definition** and
+stands for every instance; it is **not** re-derived per concrete type at codegen
+(§5.2).
 
 Rejected: **effect polymorphism** (a per-instantiation `alloc` variable so
 `Container[u8]::drop` is provably non-alloc). Refused (§1.1) — it re-grows the closed-
@@ -231,6 +253,15 @@ EFFECT).
   provenance (§3.3) — all at whole-place granularity (no field-disjointness, §3.2).
   A generic returning a borrow of a borrowed `T` parameter uses the same region
   variables and compact default as any function (0001 §3.3).
+- **Interface methods returning a borrow: `self` is the sole borrow-in (F9).** For
+  an interface method that returns a borrow, 0001 §3.3's compact default counts
+  **`self` as the one borrow-in**, so `fn first(read self) -> read Elem` needs no
+  region variable and returns a borrow of `self`. A method that adds a second
+  borrow parameter alongside `self` must declare region variables (no default). An
+  **impl's method must match the interface's region signature exactly** — the same
+  region variables in the same positions — because a caller reasons from the
+  interface's declared regions (P2); an impl that renamed or widened them would lie
+  about provenance.
 - **A type argument never ranges over a borrow type.** A generic `[T]` binds an
   owned/value or `rawptr` type — never `read U`, `write U`, `[U]`, `write [U]`. This
   is 0001 §3.4 (no borrow-typed fields, to avoid region parameters on types) lifted
@@ -293,6 +324,40 @@ instances exist and that each carries the concrete cost of the substituted types
 shared-code indirection, no hidden dispatch, no cliff the programmer cannot see
 (Priority 4 applied to the compiler's own strategy, P11).
 
+### 5.1.1 Polymorphic recursion and the termination backstop (F2, F10)
+
+Monomorphization is a fixed point over the instantiations a program reaches. A
+generic that instantiates **itself with a strictly larger type argument** —
+`fn f[T](x: T) { … f(wrap(x)) … }`, whose recursive call *infers* the type argument
+`Wrap[T]` (§6.2, no call-site turbofish) — has no fixed point: the instantiation set
+is infinite. Two cases, kept honest:
+
+- **Decidable direct self-instantiation is a definition-site error.** When a
+  generic's body directly instantiates itself (or a mutually-recursive partner)
+  with a syntactically **growing** argument — the argument nests the parameter under
+  a type constructor, `T ↦ Wrap[T]` — non-termination is decidable from the body
+  alone and is reported **once, at the definition site**, never surfaced at
+  instantiation. NN#10's letter holds.
+- **The undecidable remainder is backstopped by a documented depth limit.**
+  Indirect or value-dependent instantiation chains are not decidable in general, so
+  a **deterministic, documented monomorphization depth limit** halts them. This is
+  classified honestly as a **compile *resource* limit**, not a type error: crossing
+  it aborts the build with a resource diagnostic naming the instantiation stack —
+  the same category as exhausting memory, **not** a TYPE error at instantiation, so
+  NN#10's letter ("instantiation produces no body-internal type error") is
+  preserved. **The residual, named:** the depth limit is a deterministic-but-real
+  compile cliff for the undecidable tail; NN#10's *spirit* (no invisible
+  instantiation cliff) is honored by determinism and documentation, but a resource
+  cliff is a resource cliff, recorded as such rather than claimed away.
+
+**`sizeof(T)` is discharged by scope (F10).** An opaque `T` has no known size at the
+definition site, so `sizeof(T)` is not a definition-site compile-time constant — but
+the prototype **does not implement generics at all**, so no `sizeof(T)` over an
+opaque `T` is written in prototype code today. When generics land, `sizeof(T)` is
+legal only **post-monomorphization**, where `T` is concrete and its size is known;
+at the definition site it may not be used where a compile-time constant is required.
+No prototype-scope change is needed; the obligation is scoped forward with generics.
+
 ### 5.2 The P20 check-once / instantiate-cached story
 
 Definition-site checking is the compile-speed architecture P20 names: the body is
@@ -301,8 +366,13 @@ its bounds. Instantiation is **codegen, never re-analysis** — substitute concr
 types, emit or reuse a cache keyed by the instantiation tuple within a module-DAG-
 invalidated build. A signature change rechecks; a body change re-codegens its
 instances but re-checks nothing downstream (P20 signature-bounded invalidation). An
-instance's `alloc`-ness is resolved from concrete types at codegen (§3.4) — a codegen
-fact, not a re-check, so it never reopens the body.
+instance's `alloc`-ness is **not** resolved per-instance at codegen: §3.4 fixes
+generic drop-glue alloc-ness **once, conservatively, at the definition site** (a
+`T`-dropping generic is `alloc`-marked for *every* instance, including drop-inert
+ones such as `Wrap[u8]`). Effects are therefore **never re-derived at codegen** —
+codegen only lowers the already-resolved def-site effect to machine code, so it
+never reopens the body. The check-once architecture is total: types, moves, loans,
+*and effects* are all settled at the definition.
 
 ### 5.3 The source-level override — deferred, obligation recorded
 
@@ -333,6 +403,41 @@ with brackets on its compiler-known intrinsics — `ptr_null[T]()`, `cast_ptr[U]
 `addr_to_ptr[T](a)` (0001 §4.2), retained by 0006. Reusing that bracket for user
 generics is P3 (one spelling for "type arguments"), not a Rust reflex.
 
+### 6.1.1 Declaration lists mix region and type parameters — keyword-disambiguated (F1, F11)
+
+Before generics, a bracket after a function name already declared **region
+variables** (0001 §3.3: `fn pick[r](…)`); this design now also declares **type
+parameters** in that same bracket (`fn id[T]`). Bare `[r]` and `[T]` are lexically
+identical, so a mixed list needs a rule. Two numbered rules govern every generic
+bracket:
+
+1. **Declaration vs. use (the F11 rule, stated explicitly).** A bracket
+   **immediately following an item's *name* in its declaration** — `fn choose[…]`,
+   `struct List[…]`, `enum Result[…]`, `interface From[…]` — is a
+   **parameter-declaration** list that *introduces* binders. A bracket following a
+   **name in type or expression position** — `List[u8]`, `From[E1]`, `Box[T]` — is a
+   **use** list that *applies* arguments. Declaration introduces, use applies; the
+   defining-occurrence-vs-referring-occurrence position decides, with no symbol table
+   (§6.2's leading-vs-following machinery handles the use side).
+2. **Region vs. type parameter inside a declaration list.** A parameter written
+   **`region r`** declares a **region variable** (0001 §3.3); a **bare identifier**
+   `T` declares a **type parameter**. Regions always wear the `region` keyword; a
+   bare bracketed identifier is *never* a region. So
+
+   ```
+   fn choose[region r, T](a: read[r] T, b: read[r] T, pick_a: bool) -> read[r] T
+   ```
+
+   declares one region variable `r` and one type parameter `T`, and the returned
+   borrow's provenance is `r` (explicit, per 0001 §3.3).
+3. **Compact-default trigger restated as "no region declarations."** 0001 §3.3's
+   compact default (a lone borrow-in/borrow-out needs no region variable) triggers
+   when the declaration list declares **no `region` parameter**. Type parameters do
+   **not** suppress it: `fn first[T](s: read T) -> read T` keeps the compact default
+   and needs no region. Only a `region` declaration turns the default off, and then
+   every returned-borrow provenance is written — the rare signature carries the
+   annotation weight (P12).
+
 ### 6.2 NN#13 — the grammar still parses without a symbol table
 
 - **Type position — clean, by leading-vs-following bracket.** A **leading** `[` in
@@ -362,6 +467,32 @@ generics is P3 (one spelling for "type arguments"), not a Rust reflex.
   price of a symbol-table-free grammar without `<>` or reopening `::` (variant-
   reserved). If the successor basket shows inference + annotations cannot cover a
   case, a keyword-led turbofish is the recorded re-open (OBL-GENERIC-TURBOFISH).
+
+### 6.2.1 Naming a generic function as a *value* — `name::[T]` (F3)
+
+§6.2 removes the call-site type-argument bracket, but a generic function used **as a
+value** — not called — still needs to name *one* instantiation: a `let` binding of a
+function, a fn-pointer slot, and a vtable field each store a concrete function, and a
+generic is not one until its type arguments are fixed. That instantiation is spelled
+with the **`::[T]`** digraph:
+
+```
+let f: fn(u8) -> u8 = id::[u8];                    // let-binding a generic fn as a value
+let slot: fn(read Node) -> u32 = weigh::[Node];    // fn-pointer slot
+```
+
+- **The `::[` digraph is unambiguous (NN#13-clean).** `::` is already the reserved
+  path separator (0008 §3), never an expression operator, so `name::[` cannot be read
+  as "index `name`" (that is `name[`) nor as a path segment (`::` here is followed by
+  `[`, not an identifier or `{`). A one-token check after `::` — is the next token
+  `[`? — separates the generic-value spelling from a module path, no symbol table.
+- **This is *not* the call-site turbofish §6.2 refused.** It appears only in **value**
+  positions (binding, pointer/vtable install), never on a call, so the
+  `foo[i]`-indexing collision cannot arise.
+- **It covers let-bindings, fn-pointer slots, and vtable fields uniformly:** installing
+  an impl method or a generic function behind a vtable slot names the instantiation
+  with `::[…]`, and the stored value is an ordinary concrete fn-pointer thereafter (its
+  effect marker rides on the pointer type, §4.2). Rare, keyword-free, NN#13-clean.
 
 ### 6.3 How the compiler-known parametric types migrate
 
@@ -417,6 +548,46 @@ module, which the error-defining crate owns). No impl ⟹ a definition-site erro
 the `?` site, attributable locally. Same-type `?` (0006) is the `E1 = E2` case,
 needing no impl. This is the entire cross-type story, and it grows the interface
 system by nothing (one library interface).
+
+**Coherence over the *instantiated* interface (F4).** The coherence key is
+`(From[E1], E2)` — the *instantiated* interface, not the bare `From` (§2.3) — so a
+single error type absorbs several sources without clash:
+
+```
+impl From[IoError]    for AppError { fn from(e: IoError)    -> Self { … } }
+impl From[ParseError] for AppError { fn from(e: ParseError) -> Self { … } }
+```
+
+These are two distinct keys, both legal in `AppError`'s module (which owns the
+placement referent — `From`'s *declaration* lives in `core`, `AppError`'s module owns
+`AppError`, §2.3). `expr?` selects the impl whose source type matches `expr`'s
+non-`ok` payload. A second `impl From[IoError] for AppError` would be a duplicate key
+and a compile error; `From[IoError]` and `From[ParseError]` never are.
+
+**Cross-type `?` inherits `From::from`'s declared effect — disclosed (F7).** `expr?`
+desugars to a **call** to `E2::from(e1)`, so it inherits `From::from`'s **declared**
+effect marker exactly as any bounded method call does (§4.1/§4.2). The marker is the
+interface's, an upper bound uniform across impls (§4.1): the non-`alloc` signature
+above makes every cross-type `?` non-`alloc`; an **allocation-permitting** error
+interface instead declares
+
+```
+interface From[E] { fn from(e: E) alloc -> Self }   // conversions may allocate
+```
+
+and then a cross-type `?` is an **allocating** operation for the caller, so using it
+in an **unmarked** function is a **definition-site effect error**:
+
+```
+fn load(s: read [u8]) -> AppResult {     // unmarked: no alloc
+    let n = decode(s)?;                   // ERROR at ?: from() is alloc, load is not
+    ok(n)                                //   (def-site effect error, reported here)
+}
+```
+
+Mark `load` `alloc` to fix it — identical to a direct `x.from(...)` call. Same-type
+`?` (0006, `E1 = E2`) calls no `from` and inherits no effect. `?` is sugar over a
+method call; the call's effect is the method's, nothing added.
 
 ### 7.2 `for` / iteration — deferred to the stdlib round (with the reason)
 
@@ -535,6 +706,12 @@ place the design chooses a value-vtable over a bound *on principle*, recorded as
   dissolved.
 - **No call-site turbofish** (§6.2): an inference-defeating, annotation-awkward case is
   unwritable until OBL-GENERIC-TURBOFISH.
+- **No generic numeric `conv`** (§8, F8): `conv`'s target is a **scalar-type
+  keyword** (0006 §6), never a type parameter, and there is **no `Num`/arithmetic
+  bound** to make an opaque `T` numeric (the same refusal as the no-`Num`-bound
+  cut). So `conv T x` over an opaque `T` is **unwritable by design** — generic code
+  cannot convert between an abstract `T` and a scalar. Recorded, consistent with the
+  bound system's refusal to grow an arithmetic hierarchy.
 - **No generic over borrows** (§3.5): no abstraction over `read U` items — a real cut
   that also blocks part of iteration (§7.2).
 - **Monomorphization-only** (§5.3): code-size blowup has no override until OBL-GENERIC-
