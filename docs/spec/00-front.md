@@ -91,8 +91,8 @@ Each chapter carries one status:
 | Chapter | Title | Status | Source / obligation |
 |---------|-------|--------|---------------------|
 | 00 | Front matter | NORMATIVE (process) | philosophy §9, P18, NN#20 |
-| 01 | Lexical structure | SKELETON | binds design 0006 (in draft); NN#13 |
-| 02 | Grammar | SKELETON | binds design 0006 (in draft); NN#13 |
+| 01 | Lexical structure | NORMATIVE-DRAFT | design 0006 (token inventory); NN#13/P13/NN#11 |
+| 02 | Grammar | NORMATIVE-DRAFT | design 0006 (real EBNF); NN#13/NN#17/P2/NN#11 |
 | 03 | Types and values | NORMATIVE-DRAFT | design 0001 §1/§5/§8 |
 | 04 | Ownership and borrows | NORMATIVE-DRAFT | design 0001 §2/§3/§5 + 0005 |
 | 05 | Unsafe and pointers | NORMATIVE-DRAFT + SKELETON | design 0001 §4 + 0004; P18 aliasing model |

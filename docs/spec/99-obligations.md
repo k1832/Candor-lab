@@ -108,6 +108,12 @@ chapter's stated obligations bind now.
   (03–08) is unblocked.
 - **Acceptance:** design 0006's token inventory is transcribed, satisfying §1's
   obligations; the prototype fixture (design 0002) is superseded, not codified.
+- **Discharged (2026-07-08):** chapter 01 promoted to NORMATIVE-DRAFT — design
+  0006's token inventory (keywords with hard/contextual status, the full bitwise
+  set, the `.*` single-token rule, integer-literal suffix and bare-over-range-
+  error rules, string/comment/identifier lexis), maximal-munch rules and their
+  documented boundaries, whitespace-insignificance, and the NN#13 tokenization-
+  without-context clause (01 §6) are transcribed. Acceptance met.
 
 ### OBL-GRAM — real-language grammar
 - **Chapter:** 02 (SKELETON). **Hook:** **NN#13** (parse without a symbol table);
@@ -116,6 +122,14 @@ chapter's stated obligations bind now.
 - **Acceptance:** design 0006's productions are transcribed, realizing complete
   signatures (modes, regions, effects, contracts) and the permissive-parse /
   strict-check separation.
+- **Discharged (2026-07-08):** chapter 02 promoted to NORMATIVE-DRAFT — the
+  complete real EBNF (items with the `ok` marker, types incl. `read[r] [T]` and
+  `[N]T`, signatures with take-by-omission/regions/`alloc`/contracts, statements,
+  expressions with the normative Rust-precedence table, `conv` scalar-keyword
+  production, `?`, the negative-literal fold, patterns, the match-arm boundary
+  rule, `unsafe`/regime blocks, `field_ptr`), the two-token-lookahead ceiling and
+  NN#13 walks (02 §10), and the canonical-form clauses (02 §9) are transcribed.
+  Acceptance met.
 
 ---
 
@@ -141,7 +155,8 @@ OBL-ALIAS, OBL-CONSIST), four feature gates (OBL-CONTRACT, OBL-FFI, OBL-GENERICS
 OBL-TEXT), one P11-round token constraint (OBL-GENERIC-BRACKET), two
 skeleton-chapter gates (OBL-LEX, OBL-GRAM), one real-toolchain gate
 (OBL-FMT-REBORROW), and one design-0001 hole found by transcription
-(OBL-SLICE-REGION).
+(OBL-SLICE-REGION). The two skeleton-chapter gates (OBL-LEX, OBL-GRAM) are
+**discharged** (2026-07-08) by the NORMATIVE-DRAFT promotion of chapters 01/02.
 
 Of these, **OBL-WINDOW, OBL-ALIAS, and OBL-CONSIST are the philosophy-named
 pre-stability tier** (P18, NN#20): no "1.0" precedes their discharge (chapter 00
