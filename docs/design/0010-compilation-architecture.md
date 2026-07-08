@@ -427,7 +427,42 @@ Per §8 sequencing, the arc is staged and honest about what each stage validates
   build). *Gate:* the compiled artifact's observable trace == the interpreter's
   on the full basket + fixtures, including fault identity (§4), on at least one
   hosted target. This is the first native codegen and the first compiled-vs-
-  interpreted differential test.
+  interpreted differential test. **Prototype status (2026-07-09 — Stage B: partial, core
+  CLOSED on the full corpus).** The first native backend ships (`src/backend/`,
+  `cranelift-{codegen,frontend,module,jit}` pinned `=0.132.3`): MIR -> Cranelift
+  IR -> in-process JIT, `opt_level=none`, whole program, one Cranelift fn per
+  `MirFn` (`run --engine=native`). Scalars lower to native ints (canonical i64 per
+  Candor sign/width); **checked ops are compute + explicit i128 range/overflow
+  test + conditional branch to a fault edge** (INV-CHECK — the natural Cranelift
+  lowering; div/rem/shift in i64 with MIN/-1 and shift-amount guards). Aggregates/
+  arrays/slices/`Box` live in the interpreter's exact flat `interp::mem` model,
+  baked as `base + candor_addr`, so the MMIO/allocator fixtures that mint absolute
+  addresses read/write identically. `Box`/`Alloc` dispatch through the vtable as
+  ordinary indirect calls; **drops are the static schedule unrolled at compile
+  time (runtime tag-switch for enum payloads), and Box pointees drop through
+  synthesized per-type glue fns** so recursive Box types are runtime recursion,
+  not infinite unrolling — INV-DROP, no runtime flag. **Fault identity
+  (INV-FAULT-ID): every fault edge lowers to `call rt_fault(k, s_start, s_end)` +
+  unreachable `trap`; the hook records `(k, s)` and `_longjmp`s to the driver's
+  `_setjmp` landing pad** (the chosen hook mechanism, §3 — `(k, s)` travel as
+  immediates, subsuming the PC-keyed side-table). *Gate:* `tests/stage_b.rs`
+  asserts native `(k, s, θ)` == the tree-walking oracle over the **FULL 31-fixture
+  runnable corpus** (five §11 `.cn` + `.cnr` twins incl. both stress suites,
+  corelib tree/flat, parity, real, generics), **zero out-of-subset**, plus the
+  scalar + 10-kind fault axis, bounds, and `?`-adjacent fault axes, on x86-64
+  Linux. **385 prior tests green; +7 Stage-B gates = 392; `cargo test`/`clippy`
+  clean.** **Honest under-specifications (reported):** (i) only `trace` is
+  MIR-marked `observable`, so INV-OBS-ORDER holds *trivially at `opt_level=none`*
+  (nothing reorders; `trace` is a call barrier) rather than by atomic
+  `MemFlags`/fences — rawptr/MMIO are not yet MIR-marked observable, deferring the
+  §1/§2 fence discipline to that marking (no optimizer runs here); (ii) the fault
+  exit uses glibc/musl `_setjmp`/`_longjmp` (this hosted target is unix); (iii)
+  i128 is used for the add/sub/mul/cmp/conv range math (inline, no libcall); (iv)
+  native recursion runs on a 512 MiB host-stack thread standing in for the
+  interpreter's heap frames; (v) the flat buffer has no inline OOB guard, so
+  out-of-model access faults the host rather than delivering `BadPointer` (no
+  runnable fixture exercises it). Stage C (incremental) and Stage D (optimization)
+  remain unbuilt.
 
 - **Stage C — incremental artifacts + the two-hash tiers.** Realize 0008 §2:
   interface-artifact format, signature-hash analysis gate, codegen-hash

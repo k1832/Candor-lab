@@ -127,15 +127,16 @@ fn report_diags(checked: Result<Vec<candor_proto::diag::Diag>, candor_proto::dia
 }
 
 fn run_run(rest: &[String]) -> ExitCode {
-    // `run [--engine=mir] <file>` (default engine is the tree-walker).
-    let mut engine_mir = false;
+    // `run [--engine=mir|native|tree] <file>` (default engine is the tree-walker).
+    let mut engine = "tree";
     let mut path: Option<&str> = None;
     for a in rest {
         match a.as_str() {
-            "--engine=mir" => engine_mir = true,
-            "--engine=tree" => engine_mir = false,
+            "--engine=mir" => engine = "mir",
+            "--engine=native" => engine = "native",
+            "--engine=tree" => engine = "tree",
             other if other.starts_with("--engine") => {
-                eprintln!("error: unknown --engine (use mir|tree)");
+                eprintln!("error: unknown --engine (use mir|native|tree)");
                 return ExitCode::from(2);
             }
             other => path = Some(other),
@@ -144,12 +145,15 @@ fn run_run(rest: &[String]) -> ExitCode {
     let path = match path {
         Some(p) => p,
         None => {
-            eprintln!("usage: candor-proto run [--engine=mir] <file>");
+            eprintln!("usage: candor-proto run [--engine=mir|native] <file>");
             return ExitCode::from(2);
         }
     };
-    if engine_mir {
+    if engine == "mir" {
         return run_run_mir(path);
+    }
+    if engine == "native" {
+        return run_run_native(path);
     }
     if std::path::Path::new(path).is_dir() {
         return report_run(candor_proto::run_dir(std::path::Path::new(path)));
@@ -203,6 +207,48 @@ fn run_run_mir(path: &str) -> ExitCode {
         }
         MirRunResult::Unsupported(what) => {
             eprintln!("error: outside the Stage-A MIR subset: {what}");
+            ExitCode::from(3)
+        }
+    }
+}
+
+/// `run --engine=native <file>` — the Stage-B Cranelift JIT engine.
+fn run_run_native(path: &str) -> ExitCode {
+    use candor_proto::MirRunResult;
+    let outcome = if std::path::Path::new(path).is_dir() {
+        candor_proto::run_dir_native(std::path::Path::new(path))
+    } else {
+        let src = match read(path) {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        if is_real(path) {
+            candor_proto::run_source_real_native(&src)
+        } else {
+            candor_proto::run_source_native(&src)
+        }
+    };
+    match outcome {
+        MirRunResult::Ok(run) => {
+            println!("{}", run.ret);
+            ExitCode::SUCCESS
+        }
+        MirRunResult::Fault(f) => {
+            eprintln!("{}", f.to_json());
+            ExitCode::from(candor_proto::interp::FAULT_EXIT)
+        }
+        MirRunResult::CheckErrors(diags) => {
+            for d in &diags {
+                println!("{}", d.to_json());
+            }
+            ExitCode::FAILURE
+        }
+        MirRunResult::ParseError(d) => {
+            println!("{}", d.to_json());
+            ExitCode::FAILURE
+        }
+        MirRunResult::Unsupported(what) => {
+            eprintln!("error: outside the native backend subset: {what}");
             ExitCode::from(3)
         }
     }

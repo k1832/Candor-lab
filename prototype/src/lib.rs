@@ -288,3 +288,95 @@ pub fn run_dir_mir(dir: &std::path::Path) -> MirRunResult {
     }
     lower_and_run(&build.program)
 }
+
+// ---------------------------------------------------------------------------
+// Stage B — the native (Cranelift JIT) execution engine (design 0010 §5).
+// Same parse+check+monomorphize front and the same MIR as the Stage-A engine;
+// only the terminal step differs: `backend::run` compiles the whole MirProgram
+// to native code and runs it, returning the identical `Run`/`Fault`. Out-of-
+// subset programs still surface as `Unsupported` (never a silent divergence).
+// ---------------------------------------------------------------------------
+
+pub mod backend;
+
+/// Resolve, lower to MIR, JIT-compile and run natively. Assumes checked input.
+fn lower_and_run_native(program: &ast::Program) -> MirRunResult {
+    let mut diags = Vec::new();
+    let items = resolve::resolve_program(program, &mut diags);
+    let mut consts = std::collections::HashMap::new();
+    for it in &program.items {
+        if let ast::Item::Static(st) = it {
+            if let ast::ExprKind::IntLit { value, .. } = &st.value.kind {
+                consts.insert(st.name.clone(), *value);
+            }
+        }
+    }
+    match mir::lower_checked(program, &items) {
+        Ok(mp) => match backend::run(&mp, &items, &consts) {
+            Ok(run) => MirRunResult::Ok(run),
+            Err(f) => MirRunResult::Fault(f),
+        },
+        Err(e) => MirRunResult::Unsupported(e.0),
+    }
+}
+
+fn run_generic_native(program: &ast::Program) -> MirRunResult {
+    let (diags, insts, shapes) = check::check_generic_program(program, true);
+    if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
+        return MirRunResult::CheckErrors(diags);
+    }
+    let mono = generics::monomorphize(program, &insts, &shapes);
+    if mono.diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
+        return MirRunResult::CheckErrors(mono.diags);
+    }
+    lower_and_run_native(&mono.program)
+}
+
+/// Throwaway (`.cn`) source through the native engine.
+pub fn run_source_native(src: &str) -> MirRunResult {
+    let program = match parse_source(src) {
+        Ok(p) => p,
+        Err(d) => return MirRunResult::ParseError(d),
+    };
+    let diags = check::check_program(&program);
+    if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
+        return MirRunResult::CheckErrors(diags);
+    }
+    lower_and_run_native(&program)
+}
+
+/// Real (`.cnr`) source through the native engine (monomorphizing generics first).
+pub fn run_source_real_native(src: &str) -> MirRunResult {
+    let program = match real::parse_source(src) {
+        Ok(p) => p,
+        Err(d) => return MirRunResult::ParseError(d),
+    };
+    if generics::is_generic_program(&program) {
+        return run_generic_native(&program);
+    }
+    let diags = check::check_program_real(&program);
+    if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
+        return MirRunResult::CheckErrors(diags);
+    }
+    lower_and_run_native(&program)
+}
+
+/// Module-tree (`.cnr` directory) through the native engine.
+pub fn run_dir_native(dir: &std::path::Path) -> MirRunResult {
+    let build = match modules::build_tree(dir) {
+        Ok(b) => b,
+        Err(d) => return MirRunResult::ParseError(d),
+    };
+    let mut diags = build.diags;
+    if generics::is_generic_program(&build.program) {
+        if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
+            return MirRunResult::CheckErrors(diags);
+        }
+        return run_generic_native(&build.program);
+    }
+    diags.extend(check::check_program_real(&build.program));
+    if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
+        return MirRunResult::CheckErrors(diags);
+    }
+    lower_and_run_native(&build.program)
+}

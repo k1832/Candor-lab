@@ -5,7 +5,11 @@ authorship: memory-safe, explicit where meaning lives, locally verifiable, with
 source-declared semantics and a compiler built as a conversation partner rather
 than a gatekeeper.
 
-**Status: design surface complete; implementation catching up.** The language's
+**Status: Candor compiles to native code.** Stage B of the compilation
+architecture is closed: MIR lowers through Cranelift to x86-64 with checked
+arithmetic, exact fault identity, and the full differential gate green - every
+runnable fixture produces identical observable traces interpreted, MIR-executed,
+and natively compiled. The language's
 central bet (value-first memory model, Bet 5) was tested against a frozen,
 pre-registered kill criterion: killed as first registered, re-examined under a
 corrected successor registration (both on the public record), and **provisionally
