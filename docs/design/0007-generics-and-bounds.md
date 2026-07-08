@@ -734,5 +734,9 @@ interface path (stage 1: only internally by `?`).
 
 **Stage-2 rulings (2026-07-08):** a generic impl's type parameters must appear in the target type
 (E1016) — the only sound monomorphization driver absent use-site impl shapes; receiver lowering
-for `recv.method()` follows the method's self mode (owned receivers borrow, they are not consumed);
-generic result enums keep their `ok` marker through substitution.
+for `recv.method()` follows the method's self mode — **`read self` / `write self` receivers borrow
+the receiver place (they are not consumed); a `take self` method consumes the receiver place through
+the same receiver syntax** (the earlier "owned receivers borrow, not consumed" wording is corrected:
+it held only for read/write self, and `take self` is exactly the consuming case 0009's `Iter::next`
+desugar depends on — see `docs/reviews/2026-07-08-design-0009-review-1.md` disp. 4); generic result
+enums keep their `ok` marker through substitution.

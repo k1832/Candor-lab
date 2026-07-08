@@ -9,7 +9,7 @@ this round's mandate.
 **Philosophy hooks:** **P11** (definition-site checking; a generic that compiles
 cannot fail at instantiation — NN#10 — extended intact to associated types),
 **P6** (small core; *the budget is fixed — adding requires removing*; this round
-draws down a reserve 0007 pre-authorized, §1.3, keeping every adjacent refusal),
+adds without removing (§1.3) — a named P6 tension the deciding authority accepts on the seed's measured pressure, keeping every adjacent refusal),
 **P4/P9** (no hidden allocation or control flow — the `for` desugar is
 statement-level, greppable, visibly costed, §4), **P10** (iteration carries the
 effect marker like any method and adds no coloring, §3.3), **P3** (one loop
@@ -31,6 +31,14 @@ desugar (§3–4), and a capture-free ruling on higher-order code (§5). It disc
 borrowed-item or mutating iteration (deferred — 0007 §3.5's collision is real and
 named, §3.4). Not a change to the memory model, effect set, coherence, or borrow
 discipline — all fixed by 0001/0007 and respected once.
+
+**Revision history.** 2026-07-08 — revised per adversarial review #1 of design 0009
+(`docs/reviews/2026-07-08-design-0009-review-1.md`): `Iter::next` alloc-marked and the
+ground-floor claim moved to `Indexed` (§3.1/§3.3/§8); the break-edge E0309 sink-move in
+the consuming desugar (§4.2/§4.3); the for-operand parses as `ExprNoStruct` (§4.4); §1.3
+budget rewritten honestly (addition without removal, the reserve fiction deleted); `for`/`in`
+made contextual keywords with the migration residual walked (§4.4/§9); §5.4 cross-references
+qualified to 0007; and the `Indexed` per-step guard+bounds cost named (§7).
 
 ---
 
@@ -79,14 +87,26 @@ running sum, a base pointer, an allocator). That is the closure question, answer
 capture-free (§5): state travels as an **explicit context value** — P2's
 allocator-as-value idiom (0007 §8.3) generalized, adding no surface.
 
-### 1.3 The budget: add one, remove nothing, keep the reserve
+### 1.3 The budget: an addition without a removal, named as such
 
-P6: *when you add, remove.* This round adds **one** construct — the associated
-type (§2) — plus two library interfaces built from it (§3). It removes nothing
-because it draws down a **reserve 0007 pre-authorized** (§1.1 held associated
-types with iteration as the named unlock; this is that unlock). The discipline is
-honored by *keeping every adjacent refusal* (§2.3): bounds on associated types,
-GATs, defaults, and more-than-one member per interface all stay refused.
+P6: *when you add, remove.* This round does not remove — it adds, and says so.
+There is no pre-authorized "reserve" to draw down: 0007 §1.1 *refused* associated
+types and *recorded a reopen condition* (the pressure cases must exist); a recorded
+reopen is a debt to be argued, not a paid-up credit. The seed supplied the pressure
+(§1.1–1.2), and this round spends budget against it. Counting the additions honestly:
+
+- **the associated type** (`type Item`, §2) — one new type-member construct;
+- **the `for` statement** (§4) — one new surface form;
+- **`for` / `in`** (§4.4) — two contextual keywords;
+- **`Iter` and `Indexed`** (§3) — two library interfaces;
+- **`IterStep`** (§3.1) — one library enum.
+
+That is a real P6 cost, not a wash. The deciding authority accepts it as a **named
+P6 tension**: the measured reading-friction of the seed's hand-coded ladders and
+recursion (§1.1) is judged to outweigh the surface added, and the tension is recorded
+here rather than dissolved by a fiction. The discipline is honored where it still can
+be — by *keeping every adjacent refusal* (§2.3): bounds on associated types, GATs,
+defaults, and more-than-one member per interface all stay refused.
 
 ---
 
@@ -123,7 +143,7 @@ is single-valued: no second impl to disambiguate against. Rust's heaviest
 associated-type syntax exists to name *which* impl; 0007's coherence already
 answered that, so the projection stays a bare path.
 
-### 2.3 What stays refused (the reserve kept intact)
+### 2.3 What stays refused (the refusals kept intact)
 
 Each is a debt, reopenable by amendment when a program calls it in.
 
@@ -162,14 +182,14 @@ both rather than adding swap/replace or region-typed iterators (both larger than
 the case warrants). Two small interfaces result, each one associated type,
 **selected by the operand's borrow mode** (lexically visible, NN#13):
 
-### 3.1 Consuming — `Iter` (operand moved)
+### 3.1 Consuming — `Iter` (operand moved, always `alloc`)
 
 ```
 enum IterStep[T, S] { ok More(T, S), Done }      // library generic; the seed's `Popped` shape
 
 interface Iter {
     type Item;
-    fn next(take self) -> IterStep[Item, Self];  // consume self; return item + successor
+    fn next(take self) alloc -> IterStep[Item, Self];  // consume self; return item + successor
 }
 ```
 
@@ -179,6 +199,16 @@ proven `pop_front(l: List[T]) -> Popped[T]` does (`std/list.cnr`). No borrow is
 stored, no element moves through a borrow. `Self` names the impl target (0007 §7.1
 vocabulary). `List[T]` impls this by generalizing `pop_front`; `for x in list`
 moves `list`.
+
+**`next` is `alloc`-marked, period (0007's uniform-marker rule, 0007 §4.1).** The
+headline consuming impl — `List::next` — must `unbox` its tail (§8), which allocates;
+a non-`alloc` interface method may allocate in *no* impl (0007 §4.1), so admitting
+`List` forces the marker onto the interface, and 0007 refused the effect polymorphism
+(a per-impl `alloc` variable, OBL-GENERIC-EFFECT) that would let one impl escape it.
+The marker is therefore uniform and unconditional: **every** consuming `for` is
+`alloc`, even over a `copy` element whose successor allocates nothing. Consuming
+iteration is thus *never* the no-alloc ground floor — that role is `Indexed`'s (§3.2,
+§3.3).
 
 ### 3.2 Borrow-copy — `Indexed` (operand borrowed, items copied)
 
@@ -194,18 +224,38 @@ associated state type, not stored in any iterator; it lives on the desugared
 loop's stack (§4.2). The collection is held only by a **loop-local `read` borrow**,
 never a field, so 0001 §3.4 holds. `Item` is copied out (the impl requires
 `Item: copy`, as `Arena`'s `get[T: copy]` already does). `for x in read arena`
-borrows and yields copies without consuming. This form carries the loan-soundness
+borrows and yields copies without consuming. **`at` carries no effect marker
+(non-`alloc`):** copying a `copy` `Item` out of a `read self` allocates nothing, so
+`for x in read coll` over an `Indexed` collection is non-`alloc` and interrupt-callable
+— the ground-floor iteration protocol (§3.3). This form carries the loan-soundness
 story (§4.3).
 
-### 3.3 Effects: no coloring (P10)
+### 3.3 Effects: no coloring, and the effect tier splits the protocols (P10)
 
 `Iter::next` and `Indexed::at` carry the effect marker like any method (0007 §4.1):
-a step that may allocate is `alloc`, and a `for` over it inherits that marker —
-an allocating `for` in an unmarked function is a definition-site effect error,
-identical to a bare method call. There is no iteration-specific effect rule and no
-transformed calling convention: the `for` is sugar over `loop` + method calls, so
-it colors nothing (P10, NN#9). A ground-floor consuming walk over a drop-inert
-`copy` element stays non-`alloc` and interrupt-callable.
+the `for` inherits its step's marker, so an allocating `for` in an unmarked function
+is a definition-site effect error, identical to a bare method call. There is no
+iteration-specific effect rule and no transformed calling convention: the `for` is
+sugar over `loop` + method calls, so it colors nothing (P10, NN#9).
+
+But the two protocols sit on **different effect tiers**, and this is fixed, not
+incidental: `Iter::next` is `alloc` uniformly (§3.1 — the consuming case is never
+ground-floor), while `Indexed::at` is non-`alloc` uniformly (§3.2 — a copy-out over a
+`read` borrow allocates nothing). The **ground-floor, interrupt-callable iteration
+protocol is `Indexed`** (copy items, non-`alloc`); consuming iteration is not it.
+
+**The effect axis strengthens the two-protocol argument (P3).** §3's split was argued
+from operand mode (moved vs. borrowed); the effect tier is a *second, independent*
+reason the count is two. A single unified iteration interface would carry **one**
+uniform effect marker across every impl (0007 §4.1): mark it `alloc` and every
+ground-floor copy walk (`Arena`) is taxed off the no-alloc floor; mark it non-`alloc`
+and the allocating consuming impl (`List`, which `unbox`es) is inexpressible (0007 §4.1
+bars allocation under an unmarked method). The *only* way one protocol could span both
+tiers is a per-impl effect variable — **effect polymorphism, which 0007 refused**
+(0007 §1.1, OBL-GENERIC-EFFECT). So the protocols differ not merely by operand mode but
+by effect tier, and unifying them would require exactly the machinery 0007 declined.
+The two-protocol shape is forced twice over; this is not a patch on the P3 argument but
+a strengthening of it.
 
 ### 3.4 The named cut
 
@@ -255,12 +305,76 @@ allocation is the impl's marked, inherited `next`/`at`, §3.3). Consuming:
 // for x in coll { BODY }  ==>
 let mut __it = coll;                     // coll MOVED; __it owns all iterator state
 loop {
-    match __it.next() {
-        IterStep::More(x, __rest) => { __it = __rest; BODY }
-        IterStep::Done => { break; }
+    match __it.next() {                  // next() takes self: CONSUMES __it every turn
+        IterStep::More(x, __rest) => { __it = __rest; BODY* }
+        IterStep::Done => { break; }     // __it already moved out by next(): UNINITIALIZED here
     }
 }
+// after the loop, __it is uninitialized on EVERY path (the exit-edge accounting below)
 ```
+
+**Why `next` consuming `__it` is load-bearing — the exit-edge accounting (E0309).**
+`next(take self)` moves `__it` out on every turn; `More` restores it (`__it = __rest`),
+`Done` does not. So on the `Done` edge — the only edge that falls through to the
+post-loop point without a `break` — `__it` is uninitialized. 0001's drop scheduling
+requires init state to be **path-independent** at any drop point (E0309), so *every*
+edge reaching post-loop must agree `__it` is uninitialized. The desugar makes each
+exit edge consume `__it`:
+
+- **`Done`** consumes `__it` via `next` (the move is not restored) — uninitialized.
+- **`break`** edges do *not* naturally consume `__it` (a `break` inside `BODY` fires
+  just after `__it = __rest`, when `__it` is live), so `BODY*` is `BODY` with every
+  `break` targeting this loop rewritten to a **synthesized sink-move** that consumes
+  `__it` first:
+
+  ```
+  { let __sink = __it; break; }          // move __it into __sink, which drops as break unwinds
+  ```
+
+- **`return` / `?`** edges leave the function, not the loop; `__it` is a live local
+  there and is dropped at its ordinary **per-path drop point** by 0001's drop schedule
+  — it never reaches post-loop, so it needs no sink-move.
+
+Post-loop, `__it` is therefore uniformly uninitialized on `Done` and on every rewritten
+`break`. Path-independent, **zero new rules** — the sink-move is an ordinary move into
+a scoped binding, and E0309 is the *existing* check.
+
+**The non-example (the reviewer's `has_positive`).** A `for` whose body breaks early is
+exactly the collision. Source:
+
+```
+fn has_positive(list: List[i64]) alloc -> bool {   // alloc: List::next unboxes (§3.1)
+    let mut found: bool = false;
+    for x in list {
+        if x > 0 { found = true; break; }
+    }
+    return found;
+}
+```
+
+Desugared with the E0309-satisfying sink-move:
+
+```
+fn has_positive(list: List[i64]) alloc -> bool {
+    let mut found: bool = false;
+    let mut __it = list;
+    loop {
+        match __it.next() {
+            IterStep::More(x, __rest) => {
+                __it = __rest;
+                if x > 0 { found = true; { let __sink = __it; break; } }  // sink-move, then break
+            }
+            IterStep::Done => { break; }                                  // __it consumed by next()
+        }
+    }
+    return found;                        // __it uninitialized on BOTH the Done and the break path
+}
+```
+
+Without the sink-move the `break` edge would carry `__it` *initialized* (just set to
+`__rest`) into a post-loop point the `Done` edge reaches *uninitialized* — the join
+disagrees and 0001 reports **E0309**. The synthesized sink-move consumes `__it` on the
+break edge, restoring path-independence.
 
 Borrow-copy:
 
@@ -276,9 +390,13 @@ loop {
 }
 ```
 
-No hidden allocation, no hidden control flow: `loop`, `match`, the move or borrow,
-and the increment are ordinary constructs the reader can cost (P4). Rendered as
-source on request (P4/P6 transparency).
+The borrow-copy loop needs **no** exit-edge rewrite: `__c` is a `read` borrow (dropped
+trivially) and `__i` is a `usize` (`copy`, drop-inert), so no owned iterator state
+crosses the `break` — the E0309 concern is specific to `Iter`'s owned `__it`.
+
+No hidden allocation, no hidden control flow: `loop`, `match`, the move or borrow, the
+increment, and the sink-move are ordinary constructs the reader can cost (P4). Rendered
+as source on request (P4/P6 transparency).
 
 ### 4.3 Loans and the iterator-invalidation soundness story
 
@@ -288,7 +406,8 @@ Iterator invalidation is prevented by the **existing loan machinery**, no new ru
 - **Consuming: by the move.** `for x in coll` *moves* `coll` into `__it`, so `coll`
   is uninitialized after (0001 §1.6) and any mention of it in `BODY` is a
   use-after-move error. The collection is gone; invalidation is structurally
-  impossible.
+  impossible. `__it` itself is consumed on every exit edge (§4.2's sink-move
+  accounting), so no live iterator survives to invalidate post-loop either.
 - **Borrow-copy: by the XOR loan.** `__c = read coll` is a **loop-local borrow whose
   live range spans the loop** (0001 §2.3 NLL-lite: used by `at` every iteration).
   By XOR (0001 §2.2) a `write` of `coll` cannot coexist with that live `read` loan:
@@ -312,10 +431,24 @@ desugar target; the safety is old.
 
 ### 4.4 NN#13 walk
 
-- **`for` / `in`** — new hard keywords (anticipated by 0006 §7). `for PATTERN in
-  OPERAND {` tokenizes without a symbol table; no production competes. The operand
-  is an ordinary borrow/place expression — the parser need not know whether `coll`
-  is `Iter` or `Indexed` (a checker fact, like 0007's `Name[…]` arity).
+- **`for` / `in`** — **contextual keywords** (like `type`, below; consistent with the
+  round's grammar discipline), not hard reserved words. `for PATTERN in OPERAND {`
+  tokenizes without a symbol table: `for` in statement-leading position begins the loop
+  and `in` separates pattern from operand; elsewhere both remain ordinary identifiers
+  (the residual is walked in §9's migration note). No production competes. **The
+  operand parses as `ExprNoStruct`** — the same restriction 0006 §0.7 places on the
+  `if`/`while` condition, extended here to the `for` operand: a bare struct literal is
+  excluded so the `{` that opens the loop body is never misread as the start of a
+  struct value. The excluded case is a `Range`-style literal, which must be
+  parenthesized:
+
+  ```
+  for x in Range { lo: 0, hi: n } { … }     // REJECTED: `{ lo: 0, … }` reads as the loop body
+  for x in (Range { lo: 0, hi: n }) { … }   // OK: parenthesized, then the body `{`
+  ```
+
+  The parser need not know whether the operand is `Iter` or `Indexed` (a checker fact,
+  like 0007's `Name[…]` arity).
 - **`type Item;`** — inside `interface`/`impl` bodies only, `type` is a
   **contextual keyword** (declaration in an interface, assignment `type Item = u8;`
   in an impl). Outside, `type` is a plain identifier (no top-level alias exists), so
@@ -390,8 +523,8 @@ Reopen requires **both**: (a) a basket-grade case where the capture-free threadi
 cost (§5.2) is *measured* as the dominant reading-friction or expressiveness
 failure — the bar 0007 §1.1 set for associated types, now met by iteration and to
 be met by closures before they ship; **and** (b) a capture model compatible with
-§3.5 — **move/copy captures only**, closure type a synthesized owned aggregate
-with ordinary drop glue and §3.4 alloc-on-drop, **borrow captures remaining
+**0007 §3.5** — **move/copy captures only**, closure type a synthesized owned aggregate
+with ordinary drop glue and **0007 §3.4** alloc-on-drop, **borrow captures remaining
 refused** (they are the region-typed-closure machinery). Until both hold,
 capture-free is the one way (P3).
 
@@ -415,7 +548,7 @@ capture-free is the one way (P3).
 - **Full capturing closures — rejected** (§5): a whole-memory-model addition for a
   capture-free case; OBL-GENERICS-CLOSURE gates the reopen.
 - **Bounds on associated types / GATs / defaults / multiple members — rejected**
-  (§2.3): the reserve kept intact, each reopenable by its own basket case.
+  (§2.3): the refusals kept intact, each reopenable by its own basket case.
 - **`for` as keyword-free library sugar — rejected** (§4.1): the open-coded walk
   is the friction P13 measures; one traversal keyword earns its slot.
 
@@ -436,6 +569,15 @@ capture-free is the one way (P3).
   O(n)-indexed structure is an O(n²) walk — a cliff the *impl author* must not
   create (the interface documents "cheap `at`"); no checker enforces it, an idiom
   obligation consistent with P4.
+- **`Indexed` costs a guard + a bounds check per step** (§4.2): each turn runs the
+  loop's termination guard (the `Opt::None` match on `at`) *and* the impl's in-range
+  test (`i >= count`, §8), where the seed's manual index ladder paid a *single* static
+  check for the whole fixed-length unrolling. A real per-element cost, not a wash — but
+  a **visible** one: the reader sees the `for` and knows the loop guards and
+  bounds-checks every step, exactly P4's visible-cost test (formatter and reviewer read
+  the traversal and its cost in the same four tokens). The ladder hid the same
+  termination reasoning in prose the reviewer had to reconstruct; the `for` names it.
+  Cost paid in cycles, bought back in legibility.
 - **The associated type is still real complexity** (P11's concession): the claim is
   only that it is the *smallest* form the pressure case demands, every adjacent
   growth (§2.3) refused.
@@ -460,14 +602,15 @@ fn sum(ar: read Arena[i64]) -> i64 {
 ```
 
 Mutating `ar` inside the `for` is E0303 (§4.3). Non-consuming, copy-yielding,
-ground-floor (non-`alloc`), one associated type.
+**ground-floor** (non-`alloc`, interrupt-callable — the ground-floor iteration
+protocol, §3.3), one associated type.
 
 **`List` consumption replaces open-coded recursion:**
 
 ```
 impl[T] Iter for List[T] {
     type Item = T;
-    fn next(take self) -> IterStep[T, List[T]] {
+    fn next(take self) alloc -> IterStep[T, List[T]] {              // alloc: matches the interface (§3.1)
         match self {
             List::Nil => IterStep::Done,
             List::Cons(x, tail) => IterStep::More(x, unbox(tail)),   // pop_front, generalized
@@ -479,7 +622,7 @@ impl[T] Iter for List[T] {
 
 `next` is `alloc` (it `unbox`es, §3.3), so `for x in list` inherits `alloc` — a
 `for` over a `List` in an unmarked function is a definition-site effect error at
-the loop, exactly the P2/§3.4 partition.
+the loop, exactly the P2 / 0007 §3.4 partition.
 
 ---
 
@@ -520,7 +663,19 @@ the loop, exactly the P2/§3.4 partition.
   `type`/`I::Item` grammar join OBL-GRAM's surface; the two iteration interfaces
   and their by-value discipline join OBL-GENERICS's stdlib-successor scope.
 
-**Migration: none — everything here is additive.** New keywords that were plain
-identifiers or unused (`for`, `in`, contextual `type`), new library interfaces, a
-new statement form: no existing program changes meaning, so no migrator is required
-(P15's additive path).
+**Migration: no reserved-word break.** `for`, `in`, and `type` are **contextual**
+keywords (§4.4): each is a keyword only in its grammatical position — `for`/`in` in the
+for-statement header, `type` inside interface/impl bodies — and an ordinary identifier
+everywhere else. So no program breaks merely by *containing* an identifier named `for`,
+`in`, or `type`; the new library interfaces and the new statement form are purely
+additive (P15's additive path).
+
+**The residual, walked.** One narrow case is not free: a variable named `for` or `in`
+used **in the position where the for-statement grammar now commits**. A statement that
+begins with the token `for` is parsed as a loop, so a pre-existing statement-leading use
+of a variable `for` (e.g. `for = next_id();` or `for + 1;`) would misparse; a variable
+`in` sitting where the header expects the `in` separator collides likewise. That is the
+whole residual — it bites only an identifier both named `for`/`in` *and* appearing in the
+one position the keyword now claims; any other use (a field, a call argument, an `in` not
+between a `for`-pattern and its operand) is untouched. The corelib seed uses no such
+names, so the measured migration cost is zero; the residual is recorded, not claimed away.
