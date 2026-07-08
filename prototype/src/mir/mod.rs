@@ -1,0 +1,270 @@
+//! Stage A — the checked MIR (design 0010 §2, §5).
+//!
+//! A typed, explicit control-flow-graph mid-level IR lowered from the *checked,
+//! resolved, monomorphized* AST. It carries the analysis tier's facts as data
+//! (design 0010 §2(a)): fault checks (INV-CHECK), the static drop schedule
+//! (INV-DROP), observable markers (INV-OBS-ORDER), and effect information; a
+//! separate execution engine (`interp`) runs it *precisely* — every fault edge
+//! taken immediately, no reordering, no window-interior retirement, no late
+//! detection (the R1–R3-free `density → 1` limit of the formalization §10). This
+//! makes the MIR a faithful *precise* carrier of 0001's semantics, validated by
+//! `(k, s, θ)` semantic-trace equality against the tree-walking oracle
+//! (`tests/stage_a.rs`).
+//!
+//! ## The MIR invariants (design 0010 §2), as checkable properties
+//! * **INV-CHECK** — every default (`Regime::Checked`) arithmetic / conversion op
+//!   carries its fault edge *explicitly* as data (`Bin.fault` / `Un.fault` /
+//!   `Conv.fault` is `Some`); a `wrapping`/`saturating` op is a *distinct* op
+//!   (`regime != Checked`) carrying no overflow edge. Asserted by
+//!   [`check_invariants`].
+//! * **INV-OBS-ORDER** — observable statements (here `trace`; rawptr/MMIO in the
+//!   extension) are marked (`Statement::observable`) and emitted in program order;
+//!   the lowering is order-preserving by construction (it only ever *appends*).
+//!   Asserted structurally: observables' source spans are monotonic along each
+//!   block's linear statement stream.
+//! * **INV-FAULT-ID** — the delivered fault is program-order-first `f★`
+//!   (kind + span). Stage A is **R1–R3-free**, so the operational f★-replay
+//!   obligation (formalization §6.5) is *vacuous* — but the invariant's fields
+//!   exist: every `MirFn` records [`ReplayPolicy::Precise`] (the replay origin is
+//!   never consulted because no fault is ever detected late), and every fault edge
+//!   carries the exact `(k, s)` it delivers.
+//! * **INV-DROP** — drops appear as explicit [`StatementKind::Drop`] statements at
+//!   exactly the static schedule (reverse declaration order at each scope exit,
+//!   skipping moved/never-`needs_drop` locals), never behind a runtime flag.
+
+use std::collections::HashMap;
+
+use crate::ast::{BinOp, UnOp};
+use crate::interp::FaultKind;
+use crate::span::Span;
+use crate::token::ScalarTy;
+use crate::types::Type;
+
+pub mod build;
+pub mod interp;
+
+pub use build::{lower_checked, LowerError};
+
+/// Arithmetic regime (design 0001 §7.2; 0006 §2.4). The regime is *baked* into
+/// every arithmetic op at lowering (from the enclosing `wrapping`/`saturating`
+/// block), so it is greppable IR data — the INV-CHECK "distinct op" requirement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Regime {
+    Checked,
+    Wrapping,
+    Saturating,
+}
+
+/// A fault edge carried as explicit MIR data (INV-CHECK / INV-FAULT-ID): the exact
+/// fault identity `(k, s)` the op delivers when its check trips.
+#[derive(Clone, Copy, Debug)]
+pub struct FaultEdge {
+    pub kind: FaultKind,
+    pub span: Span,
+}
+
+/// The precision policy of a `MirFn`. Stage A is *precise* only (R1–R3-free): the
+/// f★-replay origin (formalization §6.5) is never needed because no fault is
+/// detected late. The field exists so a later batched/vectorized build can record
+/// a different policy and discharge the replay obligation (design 0010 §2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplayPolicy {
+    /// Every fault edge is taken immediately; replay is vacuous.
+    Precise,
+}
+
+pub type LocalId = usize;
+pub type BlockId = usize;
+
+/// An operand: a compile-time integer constant (with its scalar type) or a read of
+/// a local. Scalars carry their logical (sign-correct) value directly.
+#[derive(Clone, Copy, Debug)]
+pub enum Operand {
+    Const(i128, ScalarTy),
+    Local(LocalId),
+}
+
+/// A right-hand-side value. Fault-capable ops carry their fault edge as data.
+#[derive(Clone, Debug)]
+pub enum Rvalue {
+    Use(Operand),
+    /// Checked/wrapping/saturating arithmetic, bitwise, and shift (design 0001
+    /// §7.2). `ty` is the computation/result scalar type. `span` is the op span
+    /// (used for the always-on div-by-zero check on `Div`/`Rem`). `fault` is the
+    /// overflow/shift edge — `Some` iff `regime == Checked` for a fallible op
+    /// (INV-CHECK).
+    Bin {
+        op: BinOp,
+        regime: Regime,
+        ty: ScalarTy,
+        l: Operand,
+        r: Operand,
+        span: Span,
+        fault: Option<FaultEdge>,
+    },
+    /// Unary negate / logical-not / bitwise-not.
+    Un {
+        op: UnOp,
+        regime: Regime,
+        ty: ScalarTy,
+        v: Operand,
+        fault: Option<FaultEdge>,
+    },
+    /// Comparison (`== != < <= > >=`) producing a `bool`. Never faults.
+    Cmp { op: BinOp, l: Operand, r: Operand },
+    /// `conv T (e)` integer conversion (design 0001 §8.1). `fault` is the
+    /// conv-loss edge — `Some` iff `regime == Checked` (INV-CHECK).
+    Conv {
+        to: ScalarTy,
+        regime: Regime,
+        v: Operand,
+        fault: Option<FaultEdge>,
+    },
+    /// A direct call to a user function by name (non-generic subset).
+    Call { func: String, args: Vec<Operand> },
+}
+
+#[derive(Clone, Debug)]
+pub enum StatementKind {
+    /// Assign an rvalue to a local place.
+    Assign(LocalId, Rvalue),
+    /// The `trace(x)` observable (design 0010 §5 / INV-OBS-ORDER): appends `x`
+    /// (as `i64`) to the observable trace `θ`.
+    Trace(Operand),
+    /// A statically-scheduled drop of a local (INV-DROP). In the Stage-A scalar
+    /// subset every reachable local is drop-inert, so this is a no-op carrier —
+    /// but it is emitted at the exact scheduled point so the invariant is real.
+    Drop(LocalId),
+}
+
+#[derive(Clone, Debug)]
+pub struct Statement {
+    pub kind: StatementKind,
+    pub span: Span,
+    /// INV-OBS-ORDER: is this an observable operation? Observables are never
+    /// reordered, coalesced, or eliminated by the lowering.
+    pub observable: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum Terminator {
+    Goto(BlockId),
+    Branch {
+        cond: Operand,
+        then_bb: BlockId,
+        else_bb: BlockId,
+    },
+    /// Return the current value of local `0` (the return place).
+    Return,
+    /// A fault edge terminator (assert/panic/contract failure, and the sink of a
+    /// branch to a fault block). Delivers `(k, s)` immediately.
+    Fault(FaultEdge),
+}
+
+#[derive(Clone, Debug)]
+pub struct BasicBlock {
+    pub stmts: Vec<Statement>,
+    pub term: Terminator,
+}
+
+/// A typed local. `_0` is the return place; `_1..=num_params` are the parameters.
+#[derive(Clone, Debug)]
+pub struct LocalDecl {
+    pub ty: Type,
+    pub name: Option<String>,
+    /// INV-DROP: does this local carry a drop obligation (a `needs_drop` type)?
+    pub drop_obligation: bool,
+}
+
+/// A contract predicate (`requires`/`ensures`) lowered into the function's block
+/// graph: execute from `entry` until a `Return`, then read `value` (a `bool`); if
+/// false, deliver `(kind, span)`.
+#[derive(Clone, Debug)]
+pub struct Predicate {
+    pub entry: BlockId,
+    pub value: LocalId,
+    pub span: Span,
+    pub kind: FaultKind,
+}
+
+#[derive(Clone, Debug)]
+pub struct MirFn {
+    pub name: String,
+    pub num_params: usize,
+    /// The local `ensures` reads as `result` (design 0001 §7.3), if any.
+    pub result_local: Option<LocalId>,
+    pub locals: Vec<LocalDecl>,
+    pub blocks: Vec<BasicBlock>,
+    pub entry: BlockId,
+    pub requires: Vec<Predicate>,
+    pub ensures: Vec<Predicate>,
+    pub replay: ReplayPolicy,
+}
+
+#[derive(Clone, Debug)]
+pub struct MirProgram {
+    pub fns: Vec<MirFn>,
+    pub fn_index: HashMap<String, usize>,
+}
+
+impl MirProgram {
+    pub fn get(&self, name: &str) -> Option<&MirFn> {
+        self.fn_index.get(name).map(|i| &self.fns[*i])
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Invariant checks (design 0010 §2). Run as debug assertions by the lowering and
+// as an explicit test axis (`tests/stage_a.rs`).
+// ---------------------------------------------------------------------------
+
+/// Verify the MIR invariants of a well-formed function. Panics with a precise
+/// message on violation (used via `debug_assert` in the lowering).
+pub fn check_invariants(f: &MirFn) {
+    // INV-FAULT-ID: Stage A is precise; the replay origin is never consulted.
+    assert_eq!(f.replay, ReplayPolicy::Precise, "Stage A MIR must be precise");
+    for (bi, b) in f.blocks.iter().enumerate() {
+        let mut last_obs: Option<usize> = None;
+        for s in &b.stmts {
+            // INV-CHECK: every default-regime fallible arithmetic/conv op carries
+            // its fault edge explicitly.
+            if let StatementKind::Assign(_, rv) = &s.kind {
+                match rv {
+                    Rvalue::Bin { op, regime, fault, .. } if *regime == Regime::Checked && bin_is_fallible(*op) => {
+                        assert!(
+                            fault.is_some(),
+                            "INV-CHECK: checked {op:?} in {}#bb{bi} lacks its fault edge",
+                            f.name
+                        );
+                    }
+                    Rvalue::Un { op: UnOp::Neg, regime, fault, .. } if *regime == Regime::Checked => {
+                        assert!(fault.is_some(), "INV-CHECK: checked neg in {} lacks its fault edge", f.name);
+                    }
+                    Rvalue::Conv { regime, fault, .. } if *regime == Regime::Checked => {
+                        assert!(fault.is_some(), "INV-CHECK: checked conv in {} lacks its fault edge", f.name);
+                    }
+                    _ => {}
+                }
+            }
+            // INV-OBS-ORDER: observables appear in nondecreasing source order along
+            // the block (the lowering is order-preserving — it only appends).
+            if s.observable {
+                if let Some(prev) = last_obs {
+                    assert!(
+                        s.span.start >= prev,
+                        "INV-OBS-ORDER: observable reordered in {}#bb{bi}",
+                        f.name
+                    );
+                }
+                last_obs = Some(s.span.start);
+            }
+        }
+    }
+}
+
+fn bin_is_fallible(op: BinOp) -> bool {
+    matches!(
+        op,
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Shl | BinOp::Shr
+    )
+}

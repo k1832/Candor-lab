@@ -28,11 +28,11 @@ fn main() -> ExitCode {
     match (args.get(1).map(String::as_str), args.get(2)) {
         (Some("parse"), Some(path)) => run_parse(path),
         (Some("check"), Some(path)) => run_check(path),
-        (Some("run"), Some(path)) => run_run(path),
+        (Some("run"), Some(_)) => run_run(&args[2..]),
         (Some("count"), Some(path)) => run_count(path),
         (Some("migrate"), Some(path)) => run_migrate(path, &args[3..]),
         _ => {
-            eprintln!("usage: candor-proto (parse|check|run|count) <file>  |  migrate <file.cn> [-o <out.cnr>]  (.cnr = real syntax, .cn = throwaway)");
+            eprintln!("usage: candor-proto (parse|check|run|count) <file>  |  run [--engine=mir] <file>  |  migrate <file.cn> [-o <out.cnr>]  (.cnr = real syntax, .cn = throwaway)");
             ExitCode::from(2)
         }
     }
@@ -126,7 +126,31 @@ fn report_diags(checked: Result<Vec<candor_proto::diag::Diag>, candor_proto::dia
     }
 }
 
-fn run_run(path: &str) -> ExitCode {
+fn run_run(rest: &[String]) -> ExitCode {
+    // `run [--engine=mir] <file>` (default engine is the tree-walker).
+    let mut engine_mir = false;
+    let mut path: Option<&str> = None;
+    for a in rest {
+        match a.as_str() {
+            "--engine=mir" => engine_mir = true,
+            "--engine=tree" => engine_mir = false,
+            other if other.starts_with("--engine") => {
+                eprintln!("error: unknown --engine (use mir|tree)");
+                return ExitCode::from(2);
+            }
+            other => path = Some(other),
+        }
+    }
+    let path = match path {
+        Some(p) => p,
+        None => {
+            eprintln!("usage: candor-proto run [--engine=mir] <file>");
+            return ExitCode::from(2);
+        }
+    };
+    if engine_mir {
+        return run_run_mir(path);
+    }
     if std::path::Path::new(path).is_dir() {
         return report_run(candor_proto::run_dir(std::path::Path::new(path)));
     }
@@ -140,6 +164,48 @@ fn run_run(path: &str) -> ExitCode {
         candor_proto::run_source(&src)
     };
     report_run(outcome)
+}
+
+/// `run --engine=mir <file>` — the Stage-A precise MIR interpreter.
+fn run_run_mir(path: &str) -> ExitCode {
+    use candor_proto::MirRunResult;
+    let outcome = if std::path::Path::new(path).is_dir() {
+        candor_proto::run_dir_mir(std::path::Path::new(path))
+    } else {
+        let src = match read(path) {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        if is_real(path) {
+            candor_proto::run_source_real_mir(&src)
+        } else {
+            candor_proto::run_source_mir(&src)
+        }
+    };
+    match outcome {
+        MirRunResult::Ok(run) => {
+            println!("{}", run.ret);
+            ExitCode::SUCCESS
+        }
+        MirRunResult::Fault(f) => {
+            eprintln!("{}", f.to_json());
+            ExitCode::from(candor_proto::interp::FAULT_EXIT)
+        }
+        MirRunResult::CheckErrors(diags) => {
+            for d in &diags {
+                println!("{}", d.to_json());
+            }
+            ExitCode::FAILURE
+        }
+        MirRunResult::ParseError(d) => {
+            println!("{}", d.to_json());
+            ExitCode::FAILURE
+        }
+        MirRunResult::Unsupported(what) => {
+            eprintln!("error: outside the Stage-A MIR subset: {what}");
+            ExitCode::from(3)
+        }
+    }
 }
 
 /// Print a run outcome (shared by single-file and module-tree run).

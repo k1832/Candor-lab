@@ -11,6 +11,7 @@ pub mod diag;
 pub mod generics;
 pub mod interp;
 pub mod lexer;
+pub mod mir;
 pub mod modules;
 pub mod parser;
 pub mod real;
@@ -183,4 +184,97 @@ pub fn run_dir(dir: &std::path::Path) -> RunResult {
 pub fn migrate_source(src: &str) -> Result<String, Diag> {
     let program = parse_source(src)?;
     Ok(real::emit::emit_program(&program))
+}
+
+
+// ---------------------------------------------------------------------------
+// Stage A — the MIR interpreter as an alternate execution engine (design 0010
+// §5). Same parse+check front; a MIR lowering + precise MIR interpreter replaces
+// the tree-walker. Out-of-subset constructs return `Unsupported` (the honest
+// coverage boundary), never a silent divergence.
+// ---------------------------------------------------------------------------
+
+/// Outcome of running a program through the MIR engine.
+pub enum MirRunResult {
+    Ok(interp::Run),
+    Fault(interp::Fault),
+    CheckErrors(Vec<Diag>),
+    ParseError(Diag),
+    /// The program uses a construct outside the Stage-A MIR subset.
+    Unsupported(String),
+}
+
+/// Resolve, lower to MIR, and run precisely. Assumes the program already checked.
+fn lower_and_run(program: &ast::Program) -> MirRunResult {
+    let mut diags = Vec::new();
+    let items = resolve::resolve_program(program, &mut diags);
+    match mir::lower_checked(program, &items) {
+        Ok(mp) => match mir::interp::run(&mp) {
+            Ok(run) => MirRunResult::Ok(run),
+            Err(f) => MirRunResult::Fault(f),
+        },
+        Err(e) => MirRunResult::Unsupported(e.0),
+    }
+}
+
+/// Throwaway (`.cn`) source through the MIR engine.
+pub fn run_source_mir(src: &str) -> MirRunResult {
+    let program = match parse_source(src) {
+        Ok(p) => p,
+        Err(d) => return MirRunResult::ParseError(d),
+    };
+    let diags = check::check_program(&program);
+    if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
+        return MirRunResult::CheckErrors(diags);
+    }
+    lower_and_run(&program)
+}
+
+/// Real (`.cnr`) source through the MIR engine (monomorphizing generics first).
+pub fn run_source_real_mir(src: &str) -> MirRunResult {
+    let program = match real::parse_source(src) {
+        Ok(p) => p,
+        Err(d) => return MirRunResult::ParseError(d),
+    };
+    if generics::is_generic_program(&program) {
+        return run_generic_mir(&program);
+    }
+    let diags = check::check_program_real(&program);
+    if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
+        return MirRunResult::CheckErrors(diags);
+    }
+    lower_and_run(&program)
+}
+
+/// Check + monomorphize a generic program, then run the concrete result on MIR.
+fn run_generic_mir(program: &ast::Program) -> MirRunResult {
+    let (diags, insts, shapes) = check::check_generic_program(program, true);
+    if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
+        return MirRunResult::CheckErrors(diags);
+    }
+    let mono = generics::monomorphize(program, &insts, &shapes);
+    if mono.diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
+        return MirRunResult::CheckErrors(mono.diags);
+    }
+    lower_and_run(&mono.program)
+}
+
+/// Module-tree (`.cnr` directory) through the MIR engine.
+pub fn run_dir_mir(dir: &std::path::Path) -> MirRunResult {
+    let build = match modules::build_tree(dir) {
+        Ok(b) => b,
+        Err(d) => return MirRunResult::ParseError(d),
+    };
+    let mut diags = build.diags;
+    if generics::is_generic_program(&build.program) {
+        if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
+            return MirRunResult::CheckErrors(diags);
+        }
+        return run_generic_mir(&build.program);
+    }
+    diags.extend(check::check_program_real(&build.program));
+    if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
+        return MirRunResult::CheckErrors(diags);
+    }
+    lower_and_run(&build.program)
 }

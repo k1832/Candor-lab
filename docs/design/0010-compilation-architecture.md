@@ -378,7 +378,21 @@ Per §8 sequencing, the arc is staged and honest about what each stage validates
   of `θ` and equating them would test implementation detail, not semantics. This
   proves the IR is a faithful carrier of 0001's semantics *before* any native
   codegen exists. (The tree-walker is retained as the reference oracle, not
-  deleted.)
+  deleted.) **Prototype status (2026-07-08 — partial):** the checked MIR (`src/mir/`
+  — CFG blocks, typed locals with drop-obligation flags, fault checks as explicit
+  op data per INV-CHECK, `Terminator::Fault` edges, `observable` markers,
+  `ReplayPolicy::Precise`) and a precise MIR interpreter (`src/mir/interp.rs`) are
+  built and gated (`tests/stage_a.rs`, `run --engine=mir`) by `(k, s, θ)`-trace
+  equality against the oracle over the **non-generic scalar/boolean core**
+  (arithmetic in all three regimes and every scalar fault kind, comparisons,
+  `&&`/`||`, `if`/`while`/`loop`, `return`/`break`/`continue`, `assert`/`panic`,
+  `requires`/`ensures`, `trace`, value-parameter calls) — including a
+  fault-injection axis. Out-of-subset constructs (aggregates/`Box`/rawptr/slices,
+  and thus most §11-basket/corelib fixtures) lower to `Unsupported` and are the
+  reported coverage boundary; the gate additionally passes on the `mono3`
+  (generic→monomorphize→scalar) and `bits` corpus fixtures. Aggregates, the flat
+  `interp::mem::Mem` substrate, and full basket/corelib coverage remain to finish
+  the gate.
 
 - **Stage B — single backend (Cranelift), no optimization, whole-program.** Lower
   MIR→Cranelift IR→native; no incremental artifacts yet (whole-program each
