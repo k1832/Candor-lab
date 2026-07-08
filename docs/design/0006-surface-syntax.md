@@ -27,6 +27,14 @@ fixed; this document changes only how they are *written*. Nothing here designs
 generics, traits, modules, or FFI — those are deferred (§7) because they belong
 to P11/P17 rounds and would move decisions this document must not prejudge.
 
+**Revision history.** 2026-07-08 — revised per adversarial review #1
+(`docs/reviews/2026-07-08-design-0006-review-1.md`): conv target restricted to a
+scalar keyword; `out` reverted to a hard keyword; complete normative precedence
+table (Rust's, reconciled with the `as` rejection); read-only auto-deref adopted;
+explicit `ok` marker for result-shaped enums; constant-conv loss and bare
+over-range literals made compile errors; counts restated on distinct programs;
+migration totality scoped; slice-region spelling designed (OBL-SLICE-REGION).
+
 ---
 
 ## 1. Principles applied — the token-economics test, operationally
@@ -53,9 +61,11 @@ construct sorts into one of three buckets, and the bucket fixes the spelling:
    disservice.
 
 The whole document is these three rules applied to the constructs 0001 defines.
-Two corpus facts drive most of the compaction: **678 dereferences (345 of them
-the exact idiom `(deref x).field`)** and **~300 explicit reborrows** — both pure
-plumbing, both bucket 2.
+Two corpus facts drive most of the compaction: **594 dereferences (266 of them
+the exact idiom `(deref x).field`)** and **304 explicit reborrows** — both pure
+plumbing, both bucket 2. All counts in this document are measured on **distinct
+programs**: the `scheduler-v2` re-port (an already-evolved copy of `scheduler`)
+is excluded, correcting a 23% double-count found in review (see §5).
 
 ---
 
@@ -76,8 +86,9 @@ counts and site counts are measured from `ports/candor/*`.
 
 Items are the frame a reviewer navigates by; their keywords are the highest-value
 words in the language and none of them is plumbing. **No change.** The one
-addition is a declaration *modifier* for result-shaped enums, `result enum`
-(§2.5, for `?`).
+addition is a per-variant `ok` marker for result-shaped enums (§2.4, for `?`),
+which needs no new item keyword — an enum is result-shaped exactly when one of its
+variants is `ok`-marked.
 
 ### 2.2 Types — borrows and slices
 
@@ -139,60 +150,106 @@ dissolves two prototype rules — the "no mode on a slice-typed parameter" ban
 a borrow whose shared/exclusive-ness and run/scalar/array shape are all in the
 type.
 
+**Slice regions (OBL-SLICE-REGION).** A slice is a borrow, so it can be the
+region-tagged input or the region-tagged return of a function that carries region
+variables (0001 §3.3). The region hangs on the borrow keyword exactly as for a
+single-place borrow (`read[r] T` / `write[r] T`): the exclusive slice is
+`write[r] [T]`, and a region-tagged shared slice reuses the shared-borrow keyword,
+`read[r] [T]`. The bare `[T]` shared slice stays the compact default for the
+annotation-free case (one borrow in / one borrow out, 0001 §3.3); `read` appears
+on a shared slice *only* to carry a region variable, never redundantly. So
+`fn head[r](s: read[r] [u8], n: read usize) -> read[r] [u8]` is writable — the
+return borrows `s`'s region — closing the hole OBL-SLICE-REGION recorded (a slice
+plus a second borrow parameter returning a borrow was previously unspellable). The
+0001 §3.3 counting rule (a slice parameter counts as a borrow parameter, matching
+the checker) is stated there; the throwaway prototype gains a matching stopgap
+spelling `slice[r] T` / `slice_mut[r] T`, so the affected function shape is
+writable before the real parser exists.
+
 ### 2.3 Parameter modes
 
-**Unchanged in spirit (P12), one contextual fix.** Modes stay `take` (omitted) /
-`read` / `write` / `out`; omission = `take` *is* the value-first bet made visible
-in every signature and is not negotiable here. All four are bucket-1 words. The
-only change: **`out` becomes a contextual keyword** (reserved only in parameter-
-mode position and as a leading argument marker, an ordinary identifier
-elsewhere), fixing the recorded friction that `let out = fold(…)` was rejected
-(arena note 1). This mirrors how `alloc` is already contextual (0002 §0.4) and
-costs nothing at NN#13 — the position, not the identifier's meaning, decides.
+**Unchanged (P12).** Modes stay `take` (omitted) / `read` / `write` / `out`;
+omission = `take` *is* the value-first bet made visible in every signature and is
+not negotiable here. All four are bucket-1 words. **`out` stays a hard keyword
+everywhere** — reserved in all positions, never an ordinary identifier. The
+contextual-`out` relaxation considered in review is rejected: the marker position
+is expression-ful (an `out` argument is a place expression), so a contextual
+reading would have to disambiguate `out`-the-marker from `out`-the-identifier
+*inside that same expression grammar*, and the `alloc` analogy is false — `alloc`
+is an effect keyword in a fixed, non-expression slot (`fn … alloc -> …`), never
+adjacent to arbitrary expressions. The recorded friction (`let out = fold(…)`
+rejected, arena note 1) therefore stands as a real cost, not one this document
+fixes; `out` is simply not an available identifier.
 
 ### 2.4 Expressions
 
 **Dereference — postfix `.*`, retiring prefix `deref`.** This is the highest-
-value single change in the document. The corpus has **678 derefs, 345 of them
+value single change in the document. The corpus has **594 derefs, 266 of them
 the exact shape `(deref x).field`**; the prefix keyword plus its mandatory
 parentheses is bucket-2 plumbing wrapping nearly every field touch through a
 borrow. Chain depth is *shallow* — essentially always one deref before a field
 or index, never a deep `deref deref deref` tower — which is precisely why a
 *sigil* suffices and nothing heavier is warranted.
 
-| Throwaway | Real |
-|---|---|
-| `(deref s).base` | `s.*.base` |
-| `deref pos = t.end` | `pos.* = t.end` |
-| `(deref ar).mem[i]` | `ar.*.mem[i]` |
-| `deref b` (value) | `b.*` |
+`.*` is postfix, binds tighter than field access and indexing (see the §2.4
+precedence table), and reads as "the pointee." It is chosen over postfix `^`
+(which would steal the char needed for bitwise-xor) and over C's `->` (see
+Rejected).
 
-`.*` is postfix, binds tighter than field access and indexing, and reads as "the
-pointee." It is chosen over postfix `^` (which would steal the char needed for
-bitwise-xor) and over C's `->` (see Rejected). **Auto-deref (`s.base`) is
-rejected** and is the most contestable call in the document — argued in §6.
+**Read-only auto-deref (adopted).** A **read** through a tracked borrow needs no
+`.*`: for `x: read T` or `x: write T`, `x.f` and `x.mem[i]` read the pointee's
+field/element directly — the declaration already carries the fact that `x` is a
+borrow, so the sigil adds no information the reader lacks. A **write** keeps every
+deref explicit: `x.*.f = v`, `x.*.mem[i] = v`. **Chain rule (the simple one):**
+auto-deref applies *at each field-/element-access step* on a **read** path, so a
+read drops every `.*` that immediately precedes a `.`/`[…]`; **any write path (an
+assignment target) requires every deref written explicitly.** A bare pointee
+*value* (not a field access) still takes `.*` in both positions (`b.*`), because
+there is no field step to hang the auto-deref on. This preserves exactly the
+mutation-visibility cue conceded in 0005: a `.*` on the left of `=` still marks
+every store through a borrow, so a mutation audit (grep `.\* =`) stays complete,
+while the 277 read-side field/element touches lose their ceremony. Full
+explicitness (keeping `.*` on reads too) is the rejected alternative (§6).
+
+| Access | Throwaway | Real (canonical) |
+|---|---|---|
+| field read | `(deref s).base` | `s.base` |
+| element read | `(deref ar).mem[i]` | `ar.mem[i]` |
+| field/element write | `deref pos = t.end` / `(deref p).f = e` | `pos.* = t.end` / `p.*.f = e` |
+| bare value read | `deref b` | `b.*` |
 
 **Borrow operators — `read` / `write`, unchanged.** They mark the birth of a
 loan and stay words (bucket 1). Call-site *reborrow* ceremony is already gone
 per design 0005: a held borrow passed bare to a `read`/`write` parameter
-reborrows; the ~300 `read (deref b)` / `write (deref b)` sites collapse to `b`.
-Fresh borrows of owned storage keep the keyword (`f(write x)`) — that keyword
-marks a real aliasing event and earns its tokens (0005).
+reborrows; on real syntax the **304** `read b.*` / `write b.*` sites collapse to
+`b` (the formatter, §4). Fresh borrows of owned storage keep the keyword
+(`f(write x)`) — that keyword marks a real aliasing event and earns its tokens
+(0005).
 
 **Field projection on `rawptr` — `field_ptr(p, f)`, unchanged (design 0004).**
 Safe, un-gated, field-selector position; retires the `cast_ptr∘ptr_offset∘
 offsetof` incantation as the canonical way to take a field address.
 
-**Conversion — keep `conv`, drop the required parens; reject `as`.**
-`conv T (e)` (34 sites, "verbose" per the READMEs) becomes `conv T e` where `e`
-is a postfix expression (parens only when the operand needs them):
-`conv usize i`, `conv u8 x.*.f`. The keyword *stays* — this is a deliberate
-refusal of `e as T`:
+**Conversion — keep `conv`, drop the required parens; target is a scalar-type
+keyword; reject `as`.** `conv T (e)` (34 sites, "verbose" per the READMEs)
+becomes `conv T e` where the **target `T` is a scalar type keyword** (an integer
+or `usize`/`isize`/pointer-width scalar name — the only things `conv` converts;
+34/34 corpus sites are scalar) and `e` is a postfix expression (parens only when
+the operand needs them): `conv usize i`, `conv u8 x.f`. Restricting the target to
+a single scalar-keyword token is what makes dropping the parens unambiguous — see
+the §3 walk (`conv` × `[T]`). The keyword *stays* — this is a deliberate refusal
+of `e as T`:
 
 - A conversion is a *semantic event*: under 0001 §8.1 a narrowing/sign-changing
   `conv` **faults on value loss** by default (truncates only inside `wrapping`,
   saturates inside `saturating`). It must wear a word (P13: the dangerous thing
   is loud).
+- **Compile-time-known loss is a compile error (fold rule).** If the operand of a
+  `conv` is a constant expression whose value does not fit the target type, the
+  program is **rejected at compile time** (not a runtime fault) — the loss is
+  known statically, so it is a static error in the default regime. Inside a
+  `wrapping`/`saturating` block the constant is folded by that regime's rule
+  instead. A non-constant operand keeps the runtime fault-on-loss behaviour.
 - `as` is worse than neutral here: every reader and every model carries the Rust
   prior that `as` *silently truncates*. Adopting `as` for a fault-on-loss
   operation would actively mislead — a real Bet 6 hazard (models generate to
@@ -217,24 +274,62 @@ free (§2.2):
 
 Shift-amount `n >= bitwidth(a)` **faults** in the default regime (NN#4 spirit:
 no silent nonsense), is masked mod bitwidth inside `wrapping`, and clamps inside
-`saturating`. **Precedence is given explicitly to avoid C's famous `&`-below-`==`
-trap:** shifts bind above additive; `&`, `^`, `|` (in that order) bind *above*
-the comparison operators, not below — so `a & mask == 0` parses as
-`(a & mask) == 0`. Logical `&&`/`||` stay lowest. `&`/`&&` and `|`/`||` are
-distinguished by maximal munch, as today.
+`saturating`. `&`/`&&` and `|`/`||` are distinguished by maximal munch, as today.
+
+**Normative precedence table.** Candor adopts **Rust's operator precedence
+wholesale**, scoped to the operators Candor defines — spelling *and* binding match
+the dominant prior, and C's famous `&`-below-`==` bug stays fixed the way Rust
+fixes it (`a & mask == 0` parses as `(a & mask) == 0`). Tightest first; this table
+is normative and the formatter's redundant-paren removal (§4) keys on it:
+
+| # | Operators | Assoc |
+|---|---|---|
+| 1 (tightest) | postfix `.*` (deref), field `.`, index `a[i]`, call `f(…)` | left |
+| 2 | postfix `?` | postfix |
+| 3 | prefix `-` (arith neg) `!` (logical not) `~` (bitwise not); borrow `read`/`write`; `conv T` | prefix |
+| 4 | `*` `/` `%` | left |
+| 5 | `+` `-` | left |
+| 6 | `<<` `>>` | left |
+| 7 | `&` | left |
+| 8 | `^` | left |
+| 9 | `\|` | left |
+| 10 | `==` `!=` `<` `>` `<=` `>=` | non-associative |
+| 11 | `&&` | left |
+| 12 | `\|\|` | left |
+| 13 (loosest) | `=` (assignment, statement position only) | — |
+
+Within level 1, `.*` binds tightest, so `s.*.f` is `(s.*).f`. Comparison is
+**non-associative** (`a < b < c` is a parse error), following the prior.
+
+**Reconciliation with the `as` rejection (recorded).** Adopting Rust's bitwise
+spelling *and* precedence is not the contamination the `as` rejection guards
+against, and the distinction is principled: `as` was rejected because Candor's
+conversion **semantics differ** from the prior (fault-on-loss vs silent
+truncation), so the familiar spelling would import a *false* belief. Bitwise-and/
+or/xor/shift semantics **do not differ** from the prior (width-exact, the same bit
+operations); therefore reusing the familiar spelling and precedence imports a
+*true* belief — it is prior-alignment (Bet 6 working *for* the reader/model), not
+contamination. The test is whether the prior's meaning matches Candor's, not
+whether the token is borrowed.
 
 **ADDED — an `i64::MIN`-expressible literal.** Throwaway `-9223372036854775808`
 *faults* (unary minus is arithmetic over an already-overflowing magnitude;
 arena note 2 calls it "a real trap: the program checks clean and faults at the
-literal"). Fix: **unary minus applied directly to an integer literal is a
-compile-time-folded literal constant**, range-checked against its type at compile
-time — so `-9223372036854775808` (or `-9223372036854775808i64`) is a valid `i64`
-and an out-of-range literal is a *compile error*, never a runtime fault.
-`- x` for a variable `x` stays an ordinary (faulting) arithmetic negation. For
-the programmatic bound, add compile-time intrinsics **`min_of(T)` / `max_of(T)`**
-to the `sizeof`/`alignof` family (greppable, NN#13-clean). An `i64::MIN`
-associated-constant spelling is rejected: `::` is reserved exclusively for enum
-variants (NN#13), and reopening it is not worth one constant.
+literal"). Fix: **`-` directly preceding an integer literal is a single combined
+grammar production `NegLiteral := '-' IntLiteral`** — one compile-time-folded
+literal constant, range-checked against its type at compile time. Intervening
+**whitespace is permitted** (`- 5` and `-5` both fold); **parentheses break the
+production** — `-(9223372036854775808)` is unary negation applied to a
+parenthesized primary (the magnitude over-ranges first, so it errors as an
+ordinary expression), and `- x` for a variable stays ordinary faulting negation.
+So `-9223372036854775808` (or `-9223372036854775808i64`) is a valid `i64`. **A
+bare over-range literal with no sign — e.g. `9223372036854775808` on its own — is
+a compile error** (it fits no target type), as is any signed literal outside its
+target's range; never a runtime fault. Walked in §3. For the programmatic bound,
+add compile-time intrinsics **`min_of(T)` / `max_of(T)`** to the `sizeof`/`alignof`
+family (greppable, NN#13-clean). An `i64::MIN` associated-constant spelling is
+rejected: `::` is reserved exclusively for enum variants (NN#13), and reopening it
+is not worth one constant.
 
 **ADDED — `?` propagation (P7's blessed operator), scoped honestly.** The parser
 pays a two-arm `match` per fallible construction and hoists `must_box`/
@@ -243,27 +338,36 @@ pays a two-arm `match` per fallible construction and hoists `must_box`/
 scope it to what the *no-generics* core can carry:
 
 - **Spelling.** Postfix `expr?`. On a value of a **result-shaped enum**, if it is
-  the success variant, the expression evaluates to the unwrapped payload; if any
-  other variant, the enclosing function `return`s that value unchanged.
-- **Result-shaped enum.** An enum declared `result enum E { ok(T), … }`: the
-  **first** variant is the success/unwrap variant, every other variant
-  propagates. The `result` modifier is the greppable flag an auditor or model
-  keys on; the parser only needs to see `result enum`, and the checker resolves
-  the rest (NN#13-clean — no symbol table at parse).
+  the `ok`-marked variant, the expression evaluates to the unwrapped payload; if
+  any other variant, the enclosing function `return`s that value unchanged.
+- **Result-shaped enum — the explicit `ok` marker.** Exactly one variant of an
+  enum may be prefixed with the keyword `ok`; that variant is the success/unwrap
+  variant, and an enum is *result-shaped* precisely when it has an `ok`-marked
+  variant. No separate `result` declaration modifier is needed — the marker is
+  itself the greppable flag an auditor or model keys on, and it names the success
+  variant **position-independently** (it may appear anywhere in the variant list):
+
+  ```
+  enum BoxResult { ok Boxed(Box Expr), OutOfMemory }
+  ```
+
+  `box(a, v)?` evaluates to the `Box Expr` if the result is `Boxed`, else returns
+  the whole `BoxResult` (`OutOfMemory`) from the enclosing function. The parser
+  sees only the `ok` token in variant position; which payload `?` unwraps is a
+  checker fact (NN#13-clean — no symbol table at parse). The rejected positional
+  rule ("first variant is success") is recorded in §6.
 - **The honest limit — same-type only, conversion deferred.** `expr?` is legal
   only where the enclosing function returns the *same* enum `E`. Cross-type
   propagation (a callee's `E1` error flowing into a caller's `E2`) needs an
   error-conversion mechanism (`From`-style), which needs traits — **P11, deferred
   (§7)**. The same-type form already erases the parser's `must_box` matches
   (`box(a, v)?`) and every self-recursive fallible call, which is the measured
-  cost. Recorded soft spot: "first variant is success" is positional rather than
-  marked; an explicit `ok`-variant marker is the alternative if the positional
-  rule reads badly at review (§6).
+  cost.
 
 ### 2.5 Control flow
 
 **`match` — drop the per-arm `case`.** Throwaway `match e { case P => x, … }`
-becomes `match e { P => x, … }`. `case` is pure bucket-2 boilerplate — **198
+becomes `match e { P => x, … }`. `case` is pure bucket-2 boilerplate — **185
 occurrences** across the corpus, each carrying no information the `P =>` shape
 does not. Arms are `Pattern => Expr`, comma-separated (optional trailing/after-
 block comma, as today). The `Ident {`-is-not-a-struct-literal restriction in
@@ -333,13 +437,51 @@ Every added or changed sigil is walked for ambiguity; each resolves by
   `[N]T`, else it is a slice `[T]` — the component (a const-expr size vs a Type)
   and the trailing Type are lexically distinguishable (scalar-type keywords and
   the type grammar decide, no symbol table).
+- **`conv T e` × `[T]` — resolved by restricting the target to a scalar-type
+  keyword.** With the parens dropped, `conv <Type> <postfix-expr>` could in
+  principle read a bracketed target (`conv [u8] xs`) and then be unable to tell
+  where the target type ends and a `[…]` index/literal operand begins — the
+  ambiguity the review flagged. It is removed by grammar, not lookahead: the
+  target production is **`ScalarType`** (a single scalar type-keyword token —
+  `u8`, `i64`, `usize`, …), never a bracketed or composite type. So the token
+  after `conv` is always exactly one keyword and the postfix operand begins
+  immediately after it; `conv [u8] …` is simply not a production. This matches the
+  semantics (conv is scalar-only, 34/34 corpus sites) and needs no symbol table.
+- **`read T`/`write T` — mode vs borrow-type overlap: the mode parse is
+  canonical.** In parameter position a parameter is `Mode? Type`, and a borrow
+  *type* is itself spelled `read T`/`write T` (§2.2). So `p: read T` has two
+  derivations — mode `read` over type `T`, or default (`take`) mode over the
+  borrow-*type* `read T`. The rule: **in parameter position the leading
+  `read`/`write` is parsed as the mode.** Both derivations denote the identical
+  thing (a shared/exclusive borrow of a `T` passed in), so the parse is
+  unambiguous *in meaning*; the canonical choice fixes the *tree*. The formatter
+  never emits the redundant composition (`take read T`): a `take`-mode borrow-
+  typed parameter is written `read T`, and there is exactly one spelling.
+- **Slice regions `read[r] [T]` / `write[r] [T]` — position-led, no new
+  ambiguity.** The region variable `r` sits in the same `[…]` slot it occupies on
+  a single-place borrow (`read[r] T`): it is lexically the bracket that
+  *immediately follows the borrow keyword* `read`/`write`, and the slice type
+  `[T]` follows. `read` is keyword-led, so `read[r] [T]` parses as borrow-keyword,
+  region-bracket, slice-type with one-token lookahead after each bracket — the
+  same machinery as `read[r] T`. A bare `[T]` (no leading keyword) is the
+  region-free shared slice, as before.
+- **`-` + integer literal (negative-literal fold) — combined production.** The
+  production `NegLiteral := '-' IntLiteral` fires when `-` immediately precedes an
+  integer-literal *token* (intervening whitespace allowed); it yields one folded,
+  range-checked constant. A `(` after `-` does not match (the operand is a
+  parenthesized expression → ordinary unary negation), and `-` before a
+  non-literal is ordinary negation. No symbol table: the decision is purely on the
+  next token's lexical class (IntLiteral vs `(` vs other). An out-of-range folded
+  constant — a signed over-range literal, or a bare unsigned over-range literal
+  like `9223372036854775808` — is a **compile error** at this production, not a
+  parse ambiguity.
 - **`?` propagation: pure postfix.** No ternary `?:` exists (Candor uses `if`
   expressions), so `?` is unambiguously the postfix propagation operator. Result-
   shape is a *checker* fact; the parser sees only `expr?`.
 - **`->` stays solely the return arrow.** It was *not* taken for deref (see §6),
   so it never appears in expression position and never competes with anything.
-- **`conv T e`, `~a`, `min_of(T)`: keyword/position-led**, exactly like the
-  existing `conv`, `!`, and `sizeof` families.
+- **`~a`, `min_of(T)`: keyword/position-led**, exactly like the existing `!` and
+  `sizeof` families (`conv` is covered above).
 
 No production consults a declaration elsewhere in the file. Two-token lookahead
 remains the ceiling (0002 §"Consequences").
@@ -365,35 +507,52 @@ Brief and decisive; the formatter enforces all of it and there is no option:
 - **Names:** `snake_case` for functions, locals, fields; `PascalCase` for
   structs, enums, and enum variants; `SCREAMING_SNAKE` for `static`s.
 - **Normalizations the formatter performs (input accepted, output canonical):**
-  explicit reborrow `write (deref b)` / `read (deref b)` in a matching mode-
-  argument position → bare `b` (design 0005, type-aware — it must *not* rewrite a
-  `take`-mode borrow-typed parameter or a non-place operand); the throwaway
-  `deref`/`case`/`slice`/`borrow` spellings → their §2 real forms; redundant
-  parens around a `conv` primary operand → dropped.
+  - **Reborrow collapse (real syntax).** Explicit reborrow `f(write b.*)` /
+    `f(read b.*)` in a matching mode-argument position → `f(b)` (design 0005,
+    type-aware — it must *not* rewrite a `take`-mode borrow-typed parameter or a
+    non-place operand).
+  - **Read-only auto-deref collapse.** A `.*` that immediately precedes a field
+    `.` or index `[…]` on a **read** path → dropped (`s.*.base` → `s.base`; §2.4);
+    a `.*` on an **assignment target** is always kept (`p.*.f = e` stays), as is a
+    bare-value `.*` (`b.*`). Reads carry no `.*` before a field/element; writes
+    keep every one.
+  - **Redundant-paren removal — uniform.** Parentheses the now-complete precedence
+    table (§2.4) makes non-load-bearing are dropped everywhere by one rule (not
+    just around a `conv` operand): a parenthesized subexpression whose operator
+    binds tighter than its context — or equal with matching associativity — loses
+    its parens. This yields the single canonical spelling (`a & mask == 0`, not
+    `(a & mask) == 0`, once `&` binds above `==`).
+  - **Throwaway spellings** `deref`/`case`/`slice`/`borrow` (and `slice[r]`) →
+    their §2 real forms.
 
 ---
 
 ## 5. Migration (P15 — mechanical, by tool)
 
-The prototype and the six ports migrate by tool when the real parser exists. The
-throwaway→real map is a syntactic rewrite with no behavioral change (P15 strict
-sense), except the two rows marked *author-assisted*:
+The prototype and the six ports migrate by tool when the real parser exists. Most
+rows are a syntactic rewrite with no behavioral change (P15 strict sense); the
+rows marked *author-assisted* are **not** total by tool and need a human in the
+loop. The totality claim is scoped to the mechanical rows only:
 
 | Throwaway | Real | Mechanical? |
 |---|---|---|
 | `borrow T` / `borrow_mut T` | `read T` / `write T` | yes |
 | `slice T` / `slice_mut T` | `[T]` / `write [T]` | yes |
-| `(deref b).f` / `deref b` / `deref b = v` | `b.*.f` / `b.*` / `b.* = v` | yes |
+| `slice[r] T` / `slice_mut[r] T` | `read[r] [T]` / `write[r] [T]` | yes |
+| `(deref b).f` read / `deref b` / `deref b = v` write | `b.f` / `b.*` / `b.* = v` | yes (auto-deref on reads, §2.4) |
 | `read (deref b)` / `write (deref b)` (arg pos) | `b` | yes (0005) |
 | `case P => e` | `P => e` | yes |
 | `conv T (e)` | `conv T e` | yes |
-| `-MAX - 1` (MIN construction) | `-9223372036854775808` | yes |
-| wrapper structs `Buf`/`Occ`/`Arena` for array params | `write [N]T` params | yes (unwrap) |
 | xorshift 64-iteration bit loop | `^` / `<<` / `>>` | **author-assisted** (semantic rewrite) |
 | `must_box`/two-arm `BoxResult` match | `box(a, v)?` | **author-assisted** (same-type `?` only) |
+| `-MAX - 1` (MIN construction) | `-9223372036854775808` | **author-assisted** (idiom recognition, not a token map) |
+| wrapper structs `Buf`/`Occ`/`Arena` for array params | `write [N]T` params | **author-assisted** (unwrap: struct removal + field-access rewrite) |
 
 The scheduler-v2 re-port (`ports/candor/scheduler-v2`) is already authored in the
-0004/0005 evolved forms and is the reference for the mechanical rows.
+0004/0005 evolved forms and is the reference for the mechanical rows. Being a
+re-port of `scheduler`, it is **excluded from every corpus count** in this
+document (§1): counting both double-counted its constructs (a 23% inflation the
+review caught), so all counts here are on distinct programs.
 
 ---
 
@@ -404,16 +563,19 @@ The scheduler-v2 re-port (`ports/candor/scheduler-v2`) is already authored in th
   rendering of "exclusive borrow" beside the `write` operator (P3). `read T` /
   `write T` reuses the existing keyword and frees `&` entirely for arithmetic
   (§2.2). The decisive call of the document.
-- **Auto-deref (`s.base` for `s.*.base`) — rejected; the most contestable call.**
-  It would take all 678 derefs to zero tokens and is memory-safe on checker-
-  tracked borrows (design 0004's "gives the pointer meaning" objection applies to
-  *rawptr*, not safe borrows). Rejected anyway because P13 prices dereference as
-  *load-bearing semantics* (the reader must know whether a name is a value or a
-  borrow to reason about aliasing and the `.* =` write path), and the corpus
-  shows chains are shallow — so a one-token sigil captures the whole cost while
-  keeping the borrow boundary visible. If review finds `.*.` still too noisy at
-  the 345 field sites, auto-deref-on-read-only (keeping `.* =` explicit for
-  writes) is the recorded fallback.
+- **Full deref explicitness (every `.*` written, reads included) — rejected;
+  read-only auto-deref adopted instead (§2.4).** Keeping `.*` explicit on reads
+  *and* writes would cost the sigil at all **277** read-side field/element sites
+  on top of the **68** write sites, for a fact the declaration already carries (a
+  name of borrow type is a borrow — the reader knows without the sigil). The
+  adopted rule drops the sigil on the 277 reads and keeps it on the 68 writes,
+  which is where it earns its tokens: a `.*` on the left of `=` is the
+  mutation-visibility cue conceded in 0005, and keeping *every* write-path deref
+  explicit means a mutation audit (grep `.\* =`) stays complete. Design 0004's
+  "gives the pointer meaning" objection applies to *rawptr*, not to
+  checker-tracked borrows, so read auto-deref is memory-safe. Full auto-deref
+  (dropping the write sigil too) is *also* rejected, for exactly that audit
+  reason: the write boundary must stay visible.
 - **`->` for deref-and-field (`s->base`) — rejected.** Corpus-tempting (saves one
   char over `.*.` at 345 sites, C/LLM-familiar) but splits dereference into two
   spellings (`->` for field, `.*` for bare) against P3, and overloads `->` across
@@ -424,14 +586,19 @@ The scheduler-v2 re-port (`ports/candor/scheduler-v2`) is already authored in th
 - **`e as T` / `T(e)` for conversion — rejected.** `as` imports the Rust silent-
   truncation prior onto a fault-on-loss operation (a Bet 6 generation hazard);
   `T(e)` reads as construction. Keep the neutral word `conv` (§2.4).
-- **Keeping per-arm `case` — rejected.** 198 sites of bucket-2 boilerplate.
+- **Keeping per-arm `case` — rejected.** 185 sites of bucket-2 boilerplate.
 - **`i64::MIN` associated constant — rejected.** Reopens `::` (NN#13). Negative-
   literal folding + `min_of`/`max_of` intrinsics cover it.
 - **Per-expression `unsafe` modifier — rejected** (0001 §10.3): scatters the
   audit surface; the block keeps justification attached to a region.
-- **Positional "first variant is `ok`" vs an explicit `ok` marker for `result
-  enum` — chosen positional, recorded.** The marker is the fallback if the
-  positional rule reads badly; kept minimal (no per-variant keyword) for now.
+- **Positional "first variant is `ok`" for result-shaped enums — rejected in
+  favour of the explicit `ok` marker (§2.4).** Which variant is the success/unwrap
+  channel is a semantic distinction, and this document's own bucket-1 rule says a
+  semantic distinction wears a word, not a position. The explicit `ok` marker
+  (exactly one variant, anywhere in the list) is greppable, order-independent, and
+  removes the need for a separate `result enum` declaration modifier; the
+  positional rule saved one keyword at the cost of a silent, position-encoded fact
+  — the wrong trade under P13.
 
 ---
 

@@ -83,6 +83,20 @@ chapter's stated obligations bind now.
   universal view type; minimum owning/interop forms, each by recorded
   justification).
 
+### OBL-GENERIC-BRACKET — the generic-bracket token constraint
+- **Chapter:** design 0006 §3 and §7 (a constraint on the future P11 round),
+  recorded here at spec tier per review #1 disposition 12.
+- **Hook:** **P11** (generics, deferred); **NN#13** (tokenize/parse without a
+  symbol table).
+- **Gate:** binds the eventual generics design — its type-argument bracketing
+  **must not** be `<>`, so that `>>` stays unambiguously the right-shift operator
+  (design 0006 added `<<`/`>>`; a `<>` overload would reintroduce the C++
+  `>>`-vs-close-angle-bracket parse hazard NN#13 forbids). No `<…>` generic syntax
+  may be adopted.
+- **Acceptance:** OBL-GENERICS's design uses a bracketing token other than `<>`
+  for type arguments, preserving the design-0006 shift tokenization; discharged
+  when OBL-GENERICS is discharged consistent with this constraint.
+
 ---
 
 ## 3. Skeleton-chapter obligations (bind to design 0006)
@@ -122,10 +136,12 @@ chapter's stated obligations bind now.
 
 ## 5. Obligation count
 
-**Ten tracked obligations:** three pre-stability hard gates (OBL-WINDOW,
+**Twelve tracked obligations:** three pre-stability hard gates (OBL-WINDOW,
 OBL-ALIAS, OBL-CONSIST), four feature gates (OBL-CONTRACT, OBL-FFI, OBL-GENERICS,
-OBL-TEXT), two skeleton-chapter gates (OBL-LEX, OBL-GRAM), and one real-toolchain
-gate (OBL-FMT-REBORROW).
+OBL-TEXT), one P11-round token constraint (OBL-GENERIC-BRACKET), two
+skeleton-chapter gates (OBL-LEX, OBL-GRAM), one real-toolchain gate
+(OBL-FMT-REBORROW), and one design-0001 hole found by transcription
+(OBL-SLICE-REGION).
 
 Of these, **OBL-WINDOW, OBL-ALIAS, and OBL-CONSIST are the philosophy-named
 pre-stability tier** (P18, NN#20): no "1.0" precedes their discharge (chapter 00
@@ -140,3 +156,7 @@ borrow is unwritable. Ruling queued with the 0006 revision: region tags become s
 slice-typed parameters and returns (real-syntax spelling decided in 0006; the prototype gains the
 throwaway form); 0001 §3.3 amended to state the counting rule it already implements.
 Gate: blocks chapter 04's NORMATIVE promotion for the affected clause.
+Resolution (2026-07-08, review #1): real-syntax spelling `read[r] [T]` /
+`write[r] [T]` adopted in design 0006 §2.2; 0001 §3.3 amended to state the
+counting rule (slice parameters count as borrow parameters); prototype stopgap
+`slice[r] T` / `slice_mut[r] T` added.
