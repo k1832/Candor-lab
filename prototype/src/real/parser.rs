@@ -1869,10 +1869,11 @@ pub fn parse(tokens: Vec<RToken>) -> PResult<Program> {
 /// Parse a real-syntax token stream as a *module*: the shared AST plus the
 /// module-layer side channels (design 0008) — the `use` imports and the
 /// per-item visibility flags parallel to `Program.items`.
-pub fn parse_module(tokens: Vec<RToken>) -> PResult<(Program, Vec<UseDecl>, Vec<bool>)> {
+pub fn parse_module(tokens: Vec<RToken>) -> PResult<(Program, Vec<UseDecl>, Vec<bool>, bool)> {
     let mut p = RParser::new(tokens);
     let prog = p.parse_program()?;
-    Ok((prog, p.mod_uses, p.mod_vis))
+    let boundary = p.boundary;
+    Ok((prog, p.mod_uses, p.mod_vis, boundary))
 }
 
 /// Parse and also report the file's `boundary`-preamble status (design 0011).

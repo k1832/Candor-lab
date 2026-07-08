@@ -31,6 +31,7 @@ fn main() -> ExitCode {
         (Some("run"), Some(_)) => run_run(&args[2..]),
         (Some("count"), Some(path)) => run_count(path),
         (Some("audit"), Some(path)) => run_audit(path),
+        (Some("build"), Some(path)) => run_build(path),
         (Some("migrate"), Some(path)) => run_migrate(path, &args[3..]),
         _ => {
             eprintln!("usage: candor-proto (parse|check|run|count) <file>  |  run [--engine=mir] <file>  |  migrate <file.cn> [-o <out.cnr>]  (.cnr = real syntax, .cn = throwaway)");
@@ -274,6 +275,31 @@ fn report_run(outcome: candor_proto::RunResult) -> ExitCode {
         }
         candor_proto::RunResult::ParseError(d) => {
             println!("{}", d.to_json());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `build <dir>` — the Stage-C incremental build (design 0010 §3 / 0008 §2):
+/// discover the module tree, compute the DAG, and per module reuse the cached
+/// interface artifact or re-analyze it, reporting per-module actions as JSON.
+fn run_build(path: &str) -> ExitCode {
+    let dir = std::path::Path::new(path);
+    if !dir.is_dir() {
+        eprintln!("error: `build` takes a module-tree directory");
+        return ExitCode::from(2);
+    }
+    match candor_proto::build::build_dir(dir) {
+        Ok(report) => {
+            println!("{}", report.to_json());
+            if report.ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(diag) => {
+            println!("{}", diag.to_json());
             ExitCode::FAILURE
         }
     }

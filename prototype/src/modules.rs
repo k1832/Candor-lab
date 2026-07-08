@@ -59,6 +59,12 @@ struct Module {
     uses: Vec<UseDecl>,
     type_exports: HashMap<String, Export>,
     value_exports: HashMap<String, Export>,
+    /// Raw file text (for the Stage-C source hash, design 0008 §2).
+    source: String,
+    /// The file's `boundary` preamble status (design 0011 / 0008 §4).
+    boundary: bool,
+    /// Per-item `pub` flag, parallel to `program.items`.
+    is_pub: Vec<bool>,
 }
 
 /// Per-module resolved import scope (local names + imports -> global names).
@@ -121,9 +127,10 @@ fn io_err(path: &Path, msg: &str) -> Diag {
     )
 }
 
-/// Build a module tree rooted at `dir` into one merged program plus the
-/// module-layer diagnostics. A hard I/O or parse error is returned as `Err`.
-pub fn build_tree(dir: &Path) -> Result<ModuleBuild, Diag> {
+/// Internal: discover, parse, resolve imports, and run the module-layer checks
+/// (visibility, cycle, entry), returning the per-module data plus the DAG. Both
+/// [`build_tree`] (merge) and [`build_tree_parts`] (per-module, Stage C) share it.
+fn assemble(dir: &Path) -> Result<Assembled, Diag> {
     let mut files = Vec::new();
     discover(dir, &[], &mut files)?;
     if files.is_empty() {
@@ -134,7 +141,7 @@ pub fn build_tree(dir: &Path) -> Result<ModuleBuild, Diag> {
     let mut modules: Vec<Module> = Vec::new();
     for (path, file) in files {
         let src = std::fs::read_to_string(&file).map_err(|e| io_err(&file, &e.to_string()))?;
-        let (program, uses, vis) = crate::real::parse_module(&src)?;
+        let (program, uses, vis, boundary) = crate::real::parse_module(&src)?;
         let mut type_exports = HashMap::new();
         let mut value_exports = HashMap::new();
         for (item, &is_pub) in program.items.iter().zip(vis.iter()) {
@@ -164,7 +171,16 @@ pub fn build_tree(dir: &Path) -> Result<ModuleBuild, Diag> {
                 }
             }
         }
-        modules.push(Module { path, program, uses, type_exports, value_exports });
+        modules.push(Module {
+            path,
+            program,
+            uses,
+            type_exports,
+            value_exports,
+            source: src,
+            boundary,
+            is_pub: vis,
+        });
     }
 
     let index: HashMap<String, usize> =
@@ -250,19 +266,85 @@ pub fn build_tree(dir: &Path) -> Result<ModuleBuild, Diag> {
         ),
     }
 
-    // Rewrite every module's names to global form and merge into one program.
-    let mut merged = Program { items: Vec::new() };
+    Ok(Assembled { modules, scopes, adj, diags })
+}
+
+/// The output of [`assemble`]: per-module data plus the import DAG.
+struct Assembled {
+    modules: Vec<Module>,
+    scopes: Vec<Scope>,
+    adj: Vec<Vec<(usize, Span)>>,
+    diags: Vec<Diag>,
+}
+
+/// Qualify every module's names to global form, in place. Returns the qualified
+/// items grouped by module (index-parallel to `modules`). Shared by the merge
+/// and per-module builders so name-rewriting lives in exactly one place.
+fn qualify(modules: &mut [Module], scopes: &[Scope], diags: &mut Vec<Diag>) -> Vec<Vec<Item>> {
+    let mut per_module: Vec<Vec<Item>> = Vec::with_capacity(modules.len());
     for i in 0..modules.len() {
         let items = std::mem::take(&mut modules[i].program.items);
+        let mut out = Vec::with_capacity(items.len());
         for mut item in items {
             rename_item(&modules[i], &mut item);
-            let mut rw = Rewriter { scope: &scopes[i], modules: &modules, diags: &mut diags };
+            let mut rw = Rewriter { scope: &scopes[i], modules, diags };
             rw.rewrite_item(&mut item);
-            merged.items.push(item);
+            out.push(item);
         }
+        per_module.push(out);
     }
+    per_module
+}
 
+/// Build a module tree rooted at `dir` into one merged program plus the
+/// module-layer diagnostics. A hard I/O or parse error is returned as `Err`.
+pub fn build_tree(dir: &Path) -> Result<ModuleBuild, Diag> {
+    let Assembled { mut modules, scopes, mut diags, .. } = assemble(dir)?;
+    let per_module = qualify(&mut modules, &scopes, &mut diags);
+    let mut merged = Program { items: Vec::new() };
+    for items in per_module {
+        merged.items.extend(items);
+    }
     Ok(ModuleBuild { program: merged, diags })
+}
+
+/// Per-module data for the Stage-C incremental build (design 0008 §2): one node
+/// of the import DAG, with its qualified items, `pub` flags, source text, and
+/// resolved import edges (indices into [`TreeParts::modules`]).
+pub struct ModuleParts {
+    pub path: Vec<String>,
+    pub source: String,
+    pub boundary: bool,
+    pub items: Vec<Item>,
+    pub is_pub: Vec<bool>,
+    pub imports: Vec<usize>,
+}
+
+/// The module tree as per-module parts (Stage C), plus the module-layer diags.
+pub struct TreeParts {
+    pub modules: Vec<ModuleParts>,
+    pub diags: Vec<Diag>,
+}
+
+/// Build a module tree rooted at `dir` into **per-module** parts (not merged):
+/// the Stage-C interface-artifact builder consumes this to hash and check each
+/// module independently over the DAG.
+pub fn build_tree_parts(dir: &Path) -> Result<TreeParts, Diag> {
+    let Assembled { mut modules, scopes, adj, mut diags } = assemble(dir)?;
+    let meta: Vec<(Vec<String>, String, bool, Vec<bool>)> = modules
+        .iter()
+        .map(|m| (m.path.clone(), m.source.clone(), m.boundary, m.is_pub.clone()))
+        .collect();
+    let per_module = qualify(&mut modules, &scopes, &mut diags);
+    let mut out = Vec::with_capacity(per_module.len());
+    for (i, items) in per_module.into_iter().enumerate() {
+        let mut imports: Vec<usize> = adj[i].iter().map(|(t, _)| *t).collect();
+        imports.sort_unstable();
+        imports.dedup();
+        let (path, source, boundary, is_pub) = meta[i].clone();
+        out.push(ModuleParts { path, source, boundary, items, is_pub, imports });
+    }
+    Ok(TreeParts { modules: out, diags })
 }
 
 fn private_err(module: &str, name: &str, span: Span) -> Diag {

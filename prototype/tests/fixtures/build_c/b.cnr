@@ -1,0 +1,3 @@
+use base::{f};
+
+pub fn b_val() -> i64 { return f(20); }

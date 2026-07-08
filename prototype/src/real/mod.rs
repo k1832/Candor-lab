@@ -32,7 +32,7 @@ pub fn parse_source(src: &str) -> Result<Program, Diag> {
 /// returns the AST, its `use` imports, and per-item visibility flags. Used by
 /// the module-tree builder (`crate::modules`); the single-file path uses
 /// [`parse_source`] and ignores both side channels.
-pub fn parse_module(src: &str) -> Result<(Program, Vec<crate::ast::UseDecl>, Vec<bool>), Diag> {
+pub fn parse_module(src: &str) -> Result<(Program, Vec<crate::ast::UseDecl>, Vec<bool>, bool), Diag> {
     let tokens = lexer::lex(src)?;
     parser::parse_module(tokens)
 }

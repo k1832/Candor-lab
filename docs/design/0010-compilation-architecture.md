@@ -470,7 +470,40 @@ Per §8 sequencing, the arc is staged and honest about what each stage validates
   (instrumented: a body edit re-analyzes nothing downstream), T1 is *measured in
   CI* (even before ratification), and the NN#16 rebuild-and-compare job is green
   (bit-identical artifacts). This is where P20's incrementality first exists to be
-  measured (0008 §6 stage 3).
+  measured (0008 §6 stage 3). **Prototype status (2026-07-09 — Stage C: partial,
+  the two-hash analysis tier CLOSED, stage-C1 boundary named).** The incremental
+  build ships (`src/build/`): `candor-proto build <dir>` discovers the module
+  tree, computes the DAG, and per module (in topological order) **reuses** its
+  cached interface artifact iff its source and every import's **signature hash**
+  are unchanged, else **re-checks** and re-emits — reporting per-module
+  `checked`/`reused` actions as JSON (P4, the gate's evidence). The per-module
+  serialized artifact (serde JSON, in `.candor-cache/`) carries: module path +
+  boundary marker; the canonical, span-free **signatures** of its `pub` items (+
+  impls); their canonical **codegen bodies**; the imports' signature hashes it was
+  built against; the **two SHA-256 hashes** (a vendored, dependency-free digest
+  for NN#16 reproducibility) — a signature hash over path+boundary+signatures and
+  a codegen hash additionally over the bodies; and the **schema/toolchain salt**
+  (`SCHEMA_VERSION` + toolchain identity — the F3 salt, so a toolchain bump
+  invalidates every artifact by construction). *Gate* (`tests/stage_c.rs`): (a) a
+  second corelib build **reuses every module** (zero re-analysis); (b) a body edit
+  re-checks **only** the edited module, every downstream **reused**, the edited
+  module's signature hash **stable** (T2); (c) a `pub`-signature edit re-checks
+  exactly the module + its direct importers and **stops** where signatures stop
+  changing (the §2 cascade, precise set asserted); (d) two clean rebuilds are
+  **byte-identical** (NN#16); (e) a salt bump **invalidates the whole cache**.
+  **410 prior tests green; +6 (5 gates + a SHA-256 NIST-vector test) = 416;
+  `cargo test`/`clippy` clean.** **Honest under-specifications (reported):** (i)
+  no generic-MIR emission exists (Stage A/B lower *monomorphized* programs), so
+  0008 §2.4's "checked MIR body" (item 3) is stood in for by the source-derived
+  canonical body — the faithful codegen-input proxy, not serialized MIR; (ii) the
+  prototype checker is whole-program, so re-checking a dirty module reconstructs a
+  sub-program of that module **plus its transitive imports' full items** (upstream
+  context) — the **zero-DOWNSTREAM** claim the gate asserts is exactly true, but
+  the residual is that a module's own re-check re-touches its **upstream** bodies
+  (no signature-only stubs yet); (iii) no `inline` marker exists yet, so the
+  codegen-invalidation tier is exercised via `pub` bodies generally; (iv) the
+  content-addressed *per-instantiation* codegen cache and T1/T3–T5 CI timing
+  (0008 §6 stage 4) remain unbuilt — this is the analysis-tier (stage 3) half.
 
 - **Stage D — optimization within the R1 license + P20 measurement.** Enable
   Cranelift optimization (and/or add the LLVM backend), with **every pass
