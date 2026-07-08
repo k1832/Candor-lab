@@ -13,6 +13,13 @@ pub mod loans;
 pub mod patterns;
 
 mod expr;
+mod generics;
+pub use generics::check_generic_program;
+
+/// Re-export for the generics submodule: resolve a (borrowed) type to its enum.
+pub fn patterns_resolve_enum(ty: &crate::types::Type, items: &dyn crate::types::ItemEnv) -> Option<crate::types::EnumTy> {
+    patterns::resolve_enum(ty, items).map(|(_, e, _)| e)
+}
 mod stmt;
 
 use std::collections::HashMap;
@@ -126,6 +133,27 @@ pub struct Checker<'a> {
     /// write-through-borrow-needs-explicit-`.*` rule (spec 02 §6.3). The shared
     /// checker is otherwise identical for both front-ends.
     real: bool,
+    /// Concrete generic instantiations reached during checking (design 0007 §5.1):
+    /// each `(generic name, concrete type arguments)`. Drives monomorphization.
+    pub insts: Vec<(String, Vec<Type>)>,
+    /// True while checking a generic body at its definition site with opaque type
+    /// parameters (suppresses instantiation collection and gates §3 rules).
+    def_site: bool,
+    /// Monomorphization shapes recorded per expression-node span start: the
+    /// generic construct and its (possibly parametric) type arguments (design
+    /// 0007 §5). Consumed by `generics::monomorphize`.
+    pub shapes: std::collections::HashMap<usize, crate::generics::Shape>,
+    /// Type-parameter names in scope while checking a generic body at its
+    /// definition site (design 0007); a bare type name resolves to `Type::Param`.
+    type_params: Vec<String>,
+    /// Each in-scope type parameter's bound interface names (§2.1 method lookup).
+    param_bounds: Vec<(String, Vec<String>)>,
+    /// The expected type at the current value position, if any — a hint used to
+    /// resolve otherwise-uninferable generic type arguments (e.g. `Opt::None`).
+    expected_ty: Option<Type>,
+    /// The generic function currently being definition-site checked (for the
+    /// polymorphic-recursion self-instantiation check, design 0007 §5.1.1).
+    cur_generic: Option<String>,
 }
 
 /// Entry point: parse -> resolve -> check. Returns all diagnostics. Used by the
@@ -138,6 +166,9 @@ pub fn check_program(prog: &Program) -> Vec<Diag> {
 /// (design 0006 §2.4; spec 01 §3.3, spec 02 §6.3). The downstream analysis is
 /// identical; only the extra surface diagnostics differ.
 pub fn check_program_real(prog: &Program) -> Vec<Diag> {
+    if crate::generics::is_generic_program(prog) {
+        return generics::check_generic_program(prog, true).0;
+    }
     check_program_opts(prog, true)
 }
 
@@ -174,6 +205,13 @@ fn check_program_opts(prog: &Program, real: bool) -> Vec<Diag> {
                     diags: Vec::new(),
                     f: FnState::empty(),
                     real,
+                    insts: Vec::new(),
+                    def_site: false,
+                    shapes: std::collections::HashMap::new(),
+                    type_params: Vec::new(),
+                    param_bounds: Vec::new(),
+                    expected_ty: None,
+                    cur_generic: None,
                 };
                 let (fdecl, sig) = synth_drop_hook(sname, block, *span);
                 c.check_fn_with_sig(&fdecl, &sig);
@@ -198,6 +236,13 @@ fn check_program_opts(prog: &Program, real: bool) -> Vec<Diag> {
         diags,
         f: FnState::empty(),
         real,
+        insts: Vec::new(),
+        def_site: false,
+        shapes: std::collections::HashMap::new(),
+        type_params: Vec::new(),
+        param_bounds: Vec::new(),
+        expected_ty: None,
+        cur_generic: None,
     };
     for item in &prog.items {
         match item {
@@ -239,6 +284,7 @@ fn synth_drop_hook(struct_name: &str, block: &Block, span: Span) -> (FnDecl, FnS
     };
     let fdecl = FnDecl {
         name: sig.name.clone(),
+        type_params: Vec::new(),
         regions: Vec::new(),
         params: vec![Param {
             name: "self".to_string(),
@@ -706,7 +752,10 @@ impl<'a> Checker<'a> {
     /// Check `expr` as a value against an expected type, with fn-ptr effect and
     /// integer-literal flexibility. Emits E0402 / E0703 on mismatch.
     fn check_against(&mut self, expr: &Expr, expected: &Type) -> Type {
+        let saved = self.expected_ty.take();
+        self.expected_ty = Some(expected.clone());
         let t = self.check_expr(expr, Use::Value);
+        self.expected_ty = saved;
         if matches!(t, Type::Error) || matches!(expected, Type::Error) || matches!(t, Type::Never) {
             return t;
         }
@@ -754,7 +803,9 @@ impl<'a> Checker<'a> {
         match &ty.kind {
             TyKind::Scalar(s) => Type::Scalar(*s),
             TyKind::Named(n) => {
-                if self.items.structs.contains_key(n) || self.items.enums.contains_key(n) {
+                if self.type_params.iter().any(|p| p == n) {
+                    Type::Param(n.clone())
+                } else if self.items.structs.contains_key(n) || self.items.enums.contains_key(n) {
                     Type::Named(n.clone())
                 } else {
                     self.diags
@@ -789,6 +840,10 @@ impl<'a> Checker<'a> {
                     ret: Box::new(self.resolve_ty(&fp.ret)),
                 })
             }
+            TyKind::App { name, args } => Type::App(
+                name.clone(),
+                args.iter().map(|a| self.resolve_ty(a)).collect(),
+            ),
         }
     }
 

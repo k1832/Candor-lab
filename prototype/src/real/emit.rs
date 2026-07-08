@@ -77,6 +77,11 @@ impl Emitter {
             Item::Enum(e) => self.emit_enum(e),
             Item::Fn(f) => self.emit_fn(f),
             Item::Static(s) => self.emit_static(s),
+            // The throwaway front-end (the migrator's input) never produces
+            // generic items (design 0007 is real-syntax only).
+            Item::Interface(_) | Item::Impl(_) => {
+                unreachable!("throwaway syntax has no generic items")
+            }
         }
     }
 
@@ -158,7 +163,8 @@ impl Emitter {
         self.push(&f.name);
         if !f.regions.is_empty() {
             self.push("[");
-            self.push(&f.regions.join(", "));
+            let decls: Vec<String> = f.regions.iter().map(|r| format!("region {r}")).collect();
+            self.push(&decls.join(", "));
             self.push("]");
         }
         self.push("(");
@@ -250,6 +256,7 @@ impl Emitter {
         match &ty.kind {
             TyKind::Scalar(sc) => self.push(scalar_kw(*sc)),
             TyKind::Named(n) => self.push(n),
+            TyKind::App { .. } => unreachable!("throwaway syntax has no generic types"),
             TyKind::Slice(t) => {
                 self.push("[");
                 self.emit_type(t);

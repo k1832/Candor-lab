@@ -167,20 +167,213 @@ impl RParser {
 
     fn parse_item(&mut self) -> PResult<Item> {
         let copy = self.eat_kw(RKw::Copy);
+        if !copy && self.at_ident("interface") {
+            return Ok(Item::Interface(self.parse_interface()?));
+        }
+        if !copy && self.at_ident("impl") {
+            return Ok(Item::Impl(self.parse_impl()?));
+        }
         match self.peek() {
             RTok::Kw(RKw::Struct) => Ok(Item::Struct(self.parse_struct(copy)?)),
             RTok::Kw(RKw::Enum) => Ok(Item::Enum(self.parse_enum(copy)?)),
             _ if copy => Err(Diag::error("P0002", "`copy` may only precede `struct` or `enum`", self.cur_span())),
             RTok::Kw(RKw::Fn) => Ok(Item::Fn(self.parse_fn()?)),
             RTok::Kw(RKw::Static) => Ok(Item::Static(self.parse_static()?)),
-            _ => Err(self.unexpected("an item (`struct`, `enum`, `fn`, `static`)")),
+            _ => Err(self.unexpected("an item (`struct`, `enum`, `fn`, `static`, `interface`, `impl`)")),
         }
+    }
+
+    /// Parse a declaration bracket after an item name (design 0007 §6.1.1): a
+    /// mixed list of `region r` region variables and bare/bounded type parameters.
+    /// Returns `(regions, type_params)`. Absent bracket -> both empty.
+    fn parse_decl_brackets(&mut self) -> PResult<(Vec<String>, Vec<TypeParam>)> {
+        let mut regions = Vec::new();
+        let mut tparams = Vec::new();
+        if self.eat(&RTok::LBracket) {
+            while !self.at(&RTok::RBracket) {
+                if self.at_ident("region") {
+                    self.bump();
+                    regions.push(self.expect_ident("a region variable")?);
+                } else {
+                    let plo = self.cur_start();
+                    let name = self.expect_ident("a type parameter")?;
+                    let mut bounds = Vec::new();
+                    if self.eat(&RTok::Colon) {
+                        loop {
+                            // A bound is an interface name or the built-in `copy`.
+                            if self.at_kw(RKw::Copy) {
+                                self.bump();
+                                bounds.push("copy".to_string());
+                            } else {
+                                bounds.push(self.expect_ident("a bound (interface name or `copy`)")?);
+                            }
+                            if !self.eat(&RTok::Plus) {
+                                break;
+                            }
+                        }
+                    }
+                    tparams.push(TypeParam { name, bounds, span: self.span_from(plo) });
+                }
+                if !self.eat(&RTok::Comma) {
+                    break;
+                }
+            }
+            self.expect(&RTok::RBracket, "`]`")?;
+        }
+        Ok((regions, tparams))
+    }
+
+    fn parse_interface(&mut self) -> PResult<InterfaceDecl> {
+        let lo = self.cur_start();
+        self.bump(); // `interface`
+        let name = self.expect_ident("an interface name")?;
+        let (_regions, type_params) = self.parse_decl_brackets()?;
+        self.expect(&RTok::LBrace, "`{`")?;
+        let mut methods = Vec::new();
+        while !self.at(&RTok::RBrace) && !self.at(&RTok::Eof) {
+            methods.push(self.parse_method_sig()?);
+        }
+        self.expect(&RTok::RBrace, "`}`")?;
+        Ok(InterfaceDecl { name, type_params, methods, span: self.span_from(lo) })
+    }
+
+    /// A method *signature* line inside an interface: `fn m(SELF, params) TAIL ->
+    /// ret ;` where SELF is `read self` / `write self` / `take self` / `self`.
+    fn parse_method_sig(&mut self) -> PResult<MethodSig> {
+        let lo = self.cur_start();
+        self.expect(&RTok::Kw(RKw::Fn), "`fn`")?;
+        let name = self.expect_ident("a method name")?;
+        self.expect(&RTok::LParen, "`(`")?;
+        let (has_self, self_mode, mut params) = self.parse_method_params()?;
+        self.expect(&RTok::RParen, "`)`")?;
+        let mut alloc = false;
+        if self.at_ident("alloc") {
+            self.bump();
+            alloc = true;
+        }
+        let ret = if self.eat(&RTok::Arrow) {
+            Some(self.parse_ret_ty()?)
+        } else {
+            None
+        };
+        self.expect(&RTok::Semi, "`;`")?;
+        let _ = &mut params;
+        Ok(MethodSig { name, has_self, self_mode, params, alloc, ret, span: self.span_from(lo) })
+    }
+
+    /// Parse a method's parameter list, detecting an optional `self` receiver at
+    /// its head (design 0007 §3.5; a `self`-less method is an associated function,
+    /// e.g. `From::from`, §7.1). Returns `(has_self, self_mode, non_self_params)`.
+    fn parse_method_params(&mut self) -> PResult<(bool, ParamMode, Vec<Param>)> {
+        // `self` receiver forms: `self`, `read self`, `write self`, `take self`.
+        let is_self_head = matches!(self.peek(), RTok::Kw(RKw::SelfKw))
+            || (matches!(self.peek(), RTok::Kw(RKw::Read) | RTok::Kw(RKw::Write) | RTok::Kw(RKw::Take))
+                && matches!(self.peek_at(1), RTok::Kw(RKw::SelfKw)));
+        let mut params = Vec::new();
+        let (has_self, self_mode) = if is_self_head {
+            let mode = match self.peek() {
+                RTok::Kw(RKw::Read) => { self.bump(); ParamMode::Read }
+                RTok::Kw(RKw::Write) => { self.bump(); ParamMode::Write }
+                RTok::Kw(RKw::Take) => { self.bump(); ParamMode::Take }
+                _ => ParamMode::Take,
+            };
+            self.expect(&RTok::Kw(RKw::SelfKw), "`self`")?;
+            while self.eat(&RTok::Comma) {
+                if self.at(&RTok::RParen) { break; }
+                params.push(self.parse_param()?);
+            }
+            (true, mode)
+        } else {
+            while !self.at(&RTok::RParen) {
+                params.push(self.parse_param()?);
+                if !self.eat(&RTok::Comma) { break; }
+            }
+            (false, ParamMode::Take)
+        };
+        Ok((has_self, self_mode, params))
+    }
+
+    fn parse_impl(&mut self) -> PResult<ImplDecl> {
+        let lo = self.cur_start();
+        self.bump(); // `impl`
+        let (_regions, type_params) = self.parse_decl_brackets()?;
+        let iface = self.expect_ident("an interface name")?;
+        let mut iface_args = Vec::new();
+        if self.eat(&RTok::LBracket) {
+            while !self.at(&RTok::RBracket) {
+                iface_args.push(self.parse_type()?);
+                if !self.eat(&RTok::Comma) {
+                    break;
+                }
+            }
+            self.expect(&RTok::RBracket, "`]`")?;
+        }
+        if !self.at_ident("for") {
+            return Err(self.unexpected("`for` in an impl header"));
+        }
+        self.bump(); // `for`
+        let target = self.parse_type()?;
+        self.expect(&RTok::LBrace, "`{`")?;
+        let mut methods = Vec::new();
+        while !self.at(&RTok::RBrace) && !self.at(&RTok::Eof) {
+            methods.push(self.parse_impl_method()?);
+        }
+        self.expect(&RTok::RBrace, "`}`")?;
+        Ok(ImplDecl { type_params, iface, iface_args, target, methods, home: None, span: self.span_from(lo) })
+    }
+
+    /// An impl method: like a free `fn` but its first parameter is a `self`
+    /// receiver. Lowered to a `FnDecl` whose first param is named `self`.
+    fn parse_impl_method(&mut self) -> PResult<FnDecl> {
+        let lo = self.cur_start();
+        self.expect(&RTok::Kw(RKw::Fn), "`fn`")?;
+        let name = self.expect_ident("a method name")?;
+        self.expect(&RTok::LParen, "`(`")?;
+        let slo = self.cur_start();
+        let (has_self, self_mode, rest) = self.parse_method_params()?;
+        let mut params = Vec::new();
+        if has_self {
+            params.push(Param {
+                name: "self".to_string(),
+                mode: self_mode,
+                region: None,
+                // `Self` placeholder; substituted by the generics lowering pass.
+                ty: Ty { kind: TyKind::Named("Self".to_string()), span: self.span_from(slo) },
+                span: self.span_from(slo),
+            });
+        }
+        params.extend(rest);
+        self.expect(&RTok::RParen, "`)`")?;
+        let mut alloc = false;
+        if self.at_ident("alloc") {
+            self.bump();
+            alloc = true;
+        }
+        let ret = if self.eat(&RTok::Arrow) {
+            Some(self.parse_ret_ty()?)
+        } else {
+            None
+        };
+        let body = self.parse_block()?;
+        Ok(FnDecl {
+            name,
+            type_params: Vec::new(),
+            regions: Vec::new(),
+            params,
+            alloc,
+            requires: Vec::new(),
+            ensures: Vec::new(),
+            ret,
+            body,
+            span: self.span_from(lo),
+        })
     }
 
     fn parse_struct(&mut self, copy: bool) -> PResult<StructDecl> {
         let lo = self.cur_start();
         self.expect(&RTok::Kw(RKw::Struct), "`struct`")?;
         let name = self.expect_ident("a struct name")?;
+        let (_regions, type_params) = self.parse_decl_brackets()?;
         self.expect(&RTok::LBrace, "`{`")?;
         let mut fields = Vec::new();
         while !self.at(&RTok::RBrace) {
@@ -199,7 +392,7 @@ impl RParser {
         } else {
             None
         };
-        Ok(StructDecl { copy, name, fields, drop_hook, span: self.span_from(lo) })
+        Ok(StructDecl { copy, name, type_params, fields, drop_hook, span: self.span_from(lo) })
     }
 
     fn parse_drop_hook(&mut self) -> PResult<Block> {
@@ -215,6 +408,7 @@ impl RParser {
         let lo = self.cur_start();
         self.expect(&RTok::Kw(RKw::Enum), "`enum`")?;
         let name = self.expect_ident("an enum name")?;
+        let (_regions, type_params) = self.parse_decl_brackets()?;
         self.expect(&RTok::LBrace, "`{`")?;
         let mut variants = Vec::new();
         while !self.at(&RTok::RBrace) {
@@ -243,7 +437,7 @@ impl RParser {
             }
         }
         self.expect(&RTok::RBrace, "`}`")?;
-        Ok(EnumDecl { copy, name, variants, span: self.span_from(lo) })
+        Ok(EnumDecl { copy, name, type_params, variants, span: self.span_from(lo) })
     }
 
     fn parse_static(&mut self) -> PResult<StaticDecl> {
@@ -262,7 +456,7 @@ impl RParser {
         let lo = self.cur_start();
         self.expect(&RTok::Kw(RKw::Fn), "`fn`")?;
         let name = self.expect_ident("a function name")?;
-        let regions = self.parse_region_list()?;
+        let (regions, type_params) = self.parse_decl_brackets()?;
         self.expect(&RTok::LParen, "`(`")?;
         let mut params = Vec::new();
         while !self.at(&RTok::RParen) {
@@ -300,21 +494,7 @@ impl RParser {
             None
         };
         let body = self.parse_block()?;
-        Ok(FnDecl { name, regions, params, alloc, requires, ensures, ret, body, span: self.span_from(lo) })
-    }
-
-    fn parse_region_list(&mut self) -> PResult<Vec<String>> {
-        let mut regions = Vec::new();
-        if self.eat(&RTok::LBracket) {
-            while !self.at(&RTok::RBracket) {
-                regions.push(self.expect_ident("a region variable")?);
-                if !self.eat(&RTok::Comma) {
-                    break;
-                }
-            }
-            self.expect(&RTok::RBracket, "`]`")?;
-        }
-        Ok(regions)
+        Ok(FnDecl { name, type_params, regions, params, alloc, requires, ensures, ret, body, span: self.span_from(lo) })
     }
 
     fn parse_param(&mut self) -> PResult<Param> {
@@ -417,7 +597,26 @@ impl RParser {
             RTok::LBracket => self.parse_bracket_type()?,
             RTok::Ident(name) => {
                 self.bump();
-                TyKind::Named(name)
+                // A bracket *following* a type-name is a type-argument list
+                // (design 0007 §6.1.1 use-rule): `List[i64]`, `Pair[T]`.
+                if self.at(&RTok::LBracket) {
+                    self.bump();
+                    let mut args = Vec::new();
+                    while !self.at(&RTok::RBracket) {
+                        args.push(self.parse_type()?);
+                        if !self.eat(&RTok::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(&RTok::RBracket, "`]`")?;
+                    TyKind::App { name, args }
+                } else {
+                    TyKind::Named(name)
+                }
+            }
+            RTok::Kw(RKw::SelfKw) => {
+                self.bump();
+                TyKind::Named("Self".to_string())
             }
             _ => return Err(self.unexpected("a type")),
         };
@@ -1043,7 +1242,22 @@ impl RParser {
                 ExprKind::EnumCtor { enum_name: "BoxResult".to_string(), variant, args }
             }
             RTok::Ident(name) => {
-                if matches!(self.peek_at(1), RTok::ColonColon) {
+                if matches!(self.peek_at(1), RTok::ColonColon) && matches!(self.peek_at(2), RTok::LBracket) {
+                    // `name::[T, ...]` — a generic function named as a value
+                    // (design 0007 §6.2.1).
+                    self.bump(); // name
+                    self.bump(); // ::
+                    self.bump(); // [
+                    let mut ty_args = Vec::new();
+                    while !self.at(&RTok::RBracket) {
+                        ty_args.push(self.parse_type()?);
+                        if !self.eat(&RTok::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(&RTok::RBracket, "`]`")?;
+                    ExprKind::GenericVal { name, ty_args }
+                } else if matches!(self.peek_at(1), RTok::ColonColon) {
                     self.bump();
                     self.bump();
                     let variant = self.expect_ident("a variant name")?;

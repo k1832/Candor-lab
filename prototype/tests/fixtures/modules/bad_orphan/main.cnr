@@ -1,0 +1,8 @@
+// Root: an impl placed in neither the interface's module nor the target's module
+// violates the orphan rule at module granularity (design 0007 §2.3).
+use shape::{Weighable};
+use node::{Node};
+
+impl Weighable for Node { fn weight(read self) -> i64 { return self.v; } }
+
+fn main() -> i64 { return 0; }

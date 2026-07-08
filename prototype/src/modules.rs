@@ -143,6 +143,11 @@ pub fn build_tree(dir: &Path) -> Result<ModuleBuild, Diag> {
                 Item::Enum(e) => (&e.name, Kind::Type, false),
                 Item::Fn(f) => (&f.name, Kind::Value, true),
                 Item::Static(s) => (&s.name, Kind::Value, false),
+                // An interface exports its name in the type namespace (design 0007);
+                // an `impl` block exports no name (its methods dispatch via the impl
+                // table, resolved after merge).
+                Item::Interface(i) => (&i.name, Kind::Type, false),
+                Item::Impl(_) => continue,
             };
             let export = Export { global: mangle(&path, name, kind), is_pub, is_fn };
             match kind {
@@ -267,6 +272,10 @@ fn rename_item(m: &Module, item: &mut Item) {
         Item::Enum(e) => e.name = m.type_exports[&e.name].global.clone(),
         Item::Fn(f) => f.name = m.value_exports[&f.name].global.clone(),
         Item::Static(s) => s.name = m.value_exports[&s.name].global.clone(),
+        Item::Interface(i) => i.name = m.type_exports[&i.name].global.clone(),
+        // An impl's own name is not qualified, but it is tagged with its home
+        // module for the orphan check (design 0007 §2.3 / 0008).
+        Item::Impl(im) => im.home = Some(path_str(&m.path)),
     }
 }
 
@@ -363,6 +372,9 @@ impl<'a> Rewriter<'a> {
             }
             Item::Fn(f) => {
                 let mut locals = vec![std::collections::HashSet::new()];
+                for tp in &mut f.type_params {
+                    self.qualify_bounds(&mut tp.bounds);
+                }
                 for p in &mut f.params {
                     self.rewrite_ty(&mut p.ty);
                     locals[0].insert(p.name.clone());
@@ -383,6 +395,47 @@ impl<'a> Rewriter<'a> {
                 self.rewrite_ty(&mut s.ty);
                 self.rewrite_expr(&mut s.value, &mut locals);
             }
+            Item::Interface(i) => {
+                for m in &mut i.methods {
+                    for p in &mut m.params {
+                        self.rewrite_ty(&mut p.ty);
+                    }
+                    if let Some(rt) = &mut m.ret {
+                        self.rewrite_ty(&mut rt.ty);
+                    }
+                }
+            }
+            Item::Impl(im) => {
+                if let Some(g) = self.scope.type_scope.get(&im.iface) {
+                    im.iface = g.clone();
+                }
+                for a in &mut im.iface_args {
+                    self.rewrite_ty(a);
+                }
+                self.rewrite_ty(&mut im.target);
+                for m in &mut im.methods {
+                    let mut locals = vec![std::collections::HashSet::new()];
+                    for p in &mut m.params {
+                        self.rewrite_ty(&mut p.ty);
+                        locals[0].insert(p.name.clone());
+                    }
+                    if let Some(rt) = &mut m.ret {
+                        self.rewrite_ty(&mut rt.ty);
+                    }
+                    self.rewrite_block(&mut m.body, &mut locals);
+                }
+            }
+        }
+    }
+
+    /// Qualify each bound interface name to its global form (`copy` is built-in).
+    fn qualify_bounds(&mut self, bounds: &mut [String]) {
+        for b in bounds.iter_mut() {
+            if b != "copy" {
+                if let Some(g) = self.scope.type_scope.get(b) {
+                    *b = g.clone();
+                }
+            }
         }
     }
 
@@ -391,6 +444,14 @@ impl<'a> Rewriter<'a> {
             TyKind::Named(n) => {
                 if let Some(g) = self.scope.type_scope.get(n) {
                     *n = g.clone();
+                }
+            }
+            TyKind::App { name, args } => {
+                if let Some(g) = self.scope.type_scope.get(name) {
+                    *name = g.clone();
+                }
+                for a in args {
+                    self.rewrite_ty(a);
                 }
             }
             TyKind::Array { size, elem } => {
@@ -544,6 +605,16 @@ impl<'a> Rewriter<'a> {
             ExprKind::Return(e) => {
                 if let Some(e) = e {
                     self.rewrite_expr(e, locals);
+                }
+            }
+            ExprKind::GenericVal { name, ty_args } => {
+                if !is_local(locals, name) {
+                    if let Some(g) = self.scope.value_scope.get(name) {
+                        *name = g.clone();
+                    }
+                }
+                for a in ty_args {
+                    self.rewrite_ty(a);
                 }
             }
             ExprKind::IntLit { .. }

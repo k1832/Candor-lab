@@ -8,6 +8,7 @@ pub mod ast;
 pub mod check;
 pub mod count;
 pub mod diag;
+pub mod generics;
 pub mod interp;
 pub mod lexer;
 pub mod modules;
@@ -98,11 +99,32 @@ pub fn run_source_real(src: &str) -> RunResult {
         Ok(p) => p,
         Err(d) => return RunResult::ParseError(d),
     };
+    if generics::is_generic_program(&program) {
+        return run_generic(&program);
+    }
     let diags = check::check_program_real(&program);
     if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
         return RunResult::CheckErrors(diags);
     }
     match interp::run_program(&program) {
+        Ok(run) => RunResult::Ok(run),
+        Err(f) => RunResult::Fault(f),
+    }
+}
+
+/// Check a generic program, then monomorphize it and run the concrete result
+/// (design 0007 §5.2: the interpreter executes the instantiated AST, trusting the
+/// definition-site check — it re-runs no analysis tier).
+fn run_generic(program: &ast::Program) -> RunResult {
+    let (diags, insts, shapes) = check::check_generic_program(program, true);
+    if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
+        return RunResult::CheckErrors(diags);
+    }
+    let mono = generics::monomorphize(program, &insts, &shapes);
+    if mono.diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
+        return RunResult::CheckErrors(mono.diags);
+    }
+    match interp::run_program(&mono.program) {
         Ok(run) => RunResult::Ok(run),
         Err(f) => RunResult::Fault(f),
     }
@@ -132,6 +154,12 @@ pub fn run_dir(dir: &std::path::Path) -> RunResult {
         Err(d) => return RunResult::ParseError(d),
     };
     let mut diags = build.diags;
+    if generics::is_generic_program(&build.program) {
+        if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
+            return RunResult::CheckErrors(diags);
+        }
+        return run_generic(&build.program);
+    }
     diags.extend(check::check_program_real(&build.program));
     if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
         return RunResult::CheckErrors(diags);

@@ -24,6 +24,63 @@ pub enum Item {
     Enum(EnumDecl),
     Fn(FnDecl),
     Static(StaticDecl),
+    /// A generic interface declaration (design 0007 §1.2, §6). A named set of
+    /// method signatures; may itself be generic (`interface From[E]`).
+    Interface(InterfaceDecl),
+    /// An `impl I[args] for Type { .. }` block attaching an interface's methods
+    /// to a type (design 0007 §2.3).
+    Impl(ImplDecl),
+}
+
+/// A declared type parameter with its bounds (design 0007 §1.2, §6.4). Bounds are
+/// interface names and the one built-in structural bound `copy`.
+#[derive(Clone, Debug)]
+pub struct TypeParam {
+    pub name: String,
+    /// Bound names (interface names or the literal `copy`).
+    pub bounds: Vec<String>,
+    pub span: Span,
+}
+
+/// One method *signature* inside an `interface` (design 0007 §1.2, §4.1). No body.
+#[derive(Clone, Debug)]
+pub struct MethodSig {
+    pub name: String,
+    /// Whether the method takes a `self` receiver (design 0007 §3.5). A method
+    /// without `self` is an associated function, e.g. `From::from` (§7.1).
+    pub has_self: bool,
+    /// The `self` receiver mode when `has_self` (`read`/`write`/`take`).
+    pub self_mode: ParamMode,
+    /// Non-self parameters.
+    pub params: Vec<Param>,
+    pub alloc: bool,
+    pub ret: Option<RetTy>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct InterfaceDecl {
+    pub name: String,
+    pub type_params: Vec<TypeParam>,
+    pub methods: Vec<MethodSig>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct ImplDecl {
+    /// Type parameters of a *generic* impl (`impl[T] I for List[T]`). Empty for a
+    /// concrete impl. (Generic impls are deferred in stage 1; see generics.rs.)
+    pub type_params: Vec<TypeParam>,
+    pub iface: String,
+    /// The interface's type arguments (`From[E1]` -> `[E1]`).
+    pub iface_args: Vec<Ty>,
+    /// The implementing type (`impl I for Type`).
+    pub target: Ty,
+    pub methods: Vec<FnDecl>,
+    /// The module this impl block was declared in (set by the module merge, design
+    /// 0008), for the module-granularity orphan check. `None` = single-file.
+    pub home: Option<String>,
+    pub span: Span,
 }
 
 /// A `use` import declaration (design 0008 §3). Parsed by the real front-end
@@ -42,6 +99,8 @@ pub struct UseDecl {
 pub struct StructDecl {
     pub copy: bool,
     pub name: String,
+    /// Generic type parameters declared in brackets after the name (design 0007).
+    pub type_params: Vec<TypeParam>,
     pub fields: Vec<Field>,
     /// Optional `drop(write self) { ... }` hook (design 0001 §1.5).
     pub drop_hook: Option<Block>,
@@ -59,6 +118,8 @@ pub struct Field {
 pub struct EnumDecl {
     pub copy: bool,
     pub name: String,
+    /// Generic type parameters (design 0007).
+    pub type_params: Vec<TypeParam>,
     pub variants: Vec<Variant>,
     pub span: Span,
 }
@@ -78,6 +139,9 @@ pub struct Variant {
 #[derive(Clone, Debug)]
 pub struct FnDecl {
     pub name: String,
+    /// Generic type parameters declared in the bracket after the name, mixed with
+    /// region variables (design 0007 §6.1.1). Empty for a non-generic function.
+    pub type_params: Vec<TypeParam>,
     /// Region variables declared in brackets after the name (design 0001 §3.3).
     pub regions: Vec<String>,
     pub params: Vec<Param>,
@@ -150,8 +214,12 @@ pub struct Ty {
 #[derive(Clone, Debug)]
 pub enum TyKind {
     Scalar(ScalarTy),
-    /// A user struct/enum name (unresolved — no symbol table).
+    /// A user struct/enum name (unresolved — no symbol table). Also a bare type
+    /// parameter reference (`T`) inside a generic body; the checker distinguishes.
     Named(String),
+    /// A generic type application `Name[arg, ...]` in type position (design 0007
+    /// §6.1.1 use-rule): `List[i64]`, `Pair[T]`, `From[E1]`.
+    App { name: String, args: Vec<Ty> },
     /// `[N]T` fixed array; `size` is a const expression (int literal or name).
     Array { size: Box<Expr>, elem: Box<Ty> },
     Slice(Box<Ty>),
@@ -358,6 +426,10 @@ pub enum ExprKind {
     /// §6.5). On a result-shaped enum, unwraps the `ok`-marked variant's
     /// payload or early-returns the whole value. Real front-end only.
     Try(Box<Expr>),
+
+    /// `name::[T, ...]` — a generic function named as a *value* with explicit
+    /// type arguments (design 0007 §6.2.1). Only in value positions.
+    GenericVal { name: String, ty_args: Vec<Ty> },
 }
 
 // ---------------------------------------------------------------------------

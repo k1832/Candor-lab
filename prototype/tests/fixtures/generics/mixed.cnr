@@ -1,0 +1,11 @@
+// Mixed region + type parameter list (0007 §6.1.1).
+fn choose[region r, T](a: read[r] T, b: read[r] T, pick_a: bool) -> read[r] T {
+    if pick_a { return a; }
+    return b;
+}
+fn main() -> i64 {
+    let x: i64 = 4;
+    let y: i64 = 9;
+    let z: read i64 = choose(read x, read y, false);
+    return z.*;
+}

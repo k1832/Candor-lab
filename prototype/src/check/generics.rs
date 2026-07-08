@@ -1,0 +1,796 @@
+//! Generic-aware checking hooks (design 0007), kept out of the concrete-path
+//! files. These `Checker` methods handle: naming a generic function as a value
+//! (`name::[T]`), calling a generic function with value-argument-driven type
+//! inference and bound-conformance checking, and calling an interface-bound
+//! method on a type parameter or a concrete type with an impl. They are only
+//! exercised when a program contains generics; a program with none never reaches
+//! them (its calls resolve as ordinary `fns`).
+
+use std::collections::{HashMap, HashSet};
+
+use crate::ast::*;
+use crate::diag::Diag;
+use crate::resolve::GenericFnSig;
+use crate::span::Span;
+use crate::types::*;
+
+use super::{Checker, Use};
+
+impl<'a> Checker<'a> {
+    /// Record a reached instantiation (unless we are checking a generic body at
+    /// its definition site, where argument types are still opaque).
+    pub(super) fn record_inst(&mut self, name: &str, args: Vec<Type>) {
+        if self.def_site {
+            return;
+        }
+        if args.iter().any(|t| matches!(t, Type::Param(_) | Type::Error)) {
+            return;
+        }
+        if !self.insts.iter().any(|(n, a)| n == name && a == &args) {
+            self.insts.push((name.to_string(), args));
+        }
+    }
+
+    /// Check a `name::[T, ...]` generic value (design 0007 §6.2.1): its type is a
+    /// concrete fn-pointer to the named instantiation.
+    pub(super) fn check_generic_val(&mut self, name: &str, ty_args: &[Ty], span: Span) -> Type {
+        let sig = match self.items.generic_fns.get(name) {
+            Some(s) => s.clone(),
+            None => {
+                self.diags.push(Diag::error(
+                    "E1001",
+                    format!("`{name}` is not a generic function"),
+                    span,
+                ));
+                return Type::Error;
+            }
+        };
+        let args: Vec<Type> = ty_args.iter().map(|t| self.resolve_ty(t)).collect();
+        if args.len() != sig.type_params.len() {
+            self.diags.push(Diag::error(
+                "E1005",
+                format!(
+                    "generic function `{name}` expects {} type argument(s), found {}",
+                    sig.type_params.len(),
+                    args.len()
+                ),
+                span,
+            ));
+            return Type::Error;
+        }
+        let map: HashMap<String, Type> =
+            sig.type_params.iter().map(|(n, _)| n.clone()).zip(args.iter().cloned()).collect();
+        self.check_bounds(&sig, &map, span);
+        self.record_inst(name, args.clone());
+        if !args.iter().any(|t| matches!(t, Type::Error)) {
+            self.shapes.insert(span.start, crate::generics::Shape::Fn(name.to_string(), args.clone()));
+        }
+        // The value is a fn-pointer over the substituted signature.
+        let params: Vec<(ParamMode, Type)> = sig
+            .params
+            .iter()
+            .map(|p| (p.mode, subst(&p.lowered, &map)))
+            .collect();
+        Type::FnPtr(crate::types::FnPtrTy {
+            params,
+            alloc: sig.alloc,
+            ret: Box::new(subst(&sig.ret, &map)),
+        })
+    }
+
+    /// Check that each concrete argument satisfies its parameter's declared
+    /// bounds (design 0007 §2.1 bound conformance). Emits use-site errors.
+    pub(super) fn check_bounds(
+        &mut self,
+        sig: &GenericFnSig,
+        map: &HashMap<String, Type>,
+        span: Span,
+    ) {
+        for (pname, bounds) in &sig.type_params {
+            let arg = match map.get(pname) {
+                Some(a) => a.clone(),
+                None => continue,
+            };
+            if matches!(arg, Type::Error | Type::Param(_)) {
+                continue;
+            }
+            self.check_arg_conformance(&arg, bounds, span);
+        }
+    }
+
+    /// Verify one concrete type argument against one parameter's bound set.
+    pub(super) fn check_arg_conformance(&mut self, arg: &Type, bounds: &[String], span: Span) {
+        // A type parameter never ranges over a borrow type (design 0007 §3.5).
+        if arg.is_borrow_kind() {
+            self.diags.push(
+                Diag::error(
+                    "E1006",
+                    format!("a borrow type `{}` is not a legal type argument", arg.display()),
+                    span,
+                )
+                .with_note("borrows are for passing and computing, not abstracting over (§3.5)", None),
+            );
+            return;
+        }
+        for b in bounds {
+            if b == "copy" {
+                if !is_copy(arg, self.items) {
+                    self.diags.push(
+                        Diag::error(
+                            "E1007",
+                            format!("type argument `{}` does not satisfy the `copy` bound", arg.display()),
+                            span,
+                        )
+                        .with_note("only a `copy` type may instantiate a `copy`-bounded parameter (§3.1)", None),
+                    );
+                }
+            } else if !self.type_implements(arg, b) {
+                self.diags.push(
+                    Diag::error(
+                        "E1008",
+                        format!("type argument `{}` does not implement interface `{}`", arg.display(), b),
+                        span,
+                    )
+                    .with_note("no `impl` of this interface for the type is in scope (§2.1 bound conformance)", None),
+                );
+            }
+        }
+    }
+
+    /// Does `ty` (a concrete nominal) implement interface `iface`? (An impl with
+    /// matching target nominal exists.)
+    pub(super) fn type_implements(&self, ty: &Type, iface: &str) -> bool {
+        let nominal = match ty {
+            Type::Named(n) => n.clone(),
+            _ => return false,
+        };
+        self.items
+            .impls
+            .iter()
+            .any(|im| im.iface == iface && im.target == nominal)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Whole-program generic check orchestration (design 0007 §2.1, §5.2)
+// ---------------------------------------------------------------------------
+
+use crate::resolve::{resolve_program, FnSig, GenericFnSig as GFS};
+use super::{synth_drop_hook, FnState};
+
+/// Diagnostics, reached instantiations, and per-node monomorphization shapes.
+pub type GenericCheck = (Vec<Diag>, Vec<(String, Vec<Type>)>, std::collections::HashMap<usize, crate::generics::Shape>);
+
+/// Check a program that contains generics (design 0007): resolve the generic
+/// tables, definition-site-check each generic body once against its bounds with
+/// opaque type parameters, then check the concrete code (whose generic call sites
+/// are typed by value-argument inference and bound conformance). Returns the
+/// diagnostics and the reached concrete instantiations (for monomorphization).
+pub fn check_generic_program(prog: &Program, real: bool) -> GenericCheck {
+    let mut diags = Vec::new();
+    let mut items = resolve_program(prog, &mut diags);
+    crate::generics::resolve_tables(prog, &mut items, &mut diags);
+
+    // Concrete drop-hook alloc-on-drop fixpoint (same as the concrete driver).
+    let hooks: Vec<(String, Block, Span)> = prog
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Struct(s) if s.type_params.is_empty() => {
+                s.drop_hook.as_ref().map(|b| (s.name.clone(), b.clone(), s.span))
+            }
+            _ => None,
+        })
+        .collect();
+    if !hooks.is_empty() {
+        let mut guard = 0;
+        loop {
+            let snapshot = items.clone();
+            let mut changed = false;
+            for (sname, block, span) in &hooks {
+                let mut c = Checker { items: &snapshot, diags: Vec::new(), f: FnState::empty(), real, insts: Vec::new(), def_site: false, shapes: std::collections::HashMap::new(), type_params: Vec::new(), param_bounds: Vec::new(), expected_ty: None, cur_generic: None };
+                let (fdecl, sig) = synth_drop_hook(sname, block, *span);
+                c.check_fn_with_sig(&fdecl, &sig);
+                if c.f.alloc.site.is_some() && !items.structs.get(sname).map(|s| s.alloc_on_drop).unwrap_or(false) {
+                    if let Some(s) = items.structs.get_mut(sname) {
+                        s.alloc_on_drop = true;
+                        changed = true;
+                    }
+                }
+            }
+            guard += 1;
+            if !changed || guard > hooks.len() + 1 {
+                break;
+            }
+        }
+    }
+
+    let mut c = Checker { items: &items, diags, f: FnState::empty(), real, insts: Vec::new(), def_site: false, shapes: std::collections::HashMap::new(), type_params: Vec::new(), param_bounds: Vec::new(), expected_ty: None, cur_generic: None };
+
+    // --- Definition-site checks (opaque T, once per generic) ---
+    for it in &prog.items {
+        if let Item::Fn(f) = it {
+            if !f.type_params.is_empty() {
+                if let Some(sig) = c.items.generic_fns.get(&f.name).cloned() {
+                    c.check_generic_fn_def_site(f, &sig);
+                }
+            }
+        }
+    }
+    for it in &prog.items {
+        if let Item::Impl(im) = it {
+            c.check_impl_methods_def_site(im);
+        }
+    }
+
+    // --- Concrete code (typing generic uses, collecting instantiations) ---
+    for it in &prog.items {
+        match it {
+            Item::Fn(f) if f.type_params.is_empty() => c.check_fn(f),
+            Item::Static(s) => c.check_static(s),
+            _ => {}
+        }
+    }
+    for (sname, block, span) in &hooks {
+        let (fdecl, sig) = synth_drop_hook(sname, block, *span);
+        c.check_fn_with_sig(&fdecl, &sig);
+    }
+
+    (c.diags, c.insts, c.shapes)
+}
+
+impl<'a> Checker<'a> {
+    /// Definition-site check of a generic function body (design 0007 §2.1, §3):
+    /// its type parameters are opaque, non-`copy` unless bounded `copy`,
+    /// needs-drop, fieldless, and only the bound-interface methods are callable.
+    pub(super) fn check_generic_fn_def_site(&mut self, f: &FnDecl, sig: &GFS) {
+        // Build the def-site view of the items (params + their copy bounds).
+        let mut view = self.items.clone();
+        view.type_param_copy = sig
+            .type_params
+            .iter()
+            .map(|(n, bounds)| (n.clone(), bounds.iter().any(|b| b == "copy")))
+            .collect();
+        let concrete_sig = FnSig {
+            name: sig.name.clone(),
+            regions: sig.regions.clone(),
+            params: sig.params.clone(),
+            alloc: sig.alloc,
+            ret: sig.ret.clone(),
+            ret_region: sig.ret_region.clone(),
+            ret_span: sig.ret_span,
+            span: sig.span,
+        };
+        let mut c = Checker {
+            items: &view,
+            diags: std::mem::take(&mut self.diags),
+            f: FnState::empty(),
+            real: self.real,
+            insts: Vec::new(),
+            def_site: true,
+            shapes: std::collections::HashMap::new(),
+            type_params: Vec::new(),
+            param_bounds: Vec::new(),
+            expected_ty: None,
+            cur_generic: None,
+        };
+        c.type_params = sig.type_params.iter().map(|(n, _)| n.clone()).collect();
+        c.param_bounds = sig.type_params.clone();
+        c.cur_generic = Some(sig.name.clone());
+        c.check_fn_with_sig(f, &concrete_sig);
+        self.diags = c.diags;
+        self.shapes.extend(c.shapes);
+        self.insts.extend(c.insts);
+    }
+
+    /// Definition-site check of an impl's method bodies (concrete impls only in
+    /// stage 1, so `Self` = the concrete target — an ordinary function check).
+    pub(super) fn check_impl_methods_def_site(&mut self, im: &ImplDecl) {
+        let target = match &im.target.kind {
+            TyKind::Named(n) => n.clone(),
+            _ => return,
+        };
+        if !im.type_params.is_empty() {
+            return; // deferred (already diagnosed)
+        }
+        let iface_args: Vec<Type> = im.iface_args.iter().map(|a| self.resolve_ty(a)).collect();
+        for m in &im.methods {
+            // Substitute `Self` -> target throughout the method.
+            let mut fdecl = m.clone();
+            crate::generics::subst_self_fndecl(&mut fdecl, &target);
+            let sig = self.impl_method_sig(&fdecl, &target, &iface_args);
+            let mut c = Checker {
+                items: self.items,
+                diags: std::mem::take(&mut self.diags),
+                f: FnState::empty(),
+                real: self.real,
+                insts: Vec::new(),
+                def_site: false,
+                shapes: std::collections::HashMap::new(),
+                type_params: Vec::new(),
+                param_bounds: Vec::new(),
+                expected_ty: None,
+                cur_generic: None,
+            };
+            c.check_fn_with_sig(&fdecl, &sig);
+            self.diags = c.diags;
+            self.shapes.extend(c.shapes);
+            self.insts.extend(c.insts);
+        }
+    }
+
+    fn impl_method_sig(&mut self, m: &FnDecl, _target: &str, _iface_args: &[Type]) -> FnSig {
+        let params = m
+            .params
+            .iter()
+            .map(|p| {
+                let dty = self.resolve_ty(&p.ty);
+                ParamInfoLocal::to_param_info(p, dty)
+            })
+            .collect();
+        let (ret, ret_region, ret_span) = match &m.ret {
+            Some(rt) => {
+                let base = self.resolve_ty(&rt.ty);
+                let t = match rt.borrow {
+                    Some(BorrowKind::Shared) => Type::Borrow(Box::new(base)),
+                    Some(BorrowKind::Exclusive) => Type::BorrowMut(Box::new(base)),
+                    None => base,
+                };
+                (t, rt.region.clone(), rt.span)
+            }
+            None => (Type::unit(), None, m.span),
+        };
+        FnSig {
+            name: m.name.clone(),
+            regions: m.regions.clone(),
+            params,
+            alloc: m.alloc,
+            ret,
+            ret_region,
+            ret_span,
+            span: m.span,
+        }
+    }
+}
+
+use crate::resolve::ParamInfo;
+struct ParamInfoLocal;
+impl ParamInfoLocal {
+    fn to_param_info(p: &Param, dty: Type) -> ParamInfo {
+        ParamInfo {
+            name: p.name.clone(),
+            mode: p.mode,
+            region: p.region.clone(),
+            lowered: crate::resolve::lower_param(p.mode, dty.clone()),
+            decl_ty: dty,
+            span: p.span,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Generic call sites and interface method calls (design 0007 §2.2, §2.3)
+// ---------------------------------------------------------------------------
+
+impl<'a> Checker<'a> {
+    /// Type a call to a generic function: infer its type arguments from the value
+    /// arguments (§2.2), check bound conformance (§2.1), record the instantiation,
+    /// and return the substituted return type. Effects/loans are handled by the
+    /// substituted parameter modes exactly as an ordinary call.
+    pub(super) fn check_generic_call(&mut self, name: &str, args: &[Expr], span: Span) -> Type {
+        let sig = self.items.generic_fns.get(name).cloned().unwrap();
+        if args.len() != sig.params.len() {
+            self.diags.push(Diag::error(
+                "E0706",
+                format!("generic function `{}` expects {} argument(s), found {}", name, sig.params.len(), args.len()),
+                span,
+            ));
+            return Type::Error;
+        }
+        // Infer type arguments by unifying each declared parameter type with the
+        // argument's synthesized type.
+        let mut subst_map: HashMap<String, Type> = HashMap::new();
+        let param_names: HashSet<String> = sig.type_params.iter().map(|(n, _)| n.clone()).collect();
+        let mut arg_tys: Vec<Type> = Vec::new();
+        for (p, a) in sig.params.iter().zip(args) {
+            let inner: &Expr = match &a.kind {
+                ExprKind::OutArg(i) => i,
+                _ => a,
+            };
+            let at = self.synth_arg_type(inner);
+            arg_tys.push(at.clone());
+            unify(&p.decl_ty, &at, &param_names, &mut subst_map);
+        }
+        // Any parameter not inferred defaults to Error (reported as needing annotation).
+        let mut targs: Vec<Type> = Vec::new();
+        for (n, _) in &sig.type_params {
+            match subst_map.get(n) {
+                Some(t) => targs.push(t.clone()),
+                None => {
+                    self.diags.push(Diag::error(
+                        "E1002",
+                        format!("cannot infer type parameter `{n}` of `{name}` from the arguments"),
+                        span,
+                    ));
+                    targs.push(Type::Error);
+                }
+            }
+        }
+        // Emit argument accesses (moves/borrows/effects) against substituted modes.
+        for (p, a) in sig.params.iter().zip(args) {
+            self.clear_carried();
+            let decl = subst(&p.decl_ty, &subst_map);
+            self.check_arg_mode(p.mode, &decl, a);
+        }
+        self.check_bounds(&sig, &subst_map, span);
+        // Polymorphic recursion: a self-call whose inferred type argument nests a
+        // type parameter under a constructor has no fixed point (design 0007
+        // §5.1.1) — a definition-site error, decidable here.
+        if self.def_site && self.cur_generic.as_deref() == Some(name)
+            && targs.iter().any(param_grows)
+        {
+            self.diags.push(
+                Diag::error(
+                    "E1020",
+                    format!("polymorphic recursion: `{name}` instantiates itself with a growing type argument"),
+                    span,
+                )
+                .with_note("a self-instantiation nesting a type parameter under a constructor does not terminate (§5.1.1)", None),
+            );
+        }
+        if sig.alloc {
+            self.note_alloc(span, format!("call to `alloc` generic function `{name}` (§4.1)"));
+        }
+        self.record_inst(name, targs.clone());
+        if !targs.iter().any(|t| matches!(t, Type::Error)) {
+            self.shapes.insert(span.start, crate::generics::Shape::Fn(name.to_string(), targs.clone()));
+        }
+        self.clear_carried();
+        subst(&sig.ret, &subst_map)
+    }
+
+    /// Best-effort synthesis of an argument's type for inference (not emitting).
+    /// Reuses the full checker in a diagnostics-suppressed probe.
+    pub(super) fn synth_arg_type(&mut self, e: &Expr) -> Type {
+        let mark = self.diags.len();
+        let saved_cur = self.f.cur;
+        self.f.cur = None; // suppress CFG action emission during the probe
+        let t = self.check_expr(e, Use::Value);
+        self.f.cur = saved_cur;
+        self.diags.truncate(mark);
+        // Strip a borrow to get the underlying value type for inference.
+        match t {
+            Type::Borrow(inner) | Type::BorrowMut(inner) => *inner,
+            other => other,
+        }
+    }
+
+    /// Resolve `receiver.method(args)` against interface impls. Returns `None` if
+    /// this is not a recognized interface method (so the caller can fall through
+    /// to the fn-pointer/error path).
+    pub(super) fn try_method_call(
+        &mut self,
+        base: &Expr,
+        method: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Option<Type> {
+        let recv_ty = self.synth_arg_type(base);
+        // The receiver's nominal or type-parameter identity.
+        match &recv_ty {
+            Type::Param(pname) => {
+                // Def-site: only the bound interfaces provide methods (§2.1).
+                let ifaces = self.param_bound_ifaces(pname);
+                for iface in &ifaces {
+                    if let Some(m) = self.iface_method(iface, method) {
+                        return Some(self.check_iface_method_call(base, &m, args, span));
+                    }
+                }
+                self.diags.push(
+                    Diag::error(
+                        "E1002",
+                        format!("no method `{method}` on type parameter `{pname}`"),
+                        span,
+                    )
+                    .with_note("only methods declared by the parameter's bound interfaces are callable (§2.1)", None),
+                );
+                Some(Type::Error)
+            }
+            Type::Named(nominal) => {
+                // Concrete: find an impl providing the method for this type.
+                let found = self
+                    .items
+                    .impls
+                    .iter()
+                    .find(|im| im.target == *nominal && im.methods.contains_key(method))
+                    .map(|im| im.iface.clone());
+                match found {
+                    Some(iface) => {
+                        let m = self.iface_method(&iface, method)?;
+                        Some(self.check_iface_method_call(base, &m, args, span))
+                    }
+                    None => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn param_bound_ifaces(&self, pname: &str) -> Vec<String> {
+        // The current def-site's fn signature bounds are encoded in items via the
+        // interfaces the parameter is bound to; we recover them from the type
+        // parameter's registered bounds carried on the generic sig being checked.
+        self
+            .param_bounds
+            .iter()
+            .find(|(n, _)| n == pname)
+            .map(|(_, b)| b.clone())
+            .unwrap_or_default()
+    }
+
+    fn iface_method(&self, iface: &str, method: &str) -> Option<crate::resolve::IfaceMethod> {
+        self.items
+            .interfaces
+            .get(iface)
+            .and_then(|i| i.methods.iter().find(|m| m.name == method).cloned())
+    }
+
+    /// Type-check an interface-method call given its resolved signature. The
+    /// receiver is accessed per the `self` mode; the effect is inherited (§4.1).
+    fn check_iface_method_call(
+        &mut self,
+        base: &Expr,
+        m: &crate::resolve::IfaceMethod,
+        args: &[Expr],
+        span: Span,
+    ) -> Type {
+        // Receiver access per self mode.
+        let recv_use = match m.self_mode {
+            ParamMode::Read => Use::BorrowShared,
+            ParamMode::Write => Use::BorrowExcl,
+            ParamMode::Take | ParamMode::Out => Use::Value,
+        };
+        self.clear_carried();
+        self.check_expr(base, recv_use);
+        if args.len() != m.params.len() {
+            self.diags.push(Diag::error(
+                "E0706",
+                format!("method `{}` expects {} argument(s), found {}", m.name, m.params.len(), args.len()),
+                span,
+            ));
+        }
+        for ((mode, pty), a) in m.params.iter().zip(args) {
+            self.clear_carried();
+            self.check_arg_mode(*mode, pty, a);
+        }
+        if m.alloc {
+            self.note_alloc(span, format!("call to `alloc` interface method `{}` (§4.1)", m.name));
+        }
+        self.clear_carried();
+        m.ret.clone()
+    }
+}
+
+/// Unify a declared (parametric) type with a concrete argument type, binding type
+/// parameters in `out`. A best-effort structural match (design 0007 §2.2).
+fn unify(decl: &Type, arg: &Type, params: &HashSet<String>, out: &mut HashMap<String, Type>) {
+    match (decl, arg) {
+        (Type::Param(n), a) if params.contains(n) => {
+            if !matches!(a, Type::Error | Type::IntLit) {
+                out.entry(n.clone()).or_insert_with(|| a.clone());
+            } else if matches!(a, Type::IntLit) {
+                out.entry(n.clone()).or_insert(Type::Scalar(ScalarTy::I64));
+            }
+        }
+        (Type::App(_, da), Type::App(_, aa)) => {
+            for (d, a) in da.iter().zip(aa) {
+                unify(d, a, params, out);
+            }
+        }
+        (Type::Box(d), Type::Box(a))
+        | (Type::BoxResult(d), Type::BoxResult(a))
+        | (Type::RawPtr(d), Type::RawPtr(a))
+        | (Type::Slice(d), Type::Slice(a))
+        | (Type::SliceMut(d), Type::SliceMut(a))
+        | (Type::Borrow(d), Type::Borrow(a))
+        | (Type::BorrowMut(d), Type::BorrowMut(a))
+        | (Type::Array(d, _), Type::Array(a, _)) => unify(d, a, params, out),
+        _ => {}
+    }
+}
+
+use crate::token::ScalarTy;
+
+// ---------------------------------------------------------------------------
+// Generic struct literals and enum constructors (design 0007 §2.2, §5)
+// ---------------------------------------------------------------------------
+
+impl<'a> Checker<'a> {
+    /// Type a generic struct literal `Name { .. }`, inferring the type arguments
+    /// from the field values, checking each field against the substituted type.
+    pub(super) fn check_generic_struct_lit(
+        &mut self,
+        name: &str,
+        g: &GenericDecl,
+        fields: &[FieldInit],
+        span: Span,
+    ) -> Type {
+        let pset: HashSet<String> = g.params.iter().cloned().collect();
+        let mut smap: HashMap<String, Type> = HashMap::new();
+        for fi in fields {
+            if let Some((_, fty)) = g.fields.iter().find(|(fn_, _)| fn_ == &fi.name) {
+                let vt = self.synth_arg_type(&fi.value);
+                unify(fty, &vt, &pset, &mut smap);
+            }
+        }
+        let targs = self.finish_type_args(name, g, &smap, span);
+        for fi in fields {
+            match g.fields.iter().find(|(fn_, _)| fn_ == &fi.name) {
+                Some((_, fty)) => {
+                    let expect = subst(fty, &smap);
+                    self.check_against(&fi.value, &expect);
+                }
+                None => {
+                    self.diags.push(Diag::error(
+                        "E0107",
+                        format!("type `{name}` has no field `{}`", fi.name),
+                        fi.span,
+                    ));
+                    self.check_expr(&fi.value, Use::Value);
+                }
+            }
+        }
+        if !targs.iter().any(|t| matches!(t, Type::Error)) {
+            self.record_inst(name, targs.clone());
+            self.shapes.insert(span.start, crate::generics::Shape::Type(name.to_string(), targs.clone()));
+        }
+        Type::App(name.to_string(), targs)
+    }
+
+    /// Type a generic enum constructor `Enum::Variant(args)`, inferring the type
+    /// arguments from the payload arguments.
+    pub(super) fn check_generic_enum_ctor(
+        &mut self,
+        enum_name: &str,
+        g: &GenericDecl,
+        variant: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Type {
+        let v = match g.variants.iter().find(|(n, _, _)| n == variant) {
+            Some(v) => v.clone(),
+            None => {
+                self.diags.push(Diag::error("E0108", format!("`{enum_name}` has no variant `{variant}`"), span));
+                for a in args {
+                    self.check_expr(a, Use::Value);
+                }
+                return Type::Error;
+            }
+        };
+        let pset: HashSet<String> = g.params.iter().cloned().collect();
+        let mut smap: HashMap<String, Type> = HashMap::new();
+        if args.len() == v.1.len() {
+            for (a, pty) in args.iter().zip(&v.1) {
+                let at = self.synth_arg_type(a);
+                unify(pty, &at, &pset, &mut smap);
+            }
+        } else {
+            self.diags.push(Diag::error(
+                "E0605",
+                format!("variant `{enum_name}::{variant}` expects {} payload(s), found {}", v.1.len(), args.len()),
+                span,
+            ));
+        }
+        let targs = self.finish_type_args(enum_name, g, &smap, span);
+        for (a, pty) in args.iter().zip(&v.1) {
+            let expect = subst(pty, &smap);
+            self.check_against(a, &expect);
+        }
+        if !targs.iter().any(|t| matches!(t, Type::Error)) {
+            self.record_inst(enum_name, targs.clone());
+            self.shapes.insert(span.start, crate::generics::Shape::Type(enum_name.to_string(), targs.clone()));
+        }
+        Type::App(enum_name.to_string(), targs)
+    }
+
+    /// Collect the ordered concrete type arguments from an inference map, erroring
+    /// on any parameter left uninferred at a concrete site.
+    fn finish_type_args(&mut self, name: &str, g: &GenericDecl, smap: &HashMap<String, Type>, span: Span) -> Vec<Type> {
+        // A hint from the expected type (e.g. a `let` annotation) resolves any
+        // parameter the value arguments cannot pin down.
+        let hint: Vec<Type> = match &self.expected_ty {
+            Some(Type::App(en, eargs)) if en == name && eargs.len() == g.params.len() => eargs.clone(),
+            _ => Vec::new(),
+        };
+        let mut targs = Vec::new();
+        for (i, p) in g.params.iter().enumerate() {
+            match smap.get(p) {
+                Some(t) => targs.push(t.clone()),
+                None if !hint.is_empty() && !matches!(hint[i], Type::Error) => targs.push(hint[i].clone()),
+                None => {
+                    if !self.def_site {
+                        self.diags.push(Diag::error(
+                            "E1002",
+                            format!("cannot infer type parameter `{p}` of `{name}`"),
+                            span,
+                        ));
+                    }
+                    targs.push(if self.def_site { Type::Param(p.clone()) } else { Type::Error });
+                }
+            }
+        }
+        targs
+    }
+}
+
+/// Does `t` nest a type parameter under a type constructor (a *growing* argument
+/// for polymorphic-recursion detection, design 0007 §5.1.1)? A bare `Param` is
+/// not growing; a `Param` inside an `App`/`Box`/... is.
+fn param_grows(t: &Type) -> bool {
+    fn has_param(t: &Type) -> bool {
+        match t {
+            Type::Param(_) => true,
+            Type::App(_, a) => a.iter().any(has_param),
+            Type::Box(e) | Type::BoxResult(e) | Type::Array(e, _) | Type::Slice(e)
+            | Type::SliceMut(e) | Type::RawPtr(e) | Type::Borrow(e) | Type::BorrowMut(e) => has_param(e),
+            _ => false,
+        }
+    }
+    match t {
+        Type::Param(_) => false,
+        Type::App(_, a) => a.iter().any(has_param),
+        Type::Box(e) | Type::BoxResult(e) | Type::Array(e, _) | Type::Slice(e)
+        | Type::SliceMut(e) | Type::RawPtr(e) | Type::Borrow(e) | Type::BorrowMut(e) => has_param(e),
+        _ => false,
+    }
+}
+
+impl<'a> Checker<'a> {
+    /// Cross-type `?` (design 0007 §7.1): the operand is a result-shaped enum with
+    /// non-`ok` payload `E1`, the enclosing function returns a result-shaped enum
+    /// with non-`ok` payload `E2`, and `impl From[E1] for E2` exists. Records the
+    /// conversion's effect (inherited from `From::from`, §7.1). Returns `Some(())`
+    /// when the conversion is available.
+    pub(super) fn try_from_conversion(
+        &mut self,
+        _operand_ty: &Type,
+        ret_ty: &Type,
+        operand_enum: &crate::types::EnumTy,
+        _ename: &str,
+        span: Span,
+    ) -> Option<()> {
+        let e1 = non_ok_payload(operand_enum)?;
+        let ret_enum = crate::check::patterns_resolve_enum(ret_ty, self.items)?;
+        // E2 is the enclosing return enum's non-`ok` *payload* type (the error
+        // type the conversion targets), not the return enum itself (§7.1).
+        let e2 = non_ok_payload(&ret_enum)?;
+        let e2_nominal = match &e2 {
+            Type::Named(n) => n.clone(),
+            _ => return None,
+        };
+        // Find `impl From[E1] for E2`.
+        let found = self.items.impls.iter().find(|im| {
+            im.iface == "From" && im.target == e2_nominal && im.iface_args.first() == Some(&e1)
+        })?;
+        // Effect inheritance: the conversion inherits `From::from`'s declared
+        // effect (design 0007 §7.1).
+        if let Some(iface) = self.items.interfaces.get("From") {
+            if let Some(m) = iface.methods.iter().find(|m| m.name == "from") {
+                if m.alloc {
+                    self.note_alloc(span, "cross-type `?` calls `alloc` `From::from` (§7.1)");
+                }
+            }
+        }
+        let _ = found;
+        Some(())
+    }
+}
+
+/// The single non-`ok` variant's first payload type of a result-shaped enum.
+fn non_ok_payload(e: &crate::types::EnumTy) -> Option<Type> {
+    let ok = e.ok_variant.as_deref();
+    e.variants
+        .iter()
+        .find(|v| Some(v.name.as_str()) != ok)
+        .and_then(|v| v.payload.first().cloned())
+}

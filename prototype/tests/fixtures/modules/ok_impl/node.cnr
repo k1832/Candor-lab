@@ -1,0 +1,7 @@
+use shape::{Weighable};
+pub struct Node { v: i64 }
+// Legal: the impl lives in the target `Node`'s own module (orphan rule, §2.3).
+impl Weighable for Node { fn weight(read self) -> i64 { return self.v * 3; } }
+pub fn make(x: i64) -> Node { return Node { v: x }; }
+pub fn weigh_it(n: read Node) -> i64 { return weigh(n); }
+fn weigh[T: Weighable](x: read T) -> i64 { return x.weight(); }

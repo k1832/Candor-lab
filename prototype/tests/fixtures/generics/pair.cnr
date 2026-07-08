@@ -1,0 +1,9 @@
+// Generic struct + swap (0007 §8): value-argument inference, App field access.
+struct Pair[T] { first: T, second: T }
+fn swap[T](p: Pair[T]) -> Pair[T] { return Pair { first: p.second, second: p.first }; }
+fn mk[T](a: T, b: T) -> Pair[T] { return Pair { first: a, second: b }; }
+fn main() -> i64 {
+    let p: Pair[i64] = mk(3, 7);
+    let q: Pair[i64] = swap(p);
+    return q.first;
+}

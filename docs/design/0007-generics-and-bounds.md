@@ -2,6 +2,7 @@
 
 **Status:** draft
 **Date:** 2026-07-08
+**Prototype:** stage-1 core shipped in `prototype/` (parse; opaque def-site checking §3; `[T]`-bracket params/bounds/`interface`/concrete `impl`; value-argument inference §2.2 and `name::[T]` §6.2.1; monomorphization §5.1 with the depth backstop §5.1.1; coherence + module-granularity orphan §2.3; cross-type `?` via `From` §7.1). Deferred to later stages: generic `impl`s (`impl[T] I for List[T]`), generic-struct `drop` hooks, associated types/iteration (OBL-GENERICS-ITER), the source-level strategy override (OBL-GENERIC-STRATEGY), call-site turbofish (OBL-GENERIC-TURBOFISH), and effect polymorphism (OBL-GENERIC-EFFECT).
 **Philosophy hooks:** **P11** (public generics checked completely at their
 *definition site* against declared interface bounds; a generic that compiles cannot
 fail to type-check at instantiation — NN#10; instantiation strategy is a
@@ -721,3 +722,12 @@ place the design chooses a value-vtable over a bound *on principle*, recorded as
   above are a meaningful fraction of what makes Rust's traits heavy. The claim is only
   that it is the *smallest coherent* such system for the basket — every §1.1 omission
   is a debt some future program may call in, by amendment, in the open.
+
+**Stage-1 implementation rulings (2026-07-08, deciding authority, surfaced by the prototype):**
+(1) §6.1.1's `region` keyword supersedes bare-`[r]` lists; the migrator emits `region r` and this
+doc is the migration guidance. (2) Interface methods MAY be self-less associated functions —
+`From::from` requires it; §1.2's self-carrying description is the common case, not a rule.
+(3) Inference defaults: an unsuffixed integer literal argument infers `i64`; expected-type hints
+from annotations resolve payload-less variant construction. (4) Interface-method call spelling is
+receiver syntax `recv.method(args)`; self-less associated functions are invoked through their
+interface path (stage 1: only internally by `?`).

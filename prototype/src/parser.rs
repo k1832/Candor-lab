@@ -170,6 +170,7 @@ impl Parser {
             None
         };
         Ok(StructDecl {
+            type_params: Vec::new(),
             copy,
             name,
             fields,
@@ -218,6 +219,7 @@ impl Parser {
         }
         self.expect(&TokKind::RBrace, "`}`")?;
         Ok(EnumDecl {
+            type_params: Vec::new(),
             copy,
             name,
             variants,
@@ -286,6 +288,7 @@ impl Parser {
         };
         let body = self.parse_block()?;
         Ok(FnDecl {
+            type_params: Vec::new(),
             name,
             regions,
             params,

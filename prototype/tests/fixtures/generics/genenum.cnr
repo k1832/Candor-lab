@@ -1,0 +1,13 @@
+// Generic enum with a match, monomorphized (0007 §5).
+enum Opt[T] { None, Some(T) }
+fn unwrap_or[T: copy](o: Opt[T], d: T) -> T {
+    match o {
+        Opt::None => { return d; }
+        Opt::Some(v) => { return v; }
+    }
+}
+fn main() -> i64 {
+    let a: Opt[i64] = Opt::Some(99);
+    let b: Opt[i64] = Opt::None;
+    return unwrap_or(a, 0) + unwrap_or(b, 7);
+}

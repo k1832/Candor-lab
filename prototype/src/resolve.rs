@@ -38,6 +38,55 @@ pub struct FnSig {
     pub span: Span,
 }
 
+/// A resolved generic function signature (design 0007): the type parameters and
+/// their bounds, plus the parameter/return types (which may mention `Type::Param`).
+#[derive(Clone, Debug)]
+pub struct GenericFnSig {
+    pub name: String,
+    pub type_params: Vec<(String, Vec<String>)>,
+    pub regions: Vec<String>,
+    pub params: Vec<ParamInfo>,
+    pub alloc: bool,
+    pub ret: Type,
+    pub ret_region: Option<String>,
+    pub ret_span: Span,
+    pub span: Span,
+}
+
+/// A resolved interface method signature.
+#[derive(Clone, Debug)]
+pub struct IfaceMethod {
+    pub name: String,
+    pub has_self: bool,
+    pub self_mode: ParamMode,
+    /// Non-self parameter (mode, type). Types may mention the interface's `Param`s.
+    pub params: Vec<(ParamMode, Type)>,
+    pub alloc: bool,
+    pub ret: Type,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct IfaceInfo {
+    pub name: String,
+    pub type_params: Vec<String>,
+    pub methods: Vec<IfaceMethod>,
+    pub span: Span,
+}
+
+/// A resolved impl: an interface (with its instantiated args) attached to a
+/// concrete target nominal, plus the mangled free-function name of each method.
+#[derive(Clone, Debug)]
+pub struct ImplInfo {
+    pub iface: String,
+    pub iface_args: Vec<Type>,
+    /// The target nominal name (`Named`) the impl is for.
+    pub target: String,
+    /// method name -> mangled free-function name.
+    pub methods: HashMap<String, String>,
+    pub span: Span,
+}
+
 /// The resolved program item table.
 #[derive(Clone, Default)]
 pub struct Items {
@@ -45,6 +94,14 @@ pub struct Items {
     pub enums: HashMap<String, EnumTy>,
     pub fns: HashMap<String, FnSig>,
     pub statics: HashMap<String, (Type, Span)>,
+    // ---- generics layer (design 0007) ----
+    pub generic_fns: HashMap<String, GenericFnSig>,
+    pub interfaces: HashMap<String, IfaceInfo>,
+    pub impls: Vec<ImplInfo>,
+    pub generic_defs: HashMap<String, crate::types::GenericDecl>,
+    /// The type parameters in scope at the *current* def-site check, mapping each
+    /// to whether it carries the `copy` bound. Empty for concrete checking.
+    pub type_param_copy: HashMap<String, bool>,
 }
 
 impl ItemEnv for Items {
@@ -53,6 +110,12 @@ impl ItemEnv for Items {
     }
     fn lookup_enum(&self, name: &str) -> Option<&EnumTy> {
         self.enums.get(name)
+    }
+    fn param_copy(&self, name: &str) -> Option<bool> {
+        self.type_param_copy.get(name).copied()
+    }
+    fn lookup_generic(&self, name: &str) -> Option<&crate::types::GenericDecl> {
+        self.generic_defs.get(name)
     }
 }
 
@@ -86,6 +149,13 @@ impl<'a> Resolver<'a> {
                     Type::Error
                 }
             }
+            // A generic application in a *concrete* program should have been
+            // monomorphized away; if one reaches the base resolver it is treated
+            // as an unknown-type error (generics are resolved in `generics.rs`).
+            TyKind::App { name, args } => Type::App(
+                name.clone(),
+                args.iter().map(|a| self.resolve_ty(a)).collect(),
+            ),
             TyKind::Array { size, elem } => {
                 let len = match &size.kind {
                     ExprKind::IntLit { value, .. } => ArrayLen::Lit(*value),
@@ -151,6 +221,11 @@ pub fn resolve_program(prog: &Program, diags: &mut Vec<Diag>) -> Items {
 
     for item in &prog.items {
         match item {
+            // Generic structs/enums/fns are resolved by the generics layer into
+            // the generic tables, not the concrete tables (design 0007).
+            Item::Struct(s) if !s.type_params.is_empty() => {}
+            Item::Enum(e) if !e.type_params.is_empty() => {}
+            Item::Fn(f) if !f.type_params.is_empty() => {}
             Item::Struct(s) => dup_check(&mut seen_types, &s.name, s.span, "type", diags, || {
                 type_names.insert(s.name.clone());
             }),
@@ -161,6 +236,9 @@ pub fn resolve_program(prog: &Program, diags: &mut Vec<Diag>) -> Items {
             Item::Static(s) => {
                 dup_check(&mut seen_statics, &s.name, s.span, "static", diags, || {})
             }
+            // Interfaces/impls are handled by the generics layer, not the base
+            // resolver; a monomorphized program contains none.
+            Item::Interface(_) | Item::Impl(_) => {}
         }
     }
 
@@ -173,6 +251,9 @@ pub fn resolve_program(prog: &Program, diags: &mut Vec<Diag>) -> Items {
         };
         for item in &prog.items {
             match item {
+                Item::Struct(s) if !s.type_params.is_empty() => { let _ = s; }
+                Item::Enum(e) if !e.type_params.is_empty() => { let _ = e; }
+                Item::Fn(f) if !f.type_params.is_empty() => { let _ = f; }
                 Item::Struct(s) => {
                     let mut seen_f: HashMap<String, Span> = HashMap::new();
                     let mut fields = Vec::new();
@@ -344,6 +425,7 @@ pub fn resolve_program(prog: &Program, diags: &mut Vec<Diag>) -> Items {
                     let ty = r.resolve_ty(&s.ty);
                     items.statics.insert(s.name.clone(), (ty, s.span));
                 }
+                Item::Interface(_) | Item::Impl(_) => {}
             }
         }
     }
@@ -351,7 +433,7 @@ pub fn resolve_program(prog: &Program, diags: &mut Vec<Diag>) -> Items {
     // Phase 2: copy-marker validity (needs the full table for nominal copyability).
     for item in &prog.items {
         match item {
-            Item::Struct(s) if s.copy => {
+            Item::Struct(s) if s.copy && s.type_params.is_empty() => {
                 let info = &items.structs[&s.name];
                 if info.has_drop {
                     diags.push(
@@ -381,7 +463,7 @@ pub fn resolve_program(prog: &Program, diags: &mut Vec<Diag>) -> Items {
                     }
                 }
             }
-            Item::Enum(e) if e.copy => {
+            Item::Enum(e) if e.copy && e.type_params.is_empty() => {
                 let info = &items.enums[&e.name];
                 for v in &info.variants {
                     for pty in &v.payload {

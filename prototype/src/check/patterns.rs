@@ -57,6 +57,21 @@ pub fn resolve_enum(subject: &Type, items: &dyn ItemEnv) -> Option<(HoldMode, En
     }
     match subject {
         Type::Named(n) => items.lookup_enum(n).map(|e| (HoldMode::Owned, e.clone(), n.clone())),
+        // A generic enum application: substitute the arguments into the variant
+        // payloads to obtain a concrete enum shape (design 0007 §5).
+        Type::App(n, args) => items.lookup_generic(n).filter(|g| g.is_enum).map(|g| {
+            let map: std::collections::HashMap<String, Type> =
+                g.params.iter().cloned().zip(args.iter().cloned()).collect();
+            let variants = g
+                .variants
+                .iter()
+                .map(|(vn, payload, _)| VariantTy {
+                    name: vn.clone(),
+                    payload: payload.iter().map(|t| crate::types::subst(t, &map)).collect(),
+                })
+                .collect();
+            (HoldMode::Owned, EnumTy { copy: g.copy, variants, ok_variant: None, span: Span::point(0) }, n.clone())
+        }),
         Type::BoxResult(t) => Some((HoldMode::Owned, synth_box_result(t), "BoxResult".to_string())),
         Type::Borrow(inner) => {
             resolve_enum(inner, items).map(|(_, e, n)| (HoldMode::Shared, e, n))

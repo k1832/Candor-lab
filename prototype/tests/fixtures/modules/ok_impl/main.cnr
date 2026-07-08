@@ -1,0 +1,5 @@
+use node::{make, weigh_it, Node};
+fn main() -> i64 {
+    let n: Node = make(14);
+    return weigh_it(read n);
+}

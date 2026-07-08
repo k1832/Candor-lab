@@ -1,0 +1,1 @@
+pub interface Weighable { fn weight(read self) -> i64; }

@@ -1,0 +1,10 @@
+// Generic fixed-backing container with the `copy` bound (0007 §8.2).
+copy struct Item { a: i64, b: i64 }
+struct Arena[T: copy] { mem: [4]T, count: u32 }
+fn get[T: copy](ar: read Arena[T], i: u32) -> T { return ar.mem[conv usize i]; }
+fn main() -> i64 {
+    let it: Item = Item { a: 5, b: 9 };
+    let ar: Arena[Item] = Arena { mem: [it, it, it, it], count: 4 };
+    let g: Item = get(read ar, 2);
+    return g.a + g.b;
+}

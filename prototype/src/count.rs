@@ -147,6 +147,24 @@ impl Counter {
                 self.decl_rawptr(&s.ty);
                 self.expr(&s.value);
             }
+            // Generic-only items (design 0007): not part of the frozen Bet 5 unit
+            // table; each is one logical declaration and impl method bodies count
+            // like ordinary functions.
+            Item::Interface(i) => {
+                self.logical_statements += 1;
+                self.stmt_spans.push(i.span);
+            }
+            Item::Impl(im) => {
+                self.logical_statements += 1;
+                self.stmt_spans.push(im.span);
+                for m in &im.methods {
+                    self.logical_statements += 1;
+                    self.stmt_spans.push(m.span);
+                    self.fn_spans.push(m.span);
+                    self.fn_sig(m);
+                    self.block(&m.body.stmts);
+                }
+            }
         }
     }
 
@@ -204,6 +222,11 @@ impl Counter {
                 self.decl_rawptr(inner);
             }
             TyKind::Array { elem, .. } => self.decl_rawptr(elem),
+            TyKind::App { args, .. } => {
+                for a in args {
+                    self.decl_rawptr(a);
+                }
+            }
             TyKind::Slice(e)
             | TyKind::SliceMut(e)
             | TyKind::Box(e)
@@ -252,6 +275,7 @@ impl Counter {
             | ExprKind::StrLit(_)
             | ExprKind::BoolLit(_)
             | ExprKind::Ident(_)
+            | ExprKind::GenericVal { .. }
             | ExprKind::Result
             | ExprKind::Break
             | ExprKind::Continue

@@ -1,0 +1,10 @@
+// Generic identity monomorphized at three distinct type arguments (0007 §5.1).
+fn id[T](x: T) -> T { return x; }
+fn main() -> i64 {
+    let a: i64 = id(10);
+    let bb: u8 = 2;
+    let b: u8 = id(bb);
+    let c: bool = id(true);
+    if c { return a + conv i64 b; }
+    return 0;
+}

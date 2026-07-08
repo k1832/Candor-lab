@@ -123,6 +123,30 @@ fn new_frame(base_sp: u64) -> Frame {
 
 // ---------------------------------------------------------------------------
 
+/// (iface, iface_args, target, method -> free-fn name): one impl record.
+type ImplRec = (String, Vec<Type>, String, HashMap<String, String>);
+
+/// Resolve an impl's interface-argument AST type to a semantic type (concrete in
+/// a monomorphized program).
+fn resolve_impl_ty(ty: &Ty) -> Type {
+    match &ty.kind {
+        TyKind::Scalar(s) => Type::Scalar(*s),
+        TyKind::Named(n) => Type::Named(n.clone()),
+        TyKind::Box(e) => Type::Box(Box::new(resolve_impl_ty(e))),
+        TyKind::BoxResult(e) => Type::BoxResult(Box::new(resolve_impl_ty(e))),
+        _ => Type::Error,
+    }
+}
+
+/// Strip borrow/box layers to the underlying nominal type name.
+fn strip_to_nominal(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Named(n) => Some(n.clone()),
+        Type::Borrow(e) | Type::BorrowMut(e) | Type::Box(e) => strip_to_nominal(e),
+        _ => None,
+    }
+}
+
 pub struct Interp<'a> {
     program: &'a Program,
     items: &'a Items,
@@ -133,6 +157,12 @@ pub struct Interp<'a> {
     fn_names: Vec<String>,
     fn_id_of: HashMap<String, u64>,
     statics: HashMap<String, (u64, Type)>,
+    /// (target nominal, method name) -> the impl method's free-function name
+    /// (design 0007 static dispatch, resolved by the receiver's runtime type).
+    impl_dispatch: HashMap<(String, String), String>,
+    /// Full impl records (iface, iface_args, target) -> method free-fn names, for
+    /// disambiguating `From[E1]`/`From[E2]` during cross-type `?` (§7.1).
+    impls_full: Vec<ImplRec>,
     frames: Vec<Frame>,
     cur_span: Span,
     trace: Vec<i64>,
@@ -145,6 +175,22 @@ impl<'a> Interp<'a> {
         let mut fn_names = Vec::new();
         let mut fn_id_of = HashMap::new();
         let mut consts = HashMap::new();
+        let mut impl_dispatch = HashMap::new();
+        let mut impls_full = Vec::new();
+        for item in &program.items {
+            if let Item::Impl(im) = item {
+                if let TyKind::Named(target) = &im.target.kind {
+                    let iface_args: Vec<Type> = im.iface_args.iter().map(resolve_impl_ty).collect();
+                    let mut methods = HashMap::new();
+                    for m in &im.methods {
+                        let fnname = crate::generics::impl_method_fn_name(&im.iface, &iface_args, target, &m.name);
+                        impl_dispatch.insert((target.clone(), m.name.clone()), fnname.clone());
+                        methods.insert(m.name.clone(), fnname);
+                    }
+                    impls_full.push((im.iface.clone(), iface_args, target.clone(), methods));
+                }
+            }
+        }
         for item in &program.items {
             match item {
                 Item::Fn(f) => {
@@ -175,6 +221,8 @@ impl<'a> Interp<'a> {
             fn_names,
             fn_id_of,
             statics: HashMap::new(),
+            impl_dispatch,
+            impls_full,
             frames: Vec::new(),
             cur_span: Span::point(0),
             trace: Vec::new(),
@@ -464,6 +512,9 @@ impl<'a> Interp<'a> {
                 alloc: fp.alloc,
                 ret: Box::new(self.resolve_ty(&fp.ret)),
             }),
+            TyKind::App { .. } => {
+                unreachable!("generic types are monomorphized before interpretation")
+            }
         }
     }
 
@@ -566,6 +617,9 @@ impl<'a> Interp<'a> {
         match &e.kind {
             ExprKind::Paren(i) => self.eval_value(i, expected),
             ExprKind::OutArg(i) => self.eval_value(i, expected),
+            ExprKind::GenericVal { .. } => {
+                unreachable!("generic values are monomorphized before interpretation")
+            }
             ExprKind::Ident(name) => {
                 if self.local_addr_ty(name).is_some() || self.statics.contains_key(name) {
                     let (addr, ty, pl) = self.eval_place(e)?;
@@ -1092,6 +1146,13 @@ impl<'a> Interp<'a> {
             Ok(RVal { ty: pty, addr: taddr, origin: Origin::Temp(tid) })
         } else {
             let rty = self.cur_ret_ty();
+            let cross = match (&v.ty, &rty) {
+                (Type::Named(a), Type::Named(b)) => a != b,
+                _ => false,
+            };
+            if cross {
+                return self.eval_try_from(enum_addr, &v, &einfo, &ok_name, tag, &rty);
+            }
             let size = self.size_of(&rty);
             let align = self.align_of(&rty);
             let addr = self.mem.stack_alloc(size.max(1), align.max(1));
@@ -1099,6 +1160,63 @@ impl<'a> Interp<'a> {
             self.f().ret = Some((rty, addr));
             Err(Ctl::Return)
         }
+    }
+
+    /// Cross-type `?` (design 0007 §7.1): extract the operand's non-`ok` payload
+    /// `e1`, convert it through the matching `From` impl to `e2`, wrap `e2` in the
+    /// return enum's non-`ok` variant, and early-return it.
+    fn eval_try_from(
+        &mut self,
+        enum_addr: u64,
+        v: &RVal,
+        op_info: &[(String, Vec<Type>)],
+        _op_ok: &str,
+        tag: usize,
+        rty: &Type,
+    ) -> R<RVal> {
+        // The operand's actual (non-`ok`) variant payload = e1.
+        let (e1ty, e1off) = self.lay().payload_offset(&op_info[tag].1, 0);
+        let e1bytes = self.read_bytes(enum_addr + e1off, self.size_of(&e1ty), true)?;
+        // The return enum's non-`ok` variant and its e2 payload type.
+        let ret_info = self
+            .lay()
+            .enum_info(rty)
+            .ok_or_else(|| self.fault(FaultKind::Panic, "`?`: return is not an enum"))?;
+        let ret_ok = match rty {
+            Type::Named(n) => self.items.enums.get(n).and_then(|e| e.ok_variant.clone()),
+            _ => None,
+        };
+        let (ret_nonok_idx, e2ty) = ret_info
+            .iter()
+            .enumerate()
+            .find(|(_, (n, _))| Some(n.as_str()) != ret_ok.as_deref())
+            .map(|(i, (_, p))| (i, self.lay().payload_offset(p, 0).0))
+            .ok_or_else(|| self.fault(FaultKind::Panic, "`?`: no error variant"))?;
+        // Resolve the `From[e1] for e2` impl method.
+        let e2nom = match &e2ty {
+            Type::Named(n) => n.clone(),
+            _ => return Err(self.fault(FaultKind::Panic, "`?`: error payload is not nominal")),
+        };
+        let fnname = self
+            .impls_full
+            .iter()
+            .find(|(iface, args, target, _)| iface == "From" && target == &e2nom && args.first() == Some(&e1ty))
+            .and_then(|(_, _, _, methods)| methods.get("from").cloned())
+            .ok_or_else(|| self.fault(FaultKind::Panic, "`?`: no matching `From` impl"))?;
+        // Consume the operand (its payload moves into the conversion).
+        self.consume(&v.origin);
+        // Call `from(e1)` -> e2.
+        let fnd = self.fns[fnname.as_str()];
+        let e2ret = self.call(fnd, vec![CapArg::Val(e1ty, e1bytes)])?;
+        // Build the return enum value: tag = ret_nonok_idx, payload = e2 at offset.
+        let size = self.size_of(rty);
+        let align = self.align_of(rty);
+        let addr = self.mem.stack_alloc(size.max(1), align.max(1));
+        self.write_bytes(addr, &(ret_nonok_idx as u64).to_le_bytes())?;
+        let (_, e2off) = self.lay().payload_offset(&ret_info[ret_nonok_idx].1, 0);
+        self.write_bytes(addr + e2off, &e2ret.bytes)?;
+        self.f().ret = Some((rty.clone(), addr));
+        Err(Ctl::Return)
     }
 
     fn eval_clone(&mut self, expr: &Expr) -> R<RVal> {
@@ -1182,6 +1300,17 @@ impl<'a> Interp<'a> {
 // ===========================================================================
 
 impl<'a> Interp<'a> {
+    /// The receiver's static nominal type name (stripping borrows/box), for
+    /// interface method dispatch. Handles the place shapes a receiver can take.
+    fn expr_static_nominal(&self, e: &Expr) -> Option<String> {
+        let ty = match &e.kind {
+            ExprKind::Paren(i) | ExprKind::OutArg(i) => return self.expr_static_nominal(i),
+            ExprKind::Ident(name) => self.local_addr_ty(name).map(|(_, t)| t)?,
+            _ => return None,
+        };
+        strip_to_nominal(&ty)
+    }
+
     fn eval_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> R<RVal> {
         if let ExprKind::Ident(name) = &callee.kind {
             if let Some(rv) = self.eval_builtin(name, args, span)? {
@@ -1191,6 +1320,20 @@ impl<'a> Interp<'a> {
                 let fnd = self.fns[name.as_str()];
                 let sig = self.items.fns[name.as_str()].clone();
                 return self.eval_user_call(fnd, &sig, args);
+            }
+        }
+        // Interface method call `recv.m(args)` (design 0007 static dispatch): the
+        // impl is chosen by the receiver's runtime nominal type.
+        if let ExprKind::Field { base, field } = &callee.kind {
+            if let Some(nominal) = self.expr_static_nominal(base) {
+                if let Some(fnname) = self.impl_dispatch.get(&(nominal, field.clone())).cloned() {
+                    let fnd = self.fns[fnname.as_str()];
+                    let sig = self.items.fns[fnname.as_str()].clone();
+                    let mut all: Vec<Expr> = Vec::with_capacity(args.len() + 1);
+                    all.push((**base).clone());
+                    all.extend(args.iter().cloned());
+                    return self.eval_user_call(fnd, &sig, &all);
+                }
             }
         }
         // indirect call through a fn-pointer value

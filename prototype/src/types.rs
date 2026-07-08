@@ -38,6 +38,14 @@ pub enum Type {
     IntLit,
     /// A user struct or enum, resolved to exist.
     Named(String),
+    /// An opaque generic type parameter (design 0007 §3): appears only while
+    /// checking a generic body at its definition site. Never reaches a
+    /// monomorphized program or the interpreter.
+    Param(String),
+    /// A generic nominal applied to concrete/parametric type arguments
+    /// (`Pair[T]`, `List[i64]`). Def-site checking only; monomorphization lowers
+    /// each reached application to a distinct concrete `Named` instance.
+    App(String, Vec<Type>),
     Array(Box<Type>, ArrayLen),
     Slice(Box<Type>),
     SliceMut(Box<Type>),
@@ -82,6 +90,11 @@ impl Type {
             Type::Scalar(s) => scalar_name(*s).to_string(),
             Type::IntLit => "{integer}".to_string(),
             Type::Named(n) => n.clone(),
+            Type::Param(n) => n.clone(),
+            Type::App(n, args) => {
+                let a: Vec<String> = args.iter().map(|t| t.display()).collect();
+                format!("{n}[{}]", a.join(", "))
+            }
             Type::Array(e, len) => match len {
                 ArrayLen::Lit(n) => format!("[{n}]{}", e.display()),
                 ArrayLen::Named(n) => format!("[{n}]{}", e.display()),
@@ -165,6 +178,65 @@ pub struct EnumTy {
 pub trait ItemEnv {
     fn lookup_struct(&self, name: &str) -> Option<&StructTy>;
     fn lookup_enum(&self, name: &str) -> Option<&EnumTy>;
+    /// Is `name` a type parameter in scope, and does it carry the `copy` bound?
+    /// `None` = not a type parameter; `Some(b)` = a parameter, `b` = has `copy`.
+    /// (Design 0007 §3.1.) Default `None` keeps non-generic call sites unchanged.
+    fn param_copy(&self, _name: &str) -> Option<bool> {
+        None
+    }
+    /// The generic struct/enum decl for an `App` head, if generic (for field and
+    /// payload substitution during def-site checking). Default `None`.
+    fn lookup_generic(&self, _name: &str) -> Option<&GenericDecl> {
+        None
+    }
+}
+
+/// A generic struct or enum definition, with its type-parameter names, used to
+/// substitute concrete/parametric arguments into field/payload types during
+/// def-site checking and monomorphization (design 0007 §5).
+#[derive(Clone, Debug)]
+pub struct GenericDecl {
+    pub params: Vec<String>,
+    /// `true` for an enum, `false` for a struct.
+    pub is_enum: bool,
+    pub copy: bool,
+    pub has_drop: bool,
+    /// Struct fields (empty for an enum).
+    pub fields: Vec<(String, Type)>,
+    /// Enum variants (empty for a struct); each is (name, payload types, ok).
+    pub variants: Vec<(String, Vec<Type>, bool)>,
+}
+
+/// Substitute type parameters (`Param(name)`) by `map` throughout `ty`.
+pub fn subst(ty: &Type, map: &std::collections::HashMap<String, Type>) -> Type {
+    match ty {
+        Type::Param(n) => map.get(n).cloned().unwrap_or_else(|| ty.clone()),
+        Type::App(n, args) => Type::App(n.clone(), args.iter().map(|a| subst(a, map)).collect()),
+        Type::Array(e, l) => Type::Array(Box::new(subst(e, map)), l.clone()),
+        Type::Slice(e) => Type::Slice(Box::new(subst(e, map))),
+        Type::SliceMut(e) => Type::SliceMut(Box::new(subst(e, map))),
+        Type::RawPtr(e) => Type::RawPtr(Box::new(subst(e, map))),
+        Type::Box(e) => Type::Box(Box::new(subst(e, map))),
+        Type::BoxResult(e) => Type::BoxResult(Box::new(subst(e, map))),
+        Type::Borrow(e) => Type::Borrow(Box::new(subst(e, map))),
+        Type::BorrowMut(e) => Type::BorrowMut(Box::new(subst(e, map))),
+        Type::FnPtr(f) => Type::FnPtr(FnPtrTy {
+            params: f.params.iter().map(|(m, t)| (*m, subst(t, map))).collect(),
+            alloc: f.alloc,
+            ret: Box::new(subst(&f.ret, map)),
+        }),
+        _ => ty.clone(),
+    }
+}
+
+/// The substituted field/payload types reachable through a generic application's
+/// head, for def-site field access and copy/drop analysis. Returns `None` if the
+/// head is not a known generic.
+pub fn app_fields(env: &dyn ItemEnv, name: &str, args: &[Type]) -> Option<Vec<(String, Type)>> {
+    let g = env.lookup_generic(name)?;
+    let map: std::collections::HashMap<String, Type> =
+        g.params.iter().cloned().zip(args.iter().cloned()).collect();
+    Some(g.fields.iter().map(|(n, t)| (n.clone(), subst(t, &map))).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +259,27 @@ fn is_copy_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> bool {
         Type::Never | Type::Error => true,
         Type::BorrowMut(_) | Type::SliceMut(_) | Type::Box(_) | Type::BoxResult(_) => false,
         Type::Array(elem, _) => is_copy_rec(elem, env, stack),
+        // An opaque type parameter is copy iff it carries the `copy` bound (§3.1).
+        Type::Param(n) => env.param_copy(n).unwrap_or(false),
+        // A generic application is copy iff the generic is a `copy` type and every
+        // substituted field/payload is copy.
+        Type::App(n, args) => {
+            if let Some(g) = env.lookup_generic(n) {
+                if !g.copy || g.has_drop {
+                    return false;
+                }
+                let map: std::collections::HashMap<String, Type> =
+                    g.params.iter().cloned().zip(args.iter().cloned()).collect();
+                let field_tys: Vec<Type> = if g.is_enum {
+                    g.variants.iter().flat_map(|(_, p, _)| p.iter().cloned()).collect()
+                } else {
+                    g.fields.iter().map(|(_, t)| t.clone()).collect()
+                };
+                field_tys.iter().all(|t| is_copy_rec(&subst(t, &map), env, stack))
+            } else {
+                false
+            }
+        }
         Type::Named(n) => {
             if stack.iter().any(|s| s == n) {
                 return true; // cycle guard (only reachable through non-copy Box)
@@ -223,6 +316,25 @@ fn needs_drop_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> bool
     match ty {
         Type::Box(_) | Type::BoxResult(_) => true,
         Type::Array(elem, _) => needs_drop_rec(elem, env, stack),
+        // Conservatively needs-drop unless proven `copy` (§3.3).
+        Type::Param(n) => !env.param_copy(n).unwrap_or(false),
+        Type::App(n, args) => {
+            if let Some(g) = env.lookup_generic(n) {
+                if g.has_drop {
+                    return true;
+                }
+                let map: std::collections::HashMap<String, Type> =
+                    g.params.iter().cloned().zip(args.iter().cloned()).collect();
+                let tys: Vec<Type> = if g.is_enum {
+                    g.variants.iter().flat_map(|(_, p, _)| p.iter().cloned()).collect()
+                } else {
+                    g.fields.iter().map(|(_, t)| t.clone()).collect()
+                };
+                tys.iter().any(|t| needs_drop_rec(&subst(t, &map), env, stack))
+            } else {
+                false
+            }
+        }
         Type::Named(n) => {
             if stack.iter().any(|s| s == n) {
                 // A cycle is only reachable through a `Box`, already accounted
@@ -306,6 +418,17 @@ fn box_subpaths_rec(
             }
             stack.pop();
         }
+        // §3.4: an opaque owner we cannot prove drop-inert frees at its own place.
+        Type::Param(n) => {
+            if !env.param_copy(n).unwrap_or(false) {
+                out.push(prefix.clone());
+            }
+        }
+        Type::App(_, _) => {
+            if bears_box(ty, env) {
+                out.push(prefix.clone());
+            }
+        }
         _ => {}
     }
 }
@@ -319,6 +442,22 @@ fn bears_box_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> bool 
     match ty {
         Type::Box(_) | Type::BoxResult(_) => true,
         Type::Array(elem, _) => bears_box_rec(elem, env, stack),
+        // Conservatively a `T` may be box-bearing unless proven `copy` (§3.4).
+        Type::Param(n) => !env.param_copy(n).unwrap_or(false),
+        Type::App(n, args) => {
+            if let Some(g) = env.lookup_generic(n) {
+                let map: std::collections::HashMap<String, Type> =
+                    g.params.iter().cloned().zip(args.iter().cloned()).collect();
+                let tys: Vec<Type> = if g.is_enum {
+                    g.variants.iter().flat_map(|(_, p, _)| p.iter().cloned()).collect()
+                } else {
+                    g.fields.iter().map(|(_, t)| t.clone()).collect()
+                };
+                tys.iter().any(|t| bears_box_rec(&subst(t, &map), env, stack))
+            } else {
+                false
+            }
+        }
         Type::Named(n) => {
             if stack.iter().any(|s| s == n) {
                 return false;
@@ -365,6 +504,10 @@ pub fn assignable(from: &Type, to: &Type) -> bool {
         (Type::IntLit, t) | (t, Type::IntLit) => t.is_integer(),
         (Type::Scalar(a), Type::Scalar(b)) => a == b,
         (Type::Named(a), Type::Named(b)) => a == b,
+        (Type::Param(a), Type::Param(b)) => a == b,
+        (Type::App(a, aa), Type::App(b, bb)) => {
+            a == b && aa.len() == bb.len() && aa.iter().zip(bb).all(|(x, y)| assignable(x, y))
+        }
         (Type::Array(a, la), Type::Array(b, lb)) => {
             assignable(a, b) && (la == lb || matches!(la, ArrayLen::Unknown) || matches!(lb, ArrayLen::Unknown))
         }

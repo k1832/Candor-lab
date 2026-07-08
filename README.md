@@ -14,7 +14,8 @@ surface syntax is designed and reviewed (design 0006), a normative specification
 skeleton exists with every gap tracked (docs/spec/), generics and modules are
 designed and reviewed (0007/0008), the novel fault-window semantics is formalized
 to its single-threaded core (reviewed, repaired), and the prototype implements
-the real syntax with a working P15 migrator. The checker has survived eight
+the real syntax with a working P15 migrator, multi-file modules, and stage-1
+generics (definition-site-checked, monomorphized without re-analysis). The checker has survived eight
 adversarial review rounds (twelve soundness holes found and closed, all
 documented). Live records: [docs/RESULTS.md](docs/RESULTS.md),
 [docs/spec/99-obligations.md](docs/spec/99-obligations.md),

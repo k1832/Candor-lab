@@ -83,6 +83,7 @@ impl<'a> Checker<'a> {
                 }
             }
             ExprKind::Try(inner) => self.check_try(inner, e.span),
+            ExprKind::GenericVal { name, ty_args } => self.check_generic_val(name, ty_args, e.span),
             ExprKind::StrLit(_) => Type::Slice(Box::new(Type::Scalar(ScalarTy::U8))),
             ExprKind::BoolLit(_) => Type::bool(),
             ExprKind::Unary { op, expr } => self.check_unary(*op, expr),
@@ -262,6 +263,28 @@ impl<'a> Checker<'a> {
                                 self.diags.push(Diag::error(
                                     "E0107",
                                     format!("type `{n}` has no field `{field}`"),
+                                    e.span,
+                                ));
+                                (Type::Error, place)
+                            }
+                        }
+                    }
+                    // Field access on a generic application substitutes the head's
+                    // field types with the concrete/parametric arguments (§5).
+                    Type::App(n, args) => {
+                        match crate::types::app_fields(self.items, n, args)
+                            .and_then(|fs| fs.into_iter().find(|(fn_, _)| fn_ == field))
+                        {
+                            Some((_, fty)) => {
+                                if let Some(p) = place.as_mut() {
+                                    p.proj.push(Proj::Field(field.clone()));
+                                }
+                                (fty, place)
+                            }
+                            None => {
+                                self.diags.push(Diag::error(
+                                    "E0107",
+                                    format!("type `{}` has no field `{field}`", st.display()),
                                     e.span,
                                 ));
                                 (Type::Error, place)
@@ -606,6 +629,11 @@ impl<'a> Checker<'a> {
     // ----- struct / enum construction -------------------------------------
 
     fn check_struct_lit(&mut self, name: &str, fields: &[FieldInit], span: Span) -> Type {
+        if let Some(g) = self.items.generic_defs.get(name).cloned() {
+            if !g.is_enum {
+                return self.check_generic_struct_lit(name, &g, fields, span);
+            }
+        }
         let sinfo = self.items.lookup_struct(name).cloned();
         match sinfo {
             Some(s) => {
@@ -672,6 +700,11 @@ impl<'a> Checker<'a> {
                     Type::Error
                 }
             };
+        }
+        if let Some(g) = self.items.generic_defs.get(enum_name).cloned() {
+            if g.is_enum {
+                return self.check_generic_enum_ctor(enum_name, &g, variant, args, span);
+            }
         }
         let einfo = self.items.lookup_enum(enum_name).cloned();
         match einfo {
@@ -950,27 +983,36 @@ impl<'a> Checker<'a> {
                 return Type::Error;
             }
         };
-        // Same-type-only: the enclosing function must return this same enum.
+        // Same-type propagation, or cross-type propagation through a `From` impl
+        // (design 0007 §7.1).
         let ret = self.ret_ty_clone();
-        let same = match (&t, &ret) {
+        let mut same = match (&t, &ret) {
             (Type::Named(a), Type::Named(b)) => a == b,
             (Type::BoxResult(_), Type::BoxResult(_)) => true,
             _ => false,
         };
         if !same {
-            self.diags.push(
-                Diag::error(
-                    "E0712",
-                    format!(
-                        "`?` on `{}` requires the enclosing function to return `{}`, but it returns `{}`",
-                        t.display(),
-                        t.display(),
-                        ret.display()
-                    ),
-                    span,
-                )
-                .with_note("cross-type propagation needs traits and is deferred (spec 02 §6.5)", None),
-            );
+            match self.try_from_conversion(&t, &ret, &einfo, &ename, span) {
+                Some(()) => {
+                    // Cross-type `?`: treated like same-type control flow below, but
+                    // the desugared `E2::from(e1)` call inherits the `From` effect.
+                    same = true;
+                }
+                None => {
+                    self.diags.push(
+                        Diag::error(
+                            "E0712",
+                            format!(
+                                "`?` on `{}` requires the function to return `{}` or an `impl From[..] for` its error type",
+                                t.display(),
+                                t.display()
+                            ),
+                            span,
+                        )
+                        .with_note("cross-type `?` needs `impl From[E1] for E2` in scope (design 0007 §7.1)", None),
+                    );
+                }
+            }
         }
         let payload = einfo
             .variants
@@ -1200,8 +1242,18 @@ impl<'a> Checker<'a> {
             if let Some(t) = self.check_builtin(name, args, span) {
                 return t;
             }
+            if self.items.generic_fns.contains_key(name) {
+                return self.check_generic_call(name, args, span);
+            }
             if let Some(sig) = self.items.fns.get(name).cloned() {
                 return self.check_user_call(&sig, args, span);
+            }
+        }
+        // A method call: `receiver.method(args)` parses as a call whose callee is a
+        // field access. Resolve it against interface impls (design 0007 §2.3).
+        if let ExprKind::Field { base, field } = &callee.kind {
+            if let Some(t) = self.try_method_call(base, field, args, span) {
+                return t;
             }
         }
         // Indirect call: the callee is a fn-pointer value (§6.1).
@@ -1365,7 +1417,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_arg_mode(&mut self, mode: ParamMode, decl_ty: &Type, arg: &Expr) {
+    pub(super) fn check_arg_mode(&mut self, mode: ParamMode, decl_ty: &Type, arg: &Expr) {
         let out_marked = matches!(&arg.kind, ExprKind::OutArg(_));
         let inner: &Expr = match &arg.kind {
             ExprKind::OutArg(i) => i,
@@ -1748,6 +1800,16 @@ impl<'a> Checker<'a> {
         if let Some(d) = patterns::check_exhaustive(&pats, &einfo, &ename, span) {
             self.diags.push(d);
         }
+        // Record the concrete enum instance behind each arm's pattern so that
+        // monomorphization can lower the pattern's enum name (design 0007 §5).
+        if let Some((gname, gargs)) = generic_enum_of(&sc_ty) {
+            if !gargs.iter().any(|t| matches!(t, Type::Error)) {
+                self.record_inst(&gname, gargs.clone());
+                for arm in arms {
+                    self.shapes.insert(arm.pattern.span.start, crate::generics::Shape::Type(gname.clone(), gargs.clone()));
+                }
+            }
+        }
         // The scrutinee is read at the match head.
         self.emit_place_action(&sc_place, Use::ReadOnly, &sc_ty, scrut.span);
 
@@ -2073,6 +2135,16 @@ fn const_int(e: &Expr) -> Option<i128> {
         ExprKind::NegIntLit { value, .. } => Some(-(*value as i128)),
         ExprKind::Paren(i) => const_int(i),
         ExprKind::Unary { op: UnOp::Neg, expr } => const_int(expr).map(|x| -x),
+        _ => None,
+    }
+}
+
+/// The generic-enum head and concrete type arguments a (possibly borrowed) type
+/// denotes, for monomorphizing match patterns (design 0007 §5).
+fn generic_enum_of(ty: &Type) -> Option<(String, Vec<Type>)> {
+    match ty {
+        Type::App(n, args) => Some((n.clone(), args.clone())),
+        Type::Borrow(i) | Type::BorrowMut(i) | Type::Box(i) => generic_enum_of(i),
         _ => None,
     }
 }
