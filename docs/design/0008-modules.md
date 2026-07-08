@@ -15,7 +15,12 @@ codegen tier consumes def-site-resolved effects and never re-derives them (§2.4
 manifest honesty — identity plus an optional `freestanding` claim, dependency
 lockfile deferred to package-manager scope (§1, §5); F4 seam — the interface's
 *declaration* module is the placement referent, the uniqueness key is the
-instantiated interface (§Decision, §Consequences).
+instantiated interface (§Decision, §Consequences). 2026-07-08 — joint adversarial
+review #1 of designs 0010/0011
+(`docs/reviews/2026-07-08-design-0010-0011-review-1.md`) F3: the §2 codegen
+*cache key* carries a schema/toolchain salt so a toolchain upgrade cannot
+silently reuse machine code the old compiler emitted (§2 codegen-invalidation
+bullet).
 
 ## Problem
 
@@ -121,7 +126,10 @@ split into two tiers, gated by the two hashes:
 - **Codegen-invalidation is gated by the codegen hash**, is content-addressed,
   and is fully parallel and cache-shared (§2.4). It never triggers
   re-*analysis*; it triggers at most re-*emission* of specific machine code
-  from already-checked IR.
+  from already-checked IR. The codegen *cache key* additionally carries a
+  schema/toolchain salt (the MIR-schema version and compiler/backend identity) so
+  a toolchain upgrade cannot silently reuse machine code the old compiler emitted
+  (0010 §3, joint design 0010/0011 review #1 F3).
 
 Per-module analyses (effects, contracts, borrow checking) are what P20 promised
 "never require whole-program passes": each runs over one module against the

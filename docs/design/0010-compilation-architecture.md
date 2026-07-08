@@ -19,7 +19,20 @@ diagnostics and traces are a codegen output, not an afterthought), **P9/NN#6**
 interface artifact this doc's compiler emits). Where they conflict the higher
 document wins and this one changes.
 
-**Revision history.** 2026-07-08 — initial draft.
+**Revision history.** 2026-07-08 — initial draft. 2026-07-08 — revised per joint
+adversarial review #1 of designs 0010/0011
+(`docs/reviews/2026-07-08-design-0010-0011-review-1.md`), dispositions F1–F6: F1
+the structural-soundness claim scoped to INV-CHECK (the signed-overflow-UB
+class), Cranelift's trap/memory-ordering non-guarantees stated, observables
+secured by atomic `MemFlags`/fences and fault-capable ops by explicit control
+dependencies, INV-OBS-ORDER/INV-FAULT-ID named as lowering-discipline on every
+backend (§1, §2); F2 INV-FAULT-ID gains the f★-recovery obligation verbatim
+(formalization §6.5), cited in Stage D's gate (§2, §5); F3 the codegen cache key
+gains a schema/toolchain salt (§3); F4 differential testing restated as
+confidence with the spec as arbiter (§4, §1); F5 T3 pinned to a named C baseline,
+T1/T4 reconciled as codegen-dominated (§3); F6 Stage A's gate restated as
+semantic-trace `(k, s, θ)` equality against an R1–R3-free precise MIR
+interpreter, the init-byte guard excluded (§5).
 
 ## Problem
 
@@ -32,8 +45,8 @@ of P20's incremental machinery (0008 §6 stages 3–4 are unbuilt), and it canno
 substantiate the compile-speed claim §1 makes or the reproducible, native
 artifact P16 requires. This document turns the front into a **compiler**: it
 fixes the backend, the mid-level IR, the incremental build that realizes 0008's
-two hashes, the differential-testing regime that keeps compiled and interpreted
-behavior identical (P5), the pre-registered P20 targets, and the staging that
+two hashes, the differential-testing regime that builds confidence compiled and interpreted
+behavior stay identical (P5), the pre-registered P20 targets, and the staging that
 gets there without pretending the arc is one step.
 
 It is the largest remaining arc, and the philosophy's own budget applies to it
@@ -72,8 +85,12 @@ constraints, not against generic compiler-engineering taste.
    — (a) a default arithmetic op is lowered to an *explicit* overflow-detecting
    operation plus a branch to a fault block, so the check is **data in the IR the
    optimizer sees**, never a fact it may assume away; (b) the lowering never sets
-   a UB-implying flag (LLVM's `nsw`/`nuw`); (c) observable ops are marked
-   volatile/atomic so the effect-order-total rule survives the optimizer.
+   a UB-implying flag (LLVM's `nsw`/`nuw`); (c) observable ops are secured
+   against reordering by the lowering — atomic `MemFlags`/fences on the
+   observable memory accesses and explicit control dependencies on fault-capable
+   ops (Cranelift has *no* volatile MemFlag) — so the effect-order-total rule
+   survives the optimizer *by lowering discipline*, not by any promise of the
+   mid-end.
 4. **Compile speed (P20) favors Cranelift-class codegen over LLVM -O2.**
 5. **Reproducibility (NN#16): same source + lockfile + toolchain ⇒ bit-identical
    artifact.** An *in-process, vendored, deterministic* backend makes this
@@ -87,12 +104,20 @@ constraints, not against generic compiler-engineering taste.
   arithmetic lowers to `iadd` + an overflow-flag test + `trapnz`/`brif` to a
   fault block — constraint (a) is the *natural* lowering, not a workaround. Its
   optimizer is deliberately light (no aggressive UB-exploiting range passes), so
-  the *entire class* of "optimizer assumed UB Candor forbids" bug is
-  **definitionally absent** — there is no live wire to avoid. It is built for
-  fast, single-pass-ish codegen (Wasmtime, rustc's debug backend), matching
-  P20's stated preference. It is a vendored Rust crate compiled in-process and
-  deterministic, so NN#16 reproducibility is near-free. Ordering control is
-  explicit. **Its real cost, named:** narrower target coverage — x86-64,
+  the *entire class* of "optimizer assumed signed-overflow UB Candor forbids"
+  bug — the **INV-CHECK** crux, and *only* that class — is **definitionally
+  absent**: there is no live wire to avoid. **This structural advantage is
+  scoped, and the honesty matters:** Cranelift's egraph mid-end does **not**
+  promise trap order or memory ordering — it may reorder or coalesce ordinary
+  loads/stores and gives no guarantee about the relative order of traps, so
+  **INV-OBS-ORDER and INV-FAULT-ID are not free**: they are secured by the
+  lowering (constraint 3(c)) — atomic `MemFlags`/fences on observables and
+  explicit control dependencies on fault-capable ops — and are therefore
+  **discipline-secured on Cranelift exactly as on any backend, the default
+  included.** It is built for fast, single-pass-ish codegen (Wasmtime, rustc's
+  debug backend), matching P20's stated preference. It is a vendored Rust crate
+  compiled in-process and deterministic, so NN#16 reproducibility is near-free.
+  **Its real cost, named:** narrower target coverage — x86-64,
   aarch64, riscv64, s390x, Wasm; **no 16/32-bit embedded** (no AVR/thumb), which
   is exactly some of P9's freestanding home ground. And it will lose peak
   benchmarks to LLVM -O2 (accepted per §2's Priority Order — peak perf is not a
@@ -100,15 +125,23 @@ constraints, not against generic compiler-engineering taste.
   backend).
 
 - **LLVM (recommended *optional*, deferred second backend).** Best-in-class
-  optimization and the target breadth Cranelift lacks (embedded included). But it
-  can be made sound for Candor **only by discipline** — never emit `nsw`/`nuw`,
-  always lower checked ops via `llvm.sadd.with.overflow` intrinsics, mark every
-  observable volatile/atomic. Soundness then rests on us *not tripping a live
-  wire* on every lowering, forever. It is slow at -O2 (against P20) and it is a
-  large external dependency whose version bleeds into reproducibility. **Verdict:
-  worth having, not worth being the default** — kept behind the MIR→backend seam
-  (§2) for release-optimization builds and for targets Cranelift cannot reach,
-  gated by differential testing (§4) so it can never diverge observably.
+  optimization and the target breadth Cranelift lacks (embedded included). The
+  honest differential against Cranelift is **narrow**: LLVM's optimizer *does*
+  assume signed-overflow UB (`nsw`/`nuw`), so avoiding the INV-CHECK class costs
+  discipline on LLVM — never emit `nsw`/`nuw`, always lower checked ops via
+  `llvm.sadd.with.overflow` intrinsics — whereas on Cranelift that one class is
+  structurally absent. **That overflow-UB class is the *only* thing Cranelift
+  removes for free.** The observable-ordering discipline (INV-OBS-ORDER /
+  INV-FAULT-ID) is *identical* on both backends: LLVM secures observables with
+  atomic/volatile memory operations and fault-capable ops with explicit control
+  dependencies, exactly as the Cranelift lowering does. Soundness of the overflow
+  class then rests on us *not tripping a live wire* on every LLVM lowering,
+  forever. It is slow at -O2 (against P20) and it is a large external dependency
+  whose version bleeds into reproducibility. **Verdict: worth having, not worth
+  being the default** — kept behind the MIR→backend seam (§2) for
+  release-optimization builds and for targets Cranelift cannot reach, gated by
+  differential testing (§4), which builds **confidence** — not proof — that it
+  does not diverge observably, with the formalization as the arbiter (§4, P18).
 
 - **C emission (rejected as a primary path).** Tempting for portability, but it
   maximizes the very hazard of constraint 3: C is a *field* of UB (signed
@@ -129,13 +162,15 @@ constraints, not against generic compiler-engineering taste.
 
 **Recommendation.** **Cranelift is the default and only backend the first
 toolchain ships**, chosen because its minimal-assumption optimizer makes the
-soundness crux *structurally* safe rather than disciplined-safe, its speed and
-in-process determinism serve P20 and NN#16 directly, and checked arithmetic is
-its natural lowering. **LLVM is a recorded, deferred, optional second backend**
+**INV-CHECK** soundness crux (the signed-overflow-UB class) *structurally* safe
+rather than disciplined-safe — while INV-OBS-ORDER and INV-FAULT-ID are
+lowering-secured on it as on any backend — its speed and in-process determinism
+serve P20 and NN#16 directly, and checked arithmetic is its natural lowering. **LLVM is a recorded, deferred, optional second backend**
 behind the §2 seam, added when (i) a measured peak-performance need makes
 Priority 4's "reachable" bite, or (ii) a required target is outside Cranelift's
-set — and *only* under the §4 differential guarantee that it never changes an
-observable trace. The full trade is on the record: we cede peak -O2 benchmarks
+set — and *only* under §4's differential regime, which gives **confidence** (not
+a guarantee) that it changes no observable trace, with the formalization as the
+arbiter (P18). The full trade is on the record: we cede peak -O2 benchmarks
 and broad embedded coverage *now* to buy soundness-by-construction, compile
 speed, and reproducibility *now*.
 
@@ -174,12 +209,26 @@ a backend pass that breaks one is a soundness bug, not a perf regression):
 - **INV-OBS-ORDER.** Observable operations — MMIO/volatile accesses, atomics,
   syscalls, foreign calls, and fault delivery itself — are **effect-order-total**:
   the MIR marks them, and the lowering may **never** reorder, coalesce, or
-  eliminate them (R1/§8.3). They emit in full program order.
+  eliminate them (R1/§8.3). They emit in full program order. The lowering
+  **secures** this with atomic `MemFlags` and fences (Cranelift has *no* volatile
+  MemFlag) — never by relying on the backend mid-end, which promises no memory
+  ordering — so the guarantee is lowering discipline on **every** backend, the
+  default included (§1).
 - **INV-FAULT-ID.** The delivered fault is **program-order-first** `f★` (§6.2):
   the MIR's fault edges preserve `≤po`, and no fault-capable op is hoisted before
   its `e⁻` (R1 side-condition ii, the window constraint). Every build mode
   therefore delivers the *same fault identity* (kind + source span); only the
-  non-observable value-context `c` may differ within the window (§6.4).
+  non-observable value-context `c` may differ within the window (§6.4). Like
+  INV-OBS-ORDER, this is **secured by the lowering** — explicit control
+  dependencies keep every fault-capable op inside its window — on **every**
+  backend, never by a promise of the mid-end (§1). **The operational f★-recovery
+  obligation (formalization §6.5), binding on any R3/batched-detection build,
+  quoted verbatim:** "whenever a fused/vectorized/reordered build detects 'some
+  fault occurred in `W`' without knowing *which* op is `f★`, it MUST recover `f★`
+  before delivery. The **replay origin** is the **last retired observable** —
+  `e⁻`: the build re-executes the deterministic segment `(e⁻, f★]` in program
+  order to identify the `≤po`-earliest enabled-faulting op, then delivers
+  `(k★, s★, ·)`." A build that cannot replay from `e⁻` cannot claim conformance.
 - **INV-EFFECTS.** Each MIR item carries its def-site-resolved effect set; codegen
   **consumes** it and **never re-derives** an effect (0008 §2.4). Effect
   resolution is the once-only analysis-tier job.
@@ -211,8 +260,16 @@ a backend pass that breaks one is a soundness bug, not a perf regression):
   cached analysis; otherwise re-analyzes it against its imports' signatures
   *only* — never their bodies (P20, 0008 §2's analysis-invalidation tier); (iii)
   emits/reuses machine code per instantiation from a **content-addressed codegen
-  cache** keyed on the codegen hash + type arguments (0008 §2.4), fully parallel
-  and shared across the build (and, under NN#16, across builds). A body edit that
+  cache** keyed on the codegen hash + type arguments **+ a schema/toolchain
+  salt** — the MIR-schema version and the compiler/backend toolchain identity
+  (0008 §2.4). The salt is load-bearing: the codegen hash covers *source-derived*
+  MIR bodies but **not** the compiler that lowers them, so without it a toolchain
+  or MIR-schema upgrade would silently reuse machine code emitted by the old
+  compiler — the versioning hole named in 0008's seam (0008 §2). With the salt a
+  toolchain bump invalidates every codegen entry by construction, preserving the
+  NN#16 same-source-**and-toolchain** reproducibility contract. The cache is
+  fully parallel and shared across the build (and, under NN#16, across builds
+  keyed by the same salt). A body edit that
   leaves every `pub` signature hash unchanged re-analyzes **nothing downstream**
   and re-emits only that body's own instantiations — P20 delivered literally.
 - **Reproducibility (NN#16).** Codegen is content-addressed and the backend is
@@ -229,14 +286,24 @@ grown as the corpus grows). Targets:
 
 - **T1 — incremental rebuild** (one body edit, no `pub`-signature change, warm
   cache): **< 2.5 s wall, single-digit-seconds hard ceiling.** This is the
-  headline P20 claim and the one 0008 §6 stage 3 first makes measurable.
+  headline P20 claim and the one 0008 §6 stage 3 first makes measurable. **This
+  budget is codegen-dominated:** by T2 a body edit re-analyzes only the edited
+  module, and at T4's ≥ 100 000 lines/s/core an edited module's re-analysis is
+  sub-millisecond, so essentially all of T1's wall time is re-*emission* of that
+  body's instantiations — T1 measures the codegen tier, T4 bounds the analysis
+  tier, and the two do not double-count.
 - **T2 — incremental analysis scope** (instrumented, not timing): a body edit
   re-analyzes **only** the edited module and re-emits **only** its own
   instantiations — zero downstream re-analysis. A regression here is a P20
   *architecture* break, caught structurally.
 - **T3 — clean debug build** (Cranelift, no-opt) of the reference project:
-  **within K = 3× of a C toolchain baseline** (`clang -O0` on an equivalent-LOC C
-  project, same host).
+  **within K = 3× of a named, version-pinned C baseline** — `clang -O0`
+  compiling the **SQLite amalgamation (`sqlite3.c`) at a pinned release**, a
+  single well-known ~230 kLOC C translation unit, measured as codegen throughput
+  (lines/s) on the same host and normalized per-KLOC. Pinning a *named* program
+  (not "an equivalent-LOC C project") makes the baseline reproducible in CI: same
+  source, same compiler version, same host, so the ratio is a real number and not
+  a moving target.
 - **T4 — analysis throughput** (`check`, no codegen): **≥ 100 000 lines/s/core**,
   scaling ~linearly across cores over the DAG (P20's parallel-by-construction).
 - **T5 — release build** (LLVM backend, *when it exists*): within **Kr = 1.3×** of
@@ -252,7 +319,12 @@ as an amendment (withdraw or restate the §1 claim), never absorbed as silence.
 
 P5/NN#2 says every build mode agrees observably. This document makes that
 **testable** by keeping the tree-walking interpreter as the **reference oracle**
-and asserting trace equality across every execution path.
+and asserting trace equality across every execution path. **Differential testing
+builds confidence, not proof:** it can *falsify* an agreement claim but never
+*establish* it over all inputs. The **arbiter** of what agreement means is the
+normative spec and the fault-window formalization (P18/§6 there), not the test
+suite; the harness is how we gain confidence the implementation tracks that
+arbiter — and how we catch it when it does not.
 
 - **The oracle.** The prototype's tree-walking interpreter (0001 §7) is the
   reference semantics. Stage A adds an **interpreter-over-MIR** whose first duty
@@ -268,13 +340,20 @@ and asserting trace equality across every execution path.
 - **Every basket program and every corelib/check fixture** must produce
   **identical traces compiled vs interpreted**, and identical traces **across
   build modes** (Cranelift-noopt vs Cranelift-opt vs LLVM-if-present vs
-  MIR-interpreter). Cross-mode trace equality *is* NN#2 mechanized: a mode that
-  changes an observable trace has changed behavior, and the job fails.
+  MIR-interpreter). Cross-mode trace equality is NN#2's *test axis*: a mode that
+  changes an observable trace has, by the spec's definition (P18), changed
+  behavior, and the job fails.
 - **Fault-identity equality is a first-class axis.** For every faulting fixture,
   every mode must deliver the **same `f★`** — same fault kind and same source span
   (program-order-first, §6.2). This is the sharpest test of INV-FAULT-ID and the
   one an aggressive optimizer is most likely to break; it is checked on every
   faulting program, not sampled.
+
+- **The FFI shim/real seam (with 0011 §5).** When FFI enters the corpus, the
+  tree-walker's per-symbol foreign shims (0011 §5) are not exempt from
+  differential testing: each shim carries a per-symbol contract tested against the
+  **real** C symbol on a hosted target, so a shim can never stand in for a
+  behavior the linked C does not have. Recorded in both docs' seam (0011 §5).
 
 This harness is also the test runner's engine (P4/P16) and the gate every stage
 below is measured by.
@@ -286,9 +365,17 @@ Per §8 sequencing, the arc is staged and honest about what each stage validates
 - **Stage A — MIR + interpreter-over-MIR (replaces tree-walking as the pipeline
   front).** Define the checked MIR (§2); lower AST→MIR carrying *all* checker
   facts (drop schedule, move masks, effect markers, fault checks, INV-*). Build
-  the MIR-interpreter. **No backend yet.** *Gate:* the MIR-interpreter reproduces
-  the tree-walking interpreter's observable trace — including fault identity —
-  **bit-for-bit** on every basket program and every corelib/check fixture. This
+  the MIR-interpreter as an **R1–R3-free, precise** reference — no reordering, no
+  window-interior retirement, no late detection (the `density → 1` limit of
+  formalization §10) — so it is a faithful precise oracle. **No backend yet.**
+  *Gate:* the MIR-interpreter reproduces the tree-walking interpreter's
+  **semantic trace** — the tuple **(fault kind `k`, source span `s`, observable
+  trace `θ`)** of §4 — on every basket program and every corelib/check fixture.
+  Semantic-trace equality, **not** bit-for-bit state equality: the advisory
+  value-context `c` (§6.4) and the interpreter's **init-byte guard** (the poison
+  bytes marking statically-uninitialized storage — an implementation artifact,
+  not an observable) are **excluded** from the comparison, because neither is part
+  of `θ` and equating them would test implementation detail, not semantics. This
   proves the IR is a faithful carrier of 0001's semantics *before* any native
   codegen exists. (The tree-walker is retained as the reference oracle, not
   deleted.)
@@ -310,7 +397,11 @@ Per §8 sequencing, the arc is staged and honest about what each stage validates
 
 - **Stage D — optimization within the R1 license + P20 measurement.** Enable
   Cranelift optimization (and/or add the LLVM backend), with **every pass
-  validated as an R1/R2/R3 rewrite** over the MIR (INV-R1-ONLY). *Gate:* cross-
+  validated as an R1/R2/R3 rewrite** over the MIR (INV-R1-ONLY). Any R3/batched
+  or vectorized fault-detection introduced here MUST discharge the f★-recovery
+  obligation (INV-FAULT-ID, formalization §6.5): replay `(e⁻, f★]` from the last
+  retired observable to deliver `f★`; a pass that detects "some fault" without
+  recovering the po-earliest one does not pass this gate. *Gate:* cross-
   mode differential testing (noopt vs opt vs interpreter, and LLVM if present) is
   green on the full corpus *including fault identity*; T3–T5 are measured and
   tracked in CI as release criteria. Any optimization that changes an observable
@@ -336,19 +427,25 @@ Each with its one-line dependency on what is fixed here:
 - **Test runner CLI/reporting** — its *engine* is §4's differential harness; its
   command surface and structured-trace reporting (P4) are a separate, dependent
   round.
-- **C-header ingestion / boundary-module FFI codegen** (P14/P17) — depends on the
-  boundary-module FFI content 0008 §4 deferred; lowers through this MIR when it
-  lands.
+- **C-header ingestion / boundary-module FFI codegen — both directions** (P14/P17)
+  — depends on the boundary-module FFI content 0008 §4 deferred; lowers through
+  this MIR when it lands. This includes **outbound** foreign-call sites (0011 §1)
+  **and** the **inbound** C-ABI entry trampolines for boundary *exports* (0011
+  §1.5 — Candor functions made C-callable); both are native-backend emission
+  recorded here as the forward-dependency 0011 names, and an inbound fault in an
+  exported frame aborts per the root policy with no unwinding across C frames
+  (0011 §1.5).
 - **The normative spec + mechanized fault formalization** (P18/NN#20) — a sibling
   at the design tier, not this doc; its R1–R3 license *constrains* this backend
   (§2) rather than being produced by it.
 
 ## Rejected alternatives
 
-- **LLVM as the default backend.** Rejected for the first toolchain: it makes
-  soundness *disciplined* (never trip `nsw`/`nuw`, always intrinsics) rather than
-  *structural*, it is slow at -O2 against P20, and its external-version dependency
-  weakens NN#16. Kept as a deferred optional second backend (§1) precisely so its
+- **LLVM as the default backend.** Rejected for the first toolchain: it makes the
+  *overflow-UB* soundness class *disciplined* (never trip `nsw`/`nuw`, always
+  intrinsics) rather than *structural* — the one class Cranelift removes for free,
+  the observable-ordering discipline being identical on both — it is slow at -O2
+  against P20, and its external-version dependency weakens NN#16. Kept as a deferred optional second backend (§1) precisely so its
   strengths — peak perf, target breadth — are *reachable* (Priority 4) without
   paying its costs by default.
 - **C emission as the blessed path.** Rejected (§1): it maximizes the soundness

@@ -18,6 +18,17 @@ deferred the FFI *content* to this round. Spec 08-effects §6 and 05-pointers,
 07-contracts hold the matching SKELETONs; spec 99 obligation **OBL-FFI** is the
 acceptance gate this design discharges at the design tier.
 
+**Revision history.** 2026-07-08 — initial draft. 2026-07-08 — revised per joint
+adversarial review #1 of designs 0010/0011
+(`docs/reviews/2026-07-08-design-0010-0011-review-1.md`), dispositions F7–F11: F7
+the reverse direction designed as boundary `export` items (§1.5), the audit gains
+an exports section (§6), C-ABI emission recorded as a 0010 forward-dependency; F8
+the mappability predicate stated recursively, enum-in-struct/enum-in-array
+rejected (§1); F9 extern globals deferred with the errno-accessor idiom (§7); F10
+the shim/real per-symbol differential obligation recorded in both docs' seam (§5);
+F11 by-value argument classification named as the backend's duty, distinct from
+layout compatibility (§1, §1.4).
+
 ## Problem
 
 P14 and P17 have sat as principle since v2 with no mechanism. 0008 gave them a
@@ -106,6 +117,39 @@ back. The cost is stated plainly under Consequences: Candor forgoes
 field-reordering packing forever at the struct level — but it never had it, so
 this ratifies an existing property, it does not spend new budget.
 
+**Layout compatibility is *not* argument classification — a named backend duty.**
+The paragraph above establishes that a Candor struct's *in-memory layout* matches
+the C struct's. That is necessary but **not sufficient** for passing a struct
+**by value** across the C ABI: the platform ABI additionally specifies an
+*argument-classification* algorithm (SysV AMD64 sorts each aggregate's eightbytes
+into INTEGER/SSE/MEMORY and decides register-vs-stack passing; AArch64 AAPCS has
+its own HFA/composite rules) that is **orthogonal to layout** — two types with
+identical layout can be classified and passed differently, and getting it wrong
+corrupts arguments silently. This design fixes only the *layout* half; the
+*classification* half is the **native backend's duty (0010, §1.4 forward-dep)**:
+the backend MUST implement the target's by-value aggregate classification when it
+lowers a foreign call or a boundary export (§1.5) that passes or returns a struct
+by value. Named here so it is not mistaken for something the layout decision
+already bought.
+
+**The mappability predicate, stated recursively.** A type is *C-mappable* iff:
+- it is a scalar in the table above (integer / `bool` / `unit` return / `rawptr`
+  / function pointer), **or**
+- it is a `struct` **all of whose fields are C-mappable** (the layout decision
+  below makes such a struct C-ABI-compatible by construction), **or**
+- it is a fixed array `[N]T` (as a struct member) **whose element `T` is
+  C-mappable**.
+Everything else is **unmappable**, and because the predicate recurses through
+`struct` and `[N]T`, unmappability is *contagious*: a single unmappable field or
+element makes the whole aggregate unmappable. In particular a **Candor `enum`
+nested in a struct** (`struct S { tag: MyEnum, … }`) and an **array of enums**
+(`[N]MyEnum`) are **rejected** (E1102, the diagnostic naming the offending
+field/element path), exactly as a bare `enum` is — the 8-byte payload tag
+(`layout.rs` `ENUM_TAG`) has no portable C shape at *any* nesting depth, so it
+cannot be laundered into C by wrapping it in a struct or an array. The same
+recursion rejects a struct or array containing a `Box`, a slice, or a float
+field.
+
 **What is UNMAPPABLE and rejected** (well-formed error at the extern boundary,
 proposed **E1102**, with a P4 diagnostic naming the offending type):
 - **Candor `enum`s** — the interpreter tags every payload with an 8-byte prefix
@@ -126,8 +170,61 @@ proposed **E1102**, with a P4 diagnostic naming the offending type):
 **1.4 Calling convention = the C ABI, per target.** There is no Candor native
 calling convention at the boundary and no stable native ABI (P14/NN#15): a foreign
 call uses the target platform's own C ABI (SysV AMD64, AArch64 AAPCS, …). The
-`"C"` ABI string selects it; the native backend (0010) lowers to it. Non-C
-conventions (`stdcall`, `vectorcall`) are §7 deferrals.
+`"C"` ABI string selects it; the native backend (0010) lowers to it — **including
+the target's by-value aggregate argument-classification algorithm** (the duty
+named under the layout decision above), which layout compatibility does **not**
+supply. Non-C conventions (`stdcall`, `vectorcall`) are §7 deferrals.
+
+### 1.5 Boundary exports — the reverse direction (Candor called from C)
+
+FFI is bidirectional: C code (a callback, a registered handler, a `main`
+replacement) may need to **call a Candor function**. The forward direction (§1)
+declares foreign *imports* with `extern`; the reverse direction declares Candor
+*exports* with a matching **`export` item**, well-formed **only inside a boundary
+file** (the same NN#18 confinement as `extern`; an `export` outside a boundary
+file is the E1101 placement error). The construct mirrors an `extern` declaration
+in reverse: it names an existing `pub` Candor function and re-states its signature
+under the `"C"` ABI, binding it to a stable C symbol.
+
+```
+boundary
+
+// an ordinary safe Candor function:
+pub fn checksum(buf: read [u8]) -> u32 { … }
+
+// export it under the C ABI at symbol `candor_checksum`, C-mapped signature:
+export "C" fn candor_checksum(buf: rawptr u8, n: usize) -> u32 = checksum;
+```
+
+- **The body is ordinary Candor.** An `export` introduces no new kind of
+  function; it exposes an existing `pub` fn at a C-ABI symbol. The exported
+  signature uses the §1 type-mapping table (a `read [u8]` argument is presented to
+  C as the decomposed `(rawptr u8, usize)` parts, §1's slice rule); the boundary
+  wrapper reconstitutes the Candor view. The mappability predicate (§1) is the
+  same in this direction — a type C cannot receive cannot cross either way.
+- **C-ABI emission is a 0010 forward-dependency.** Emitting the export's C-ABI
+  entry trampoline (argument classification, the by-value duty of §1/§1.4) is
+  native-backend work; until 0010 lands an `export` **parses, checks, and is
+  audit-enumerated** but is not callable from a real C frame — the same honest gap
+  §5 states for the forward direction. Recorded as a 0010 forward-dependency in
+  both documents (0010 §6).
+- **An inbound fault aborts per the root policy — no unwinding across C frames,
+  ever.** When a fault fires inside an exported Candor function that was entered
+  from a C frame, there is **no Candor stack discipline across the C boundary to
+  unwind through** and no defined C-side handler. The fault is therefore delivered
+  to the **root fault policy** (chapter 06 §6.1) and, absent a handler, **aborts
+  the process** — it never propagates as an exception, a `longjmp`, or any
+  non-local exit across the C activation records. This is the only sound choice:
+  unwinding across frames the C compiler laid out under a convention Candor does
+  not control would be undefined behavior on the C side (NN#1's guarantee stops at
+  the boundary). An export whose Candor body may fault therefore carries the
+  standing consequence that a fault is a process abort for its C caller — stated,
+  not hidden.
+- **The `foreign` effect.** An `export` is a *sink* of Candor code into C, not a
+  *source* of foreign trust: the exported function is ordinary Candor and does
+  **not** acquire `foreign` (it is not calling out). If its body *itself* calls a
+  boundary import, that is the ordinary §2 partition, discharged or propagated as
+  usual *before* it is exported.
 
 ### 2. The foreign-trust effect, activated
 
@@ -287,6 +384,16 @@ and only the actual foreign *call* waits on 0010.
   is the deliverable of this round; a fault-only prototype could audit but never
   *test* a discharge, leaving P17's most load-bearing path unexercised until the
   backend. The shim registry is harness-scope only and ships no C.
+- **Shim/real differential obligation (seam with 0010 §4).** A shim is a
+  *stand-in*, and a stand-in that diverges from the real C symbol would let the
+  boundary machinery pass tests it should fail. Therefore, **when FFI enters the
+  differential corpus (0010 §4), each registered shim carries a per-symbol
+  contract that is itself differentially tested against the real C
+  implementation** on a hosted target: the shim and the linked C symbol must agree
+  observably on the fixture inputs, exactly as compiled-vs-interpreted agreement
+  is tested for pure Candor. Until then the shim is trusted for harness use only
+  (it ships no C, above). The obligation is recorded in **both** this design and
+  0010 §4 so neither side can quietly let the shim drift from the C it imitates.
 - **Real foreign calls depend on 0010 (the native backend), stated as a forward
   dependency.** Emitting a genuine C-ABI call site is backend work; until 0010
   lands, `no_foreign_runtime` is the honest runtime behavior of an unregistered
@@ -300,7 +407,10 @@ JSON, from one walk of the boundary modules. For each boundary module it reports
 (a) the module path, (b) every `extern` with its full signature and `foreign`
 effect, (c) every trust declaration — predicate, justification string, source span
 — (d) the **effect reach**: which `pub` wrappers *discharge* `foreign` (safe
-surface) and which *propagate* it (undischarged escape, §2 rule 5).
+surface) and which *propagate* it (undischarged escape, §2 rule 5); and (e) every
+`export` (§1.5) — its C symbol, mapped C-ABI signature, and the Candor `pub` fn it
+exposes — so the auditor sees the *inbound* trust surface (code C may call) beside
+the *outbound* one (code that calls C).
 
 ```
 $ candor audit --boundaries
@@ -315,12 +425,44 @@ boundary module  ffi::libc  (src/ffi/libc.cnr)
   effect reach
     pub c_strlen(read [u8]) -> usize           discharges foreign   (enforced: NUL-terminated)
     pub c_memcpy_into(write [u8], read [u8])    discharges foreign
-  summary: 2 externs, 7 trust predicates, 0 undischarged pub exports
+  exports  (C may call in)
+    export "C" fn candor_checksum(rawptr u8, usize) -> u32 = checksum
+      inbound fault -> root policy (abort; no unwinding across C frames)
+  summary: 2 externs, 7 trust predicates, 0 undischarged foreign wrappers, 1 C-ABI export
 ```
 
 The JSON form carries the same fields keyed by module, extern, and trust
 predicate, each with its span — the exact shape the §7 auditor's tooling consumes
 to answer "show me everything this program trusts" in one command (P17).
+
+### 7. Deferrals
+
+The named forward obligations of this edition — each a §7 deferral referenced
+above, collected here so the deferral surface is enumerable in one place, never a
+silent coercion:
+
+- **Extern globals / mutable statics** (`extern "C" { static errno: i32; }`).
+  Deferred. A foreign *global* is a different trust and aliasing question from a
+  foreign *call* — an ambiently-mutable place the C side may change under Candor's
+  aliasing model — and it is not needed for the call-oriented surface this design
+  fixes. **The errno-accessor idiom in the meantime:** POSIX already exposes
+  `errno` as a **thread-local accessor function** (`__errno_location()` on glibc,
+  `__error()` on BSD/macOS), not a linkable object, so the portable, in-edition
+  way to read it is to declare that accessor as an ordinary `extern` foreign
+  *function* returning `rawptr i32` and read through it inside the boundary
+  wrapper — no extern-global mechanism required. Direct `extern static` binding is
+  the deferred obligation; the accessor-function idiom covers the common case now.
+- **Floating types** (`float` / `double` / `long double` / `_Complex`) — no scalar
+  float in this edition (0001 §5); unmappable until floats land.
+- **Variadic functions, bitfields, unions, `#pragma pack` / packed structs,
+  flexible array members, `_Atomic`** — each rejected in this edition (§1).
+- **C++ constructs** (templates, overloads, references, RAII) — P14's honestly
+  partial neighbor.
+- **Non-C calling conventions** (`stdcall`, `vectorcall`) and **`const`
+  qualification modelling** (§1) — deferred.
+- **Header-driven generation** (OBL-FFI-GEN, §4) and **real foreign calls / C-ABI
+  emission** (0010, §5, §1.5) — the staged obligations recorded elsewhere, noted
+  here for completeness of the deferral surface.
 
 ## Rejected alternatives
 
@@ -362,7 +504,7 @@ to answer "show me everything this program trusts" in one command (P17).
   final** reserved slot. Any third tracked effect is now an amendment under NN#19,
   with its own conservative-default migration — the door is not closed, but the
   budget line is drawn here, deliberately.
-- **New bucket-1 surface: `extern`, `foreign`, `trust`, and the trust-predicate
+- **New bucket-1 surface: `extern`, `foreign`, `trust`, `export`, and the trust-predicate
   vocabulary.** Priced as semantic words (P13), like `unsafe`/`boundary` — see the
   reclassification record. The offsetting "remove" (P6) is that **no new valve and
   no new contract level** are introduced: foreign calls reuse `unsafe` (spec 05
