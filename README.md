@@ -13,7 +13,9 @@ interpreter, MIR, native, native-optimized - produce identical observable
 traces and identical fault identity across the entire corpus. Incremental
 builds prove zero-downstream re-analysis on body edits (P20's mechanism,
 measured); the P17 boundary and audit command run; the P20 measurement
-instrument reports baselines. The language's
+instrument reports baselines; and candor-proto compile emits standalone
+native ELF executables (via cranelift-object + a small C runtime) that match
+the reference oracle process-for-process across the entire corpus. The language's
 central bet (value-first memory model, Bet 5) was tested against a frozen,
 pre-registered kill criterion: killed as first registered, re-examined under a
 corrected successor registration (both on the public record), and **provisionally

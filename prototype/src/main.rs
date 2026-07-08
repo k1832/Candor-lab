@@ -32,9 +32,10 @@ fn main() -> ExitCode {
         (Some("count"), Some(path)) => run_count(path),
         (Some("audit"), Some(path)) => run_audit(path),
         (Some("build"), Some(path)) => run_build(path),
+        (Some("compile"), Some(_)) => run_compile(&args[2..]),
         (Some("migrate"), Some(path)) => run_migrate(path, &args[3..]),
         _ => {
-            eprintln!("usage: candor-proto (parse|check|run|count) <file>  |  run [--engine=mir] <file>  |  migrate <file.cn> [-o <out.cnr>]  (.cnr = real syntax, .cn = throwaway)");
+            eprintln!("usage: candor-proto (parse|check|run|count) <file>  |  run [--engine=mir] <file>  |  compile <file_or_dir> -o <prog>  |  migrate <file.cn> [-o <out.cnr>]  (.cnr = real syntax, .cn = throwaway)");
             ExitCode::from(2)
         }
     }
@@ -314,6 +315,48 @@ fn run_audit(path: &str) -> ExitCode {
         }
         Err(diag) => {
             println!("{}", diag.to_json());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `compile <file_or_dir> -o <prog>` — AOT-compile to a linked native executable
+/// (design 0010 §5). Lowers the same checked MIR the native engine runs, emits a
+/// relocatable object (cranelift-object), and links it with the static runtime
+/// via `cc` into a standalone ELF that needs neither the JIT nor `candor-proto`.
+fn run_compile(rest: &[String]) -> ExitCode {
+    let mut out: Option<&str> = None;
+    let mut input: Option<&str> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "-o" => match rest.get(i + 1) {
+                Some(o) => {
+                    out = Some(o);
+                    i += 2;
+                }
+                None => {
+                    eprintln!("error: `-o` requires an output path");
+                    return ExitCode::from(2);
+                }
+            },
+            other => {
+                input = Some(other);
+                i += 1;
+            }
+        }
+    }
+    let (input, out) = match (input, out) {
+        (Some(a), Some(b)) => (a, b),
+        _ => {
+            eprintln!("usage: candor-proto compile <file_or_dir> -o <prog>");
+            return ExitCode::from(2);
+        }
+    };
+    match candor_proto::compile_path(std::path::Path::new(input), std::path::Path::new(out)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
             ExitCode::FAILURE
         }
     }

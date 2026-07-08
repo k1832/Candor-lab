@@ -38,7 +38,7 @@ use cranelift_codegen::ir::{
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
+use cranelift_module::{default_libcall_names, DataId, FuncId, Linkage, Module};
 
 use crate::interp::layout::Layout;
 use crate::interp::FaultKind;
@@ -141,10 +141,221 @@ pub struct Compiled {
     pub static_inits: Vec<(u64, u64, bool, *const u8)>,
 }
 
-/// Compile the whole program. `mem_base` is the flat buffer base; `statics`/
-/// `strings` are the pre-computed Candor addresses baked into `StaticAddr`/
-/// `StrAddr`; `fnptr_table` is a host array (len = `prog.fn_ptrs`) filled after
-/// finalization and read by indirect calls.
+/// The declared user-function and drop-glue FuncId maps, keyed by MIR name.
+type FuncIdMaps = (HashMap<String, FuncId>, HashMap<String, FuncId>);
+
+/// Where indirect calls read their function-pointer dispatch table from.
+///   * `Host` — a leaked host array whose address is baked as a constant (JIT).
+///   * `Data` — an emitted data object filled with function-address relocations,
+///     addressed with `symbol_value` (AOT object).
+#[derive(Clone, Copy)]
+pub(super) enum FnTable {
+    Host(i64),
+    Data(DataId),
+}
+
+/// Declare every user function and drop-glue up front, returning their FuncId
+/// maps (keyed by MIR name). `prefix` is prepended to the emitted **symbol
+/// name** only (the AOT path prefixes so the Candor `main` never clashes with the
+/// C runtime's `main`); the maps stay keyed by the original name, so call
+/// resolution — which goes through the FuncId, not the symbol — is unchanged.
+pub(super) fn declare_functions<M: Module>(
+    module: &mut M,
+    prog: &MirProgram,
+    glue_types: &[Type],
+    prefix: &str,
+) -> Result<FuncIdMaps, String> {
+    let mut func_ids: HashMap<String, FuncId> = HashMap::new();
+    for f in &prog.fns {
+        let mut sig = module.make_signature();
+        for _ in 0..f.num_params {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+        sig.returns.push(AbiParam::new(types::I64));
+        let id = module
+            .declare_function(&format!("{prefix}{}", f.name), Linkage::Local, &sig)
+            .map_err(|e| e.to_string())?;
+        func_ids.insert(f.name.clone(), id);
+    }
+    // Drop glue (design 0010 §5, INV-DROP): a Box's pointee is dropped through a
+    // synthesized per-type glue function, so a recursive Box type's drop is
+    // runtime recursion (terminating on `ptr == 0`), never infinite compile-time
+    // unrolling.
+    let mut glue_ids: HashMap<String, FuncId> = HashMap::new();
+    for (i, ty) in glue_types.iter().enumerate() {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        let id = module
+            .declare_function(&format!("{prefix}__drop_glue_{i}"), Linkage::Local, &sig)
+            .map_err(|e| e.to_string())?;
+        glue_ids.insert(type_key(ty), id);
+    }
+    Ok((func_ids, glue_ids))
+}
+
+/// Define every user function + drop-glue body — the shared MIR->Cranelift-IR
+/// lowering, generic over the backend `Module` (JIT or object). Identical IR is
+/// built either way; only `mem_base`/`fntable` differ (the module-plumbing delta,
+/// design 0010 §1's "the lowering is the only backend-specific code").
+#[allow(clippy::too_many_arguments)]
+pub(super) fn define_functions<M: Module>(
+    module: &mut M,
+    prog: &MirProgram,
+    items: &Items,
+    consts: &HashMap<String, u64>,
+    mem_base: i64,
+    statics: &HashMap<String, u64>,
+    strings: &HashMap<String, u64>,
+    fntable: FnTable,
+    shims: &Shims,
+    func_ids: &HashMap<String, FuncId>,
+    glue_ids: &HashMap<String, FuncId>,
+    glue_types: &[Type],
+) -> Result<(), String> {
+    let mut ctx = module.make_context();
+    let mut fctx = FunctionBuilderContext::new();
+
+    for f in &prog.fns {
+        let fid = func_ids[&f.name];
+        ctx.func.signature = {
+            let mut sig = Signature::new(module.isa().default_call_conv());
+            for _ in 0..f.num_params {
+                sig.params.push(AbiParam::new(types::I64));
+            }
+            sig.returns.push(AbiParam::new(types::I64));
+            sig
+        };
+        ctx.func.name = UserFuncName::user(0, fid.as_u32());
+        {
+            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+            let mut cg = Cg {
+                b: &mut b,
+                module,
+                prog,
+                items,
+                consts,
+                mem_base,
+                statics,
+                strings,
+                fntable,
+                shims,
+                func_ids,
+                glue_ids,
+                callrefs: HashMap::new(),
+                shimrefs: HashMap::new(),
+                addr: Vec::new(),
+            };
+            cg.lower_fn(f);
+            b.seal_all_blocks();
+            b.finalize();
+        }
+        module.define_function(fid, &mut ctx).map_err(|e| e.to_string())?;
+        module.clear_context(&mut ctx);
+    }
+
+    for ty in glue_types {
+        let fid = glue_ids[&type_key(ty)];
+        ctx.func.signature = {
+            let mut sig = Signature::new(module.isa().default_call_conv());
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            sig
+        };
+        ctx.func.name = UserFuncName::user(0, fid.as_u32());
+        {
+            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+            let mut cg = Cg {
+                b: &mut b,
+                module,
+                prog,
+                items,
+                consts,
+                mem_base,
+                statics,
+                strings,
+                fntable,
+                shims,
+                func_ids,
+                glue_ids,
+                callrefs: HashMap::new(),
+                shimrefs: HashMap::new(),
+                addr: Vec::new(),
+            };
+            cg.lower_glue(ty);
+            b.seal_all_blocks();
+            b.finalize();
+        }
+        module.define_function(fid, &mut ctx).map_err(|e| e.to_string())?;
+        module.clear_context(&mut ctx);
+    }
+    Ok(())
+}
+
+/// Define the AOT entry wrapper `candor_entry() -> i64` (object path only). It
+/// runs the startup work the JIT driver does host-side: copy string-literal bytes
+/// into the flat buffer at their baked Candor addresses, run each static
+/// initializer and write its result to the static's address, then call `main` and
+/// return its `i64` (or `0` for a non-`i64` `main`, mirroring `backend::run`). The
+/// runtime library establishes the `setjmp` landing pad and calls this.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn define_entry<M: Module>(
+    module: &mut M,
+    prog: &MirProgram,
+    items: &Items,
+    consts: &HashMap<String, u64>,
+    mem_base: i64,
+    statics: &HashMap<String, u64>,
+    strings: &HashMap<String, u64>,
+    fntable: FnTable,
+    shims: &Shims,
+    func_ids: &HashMap<String, FuncId>,
+    glue_ids: &HashMap<String, FuncId>,
+    entry_id: FuncId,
+) -> Result<(), String> {
+    let mut ctx = module.make_context();
+    let mut fctx = FunctionBuilderContext::new();
+    ctx.func.signature = {
+        let mut sig = Signature::new(module.isa().default_call_conv());
+        sig.returns.push(AbiParam::new(types::I64));
+        sig
+    };
+    ctx.func.name = UserFuncName::user(0, entry_id.as_u32());
+    let main_is_i64 = matches!(
+        prog.get("main").map(|f| &f.locals[0].ty),
+        Some(Type::Scalar(ScalarTy::I64))
+    );
+    {
+        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+        let mut cg = Cg {
+            b: &mut b,
+            module,
+            prog,
+            items,
+            consts,
+            mem_base,
+            statics,
+            strings,
+            fntable,
+            shims,
+            func_ids,
+            glue_ids,
+            callrefs: HashMap::new(),
+            shimrefs: HashMap::new(),
+            addr: Vec::new(),
+        };
+        cg.lower_entry(main_is_i64);
+        b.seal_all_blocks();
+        b.finalize();
+    }
+    module.define_function(entry_id, &mut ctx).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Compile the whole program with the in-process JIT. `mem_base` is the flat
+/// buffer base; `statics`/`strings` are the pre-computed Candor addresses baked
+/// into `StaticAddr`/`StrAddr`; `fnptr_table` is a host array (len =
+/// `prog.fn_ptrs`) filled after finalization and read by indirect calls.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn compile(
     prog: &MirProgram,
@@ -176,115 +387,23 @@ pub fn compile(
     builder.symbol("rt_fault", runtime::rt_fault as *const u8);
     let mut module = JITModule::new(builder);
 
-    // Shim signatures.
     let shims = Shims::declare(&mut module)?;
-
-    // Declare every user function up front (so calls resolve in any order).
-    let mut func_ids: HashMap<String, FuncId> = HashMap::new();
-    for f in &prog.fns {
-        let mut sig = module.make_signature();
-        for _ in 0..f.num_params {
-            sig.params.push(AbiParam::new(types::I64));
-        }
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function(&f.name, Linkage::Local, &sig)
-            .map_err(|e| e.to_string())?;
-        func_ids.insert(f.name.clone(), id);
-    }
-
-    // Drop glue (design 0010 §5, INV-DROP): a Box's pointee is dropped through a
-    // synthesized per-type glue function, so a recursive Box type's drop is
-    // runtime recursion (terminating on `ptr == 0`), never infinite compile-time
-    // unrolling.
     let glue_types = collect_glue_types(prog, items, consts);
-    let mut glue_ids: HashMap<String, FuncId> = HashMap::new();
-    for (i, ty) in glue_types.iter().enumerate() {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function(&format!("__drop_glue_{i}"), Linkage::Local, &sig)
-            .map_err(|e| e.to_string())?;
-        glue_ids.insert(type_key(ty), id);
-    }
-
-    let mut ctx = module.make_context();
-    let mut fctx = FunctionBuilderContext::new();
-
-    for f in &prog.fns {
-        let fid = func_ids[&f.name];
-        ctx.func.signature = {
-            let mut sig = Signature::new(module.isa().default_call_conv());
-            for _ in 0..f.num_params {
-                sig.params.push(AbiParam::new(types::I64));
-            }
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        };
-        ctx.func.name = UserFuncName::user(0, fid.as_u32());
-        {
-            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
-            let mut cg = Cg {
-                b: &mut b,
-                module: &mut module,
-                prog,
-                items,
-                consts,
-                mem_base,
-                statics,
-                strings,
-                fnptr_table: fnptr_table as i64,
-                shims: &shims,
-                func_ids: &func_ids,
-                glue_ids: &glue_ids,
-                callrefs: HashMap::new(),
-                shimrefs: HashMap::new(),
-                addr: Vec::new(),
-            };
-            cg.lower_fn(f);
-            b.seal_all_blocks();
-            b.finalize();
-        }
-        module.define_function(fid, &mut ctx).map_err(|e| e.to_string())?;
-        module.clear_context(&mut ctx);
-    }
-
-    for ty in &glue_types {
-        let fid = glue_ids[&type_key(ty)];
-        ctx.func.signature = {
-            let mut sig = Signature::new(module.isa().default_call_conv());
-            sig.params.push(AbiParam::new(types::I64));
-            sig.returns.push(AbiParam::new(types::I64));
-            sig
-        };
-        ctx.func.name = UserFuncName::user(0, fid.as_u32());
-        {
-            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
-            let mut cg = Cg {
-                b: &mut b,
-                module: &mut module,
-                prog,
-                items,
-                consts,
-                mem_base,
-                statics,
-                strings,
-                fnptr_table: fnptr_table as i64,
-                shims: &shims,
-                func_ids: &func_ids,
-                glue_ids: &glue_ids,
-                callrefs: HashMap::new(),
-                shimrefs: HashMap::new(),
-                addr: Vec::new(),
-            };
-            cg.lower_glue(ty);
-            b.seal_all_blocks();
-            b.finalize();
-        }
-        module.define_function(fid, &mut ctx).map_err(|e| e.to_string())?;
-        module.clear_context(&mut ctx);
-    }
+    let (func_ids, glue_ids) = declare_functions(&mut module, prog, &glue_types, "")?;
+    define_functions(
+        &mut module,
+        prog,
+        items,
+        consts,
+        mem_base,
+        statics,
+        strings,
+        FnTable::Host(fnptr_table as i64),
+        &shims,
+        &func_ids,
+        &glue_ids,
+        &glue_types,
+    )?;
 
     module.finalize_definitions().map_err(|e| e.to_string())?;
 
@@ -309,9 +428,8 @@ pub fn compile(
 
     Ok(Compiled { _module: module, main_ptr, static_inits })
 }
-
 /// Imported shim FuncIds.
-struct Shims {
+pub(super) struct Shims {
     stack_alloc: FuncId,
     copy: FuncId,
     trace: FuncId,
@@ -321,7 +439,7 @@ struct Shims {
 }
 
 impl Shims {
-    fn declare(module: &mut JITModule) -> Result<Shims, String> {
+    pub(super) fn declare<M: Module>(module: &mut M) -> Result<Shims, String> {
         let mut sig1 = module.make_signature();
         sig1.params.push(AbiParam::new(types::I64));
         sig1.params.push(AbiParam::new(types::I64));
@@ -374,17 +492,18 @@ impl Shims {
     }
 }
 
-/// Per-function codegen context.
-struct Cg<'a, 'b> {
+/// Per-function codegen context, generic over the backend `Module` (JIT or
+/// object) so one lowering serves both.
+struct Cg<'a, 'b, M: Module> {
     b: &'a mut FunctionBuilder<'b>,
-    module: &'a mut JITModule,
+    module: &'a mut M,
     prog: &'a MirProgram,
     items: &'a Items,
     consts: &'a HashMap<String, u64>,
     mem_base: i64,
     statics: &'a HashMap<String, u64>,
     strings: &'a HashMap<String, u64>,
-    fnptr_table: i64,
+    fntable: FnTable,
     shims: &'a Shims,
     func_ids: &'a HashMap<String, FuncId>,
     glue_ids: &'a HashMap<String, FuncId>,
@@ -394,7 +513,7 @@ struct Cg<'a, 'b> {
     addr: Vec<Value>,
 }
 
-impl Cg<'_, '_> {
+impl<M: Module> Cg<'_, '_, M> {
     fn lay(&self) -> Layout<'_> {
         Layout { items: self.items, consts: self.consts }
     }
@@ -435,6 +554,18 @@ impl Cg<'_, '_> {
     fn host_addr(&mut self, candor: Value) -> Value {
         let base = self.iconst(self.mem_base);
         self.b.ins().iadd(base, candor)
+    }
+    /// The base address (SSA value) of the fn-pointer dispatch table: a baked
+    /// host constant under the JIT, the address of the emitted data object (via a
+    /// relocated `symbol_value`) under the AOT object backend.
+    fn fntable_base(&mut self) -> Value {
+        match self.fntable {
+            FnTable::Host(p) => self.iconst(p),
+            FnTable::Data(id) => {
+                let gv = self.module.declare_data_in_func(id, self.b.func);
+                self.b.ins().symbol_value(types::I64, gv)
+            }
+        }
     }
     fn canon(&mut self, v: Value, sty: ScalarTy) -> Value {
         let (_, _, bits, signed) = ty_range(sty);
@@ -692,7 +823,7 @@ impl Cg<'_, '_> {
                 let id = self.eval_operand(func, mf);
                 let vals: Vec<Value> = args.iter().map(|a| self.eval_operand(a, mf)).collect();
                 // faddr = *(fnptr_table + id*8)
-                let base = self.iconst(self.fnptr_table);
+                let base = self.fntable_base();
                 let eight = self.iconst(8);
                 let off = self.b.ins().imul(id, eight);
                 let slot = self.b.ins().iadd(base, off);
@@ -1059,6 +1190,66 @@ impl Cg<'_, '_> {
             }
         }
     }
+
+    /// Build the AOT entry wrapper body (see `define_entry`).
+    fn lower_entry(&mut self, main_is_i64: bool) {
+        let entry = self.b.create_block();
+        self.b.switch_to_block(entry);
+
+        // Copy each string literal's bytes into the flat buffer at its baked
+        // Candor address (the JIT driver does this host-side before running).
+        let strs: Vec<(String, u64)> =
+            self.strings.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        for (sv, addr) in strs {
+            for (i, byte) in sv.as_bytes().iter().enumerate() {
+                let a = self.iconst((addr + i as u64) as i64);
+                let ha = self.host_addr(a);
+                let v = self.b.ins().iconst(types::I8, *byte as i64);
+                self.b.ins().store(MemFlags::new(), v, ha, 0);
+            }
+        }
+
+        // Run each static initializer and write its result to the static's addr
+        // (wordy: store the low `size` bytes; aggregate: `rt_copy` from the
+        // returned address) — mirroring `backend::run`'s init loop.
+        let inits: Vec<(u64, u64, bool, String)> = self
+            .prog
+            .statics
+            .iter()
+            .map(|st| {
+                (
+                    self.statics[&st.name],
+                    self.size_of(&st.ty),
+                    is_wordy(&st.ty),
+                    st.init_fn.clone(),
+                )
+            })
+            .collect();
+        for (addr, size, wordy, init_fn) in inits {
+            let r = self.callref(&init_fn);
+            let c = self.b.ins().call(r, &[]);
+            let out = self.b.inst_results(c)[0];
+            if wordy {
+                if size > 0 {
+                    let a = self.iconst(addr as i64);
+                    let ha = self.host_addr(a);
+                    let st = int_ty(size);
+                    let v = if size >= 8 { out } else { self.b.ins().ireduce(st, out) };
+                    self.b.ins().store(MemFlags::new(), v, ha, 0);
+                }
+            } else {
+                let d = self.iconst(addr as i64);
+                self.call_copy(d, out, size);
+            }
+        }
+
+        // Call `main` and return its `i64` (or 0 for a non-`i64` main).
+        let r = self.callref("main");
+        let c = self.b.ins().call(r, &[]);
+        let ret0 = self.b.inst_results(c)[0];
+        let ret = if main_is_i64 { ret0 } else { self.iconst(0) };
+        self.b.ins().return_(&[ret]);
+    }
 }
 
 /// DFS successors from `entry`, tagging each unvisited MIR block with `target`.
@@ -1088,7 +1279,7 @@ fn assign_region(mf: &MirFn, entry: usize, target: Block, ret_target: &mut [Opti
 // drop flag), with a runtime tag switch only for enum payload dispatch.
 // ---------------------------------------------------------------------------
 
-impl Cg<'_, '_> {
+impl<M: Module> Cg<'_, '_, M> {
     fn load_u64(&mut self, candor: Value) -> Value {
         self.load_scalar(candor, ScalarTy::U64)
     }
@@ -1134,7 +1325,7 @@ impl Cg<'_, '_> {
     /// Indirect call by fn-pointer id (box/unbox vtable dispatch); returns the
     /// callee's word result.
     fn call_fnptr_id(&mut self, id: Value, args: &[Value]) -> Value {
-        let base = self.iconst(self.fnptr_table);
+        let base = self.fntable_base();
         let eight = self.iconst(8);
         let off = self.b.ins().imul(id, eight);
         let slot = self.b.ins().iadd(base, off);
@@ -1405,7 +1596,7 @@ fn type_key(ty: &Type) -> String {
 /// droppable type (drop-obligation locals, `BoxOp` inners) and gather each
 /// distinct `Box(inner)` where `inner` needs drop, recursing through `inner` —
 /// deduped by key so recursive Box types terminate.
-fn collect_glue_types(prog: &MirProgram, items: &Items, consts: &HashMap<String, u64>) -> Vec<Type> {
+pub(super) fn collect_glue_types(prog: &MirProgram, items: &Items, consts: &HashMap<String, u64>) -> Vec<Type> {
     let lay = Layout { items, consts };
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();

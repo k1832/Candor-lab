@@ -11,6 +11,7 @@
 //! landing pad (`runtime::run_guarded`).
 
 pub mod lower;
+pub mod object;
 pub mod runtime;
 
 use std::collections::{HashMap, HashSet};

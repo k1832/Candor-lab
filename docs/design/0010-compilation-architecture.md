@@ -462,7 +462,33 @@ Per §8 sequencing, the arc is staged and honest about what each stage validates
   interpreter's heap frames; (v) the flat buffer has no inline OOB guard, so
   out-of-model access faults the host rather than delivering `BadPointer` (no
   runnable fixture exercises it). Stage C (incremental) and Stage D (optimization)
-  remain unbuilt.
+  remain unbuilt. **AOT emission (2026-07-09 — Stage B now emits a real
+  EXECUTABLE, not only a JIT).** `candor-proto compile <file_or_dir> -o prog`
+  lowers the *same* MIR through the *same* `src/backend/lower.rs` — now generic
+  over the Cranelift `Module` — targeting a **cranelift-object** `ObjectModule`
+  instead of the JIT (the delta is pure module plumbing: the flat-memory base is a
+  fixed `MAP_FIXED` address baked as a constant so the load/store lowering is
+  unchanged; the fn-pointer dispatch table becomes an emitted `.data` object of
+  function-address relocations addressed via `symbol_value`; an exported
+  `candor_entry` glue writes string bytes, runs the static initializers, and calls
+  `main`). The runtime is a small static **C file** (`src/backend/aot_runtime.c`,
+  the least-dependency path — `cc` is already required for linking, so no second
+  Rust staticlib) compiled and linked once by `cc` at compile time: it maps the
+  flat region, runs `candor_entry` inside a `setjmp` landing pad on a 512 MiB
+  thread, streams `θ` to stdout via the `trace` hook, and translates the result to
+  the process exit protocol — main's `i64` as the low-byte exit code, or **exit 2
+  plus the `(kind, span)` JSON on stderr** on fault, EXACTLY the CLI `run`
+  contract. *Gate* (`tests/aot.rs`): the emitted ELF executables — run as real
+  standalone processes with no JIT and no `candor-proto` present — reproduce the
+  tree-walking oracle's stdout trace, exit code, and fault `(k, s)` across the
+  **FULL 31-fixture runnable corpus** (five §11 `.cn` + `.cnr` twins incl. both
+  stress suites, corelib tree/flat, parity, real, generics; **zero out-of-subset**)
+  plus 10 fault axes, on x86-64 Linux. Binaries link only libc/pthread (≈17 KB
+  trivial, tens–hundreds of KB with monomorphized generics). **One surprise:** an
+  fn-pointer table emitted with `define_zeroinit` lands in `.bss`, which stores no
+  bytes on disk, so its relocations were silently dropped (null slots -> a call to
+  0); emitting it as real (`.data`) initialized bytes fixes it. All four in-process
+  engines stay green; the object path is non-PIC, linked `-no-pie`.
 
 - **Stage C — incremental artifacts + the two-hash tiers.** Realize 0008 §2:
   interface-artifact format, signature-hash analysis gate, codegen-hash

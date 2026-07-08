@@ -411,3 +411,97 @@ fn run_dir_native_impl(dir: &std::path::Path, optimize: bool) -> MirRunResult {
     }
     lower_and_run_native(&build.program, optimize)
 }
+
+// ---------------------------------------------------------------------------
+// AOT compilation (design 0010 §5, Stage B's cranelift-object note): the same
+// parse+check+monomorphize+lower-to-MIR front as the native engine, but the
+// terminal step emits a linked native EXECUTABLE (`backend::object`) instead of
+// JIT-running. `candor-proto compile <file_or_dir> -o prog` drives this.
+// ---------------------------------------------------------------------------
+
+/// Format the first error diagnostics as a single message.
+fn first_error_msg(diags: &[Diag]) -> String {
+    diags
+        .iter()
+        .find(|d| matches!(d.severity, diag::Severity::Error))
+        .map(|d| d.to_json())
+        .unwrap_or_else(|| "check failed".to_string())
+}
+
+fn any_error(diags: &[Diag]) -> bool {
+    diags.iter().any(|d| matches!(d.severity, diag::Severity::Error))
+}
+
+/// Monomorphize + check a generic program, returning the concrete AST to lower.
+fn monomorphized_program(program: &ast::Program) -> Result<ast::Program, String> {
+    let (diags, insts, shapes) = check::check_generic_program(program, true);
+    if any_error(&diags) {
+        return Err(first_error_msg(&diags));
+    }
+    let mono = generics::monomorphize(program, &insts, &shapes);
+    if any_error(&mono.diags) {
+        return Err(first_error_msg(&mono.diags));
+    }
+    Ok(mono.program)
+}
+
+/// Produce the checked (and, if generic, monomorphized) AST for a `.cn`/`.cnr`
+/// file or a `.cnr` module-tree directory — the same dispatch the native `run`
+/// engine performs, stopping just before MIR lowering.
+fn checked_program_for_native(path: &std::path::Path) -> Result<ast::Program, String> {
+    if path.is_dir() {
+        let build = modules::build_tree(path).map_err(|d| d.to_json())?;
+        let mut diags = build.diags;
+        if generics::is_generic_program(&build.program) {
+            if any_error(&diags) {
+                return Err(first_error_msg(&diags));
+            }
+            return monomorphized_program(&build.program);
+        }
+        diags.extend(check::check_program_real(&build.program));
+        if any_error(&diags) {
+            return Err(first_error_msg(&diags));
+        }
+        return Ok(build.program);
+    }
+    let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let real = path.extension().map(|e| e == "cnr").unwrap_or(false);
+    if real {
+        let program = real::parse_source(&src).map_err(|d| d.to_json())?;
+        if generics::is_generic_program(&program) {
+            return monomorphized_program(&program);
+        }
+        let diags = check::check_program_real(&program);
+        if any_error(&diags) {
+            return Err(first_error_msg(&diags));
+        }
+        Ok(program)
+    } else {
+        let program = parse_source(&src).map_err(|d| d.to_json())?;
+        let diags = check::check_program(&program);
+        if any_error(&diags) {
+            return Err(first_error_msg(&diags));
+        }
+        Ok(program)
+    }
+}
+
+/// AOT-compile a `.cn`/`.cnr` file or `.cnr` module-tree at `path` into a linked
+/// native executable at `out`. Returns `Err` with a message on parse/check errors,
+/// out-of-subset MIR, or a backend/link failure.
+pub fn compile_path(path: &std::path::Path, out: &std::path::Path) -> Result<(), String> {
+    let program = checked_program_for_native(path)?;
+    let mut diags = Vec::new();
+    let items = resolve::resolve_program(&program, &mut diags);
+    let mut consts = std::collections::HashMap::new();
+    for it in &program.items {
+        if let ast::Item::Static(st) = it {
+            if let ast::ExprKind::IntLit { value, .. } = &st.value.kind {
+                consts.insert(st.name.clone(), *value);
+            }
+        }
+    }
+    let mp = mir::lower_checked(&program, &items)
+        .map_err(|e| format!("outside the native backend subset: {}", e.0))?;
+    backend::object::emit_executable(&mp, &items, &consts, out)
+}
