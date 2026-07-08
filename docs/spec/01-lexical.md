@@ -44,9 +44,14 @@ throwaway inventory; it does not codify it.
 
 2.3 The **intrinsic keywords** are keyword-led operator forms reserved in every
     position: `sizeof`, `alignof`, `min_of`, `max_of`, `offsetof`, `field_ptr`,
-    `cast_ptr`, `addr_to_ptr`, `ptr_null`. `min_of` and `max_of` are added by
-    design 0006 §2.4 to the compile-time `sizeof`/`alignof` family; they take a
-    type argument and yield the minimum/maximum value of that type.
+    `cast_ptr`, `addr_to_ptr`, `ptr_null`. `min_of` and `max_of` are **reserved but
+    not implemented** this edition: design 0006 §2.4 added them to the compile-time
+    `sizeof`/`alignof` family (a type argument yielding the minimum/maximum value
+    of that type), but the prototype front-end never implemented them and the
+    negative-literal fold (§3.4; chapter 02 §6.6) covers the corpus's
+    programmatic-bound use. Their token stays reserved so the spelling remains
+    available; implementing or dropping them is deferred to the real-toolchain
+    gate (chapter 99, OBL-MINMAX-INTRINSICS).
 
 2.4 **`out` is a hard keyword everywhere** (design 0006 §2.3). It SHALL NOT be an
     identifier in any position. The contextual relaxation is rejected: the
@@ -66,6 +71,16 @@ throwaway inventory; it does not codify it.
       enum (chapter 02 §2, §7); elsewhere an identifier. Its slot is a fixed,
       non-expression position (unlike `out`), so contextual recognition raises no
       identifier ambiguity.
+    - **`for`** and **`in`** — recognized only in the for-statement header
+      (chapter 02 §8.3; design 0009 §4.4): `for` in statement-leading position,
+      `in` separating the pattern from the operand; elsewhere identifiers.
+    - **`type`** — recognized only in interface-body member position, declaring
+      the single associated type (chapter 12 §1, `type Item;`); elsewhere an
+      identifier.
+    - **`region`** — recognized only in a bracketed declaration list after an
+      item name, declaring a region variable (chapter 02 §4, chapter 10 §1.3;
+      design 0007 §6.1.1); elsewhere an identifier. The region **use** tag on a
+      borrow type is the bare `[r]` (chapter 02 §3), not the keyword.
 
 2.6 **Retired spellings.** The prototype keywords `slice`, `slice_mut`, `borrow`,
     `borrow_mut`, `deref`, and `case` (and the throwaway region forms `slice[r]`

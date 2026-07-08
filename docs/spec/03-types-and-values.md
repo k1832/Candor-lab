@@ -17,9 +17,9 @@ normative clauses. Rationale is in design 0001; this chapter states rules only.
     tagged-sum `enum` (variants with zero or more positional payloads), and the
     fixed array `[N]T` for a compile-time-constant length `N`.
 
-1.3 The reference types are the shared borrow `borrow T`, the exclusive borrow
-    `borrow_mut T`, the shared slice `slice T`, and the exclusive slice
-    `slice_mut T`. Their access discipline is normative in chapter 04.
+1.3 The reference types are the shared borrow `read T`, the exclusive borrow
+    `write T`, the shared slice `[T]`, and the exclusive slice
+    `write [T]`. Their access discipline is normative in chapter 04.
 
 1.4 The pointer type is `rawptr T` (chapter 05). The heap-owning type is `Box T`,
     and `BoxResult T` is the compiler-known sum `enum { boxed(Box T), oom }`
@@ -27,8 +27,8 @@ normative clauses. Rationale is in design 0001; this chapter states rules only.
     effect marker (chapter 08).
 
 1.5 A conforming program in this edition **SHALL NOT** declare generic types or
-    functions; the only parametric types are the compiler-known `[N]T`, `slice T`,
-    `slice_mut T`, `rawptr T`, `Box T`, and `BoxResult T` (design 0001 §8.3;
+    functions; the only parametric types are the compiler-known `[N]T`, `[T]`,
+    `write [T]`, `rawptr T`, `Box T`, and `BoxResult T` (design 0001 §8.3;
     user-defined generics are a future obligation, chapter 99).
 
 ---
@@ -43,7 +43,7 @@ normative clauses. Rationale is in design 0001; this chapter states rules only.
 
 2.3 A **place** is an expression denoting storage that holds or will hold a
     value: a local, a field access `p.f`, an index `a[i]`, or a dereference
-    `deref b`. Places are what a program borrows, moves out of, and assigns to.
+    `b.*`. Places are what a program borrows, moves out of, and assigns to.
 
 ---
 
@@ -73,9 +73,9 @@ normative clauses. Rationale is in design 0001; this chapter states rules only.
     only where it is cheap.
 
 4.2 The following are `copy`: every sized integer, `bool`, `unit`, every
-    `rawptr T`, every shared borrow (`borrow T`), and `slice T`.
+    `rawptr T`, every shared borrow (`read T`), and the shared slice `[T]`.
 
-4.3 An exclusive borrow (`borrow_mut T`), a `slice_mut T`, a `Box T`, and every
+4.3 An exclusive borrow (`write T`), an exclusive slice (`write [T]`), a `Box T`, and every
     owning aggregate lacking the `copy` marker **SHALL move** (are not `copy`).
 
 4.4 A fixed array `[N]T` is `copy` **iff** `T` is `copy`.
@@ -178,13 +178,13 @@ normative clauses. Rationale is in design 0001; this chapter states rules only.
     moves, or copies iff `T` is `copy` (§4.4). `a[i]` is a place. Indexing SHALL
     be bounds-checked (chapter 06).
 
-8.2 A `slice T` is a shared borrow of a contiguous run of `T`; a `slice_mut T` is
+8.2 A `[T]` is a shared borrow of a contiguous run of `T`; a `write [T]` is
     an exclusive borrow of one. Slices obey the borrow rules of chapter 04. They
     SHALL NOT be struct fields (chapter 04 §8). Slice range operations
     (`subslice`) SHALL be bounds-checked (chapter 06).
 
-8.3 There is **no string type** in this edition. Text is `slice u8` (borrowed) or
-    `[N]u8` / `Box`-of-bytes (owned). String and byte literals produce `slice u8`
+8.3 There is **no string type** in this edition. Text is `[u8]` (borrowed) or
+    `[N]u8` / `Box`-of-bytes (owned). String and byte literals produce `[u8]`
     viewing read-only static storage. (The text-type budget under P3 is a future
     design obligation, chapter 99.)
 

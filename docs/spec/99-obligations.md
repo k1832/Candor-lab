@@ -92,7 +92,7 @@ chapter's stated obligations bind now.
 ### OBL-TEXT — the text-type budget
 - **Chapter:** 03 §8.3 (byte slices only this edition).
 - **Hook:** **P3** (one canonical way; the named string-sprawl stress point).
-- **Gate:** blocks any owning/interop text type beyond `slice u8` / `[N]u8`.
+- **Gate:** blocks any owning/interop text type beyond `[u8]` / `[N]u8`.
 - **Acceptance:** the spec resolves text under P3 with a defended budget (one
   universal view type; minimum owning/interop forms, each by recorded
   justification).
@@ -159,7 +159,7 @@ chapter's stated obligations bind now.
   guarantee in the real toolchain; the prototype has no formatter and accepts both
   forms.
 - **Acceptance:** the shipped, **type-aware** formatter rewrites
-  `f(write (deref b))` / `f(read (deref b))` to `f(b)` exactly where the argument
+  `f(write b.*)` / `f(read b.*)` to `f(b)` exactly where the argument
   fills a matching `read`/`write`-mode parameter, leaving `take`-mode borrow
   arguments and non-place arguments alone.
 
@@ -209,6 +209,14 @@ Spec 01 §2.3 lists min_of/max_of as normative intrinsics; the real front-end de
 report) and the lexer table omits them. Resolve by implementing the two intrinsics (trivial
 compile-time constants) or downgrading the spec entry to reserved; the grammar highlights them
 per spec meanwhile. Gate: chapter 01 NORMATIVE promotion for that clause.
+
+Resolution/re-scope (2026-07-09): the prototype front-end never implemented
+min_of/max_of and the negative-literal fold (chapter 02 §6.6) covers the
+programmatic-bound use. Spec 01 §2.3 is **downgraded to reserved-but-not-
+implemented** (the honest state); the tokens stay reserved so the spelling is
+available. The obligation stays **open, re-scoped**: implement or drop
+min_of/max_of at the **real-toolchain gate**. Chapter 01's NORMATIVE promotion
+for that clause no longer blocks on an unimplemented feature.
 
 ## OBL-GENERICS-ITER evidence update (stdlib seed, 2026-07-08)
 
@@ -270,6 +278,12 @@ on wrapper cells. Both feed the iteration/associated-types design round.
   not resolved.
 - **Acceptance:** chapters 01/02/04 updated to the `region r` form and the
   contextual-keyword inventory (`for`, `in`, `type`).
+- **Discharged (2026-07-09):** chapters 01/02/04 updated to the `region r`
+  declaration form — chapter 02 §4's `Regions` production and new clause 4.6,
+  chapter 04 §7.2 — and chapter 01 §2.5's contextual-keyword inventory extended
+  with `for`, `in`, `type`, `region` (`ok` already present). The region **use**
+  tag keeps the bare `[r]` on borrow types; only declarations wear the keyword.
+  Acceptance met.
 
 ### OBL-ITER-BORROW (new, design 0009 §3.4)
 - **Chapter:** 12 §6.1 (SKELETON pointer). **Hook:** **P12/P11** (value-first; the
@@ -331,3 +345,14 @@ grammar coordination across chapters 01/02/04). The E1002 inference note is an
 implementation obligation with no surface. The philosophy-named pre-stability tier
 (OBL-WINDOW, OBL-ALIAS, OBL-CONSIST) is unchanged; no "1.0" precedes its discharge
 (chapter 00 §3.4).
+
+## Spec-maintenance pass (2026-07-09)
+
+Chapters 03/04 re-spelled from the throwaway forms (`borrow T`/`borrow_mut T`/
+`slice T`/`slice_mut T`/`deref b`) into the real syntax (`read T`/`write T`/
+`[T]`/`write [T]`/`.*`; design 0006), semantics untouched — chapter 04 §3's
+reborrow content already cited design 0005 and was unchanged. **OBL-REGION-
+KEYWORD-GRAM discharged** and **OBL-MINMAX-INTRINSICS re-scoped** (open, deferred
+to the real-toolchain gate) per the entries above. The OBL-SLICE-REGION ledger
+keeps the retired prototype spelling `slice[r] T` / `slice_mut[r] T` as a
+historical record, not a live spelling.

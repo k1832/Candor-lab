@@ -126,8 +126,10 @@ types/variants, `SCREAMING_SNAKE` statics. Formatter also: collapses reborrows
 - **`Box[T]` / `BoxResult[T]{ ok Boxed, OutOfMemory }`** (design 0007 §6.3) is
   ahead. The prototype + corpus use `Box T` (space form) and the variants
   `BoxResult::boxed` / `BoxResult::oom` (lowercase). **Write `Box T`.**
-- **`min_of`/`max_of`** are specified (01 §2.3, 06 §6.7) but NOT implemented and
-  not in the corpus. Do not rely on them yet.
-- **Spec ch03/04 prose lag:** those chapters still say `borrow T`/`borrow_mut`/
-  `slice T`/`slice_mut`/`deref b`; the real spellings (this file, ch01/02, corpus)
-  are `read T`/`write T`/`[T]`/`write [T]`/`.*`. Generate the real spellings.
+- **`min_of`/`max_of`** are **reserved but not implemented** (01 §2.3 downgraded,
+  02 §6.8; chapter 99 OBL-MINMAX-INTRINSICS) and not in the corpus. Do not use
+  them — the negative-literal fold covers the programmatic bound.
+- **Spec ch03/04 spellings — RESOLVED (2026-07-09):** those chapters now use the
+  real spellings (`read T`/`write T`/`[T]`/`write [T]`/`.*`), matching this file,
+  ch01/02, and the corpus (formerly lagged in throwaway `borrow T`/`slice T`/
+  `deref b`).

@@ -11,8 +11,8 @@ the non-normative appendix maps clauses to the prototype's diagnostic codes.
 ## 1. Loans and the two borrow kinds
 
 1.1 A **borrow** is produced by a keyword operator on a place. A **shared borrow**
-    (`read place`, type `borrow T`) is read-only, aliasable, and `copy`. An
-    **exclusive borrow** (`write place`, type `borrow_mut T`) is read-write,
+    (`read place`, type `read T`) is read-only, aliasable, and `copy`. An
+    **exclusive borrow** (`write place`, type `write T`) is read-write,
     unique, and **moves** (is not `copy`). An exclusive borrow REQUIRES a mutable
     place.
 
@@ -24,21 +24,21 @@ the non-normative appendix maps clauses to the prototype's diagnostic codes.
 
 ## 2. Dereference and reborrow
 
-2.1 `deref b` is a **place** denoting the borrowed storage. On the right of `=`
+2.1 `b.*` is a **place** denoting the borrowed storage. On the right of `=`
     it reads (copying if `copy`, or serving as a place to reborrow); on the left
     it writes, and a deref-write SHALL be permitted **only** through an exclusive
-    borrow (or a `Box`). Every `deref` on the path to a written place SHALL peel
+    borrow (or a `Box`). Every `.*` on the path to a written place SHALL peel
     an **exclusive** borrow (or a `Box`), never a shared one — including a shared
     deref reached via autoderef or nested under an exclusive one.
 
-2.2 A read through `deref` SHALL NOT move the pointee out: moving a non-`copy`
-    value out through any place whose path contains a `deref` or an index is
+2.2 A read through `.*` SHALL NOT move the pointee out: moving a non-`copy`
+    value out through any place whose path contains a `.*` or an index is
     **ill-formed** (chapter 03 §3.3; the defined extraction of a `Box` pointee is
     `unbox`, chapter 08).
 
 2.3 A borrow of a place through another borrow is a **reborrow**. An exclusive
-    reborrow `write (deref b)` yields a fresh exclusive borrow constrained not to
-    outlive `b`; a shared reborrow `read (deref b)` yields a fresh shared borrow
+    reborrow `write b.*` yields a fresh exclusive borrow constrained not to
+    outlive `b`; a shared reborrow `read b.*` yields a fresh shared borrow
     of the pointee (legal even when `b` is exclusive).
 
 2.4 **The reborrow rule (both directions).** For the reborrow's live range: an
@@ -68,7 +68,7 @@ the non-normative appendix maps clauses to the prototype's diagnostic codes.
     parameter is the value gear (a shared borrow copies, an exclusive borrow
     moves), bare and unkeyworded.
 
-3.4 The explicit spellings `read (deref b)` / `write (deref b)` remain accepted
+3.4 The explicit spellings `read b.*` / `write b.*` remain accepted
     input; in the real toolchain the canonical formatter (NN#11) normalizes them
     to the bare form in reborrow-argument position (a P16 obligation, chapter 99).
 
@@ -107,7 +107,7 @@ live ranges by any means (the prototype uses body-local non-lexical liveness,
 
 5.1 A borrow's **live range** is body-local and **not** tied to lexical blocks.
     A borrow (and any reborrow taken from it) is **live** at a point P iff some
-    path from P reaches a **use** of it — a `deref`, a pass-by-borrow, a store of
+    path from P reaches a **use** of it — a `.*`, a pass-by-borrow, a store of
     it, or a reborrow of it — without first passing through a redefinition of the
     binding that holds it.
 
@@ -160,10 +160,11 @@ live ranges by any means (the prototype uses body-local non-lexical liveness,
     caller.
 
 6.8 **Passing borrow-typed arguments.** A slice or borrow-typed value is passed
-    **by value**, not re-annotated with a mode: a shared borrow / `slice` copies
-    in; an exclusive borrow / `slice_mut` moves in, or is reborrowed at the call
-    site (§3). A `read`/`write` mode written on a parameter whose type is already
-    a borrow kind (a borrow, `slice`, or `slice_mut`) is **ill-formed**. (A
+    **by value**, not re-annotated with a mode: a shared borrow / shared slice
+    (`[T]`) copies in; an exclusive borrow / exclusive slice (`write [T]`) moves
+    in, or is reborrowed at the call site (§3). A `read`/`write` mode written on a
+    parameter whose type is already a borrow kind (a borrow, `[T]`, or `write [T]`)
+    is **ill-formed**. (A
     `write usize` parameter is well-formed: `usize` is not a borrow kind.)
 
 ---
@@ -175,8 +176,11 @@ live ranges by any means (the prototype uses body-local non-lexical liveness,
     relationships that cross the signature SHALL be written in the signature;
     borrows **inside** a body are inferred body-locally (§5).
 
-7.2 **Region variables** are declared after the function name and attached to
-    borrow parameters and borrow returns; the returned borrow derives from the
+7.2 **Region variables** are declared after the function name in a bracketed
+    declaration list, each wearing the `region` keyword
+    (`fn f[region r](a: read[r] T) -> read[r] T`; design 0007 §6.1.1, chapter 10
+    §1.3), and attach to borrow parameters and borrow returns by the region tag
+    `[r]`; the returned borrow derives from the
     region-tagged parameter. The checker SHALL verify, body-locally, that the
     returned borrow's provenance is reachable through the tagged parameter.
 
@@ -199,7 +203,7 @@ live ranges by any means (the prototype uses body-local non-lexical liveness,
 ## 8. Storage restriction on borrows
 
 8.1 A struct or enum field **SHALL NOT** have a borrow type (shared or exclusive
-    borrow, `slice`, or `slice_mut`). Owned values and `rawptr T` fields are
+    borrow, `[T]`, or `write [T]`). Owned values and `rawptr T` fields are
     permitted.
 
 8.2 Borrows are a gear for **passing and computing**, first-class as parameters,

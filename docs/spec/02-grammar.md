@@ -115,7 +115,7 @@ grouping, `"lit"` terminal, UPPER a token class from chapter 01.
 
     Fn        = "fn" IDENT [ Regions ] "(" [ ParamList ] ")" SigTail
                 [ "->" RetTy ] Block
-    Regions   = "[" IDENT { "," IDENT } [ "," ] "]"
+    Regions   = "[" "region" IDENT { "," "region" IDENT } [ "," ] "]"
     ParamList = Param { "," Param } [ "," ]
     Param     = IDENT ":" Mode Type
     Mode      = [ "take" | "out" | ( "read" | "write" ) [ Region ] ]
@@ -147,6 +147,15 @@ grouping, `"lit"` terminal, UPPER a token class from chapter 01.
 
 4.5 A return borrow wears its mode/region in `RetTy` (`read[r] [u8]`,
     `write T`); an omitted return mode is a by-value return.
+
+4.6 **Region declarations wear the `region` keyword** (design 0007 §6.1.1;
+    chapter 10 §1.3). Each entry of the post-name `Regions` list is
+    `"region" IDENT`; a bare bracketed identifier is not a region declaration.
+    This supersedes the bare-`[r]` declaration list and is the same syntax used
+    when the bracket also carries type parameters (`fn choose[region r, T](…)`,
+    chapter 10). The region **use** on a borrow type or mode keeps the bare tag
+    (`read[r] T`; `Region`, §3); only the declaration wears the keyword.
+    `region` is a contextual keyword (chapter 01 §2.5).
 
 ---
 
@@ -278,9 +287,11 @@ grouping, `"lit"` terminal, UPPER a token class from chapter 01.
 
 6.8 **`field_ptr(p, f)`** is the safe, un-gated field-address form (design 0004);
     its second argument `f` is a field selector (field position), not an
-    expression. `min_of`/`max_of` yield a type's minimum/maximum value at compile
-    time and cover the programmatic bound (`i64::MIN` associated-constant spelling
-    rejected — `::` is reserved for enum variants; design 0006 §2.4).
+    expression. `min_of`/`max_of` are **reserved but not
+    implemented** this edition (chapter 01 §2.3; chapter 99 OBL-MINMAX-INTRINSICS):
+    the negative-literal fold (§6.6) covers the corpus's programmatic-bound use, so
+    the `i64::MIN` associated-constant spelling stays rejected — `::` is reserved
+    for enum variants — without relying on them (design 0006 §2.4).
 
 6.9 **Regime and unsafe expressions.** `wrapping Block` and `saturating Block`
     (chapter 06) and `unsafe STRING Block` are block-like expressions that yield a
