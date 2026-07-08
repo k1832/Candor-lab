@@ -8,6 +8,8 @@ memory model), P18 (semantics defined by a spec, not the compiler — served her
 **Subordinate to** `LANG_PHYLOSOPHY.md` and to design `0001-memory-model.md`; where either
 outranks this document and conflicts, this document is the artifact that changes.
 
+**Revision note (2026-07-08).** §2.2, §2.5, §3 (#4), and §0 amended to agree with accepted designs 0004 (`field_ptr` + E0510) and 0005 (implicit call-site reborrow), per `docs/reviews/2026-07-08-design-0004-0005-review-1.md`; the freeze hash is invalidated and a fresh-session re-review is scheduled with the implementation verification (§0).
+
 **Why this document exists.** `docs/BET5_CRITERION.md` §3.7 and freeze step (i) make a written,
 independently reviewed soundness argument a *precondition of admissibility*: "counts produced by a
 checker without that reviewed argument are inadmissible." The reason is measurement, not ceremony —
@@ -110,6 +112,8 @@ ordinary **E0301**, as if written at the return; **(3) statics are immutable** �
 or `out`-passing of a static is a new checker error **E0311**. Design 0001 §7.3 gains rules (1)/(2) and
 §8.2 gains rule (3); the new §2.7 sub-argument below discharges the contract boundary. A retest #4 in a
 fresh session follows; counts remain inadmissible until it passes.
+
+**HASH TRIPWIRE FIRED (2026-07-08; designs 0004/0005, `docs/reviews/2026-07-08-design-0004-0005-review-1.md`).** Design 0005 (implicit call-site reborrow) contradicts this document's §3 conservatism #4 as hashed ("explicit call-site reborrows required; no implicit call-site reborrow"), and design 0004 adds a new safe op, `field_ptr`, to the §2.5 boundary. Both are soundness-relevant changes to the accept/reject boundary, so the freeze-step-(i) hash is invalidated exactly as the tripwire (Consequences and costs) intends. Applied in this change series: §3 #4 rewritten, the implicit-reborrow **desugaring rule** added to §2.2, and `field_ptr` + its **E0510** well-formedness rule added to the §2.5 safe carve-out. Per the review's disposition (findings 3, 5), **a fresh-session re-review of this document is scheduled as part of the implementation verification pass, before the scheduler re-port** — counts stay inadmissible until that re-review passes, the same standing rule the retests above enforce.
 
 ---
 
@@ -231,6 +235,16 @@ Stage 3 is NLL-lite: backward liveness of borrow-carrying bindings plus a confli
     binding** `b` for the reborrow's live range (§2.1: an exclusive reborrow suspends the parent, a
     shared reborrow freezes it to shared). Chained reborrows are covered transitively, each anchoring
     on its immediate parent.
+  - **Implicit-reborrow desugaring (design 0005).** When an argument is a **place that already
+    denotes a borrow** and it fills a `read`/`write`-mode parameter whose pointee type and
+    shareability admit the mode, the checker **inserts a reborrow node** — `read`/`write` of `deref
+    place` — as a syntactic desugaring at the front of the pipeline, then runs liveness + the conflict
+    scan unchanged. Bare `b` to such a parameter is a **reborrow, not a move**; the loan it creates is
+    anchored exactly as the explicit form above (parent-binding restriction over the reborrow's live
+    range). No new lattice state and no coercion pass: one rule keyed on (argument is a borrow-typed
+    place) × (parameter mode is `read`/`write`) × (pointee admits the mode). The §2.1 use-after-move
+    diagnostic that previously fired on bare `b` has nothing to fire on. Fresh borrows of owned storage
+    (`f(write x)`) are unaffected — they still wear the keyword.
   - **Call-argument loans.** `check_user_call`/`check_call` capture per-argument carried loans into a
     `call_group`; these are `Temp` loans checked by `same_call_overlaps` (below), not by the liveness
     scan — a call argument's borrow is live only for the call.
@@ -331,7 +345,16 @@ operations are the enumerated ones, each of which forces the marker.
 
 `require_unsafe` (**E0501**) gates every operation that gives a raw pointer meaning
 (`ptr_read`/`ptr_write`/`ptr_offset`/`addr_of`/`addr_of_mut`/`cast_ptr`/`addr_to_ptr`/`ptr_null`),
-while holding/moving/copying/comparing a `rawptr` and `is_null`/`offsetof` stay safe (§4.2). `unsafe`
+while holding/moving/copying/comparing a `rawptr` and `is_null`/`offsetof`/`field_ptr` stay safe
+(§4.2). **`field_ptr(p, f)` (design 0004) is a new safe carve-out** in this enumeration: it computes a
+field's address by static offset and gives the pointer no meaning (no read, no write, no borrow, no
+fault of its own), so it joins `offsetof`/`is_null` on the safe side of E0501 rather than being gated.
+It carries its own **well-formedness rule, checker error E0510**: `p` must have type `rawptr StructT`
+for a compiler-known struct and `f` must be a statically known field of `StructT`, so the op cannot
+name a non-field or apply to a non-struct pointee — the restriction to a static field of the pointee
+is what keeps it address-arithmetic-with-a-proof, not free pointer arithmetic. E0510 is a
+well-formedness diagnostic, not an unsafety gate; the §1 "What is NOT claimed" safe-carve-out list
+gains `field_ptr` as one more safe entry, not one more proof obligation. `unsafe`
 is a block with a mandatory non-empty justification (**E0502**, closing verification #1 C1). The
 boundary is syntactically narrow: `set_in_unsafe` toggles a flag only across the block body, and the
 block grants *only* raw-pointer power — move, borrow, overflow, and bounds checking still run inside
@@ -431,8 +454,14 @@ record for Bet 5.
 3. **One-level / parent-anchored reborrow provenance.** A reborrow loan restricts its immediate parent
    binding (canonical root), not the ultimate origin; deep aliasing is approximated transitively rather
    than tracked with fine provenance.
-4. **Explicit call-site reborrows required** (§2.1). Passing a held exclusive borrow bare is a move; a
-   reborrow must be spelled `write (deref b)`/`read (deref b)`. No implicit call-site reborrow.
+4. **Call-site reborrow of a held borrow is implicit** (§2.1, as amended by design 0005;
+   `docs/reviews/2026-07-08-design-0004-0005-review-1.md`). A bare held borrow passed to a
+   `read`/`write`-mode parameter **reborrows** (it does not move); the checker inserts the reborrow
+   node by the desugaring rule of §2.2. This *retires* the former conservatism (explicit
+   `write (deref b)`/`read (deref b)` required at every call site, which pushed authors toward
+   ceremony) rather than adding one — it is kept in this list because the earlier hashed text asserted
+   the opposite ("no implicit call-site reborrow"), and the change is what fired this document's
+   re-review tripwire (§0). Fresh borrows of owned storage still wear the keyword (`f(write x)`).
 5. **Opaque places required-init at the root; no non-copy move through indirection.** A place through
    `deref`/index is required initialized at its whole *root* (finer partial init states through indirection
    are not tracked). A *non-copy* move out of such a place is not a conservatism but a rejected shape

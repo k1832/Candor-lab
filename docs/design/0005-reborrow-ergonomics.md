@@ -13,6 +13,8 @@ Subordinate to `LANG_PHYLOSOPHY.md` and to `docs/design/0001-memory-model.md`,
 which this document amends at §2.1. Where they conflict, they win and this
 document changes.
 
+**Revision note (2026-07-08).** Amended per adversarial review #1 (`docs/reviews/2026-07-08-design-0004-0005-review-1.md`), findings 2, 3, 4, 7, 8, 9: the mutation-audit P2 concession is named and option (d) weighed against 0004's greppability rationale; the 0003 update and its scheduled re-review are named; the type-aware formatter requirement and its non-rewrite cases are stated with a prototype-has-no-formatter note; rule 1's `p.f` example is replaced with a §3.4-legal one; the temporary-reborrow residual is stated and "exactly one form" scoped to argument position; and the newly-legal spelling is re-characterized as "ill-formed (type-mismatch or use-after-move by shareability)."
+
 ## Problem
 
 Design 0001 §2.1 made call-site reborrowing explicit: passing a held borrow
@@ -106,7 +108,9 @@ retained for borrowing a fresh local.** Precisely:
 
 1. **Reborrow (new, implicit).** In argument position for a parameter of mode
    `read`/`write`, if the argument is a **place that already denotes a
-   borrow** (`b`, `p.f`, `(deref b)`) whose pointee type and shareability
+   borrow** — a borrow-typed local `b`, or a chained reborrow `(deref b)`
+   (borrow-typed struct/enum fields and slice fields cannot denote a borrow,
+   §3.4, so there is no `p.f` case) — whose pointee type and shareability
    admit the parameter's mode, the argument is a **reborrow** governed by
    §2.1's reborrow rule — a fresh borrow constrained not to outlive the
    source, suspending (exclusive) or freezing-to-shared (shared) the parent
@@ -158,6 +162,8 @@ place) × (parameter mode is `read`/`write`) × (pointee admits the mode). The
 §2.1 use-after-move diagnostic that previously fired on bare `b` simply has
 nothing to fire on: bare `b` no longer moves.
 
+**Interaction with hash-frozen 0003 (the tripwire).** This decision contradicts 0003's §3 conservatism #4 as hashed ("explicit call-site reborrows required; no implicit call-site reborrow"), so 0003's freeze-step-(i) hash tripwire **fires**. It is handled in the same change series, not deferred: 0003 §3 #4 is **rewritten** to the implicit rule, the **desugaring rule is documented in 0003 §2.2**, and a **fresh-session re-review of 0003 is scheduled as part of the implementation verification pass, before the scheduler re-port** — counts stay inadmissible until that re-review passes (0003's standing rule). See finding 3 of `docs/reviews/2026-07-08-design-0004-0005-review-1.md`.
+
 **Interaction with §8.2.1 pattern bindings.** None adverse. A reborrow that
 feeds a scrutinee — `match arena_get(read (deref ar), root)` (arena §11.5) —
 becomes `match arena_get(ar, root)`; the pattern-binding mode is still derived
@@ -200,7 +206,16 @@ re-measurement neutrality holds by construction.
   reborrows (`write (deref pos)`, `write (deref ar)`, `write (deref s)`), so
   (d) would leave the tax exactly where it is heaviest and split reborrow into
   two spellings (P3). The shared/exclusive intuition is real but pays nothing
-  here.
+  here. **Weighed against 0004's greppability rationale, on the record:** (d) is
+  in fact the option that would *preserve* the mutation-point audit's call-site
+  locality — keeping exclusive re-lends loud is keeping the mutation points
+  greppable, the same value 0004 protects when it shrinks `unsafe` (every
+  memory-access site stays greppable). That is (d)'s strongest point, and it is
+  weighed and declined: the mutation bit is in the signature for `write` exactly
+  as for `read` (P2/NN#17), and because the measured sites are overwhelmingly
+  exclusive, (d) keeps the tax on the common case to buy a greppability the
+  signature already provides — a worse trade than (b)'s uniform rule plus the
+  named P2 concession (Consequences and costs).
 - **Fully implicit including fresh-local borrow (`f(x)` for owned `x`) —
   rejected.** Dropping the keyword on fresh borrows too would erase the
   visible birth of a loan on owned storage — an aliasing event the reader's
@@ -218,12 +233,31 @@ re-measurement neutrality holds by construction.
   both requires and cheapens it (complete, local signatures; NN#17). It is not
   a *new* non-locality — it is the standing one, now covering one more
   decision.
+- **P2 concession — the mutation-point audit loses call-site locality (a real
+  cost, named).** Under the status quo, `write (deref b)` marks at the call site
+  every point where a held borrow is re-lent for mutation, so a reviewer auditing
+  "where can this state be mutated through a re-lend" could grep the explicit
+  exclusive-reborrow form. Under implicit reborrow that audit now requires reading
+  the callee signature for each bare argument — the mutation point is no longer
+  self-evident from the call-site token. This is a genuine **P2 (local
+  verifiability) concession**, recorded in the documented-limitation style, and it
+  honestly **argues the less-guarded reclassification direction** (it is a reason
+  one could have kept the ceremony). It is weighed against **0004's greppability
+  rationale**, where the parallel move — shrinking `unsafe` — was defended
+  precisely because *every memory-access site stays greppable*; the reborrow case
+  is weaker on exactly that axis, since the mutation-audit query does lose
+  call-site greppability here where 0004's audit query lost none. The decision
+  still stands — the disambiguating bit lives in the signature (P2 localizes it;
+  NN#17 keeps it complete), the signature carries the bit, and option (b)'s 296
+  sites are the measured cost of the alternatives — **but it is an argued trade,
+  not a settled matter**, and this concession is the strongest thing said against
+  it.
 - **P3 — the old explicit form must not survive as an optional second way.**
   Two spellings of one meaning is a P3 violation, so this is decided, not left
   open. **Disposition: canonical-formatter-normalized, not ill-formed.** The
   shipped formatter (NN#11) rewrites `f(write (deref b))` / `f(read (deref
   b))` → `f(b)` wherever the argument fills a matching `read`/`write`-mode
-  parameter, so the corpus shows exactly one form. The explicit spelling is
+  parameter, so the corpus shows exactly one form **in reborrow-argument position** — not "exactly one form" globally: the explicit borrow operators stay first-class everywhere else, so a temporary reborrow bound to a local (`let r = write (deref b);`), a reborrow used as a field base (`(deref d).base`), and any reborrow whose operand is a non-place all keep the explicit spelling. That temporary-reborrow residual is why the claim is scoped to argument position, not the whole corpus. The explicit spelling is
   *accepted on input* (hand-written and model-generated code, and the
   migrator, all keep working) but never appears in formatted source — the same
   discipline as any formatter normalization. Ill-formedness was rejected as
@@ -232,12 +266,19 @@ re-measurement neutrality holds by construction.
   expression `let r = write (deref b);` and field-access `(deref d).base`,
   buying nothing over normalization; `deref` and the explicit borrow operators
   remain first-class everywhere outside this argument position.
+
+  **The formatter must be type-aware, and there are cases it must not rewrite.** Deciding whether `f(write (deref b))` → `f(b)` is legal at a given site requires the parameter's mode and type and the argument's type — a purely syntactic rewrite is unsound. Two classes must be **left alone**: (i) a **`take`-mode borrow-typed parameter**, where bare `b` is a *move* of the borrow value while `write (deref b)` is a *reborrow* — the two genuinely differ, so normalizing one to the other would change semantics; and (ii) a **non-place argument** (e.g. `write (deref f())`, or any reborrow whose operand is not a place denoting a borrow), which the implicit rule does not cover and the formatter must not collapse. Only a reborrow argument whose operand is a borrow-typed place filling a matching `read`/`write`-mode parameter is normalized. **Prototype note:** the prototype has **no formatter** — both the explicit and bare forms parse there, and this document's scheduler re-port is written directly in the **canonical bare form**; the formatter normalization obligation therefore binds the **real toolchain (P16)**, recorded as a P16 obligation, not a prototype feature.
 - **No silent behavior change — a soundness note.** The newly-legal spelling
-  (bare borrow to a mode parameter) was, under the status quo, a **compile
-  error** (use-after-move on the moved borrow value), never a different
-  *legal* behavior. So no existing correct program changes meaning; the change
-  only turns a class of errors into the intended reborrow. This is why the
-  migration is safe under P15 without behavioral review.
+  (bare borrow to a mode parameter) was, under the status quo, **ill-formed** — a
+  **compile error** in every case, though the *kind* of error depended on the
+  source's shareability: an exclusive borrow bare was a **use-after-move** on the
+  moved borrow value, while a shared borrow bare was a **type mismatch** (a `copy`
+  borrow value handed to a mode parameter that wants a fresh borrow), not a move.
+  Either way it was never a different *legal* behavior. So no existing correct
+  program changes meaning; the change only turns a class of **ill-formed**
+  (type-mismatch or use-after-move by shareability) sites into the intended
+  reborrow — pure legalization. This is why the migration is safe under P15
+  without behavioral review.
 
 ## Migration note
 

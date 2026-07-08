@@ -8,6 +8,8 @@ order, Bet 5 and its v4.2 disposition, P12's concession clause. Subordinate to
 `LANG_PHYLOSOPHY.md` and to design 0001, which it extends (§4.2's op set). Where
 they conflict, the higher document wins and this one changes.
 
+**Revision note (2026-07-08).** Amended per adversarial review #1 (`docs/reviews/2026-07-08-design-0004-0005-review-1.md`), findings 1, 5, 6: the `table_version`-bump framing is withdrawn for a §9 philosophy-tier a-priori ruling plus a counter-update / region-rule-preservation requirement; E0510 is named as a new checker rule tied to the 0003 §2.5 edit; and impact is restated in the frozen region metric (≈1 valve statement; the two shrinks metric-invisible).
+
 This document discharges the **first** of the two binding commitments attached
 to the v4.2 provisional confirmation of Bet 5 (Appendix A, v4.1→v4.2): *"the
 next design round takes up safe typed field projection on `rawptr`."* The
@@ -89,11 +91,15 @@ field_ptr(p, f)     // p : rawptr StructT,  f : a field of StructT   =>   rawptr
 - **No bounds or validity knowledge.** `field_ptr` knows a field's static offset
   and nothing else. It asserts nothing about `p`'s validity, initialization, or
   provenance — exactly like `offsetof`, and unlike a borrow.
-- **Checker rule.** `p` must have type `rawptr StructT` for a struct (or a
-  compiler-known struct type), and `f` must be a **statically known field** of
-  `StructT`; otherwise a new checker error (proposed **E0510**). `field_ptr` is
-  **not** gated by E0501 — it joins `offsetof`/`is_null` on the safe side of the
-  boundary. It carries no effect (§3.2).
+- **Checker rule (E0510, new).** `p` must have type `rawptr StructT` for a struct
+  (or a compiler-known struct type), and `f` must be a **statically known field**
+  of `StructT`; otherwise a **new checker rule, E0510** — a well-formedness
+  diagnostic, not an unsafety gate. `field_ptr` is **not** gated by E0501 — it
+  joins `offsetof`/`is_null` on the safe side of the boundary. It carries no
+  effect (§3.2). This adds a rule to the checker and to 0003's soundness boundary:
+  **0003 §2.5's safe-carve-out enumeration is edited to name `field_ptr` and its
+  E0510 rule** (and 0001 §4.2's operation table gains the same), so the three
+  documents enumerate one safe set (review finding 5).
 
 **Why it is safe — the §4.2 audit line.** 0001 §4.2 draws the line at *"every op
 that gives a raw pointer meaning is inside `unsafe`,"* and 0003 §2.5 enumerates
@@ -131,17 +137,25 @@ line**: dereference — the act that gives a pointer meaning — stays gated.
   untouched — it gains one more entry in the safe-carve-out list, not one more
   proof obligation.
 
-**Estimated valve reduction (honest, from the actual ports).**
-- *Scheduler:* 19 `unsafe` blocks → **18** (one eliminated: `t_link`, whose whole
-  body was pure forward projection) and **2 shrunk** (`t_set_prio`,
+**Estimated impact, in the frozen metric (honest, from the actual ports).** The
+frozen metric counts **valve statements** — statements intersecting an `unsafe`
+region (§4.1) — so the impact is stated in that unit, not in block counts.
+- *Scheduler:* **≈1 valve statement removed** — `t_link`, whose whole `unsafe`
+  body was pure forward projection: its block disappears, so its statement(s)
+  leave the valve entirely. The block-count view (19 → 18 blocks) is a coarser
+  restatement of the same single removal. The **two "shrinks"** (`t_set_prio`,
   `t_set_state`: the 3-op `cast_ptr∘ptr_offset∘offsetof` address expression
-  collapses to one safe `field_ptr`; the `ptr_write` keeps the block). The three
-  read accessors, `task_of` (inverse `container_of` — a *negative* offset to a
-  type that is **not** a field of the source; not expressible as projection and
+  collapses to one safe `field_ptr`) are **metric-invisible**: each block keeps
+  its `ptr_write`, so the statement still intersects an `unsafe` region and still
+  counts as exactly one valve statement — the arithmetic got cleaner inside the
+  region, but the region, and therefore the count, is unchanged. The three read
+  accessors, `task_of` (inverse `container_of` — a *negative* offset to a type
+  that is **not** a field of the source; not expressible as projection and
   correctly still a valve), the sentinel/arena `addr_of` sites, the whole-node
-  list splices, and `th`'s index arithmetic are **unchanged**. Net: one block
-  removed, two shrunk — modest and real, not the "~10" the README implied.
-- *Allocator:* **~0.** No `offsetof`; its valve is genuine in-band-metadata deref
+  list splices, and `th`'s index arithmetic are **unchanged**. Net in the frozen
+  metric: **≈1 valve statement**, at `t_link` — modest and real, not the "~10"
+  the README implied.
+- *Allocator:* **0.** No `offsetof`; its valve is genuine in-band-metadata deref
   over untyped memory. P12's concession stands exactly as written.
 
 A secondary, non-counting benefit: `field_ptr` makes **field-precise reads and
@@ -150,22 +164,35 @@ writes** through a handle clean (`ptr_read(field_ptr(t, id))`,
 in-`unsafe` `offsetof` arithmetic, now with the address safe and only the access
 gated.
 
-**Interaction with the counting rules (the un-gameable part).** `field_ptr` is a
-new op absent from the frozen successor unit-table (`docs/BET5_CRITERION2.md`,
-ratified and frozen). That registration is **frozen and un-amendable**, so the
-binding scheduler re-measurement runs against the frozen table *with `field_ptr`
-classified per this document's argument* — as a **non-valve** token, on the same
-ground that made `offsetof`/`is_null` safe carve-outs (it gives no memory
-access). Introducing it therefore requires an explicit **table_version bump**
-recording the new op and its classification. Because projection **lowers** the
-valve fraction, classifying it *after* seeing the re-port's numbers would be
-gaming a frozen criterion. **This document therefore flags, as a hard
-precondition: the classification of `field_ptr` as non-valve must be adjudicated
-and recorded (an `ADJUDICATIONS.md` ruling) BEFORE the scheduler is re-ported,**
-so the re-measurement's yardstick is fixed a priori. If the adjudicator instead
-rules `field_ptr` a valve token, the reduction above is zero by definition and
-the confirmation is unaffected — either way the number is not chosen after the
-fact.
+**Interaction with the counting rules (the un-gameable part).** The frozen metric
+(`docs/BET5_CRITERION2.md`, ratified and frozen under v4.2) is **region-based**:
+a valve statement is one that intersects an `unsafe` region (§4.1). A **safe** op
+therefore auto-excludes from the count with *nothing to classify* — there is no
+unit-table slot for it to occupy and, contrary to an earlier draft of this
+section, **no `table_version` bump is required or appropriate** (bumping a frozen
+criterion to admit a token the metric never counts would be both unnecessary and
+criterion-prohibited). That framing is withdrawn. What replaces it, so the
+yardstick is fixed a priori and the shrink is not chosen after the fact:
+
+- **A §9 philosophy-tier a-priori ruling.** That `field_ptr` is
+  safe-hence-uncounted is recorded as a **philosophy-tier ruling** — above the
+  criterion, not a modification of it — in `ADJUDICATIONS.md` under an explicit
+  philosophy-tier heading, **BEFORE any re-port code exists**. It rests on the
+  same ground that made `offsetof`/`is_null` safe carve-outs (the op gives no
+  memory access), applied once, in the open, before the numbers.
+- **A counter-update requirement, with the region rule preserved.** The counter
+  must be updated to parse the new grammar (`field_ptr`), and the update must
+  ship with a test **demonstrating the frozen region rule is preserved** — a
+  `field_ptr` outside any `unsafe` region contributes zero valve statements, a
+  `field_ptr` textually inside one still counts exactly as its enclosing region
+  does (the cross-counter fixture is extended to cover both). The metric
+  definition does not move; only the parser learns a new safe token.
+
+Because the ruling is philosophy-tier and pre-recorded, and the metric is
+region-based, the shrink cannot be a post-hoc reclassification of a frozen
+criterion. If an adjudicator instead holds `field_ptr` should be treated as
+valve-bearing, the reduction above is zero by definition and the confirmation is
+unaffected — either way the number is fixed before the re-port.
 
 ## Rejected alternatives
 
@@ -203,11 +230,15 @@ fact.
   core op, paid partly by canonicalization, not by a clean deletion; the residual
   is a named P6 debt, not a managed one. An adjudicator who holds the payment
   insufficient may treat `field_ptr` as owing the budget.
-- **The unit-table versioning question.** Recorded above and un-dodgeable: the
-  frozen criterion cannot be amended, so the new op's classification must be a
-  pre-recorded adjudication, not a post-hoc reading. This is process cost the
-  disposition imposed by freezing the yardstick — correctly, since a movable
-  yardstick proves nothing.
+- **The a-priori-ruling requirement (process cost).** Recorded above and
+  un-dodgeable: because the criterion is frozen and region-based, `field_ptr`'s
+  safe-hence-uncounted status is fixed by a **philosophy-tier ruling pre-recorded
+  in `ADJUDICATIONS.md` before the re-port**, not by any amendment to the frozen
+  table (there is no `table_version` bump — the metric never counts a safe op).
+  The counter must additionally be updated to parse the new grammar with a test
+  showing the frozen region rule is preserved. This is process cost the
+  disposition imposed by fixing the yardstick a priori — correctly, since a
+  movable yardstick proves nothing.
 - **Does shrinking the valve make `unsafe` less greppable-complete?** No, argued.
   The audit query — "show me everything this program can read, write, or trust"
   (P1/P17) — enumerates `unsafe` blocks, boundary modules, and `assumed-proven`
@@ -219,8 +250,9 @@ fact.
   count. The valve becomes *more* honest, containing only genuinely dangerous
   ops, not arithmetic noise. Greppable-completeness is a property of the
   memory-access set, and that set is unchanged.
-- **Bootstrap/measurement honesty.** The reduction is small (one block, two
-  shrinks in the scheduler; nil in the allocator). Presented as small, it
+- **Bootstrap/measurement honesty.** The reduction is small — **≈1 valve
+  statement in the frozen metric** (the `t_link` block; the two scheduler shrinks
+  are metric-invisible, and the allocator is nil). Presented as small, it
   strengthens rather than weakens the Bet 5 record: the disposition's authored-vs-
   registered gap is an ecosystem-maturity fact (Bets 4/6), and this op does not
   paper over it — it removes a genuine but narrow measurement artifact (pure
