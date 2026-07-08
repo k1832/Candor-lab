@@ -142,3 +142,21 @@ soundness reviews) was found by the design-0004/0005 re-review and closed as E08
 all five checkable and five runnable frozen fixtures and all five scored port artifacts re-run
 under the fixed checker — every one passes with byte-identical checker output. No frozen
 measurement exercised the hole; the Bet 5 record stands. No §3.7 admissibility event.
+
+## v4.2 commitment discharged: scheduler re-port re-measurement — 2026-07-08
+
+The scheduler was re-ported under the evolved language (safe field_ptr, implicit call-site
+reborrow — designs 0004/0005, adversarially reviewed; the checker meanwhile hardened by twelve
+closed holes across eight review rounds, with the frozen record confirmed intact throughout).
+The re-port (ports/candor/scheduler-v2/) passes the full frozen suite (T1-T20 incl. the 20k
+stress, sentinel 777, ~22s) and measures, under the frozen successor rules and the a-priori
+field_ptr ruling:
+
+- **Valve statements 45 vs v1's 47** (R_valve = 45/89 = 0.5056 vs 0.5281) — the a-priori
+  prediction (~1 statement, block granularity) slightly beaten at statement granularity, honestly
+  reconciled. Annotation 0.2907/stmt (v1: 0.2948). All 41 explicit reborrow sites now the bare
+  canonical form.
+- **Not worse than the frozen baseline result → the return-to-review clause does not fire.**
+  Philosophy v4.2's binding commitments are discharged: both design items shipped and reviewed,
+  the re-port re-measured under frozen rules, result equal-or-better. NN#14's conditional gate
+  obligations are met; Bet 5's provisional confirmation stands as ruled.

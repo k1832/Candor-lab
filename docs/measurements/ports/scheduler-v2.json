@@ -1,0 +1,321 @@
+{
+  "table_version": "1",
+  "unit_ext_version": "2",
+  "annotation_units": {
+    "a": 11,
+    "b": 0,
+    "c": 0,
+    "d": 39,
+    "per_site": [
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 4243,
+        "end": 4254
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 4262,
+        "end": 4273
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 4896,
+        "end": 4907
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 5407,
+        "end": 5418
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 5754,
+        "end": 5937
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 5957,
+        "end": 5968
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 5975,
+        "end": 6121
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 6537,
+        "end": 6551
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 6664,
+        "end": 6873
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 7275,
+        "end": 7289
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 7304,
+        "end": 7315
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 7322,
+        "end": 7521
+      },
+      {
+        "class": "a",
+        "kind": "read_param",
+        "start": 7590,
+        "end": 7603
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 7618,
+        "end": 7629
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 7636,
+        "end": 7788
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 8126,
+        "end": 8137
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 8142,
+        "end": 8153
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 8477,
+        "end": 8488
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 8493,
+        "end": 8504
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 8511,
+        "end": 8836
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 9039,
+        "end": 9050
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 9055,
+        "end": 9066
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 9082,
+        "end": 9587
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 9828,
+        "end": 9839
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 9855,
+        "end": 10472
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 11015,
+        "end": 11026
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 11043,
+        "end": 11162
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 11179,
+        "end": 11190
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 11207,
+        "end": 11328
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 11346,
+        "end": 11357
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 11374,
+        "end": 11496
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 11517,
+        "end": 11528
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 11554,
+        "end": 11693
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 11715,
+        "end": 11726
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 11752,
+        "end": 11893
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 12390,
+        "end": 12404
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 12409,
+        "end": 12420
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 12972,
+        "end": 12986
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 13252,
+        "end": 13399
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 13802,
+        "end": 13816
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 14304,
+        "end": 14318
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 14323,
+        "end": 14334
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 14938,
+        "end": 14952
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 14957,
+        "end": 14968
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 15583,
+        "end": 15597
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 15602,
+        "end": 15613
+      },
+      {
+        "class": "a",
+        "kind": "write_param",
+        "start": 16324,
+        "end": 16338
+      },
+      {
+        "class": "d",
+        "kind": "rawptr_decl",
+        "start": 16343,
+        "end": 16354
+      },
+      {
+        "class": "a",
+        "kind": "read_param",
+        "start": 16835,
+        "end": 16848
+      },
+      {
+        "class": "d",
+        "kind": "unsafe_block",
+        "start": 16968,
+        "end": 17332
+      }
+    ]
+  },
+  "value_copy_units": 0,
+  "logical_statements": 172,
+  "valve_statements": 45,
+  "valve": {
+    "lines": 83,
+    "functions": 21,
+    "total_lines": 211,
+    "total_functions": 24
+  }
+}

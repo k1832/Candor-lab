@@ -62,3 +62,17 @@ One lesson per entry, one-line summary first.
   with nothing used afterwards. Put `return;` at the end of every arm (the
   §11.4 fixture's all-arms-return shape is load-bearing, not style). Found
   in the parser port's serializer/span-walker, 2026-07-07.
+
+- **The region-based valve metric counts the `unsafe` block statement itself
+  plus each inner statement.** A one-return unsafe block = 2 valve statements,
+  so deleting t_link's block in the scheduler re-port moved the count 47->45
+  ("≈1" in the a-priori ruling was block-granularity; both removed statements
+  attribute to t_link). Verified with a minimal fixture via
+  `candor-proto count`, 2026-07-08.
+
+- **The counter counts an unsafe block's statement AND its inner statements.**
+  Eliminating a one-statement unsafe block removes 2 valve statements, not 1
+  (block + inner). State a-priori predictions in the metric's exact unit, or
+  reconcile granularities explicitly when recording outcomes (scheduler re-port,
+  2026-07-08: predicted ~1 at block granularity, measured 2 at statement
+  granularity).
