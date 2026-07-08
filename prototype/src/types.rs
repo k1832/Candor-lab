@@ -134,6 +134,13 @@ pub fn scalar_name(s: ScalarTy) -> &'static str {
 pub struct StructTy {
     pub copy: bool,
     pub has_drop: bool,
+    /// The `drop` hook body is alloc-effecting (allocates, boxes, or drops a
+    /// box-bearing local), so every scheduled drop of this type is allocator
+    /// work — the type is *alloc-on-drop* and propagates the `alloc` effect to
+    /// the enclosing function exactly like a `Box` field (design 0001 §1.5/§6.3;
+    /// retest 2026-07-08). Computed by checking the hook as a synthetic
+    /// `fn drop(self: write StructT) -> unit`.
+    pub alloc_on_drop: bool,
     pub fields: Vec<(String, Type)>,
     pub span: Span,
 }
@@ -271,10 +278,17 @@ fn box_subpaths_rec(
             }
             stack.push(n.clone());
             if let Some(s) = env.lookup_struct(n) {
-                for (fname, fty) in &s.fields {
-                    prefix.push(fname.clone());
-                    box_subpaths_rec(fty, env, prefix, stack, out);
-                    prefix.pop();
+                // An alloc-on-drop hook makes the WHOLE-struct drop allocator
+                // work (retest 2026-07-08): the drop point is this aggregate
+                // place, so record it and stop — its fields' drops run under it.
+                if s.alloc_on_drop {
+                    out.push(prefix.clone());
+                } else {
+                    for (fname, fty) in &s.fields {
+                        prefix.push(fname.clone());
+                        box_subpaths_rec(fty, env, prefix, stack, out);
+                        prefix.pop();
+                    }
                 }
             } else if let Some(e) = env.lookup_enum(n) {
                 // Enum payloads are not named field places; a box in any variant

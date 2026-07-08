@@ -39,7 +39,7 @@ pub struct FnSig {
 }
 
 /// The resolved program item table.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Items {
     pub structs: HashMap<String, StructTy>,
     pub enums: HashMap<String, EnumTy>,
@@ -214,6 +214,9 @@ pub fn resolve_program(prog: &Program, diags: &mut Vec<Diag>) -> Items {
                         StructTy {
                             copy: s.copy,
                             has_drop: s.drop_hook.is_some(),
+                            // Filled by the drop-hook effect fixpoint in
+                            // `check_program` (retest 2026-07-08).
+                            alloc_on_drop: false,
                             fields,
                             span: s.span,
                         },

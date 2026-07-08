@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::diag::Diag;
-use crate::resolve::{resolve_program, Items};
+use crate::resolve::{lower_param, resolve_program, FnSig, Items, ParamInfo};
 use crate::span::Span;
 use crate::types::*;
 
@@ -120,7 +120,55 @@ pub struct Checker<'a> {
 /// Entry point: parse -> resolve -> check. Returns all diagnostics.
 pub fn check_program(prog: &Program) -> Vec<Diag> {
     let mut diags = Vec::new();
-    let items = resolve_program(prog, &mut diags);
+    let mut items = resolve_program(prog, &mut diags);
+
+    // Every struct's `drop` hook is checked as a synthetic
+    // `fn drop(self: write StructT) -> unit` (retest 2026-07-08, finding 4).
+    let hooks: Vec<(String, Block, Span)> = prog
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Struct(s) => s
+                .drop_hook
+                .as_ref()
+                .map(|b| (s.name.clone(), b.clone(), s.span)),
+            _ => None,
+        })
+        .collect();
+
+    // Alloc-on-drop fixpoint: a hook body that is alloc-effecting makes its TYPE
+    // alloc-on-drop (§1.5/§6.3). Because one hook may drop a value of another
+    // alloc-on-drop type, run to a monotonic fixpoint over a read-only snapshot
+    // (throwaway diagnostics) before the real, diagnostic-emitting pass.
+    if !hooks.is_empty() {
+        let mut guard = 0;
+        loop {
+            let snapshot = items.clone();
+            let mut changed = false;
+            for (sname, block, span) in &hooks {
+                let mut c = Checker {
+                    items: &snapshot,
+                    diags: Vec::new(),
+                    f: FnState::empty(),
+                };
+                let (fdecl, sig) = synth_drop_hook(sname, block, *span);
+                c.check_fn_with_sig(&fdecl, &sig);
+                if c.f.alloc.site.is_some()
+                    && !items.structs.get(sname).map(|s| s.alloc_on_drop).unwrap_or(false)
+                {
+                    if let Some(s) = items.structs.get_mut(sname) {
+                        s.alloc_on_drop = true;
+                        changed = true;
+                    }
+                }
+            }
+            guard += 1;
+            if !changed || guard > hooks.len() + 1 {
+                break;
+            }
+        }
+    }
+
     let mut c = Checker {
         items: &items,
         diags,
@@ -133,7 +181,58 @@ pub fn check_program(prog: &Program) -> Vec<Diag> {
             _ => {}
         }
     }
+    // Real (diagnostic-emitting) pass over each hook body, with stable flags.
+    for (sname, block, span) in &hooks {
+        let (fdecl, sig) = synth_drop_hook(sname, block, *span);
+        c.check_fn_with_sig(&fdecl, &sig);
+    }
     c.diags
+}
+
+/// Build the synthetic `fn drop(self: write StructT) -> unit` whose body is the
+/// hook — ordinary checked code (retest 2026-07-08, finding 4). Marked `alloc`
+/// so an alloc-effecting hook is *permitted* (it makes the type alloc-on-drop
+/// instead of erroring); the caller reads `f.alloc.site` to learn that.
+fn synth_drop_hook(struct_name: &str, block: &Block, span: Span) -> (FnDecl, FnSig) {
+    let self_ty = Type::Named(struct_name.to_string());
+    let sig = FnSig {
+        name: format!("drop({struct_name})"),
+        regions: Vec::new(),
+        params: vec![ParamInfo {
+            name: "self".to_string(),
+            mode: ParamMode::Write,
+            region: None,
+            decl_ty: self_ty.clone(),
+            lowered: lower_param(ParamMode::Write, self_ty.clone()),
+            span,
+        }],
+        alloc: true,
+        ret: Type::unit(),
+        ret_region: None,
+        ret_span: span,
+        span,
+    };
+    let fdecl = FnDecl {
+        name: sig.name.clone(),
+        regions: Vec::new(),
+        params: vec![Param {
+            name: "self".to_string(),
+            mode: ParamMode::Write,
+            region: None,
+            ty: Ty {
+                kind: TyKind::Named(struct_name.to_string()),
+                span,
+            },
+            span,
+        }],
+        alloc: true,
+        requires: Vec::new(),
+        ensures: Vec::new(),
+        ret: None,
+        body: block.clone(),
+        span,
+    };
+    (fdecl, sig)
 }
 
 impl<'a> Checker<'a> {
@@ -430,6 +529,12 @@ impl<'a> Checker<'a> {
 
     fn check_fn(&mut self, f: &FnDecl) {
         let sig = self.items.fns[&f.name].clone();
+        self.check_fn_with_sig(f, &sig);
+    }
+
+    /// Check a function body against an explicit signature. Used both for
+    /// top-level `fn`s and for synthetic drop-hook functions (finding 4).
+    fn check_fn_with_sig(&mut self, f: &FnDecl, sig: &FnSig) {
         self.f = FnState::empty();
         self.f.ret_ty = sig.ret.clone();
         self.f.ret_is_borrow = matches!(sig.ret, Type::Borrow(_) | Type::BorrowMut(_));
@@ -439,7 +544,7 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|p| (p.name.clone(), is_borrow_param(p), p.region.clone()))
             .collect();
-        self.check_signature_regions(&sig);
+        self.check_signature_regions(sig);
 
         // Entry block + parameter environment + initial flow state.
         let entry = self.new_block();
@@ -532,11 +637,15 @@ impl<'a> Checker<'a> {
         // (finding 4 of 2026-07-07; §6.3). The interpreter drops the parameter
         // scope on return (`interp/eval.rs` `call`), so this drop obligation is
         // real and static-schedulable here.
+        // `box_subpaths` reaches both `Box` sub-places and alloc-on-drop-hooked
+        // types (retest 2026-07-08), so a non-empty result is the general
+        // "freeing drop" predicate here — not just `bears_box`.
         let param_box: Vec<(String, Vec<Vec<String>>)> = sig
             .params
             .iter()
-            .filter(|p| p.mode != ParamMode::Out && bears_box(&p.lowered, self.items))
+            .filter(|p| p.mode != ParamMode::Out)
             .map(|p| (p.name.clone(), box_subpaths(&p.lowered, self.items)))
+            .filter(|(_, paths)| !paths.is_empty())
             .collect();
         let box_drop_sites = init::analyze(&cfg, &entry_state, &out_params, &param_box, &mut self.diags);
         for (span, reason) in box_drop_sites {

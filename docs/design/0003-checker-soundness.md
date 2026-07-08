@@ -343,6 +343,22 @@ no vtable special case: `AllocVtable` fields are `alloc`-typed, so every indirec
 `alloc` by the one general rule. This makes a non-`alloc` context allocation-free: the only allocating
 operations are the enumerated ones, each of which forces the marker.
 
+**Drop-hook bodies (retest 2026-07-08, finding 4; `docs/reviews/2026-07-08-e0809-retest-1.md`).** Every
+struct `drop` hook is checked as a synthetic `fn drop(self: write StructT) -> unit` (`check/mod.rs::check_program`
+→ `check_fn_with_sig`): full resolution, type, dataflow (E0301/E0304/E0309/E0310), and loan analysis run on
+the body, so an unknown name, a use of an uninitialized local, a move of `self`/a field out via `deref self`,
+and a **write through a shared borrow** are all caught inside a hook exactly as in an ordinary function — closing
+the "hook bodies bypass the checker" hole. The hook's own alloc-effect is *permitted* (it does not raise E0401);
+instead, if the body is `alloc`-effecting the struct is marked **alloc-on-drop** (`StructTy::alloc_on_drop`),
+computed to a monotonic fixpoint before the main pass (one hook may drop a value of another alloc-on-drop type).
+`box_subpaths` then treats an alloc-on-drop struct's whole-value drop as a freeing site, so the existing
+`check/init.rs` drop-site machinery propagates the `alloc` requirement to every scheduled drop of the type — a
+scope-exit, reassignment, `out`-drop, or function-exit drop — exactly like a `Box` field. The same retest also
+extended the E0809 write-through-shared gate (§0) to the two write forms it had missed: an **`out` argument**
+(`check_out_arg`, an `out` is a write) and **indexing a shared `slice`** (`write_path_probe`/`autoderef_probe`
+treat `slice` as a shared borrow and `slice_mut` as exclusive — arrays stay owned/unaffected), and added the
+gate to **`slice_of_mut`** (an exclusive reborrow of the run). All are regression-tested in `tests/check.rs`.
+
 ### 2.5 The unsafe boundary (bounding what (a)–(e) cover)
 
 `require_unsafe` (**E0501**) gates every operation that gives a raw pointer meaning

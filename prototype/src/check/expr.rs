@@ -380,7 +380,16 @@ impl<'a> Checker<'a> {
                 let (bt, mut shared) = self.write_path_probe(base);
                 let st = self.autoderef_probe(bt, &mut shared);
                 let elem = match st {
-                    Type::Array(e, _) | Type::Slice(e) | Type::SliceMut(e) => *e,
+                    // Owned array: indexing does not cross a borrow (unaffected).
+                    Type::Array(e, _) => *e,
+                    // Shared slice: indexing it is a write through a shared borrow
+                    // (§5.2; retest 2026-07-08, finding 2) — `s[i]=v` rejects.
+                    Type::Slice(e) => {
+                        shared = true;
+                        *e
+                    }
+                    // Exclusive slice: an ordinary exclusive write path (legal).
+                    Type::SliceMut(e) => *e,
                     _ => Type::Error,
                 };
                 (elem, shared)
@@ -399,6 +408,14 @@ impl<'a> Checker<'a> {
                     ty = *x;
                 }
                 Type::BorrowMut(x) | Type::Box(x) => ty = *x,
+                // A slice IS a borrow (§5.2): a shared `slice` on a write path is
+                // a shared borrow of the run; `slice_mut` is exclusive. Stop at
+                // the slice so the `Index` caller peels the element (retest
+                // 2026-07-08, finding 2). Arrays are owned and unaffected.
+                Type::Slice(x) => {
+                    *shared = true;
+                    return Type::Slice(x);
+                }
                 other => return other,
             }
         }
@@ -1115,6 +1132,10 @@ impl<'a> Checker<'a> {
 
     fn check_out_arg(&mut self, arg: &Expr, expected: &Type) {
         self.reject_static_mutation(arg, "pass as `out`", arg.span);
+        // An `out` argument is a write to the slot (§3.1), so it may not route
+        // through a shared (`read`) deref — same gate as an assignment or an
+        // exclusive reborrow (retest 2026-07-08, finding 1).
+        self.reject_write_through_shared(arg, "pass as `out`", arg.span);
         let (t, place) = self.check_place(arg);
         match &place {
             Some(p) => {
@@ -1251,6 +1272,14 @@ impl<'a> Checker<'a> {
             }
             "slice_of_mut" => {
                 if args.len() == 1 {
+                    // `slice_of_mut` is an exclusive borrow of the run, so it may
+                    // not reborrow exclusively from behind a shared deref (§5.2;
+                    // retest 2026-07-08, finding 3) — same gate as a write.
+                    self.reject_write_through_shared(
+                        &args[0],
+                        "take an exclusive (`slice_mut`) slice",
+                        args[0].span,
+                    );
                     let (t, place) = self.check_place(&args[0]);
                     self.emit_place_action(&place, Use::BorrowExcl, &t, args[0].span);
                     match t {

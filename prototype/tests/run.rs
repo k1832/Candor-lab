@@ -505,3 +505,17 @@ fn field_ptr_projects_field_address_and_reads_it() {
         return read_i64(fp); }";
     assert_eq!(run(src).ret, 32);
 }
+
+// --------------------------------------------------------------------------
+// Retest 2026-07-08: a drop-hook body is executed AND checked. A div-by-zero
+// inside a hook is a RUNTIME fault (legal to write), not a check-time reject.
+// --------------------------------------------------------------------------
+
+#[test]
+fn retest_hook_body_runtime_fault_div_by_zero() {
+    let f = fault(
+        "struct H { x: i64 } drop(write self) { let bad: i64 = (deref self).x / 0; } \
+         fn mk() -> H { return H { x: 5 }; } fn main() -> i64 { let h: H = mk(); return 0; }",
+    );
+    assert_eq!(f.kind, FaultKind::DivByZero);
+}

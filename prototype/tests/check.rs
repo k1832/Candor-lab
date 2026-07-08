@@ -999,3 +999,159 @@ fn shared_downgrade_from_exclusive_is_clean() {
     // A shared reborrow of an exclusive borrow (freeze-to-shared) is legal.
     assert_clean(&format!("{S_PRE}fn f(b: write S) -> unit {{ useb(b); }}"));
 }
+
+// --------------------------------------------------------------------------
+// Retest 2026-07-08 (docs/reviews/2026-07-08-e0809-retest-1.md): the four
+// accept-invalid families the obligation sweep found.
+// --------------------------------------------------------------------------
+
+// Finding 1: an `out` argument is a write, so it may not route through a
+// shared (`read`) deref.
+#[test]
+fn retest_out_through_shared_borrow_rejected() {
+    assert_has(
+        "struct S { n: i64 } fn init(x: out S) -> unit { x = S { n: 1 }; } \
+         fn f(b: read S) -> unit { init(out (deref b)); }",
+        "E0809",
+    );
+    assert_has(
+        "struct S { n: i64 } fn ini(x: out i64) -> unit { x = 99; } \
+         fn f(b: read S) -> unit { ini(out (deref b).n); }",
+        "E0809",
+    );
+}
+
+#[test]
+fn retest_out_through_exclusive_borrow_ok() {
+    assert_clean(
+        "struct S { n: i64 } fn ini(x: out i64) -> unit { x = 99; } \
+         fn f(b: write S) -> unit { ini(out (deref b).n); }",
+    );
+}
+
+// Finding 2: writing through a shared `slice` (index or subslice) is E0809;
+// through a `slice_mut` it stays legal; owned arrays are unaffected.
+#[test]
+fn retest_write_through_shared_slice_rejected() {
+    assert_has("fn f(s: slice i64) -> unit { s[0] = 5; }", "E0809");
+    assert_has(
+        "struct S { n: i64 } fn f(s: slice S) -> unit { s[0].n = 5; }",
+        "E0809",
+    );
+    // subslice of a shared slice, then write through the reborrow.
+    assert_has(
+        "fn f(s: slice i64) -> unit { let t = subslice(s, 0, 1); t[0] = 99; }",
+        "E0809",
+    );
+}
+
+#[test]
+fn retest_write_through_slice_mut_ok() {
+    assert_clean("fn f(s: slice_mut i64) -> unit { s[0] = 5; }");
+    assert_clean(
+        "fn f(s: slice_mut i64) -> unit { let t = subslice(s, 0, 1); t[0] = 99; }",
+    );
+    // Owned array index write is unaffected.
+    assert_clean("fn f() -> unit { let mut a: [1]i64 = [0]; a[0] = 5; }");
+}
+
+// Finding 3: `slice_of_mut` of a place behind a shared deref is an exclusive
+// reborrow from shared — E0809; of an owned array it stays legal.
+#[test]
+fn retest_slice_of_mut_through_shared_rejected() {
+    assert_has(
+        "fn f() -> unit { let mut a: [4]i64 = [0,0,0,0]; let b = read a; \
+         let sm = slice_of_mut((deref b)); sm[0] = 5; }",
+        "E0809",
+    );
+}
+
+#[test]
+fn retest_slice_of_mut_of_owned_array_ok() {
+    assert_clean(
+        "fn f() -> unit { let mut a: [4]i64 = [0,0,0,0]; let sm = slice_of_mut(a); sm[0] = 5; }",
+    );
+}
+
+// Finding 4: drop-hook bodies are ordinary checked code.
+#[test]
+fn retest_hook_body_unknown_name_rejected() {
+    assert_has(
+        "struct H { x: Box i64 } drop(write self) { nonexistent(); } fn f() -> unit { }",
+        "E0103",
+    );
+}
+
+#[test]
+fn retest_hook_body_uninitialized_read_rejected() {
+    assert_has(
+        "struct H { x: Box i64 } drop(write self) { let y: i64; let z: i64 = y; } fn f() -> unit { }",
+        "E0304",
+    );
+}
+
+#[test]
+fn retest_hook_body_write_through_shared_rejected() {
+    assert_has(
+        "struct S { n: i64 } drop(write self) { let b = read (deref self); (deref b).n = 99; } \
+         fn f() -> unit { }",
+        "E0809",
+    );
+}
+
+#[test]
+fn retest_hook_body_move_field_out_rejected() {
+    assert_has(
+        "struct H { b: Box i64 } drop(write self) { let x: Box i64 = (deref self).b; } \
+         fn f() -> unit { }",
+        "E0310",
+    );
+}
+
+#[test]
+fn retest_hook_body_reads_and_traces_ok() {
+    assert_clean(
+        "struct R { v: i64 } drop(write self) { trace((deref self).v); } fn f() -> unit { }",
+    );
+}
+
+// Finding 4 (alloc-on-drop): an alloc-effecting hook makes the TYPE
+// alloc-on-drop; every scheduled drop of it propagates the `alloc` effect.
+#[test]
+fn retest_alloc_on_drop_propagates_to_param_drop() {
+    // Hook calls an `alloc` fn -> H is alloc-on-drop. A non-`alloc` function
+    // that takes H by value and lets it die at function exit is E0401.
+    assert_has(
+        "struct H { v: i64 } drop(write self) { allocy(); } \
+         fn allocy() alloc -> unit { } fn dropit(h: H) -> unit { }",
+        "E0401",
+    );
+}
+
+#[test]
+fn retest_alloc_on_drop_propagates_to_scope_local() {
+    assert_has(
+        "struct H { v: i64 } drop(write self) { allocy(); } \
+         fn allocy() alloc -> unit { } fn mk() -> H { return H { v: 1 }; } \
+         fn f() -> unit { let h: H = mk(); }",
+        "E0401",
+    );
+}
+
+#[test]
+fn retest_alloc_on_drop_ok_when_dropper_is_alloc() {
+    assert_clean(
+        "struct H { v: i64 } drop(write self) { allocy(); } \
+         fn allocy() alloc -> unit { } fn dropit(h: H) alloc -> unit { }",
+    );
+}
+
+#[test]
+fn retest_nonallocating_hook_type_not_alloc_on_drop() {
+    // A hook that only traces/reads is NOT alloc-on-drop: dropping the type in
+    // a non-`alloc` function stays clean.
+    assert_clean(
+        "struct R { v: i64 } drop(write self) { trace((deref self).v); } \
+         fn dropit(r: R) -> unit { }",
+    );
+}
