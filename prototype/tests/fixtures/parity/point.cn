@@ -1,0 +1,11 @@
+// Parity fixture (throwaway syntax). Identical run result to point.cnr.
+struct Point { x: i64, y: i64 }
+
+fn add(p: read Point) -> i64 {
+    return (deref p).x + (deref p).y;
+}
+
+fn main() -> i64 {
+    let pt: Point = Point { x: 40, y: 2 };
+    return add(read pt);
+}

@@ -11,6 +11,7 @@ pub mod diag;
 pub mod interp;
 pub mod lexer;
 pub mod parser;
+pub mod real;
 pub mod resolve;
 pub mod span;
 pub mod token;
@@ -56,6 +57,47 @@ pub fn run_source(src: &str) -> RunResult {
         Err(d) => return RunResult::ParseError(d),
     };
     let diags = check::check_program(&program);
+    if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
+        return RunResult::CheckErrors(diags);
+    }
+    match interp::run_program(&program) {
+        Ok(run) => RunResult::Ok(run),
+        Err(f) => RunResult::Fault(f),
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Real (`.cnr`) surface-syntax entry points (design 0006; spec 01/02).
+// Same downstream pipeline as the throwaway front-end; only the parser and the
+// real-syntax-only surface checks differ.
+// ---------------------------------------------------------------------------
+
+/// Parse a real-syntax (`.cnr`) source string into the shared AST.
+pub fn parse_source_real(src: &str) -> Result<Program, Diag> {
+    real::parse_source(src)
+}
+
+/// Parse + count a real-syntax program against the frozen unit table.
+pub fn count_source_real(src: &str) -> Result<count::Counts, Diag> {
+    let program = real::parse_source(src)?;
+    let _diags = check::check_program_real(&program);
+    Ok(count::count_program(&program, src))
+}
+
+/// Parse + check a real-syntax program (with the real surface rules enabled).
+pub fn check_source_real(src: &str) -> Result<Vec<Diag>, Diag> {
+    let program = real::parse_source(src)?;
+    Ok(check::check_program_real(&program))
+}
+
+/// Parse, check, then run a real-syntax program's `main`.
+pub fn run_source_real(src: &str) -> RunResult {
+    let program = match real::parse_source(src) {
+        Ok(p) => p,
+        Err(d) => return RunResult::ParseError(d),
+    };
+    let diags = check::check_program_real(&program);
     if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
         return RunResult::CheckErrors(diags);
     }

@@ -209,6 +209,7 @@ impl Parser {
             variants.push(Variant {
                 name: vname,
                 payload,
+                ok: false,
                 span: self.span_from(vlo),
             });
             if !self.eat(&TokKind::Comma) {

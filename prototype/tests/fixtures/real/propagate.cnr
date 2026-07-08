@@ -1,0 +1,30 @@
+// Golden (real syntax): `?` propagation on an `ok`-marked result enum, explicit
+// `.*` writes, read auto-deref, reborrow, and `match` without `case`.
+struct Acc { total: i64, count: i64 }
+
+enum Step { ok Cont(i64), Stop }
+
+fn advance(a: write Acc, delta: i64) -> Step {
+    a.*.total = a.total + delta;
+    a.*.count = a.count + 1;
+    if a.count >= 3 {
+        return Step::Stop;
+    }
+    return Step::Cont(a.total);
+}
+
+fn drive(a: write Acc) -> Step {
+    let x: i64 = advance(a, 10)?;
+    let y: i64 = advance(a, 20)?;
+    let z: i64 = advance(a, 30)?;
+    return Step::Cont(z);
+}
+
+fn main() -> i64 {
+    let mut acc: Acc = Acc { total: 0, count: 0 };
+    let r: Step = drive(write acc);
+    return match r {
+        Step::Cont(v) => v,
+        Step::Stop => acc.total,
+    };
+}

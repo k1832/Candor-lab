@@ -51,6 +51,7 @@ pub fn resolve_enum(subject: &Type, items: &dyn ItemEnv) -> Option<(HoldMode, En
                     payload: vec![],
                 },
             ],
+            ok_variant: Some("boxed".to_string()),
             span: Span::point(0),
         }
     }

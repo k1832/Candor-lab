@@ -5,9 +5,17 @@
 //!   candor-proto check <file>   -- parse + resolve + Stage 2 check;
 //!                                  print JSON diagnostics (one per line),
 //!                                  exit 0 if clean, 1 if any error.
+//!   candor-proto run <file>     -- parse + check + execute `main`.
 //!   candor-proto count <file>   -- parse + check, then emit the frozen Bet 5
 //!                                  unit-table counts as JSON (exit 0), or a
 //!                                  parse-error JSON (exit 1).
+//!
+//! The surface syntax is chosen by file extension (design 0006; spec 01/02):
+//!   * `.cnr` -> the real toolchain syntax (borrows/slices as keywords, the
+//!     bitwise set, `.*` deref, `?` propagation, `ok`-marked variants, ...).
+//!   * `.cn`  -> the throwaway prototype syntax (unchanged).
+//!
+//! Any other extension is treated as throwaway `.cn`.
 
 use std::process::ExitCode;
 
@@ -19,10 +27,18 @@ fn main() -> ExitCode {
         (Some("run"), Some(path)) => run_run(path),
         (Some("count"), Some(path)) => run_count(path),
         _ => {
-            eprintln!("usage: candor-proto (parse|check|run|count) <file>");
+            eprintln!("usage: candor-proto (parse|check|run|count) <file>  (.cnr = real syntax, .cn = throwaway)");
             ExitCode::from(2)
         }
     }
+}
+
+/// True when the path names a real-syntax (`.cnr`) source file.
+fn is_real(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .map(|e| e == "cnr")
+        .unwrap_or(false)
 }
 
 fn read(path: &str) -> Result<String, ExitCode> {
@@ -37,7 +53,12 @@ fn run_parse(path: &str) -> ExitCode {
         Ok(s) => s,
         Err(c) => return c,
     };
-    match candor_proto::parse_source(&src) {
+    let parsed = if is_real(path) {
+        candor_proto::parse_source_real(&src)
+    } else {
+        candor_proto::parse_source(&src)
+    };
+    match parsed {
         Ok(program) => {
             println!("{program:#?}");
             ExitCode::SUCCESS
@@ -54,7 +75,12 @@ fn run_check(path: &str) -> ExitCode {
         Ok(s) => s,
         Err(c) => return c,
     };
-    match candor_proto::check_source(&src) {
+    let checked = if is_real(path) {
+        candor_proto::check_source_real(&src)
+    } else {
+        candor_proto::check_source(&src)
+    };
+    match checked {
         Ok(diags) => {
             for d in &diags {
                 println!("{}", d.to_json());
@@ -77,7 +103,12 @@ fn run_run(path: &str) -> ExitCode {
         Ok(s) => s,
         Err(c) => return c,
     };
-    match candor_proto::run_source(&src) {
+    let outcome = if is_real(path) {
+        candor_proto::run_source_real(&src)
+    } else {
+        candor_proto::run_source(&src)
+    };
+    match outcome {
         candor_proto::RunResult::Ok(run) => {
             println!("{}", run.ret);
             ExitCode::SUCCESS
@@ -104,7 +135,12 @@ fn run_count(path: &str) -> ExitCode {
         Ok(s) => s,
         Err(c) => return c,
     };
-    match candor_proto::count_source(&src) {
+    let counted = if is_real(path) {
+        candor_proto::count_source_real(&src)
+    } else {
+        candor_proto::count_source(&src)
+    };
+    match counted {
         Ok(counts) => {
             println!("{}", counts.to_json_pretty());
             ExitCode::SUCCESS

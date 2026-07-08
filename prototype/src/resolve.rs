@@ -225,7 +225,26 @@ pub fn resolve_program(prog: &Program, diags: &mut Vec<Diag>) -> Items {
                 Item::Enum(e) => {
                     let mut seen_v: HashMap<String, Span> = HashMap::new();
                     let mut variants = Vec::new();
+                    let mut ok_variant: Option<String> = None;
                     for v in &e.variants {
+                        // At most one variant may be `ok`-marked (spec 02 §2.2).
+                        if v.ok {
+                            if let Some(prev) = &ok_variant {
+                                r.diags.push(
+                                    Diag::error(
+                                        "E0109",
+                                        format!(
+                                            "enum `{}` marks more than one `ok` variant (`{}` and `{}`)",
+                                            e.name, prev, v.name
+                                        ),
+                                        v.span,
+                                    )
+                                    .with_note("a result-shaped enum has exactly one `ok` variant (spec 02 §2.2)", None),
+                                );
+                            } else {
+                                ok_variant = Some(v.name.clone());
+                            }
+                        }
                         if let Some(prev) = seen_v.insert(v.name.clone(), v.span) {
                             r.diags.push(
                                 Diag::error(
@@ -264,6 +283,7 @@ pub fn resolve_program(prog: &Program, diags: &mut Vec<Diag>) -> Items {
                         EnumTy {
                             copy: e.copy,
                             variants,
+                            ok_variant,
                             span: e.span,
                         },
                     );

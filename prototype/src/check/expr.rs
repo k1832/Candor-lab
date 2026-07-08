@@ -64,10 +64,25 @@ impl<'a> Checker<'a> {
                 }
                 t
             }
-            ExprKind::IntLit { suffix, .. } => match suffix {
-                Some(s) => Type::Scalar(*s),
-                None => Type::IntLit,
-            },
+            ExprKind::IntLit { value, suffix } => {
+                if self.is_real() {
+                    self.check_int_lit_range(*value, *suffix, false, e.span);
+                }
+                match suffix {
+                    Some(s) => Type::Scalar(*s),
+                    None => Type::IntLit,
+                }
+            }
+            ExprKind::NegIntLit { value, suffix } => {
+                if self.is_real() {
+                    self.check_int_lit_range(*value, *suffix, true, e.span);
+                }
+                match suffix {
+                    Some(s) => Type::Scalar(*s),
+                    None => Type::IntLit,
+                }
+            }
+            ExprKind::Try(inner) => self.check_try(inner, e.span),
             ExprKind::StrLit(_) => Type::Slice(Box::new(Type::Scalar(ScalarTy::U8))),
             ExprKind::BoolLit(_) => Type::bool(),
             ExprKind::Unary { op, expr } => self.check_unary(*op, expr),
@@ -137,7 +152,9 @@ impl<'a> Checker<'a> {
                 Type::unit()
             }
             ExprKind::Wrapping(b) | ExprKind::Saturating(b) => {
+                self.regime_enter();
                 self.check_block_stmts(b);
+                self.regime_exit();
                 Type::unit()
             }
             ExprKind::Return(opt) => self.check_return(opt.as_deref(), e.span),
@@ -446,6 +463,14 @@ impl<'a> Checker<'a> {
                 self.expect_bool(&t, expr.span, "operand of `!`");
                 Type::bool()
             }
+            UnOp::BitNot => {
+                self.expect_integer(&t, expr.span);
+                if matches!(t, Type::Error) {
+                    Type::Error
+                } else {
+                    t
+                }
+            }
         }
     }
 
@@ -478,6 +503,20 @@ impl<'a> Checker<'a> {
                 self.expect_bool(&l, lhs.span, "operand of a boolean operator");
                 self.expect_bool(&r, rhs.span, "operand of a boolean operator");
                 Type::bool()
+            }
+            // Bitwise and/or/xor: integer operands, unified like arithmetic
+            // (design 0006 §2.4; width-exact, never overflow).
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => self.unify_int(&l, &r, span),
+            // Shifts: both operands integer; the result takes the left type.
+            // The shift amount need not match the shifted type.
+            BinOp::Shl | BinOp::Shr => {
+                self.expect_integer(&l, lhs.span);
+                self.expect_integer(&r, rhs.span);
+                if matches!(l, Type::Error) {
+                    Type::Error
+                } else {
+                    l
+                }
             }
         }
     }
@@ -535,6 +574,31 @@ impl<'a> Checker<'a> {
                 )
                 .with_note("pointer retyping uses `cast_ptr`/`addr_to_ptr` (§4.2)", None),
             );
+        }
+        // Constant-known loss is a compile error in the default regime (design
+        // 0006 §2.4): if the operand folds to a constant that does not fit the
+        // scalar target, reject at check time. Inside `wrapping`/`saturating`
+        // the regime folds it instead, so we skip the check there.
+        if self.is_real() && !self.in_regime() {
+            if let (Some(v), Type::Scalar(ts)) = (const_int(expr), &target) {
+                if !scalar_fits(v, *ts) {
+                    self.diags.push(
+                        Diag::error(
+                            "E0710",
+                            format!(
+                                "constant `{}` does not fit target type `{}` (a `conv` that is known to lose value is rejected)",
+                                v,
+                                target.display()
+                            ),
+                            span,
+                        )
+                        .with_note(
+                            "wrap the conversion in a `wrapping` or `saturating` block to fold it, or use a value that fits (design 0006 §2.4)",
+                            None,
+                        ),
+                    );
+                }
+            }
         }
         target
     }
@@ -814,6 +878,188 @@ impl<'a> Checker<'a> {
                 }
             }
             _ => None,
+        }
+    }
+
+    /// Range-check an integer literal (real front-end only; spec 01 §3.3). A
+    /// positive literal must fit its type's maximum; a negative-literal fold must
+    /// fit its type's minimum. Unsuffixed literals default to `i64`.
+    pub(super) fn check_int_lit_range(
+        &mut self,
+        value: u64,
+        suffix: Option<ScalarTy>,
+        neg: bool,
+        span: Span,
+    ) {
+        let sty = suffix.unwrap_or(ScalarTy::I64);
+        let (min, max) = scalar_range(sty);
+        let v: i128 = if neg { -(value as i128) } else { value as i128 };
+        if v < min || v > max {
+            self.diags.push(
+                Diag::error(
+                    "E0709",
+                    format!(
+                        "integer literal `{}{}` is out of range for `{}`",
+                        if neg { "-" } else { "" },
+                        value,
+                        scalar_name(sty)
+                    ),
+                    span,
+                )
+                .with_note(
+                    "an over-range literal is rejected at compile time, never a runtime fault (spec 01 §3.3)",
+                    None,
+                ),
+            );
+        }
+    }
+
+    /// Type-check `expr?` (spec 02 §6.5). Requires a result-shaped enum whose
+    /// enclosing function returns the same enum type (same-type-only per 0006).
+    fn check_try(&mut self, inner: &Expr, span: Span) -> Type {
+        let t = self.check_expr(inner, Use::Value);
+        if matches!(t, Type::Error | Type::Never) {
+            return Type::Error;
+        }
+        let resolved = patterns::resolve_enum(&t, self.items);
+        let (_, einfo, ename) = match resolved {
+            Some(x) => x,
+            None => {
+                self.diags.push(
+                    Diag::error(
+                        "E0711",
+                        format!("`?` applied to `{}`, which is not an enum", t.display()),
+                        span,
+                    )
+                    .with_note("`?` unwraps a result-shaped enum (spec 02 §6.5)", None),
+                );
+                return Type::Error;
+            }
+        };
+        let ok_name = match &einfo.ok_variant {
+            Some(n) => n.clone(),
+            None => {
+                self.diags.push(
+                    Diag::error(
+                        "E0711",
+                        format!("`?` applied to enum `{ename}`, which is not result-shaped"),
+                        span,
+                    )
+                    .with_note("mark exactly one variant `ok` to make an enum result-shaped (spec 02 §2.2)", None),
+                );
+                return Type::Error;
+            }
+        };
+        // Same-type-only: the enclosing function must return this same enum.
+        let ret = self.ret_ty_clone();
+        let same = match (&t, &ret) {
+            (Type::Named(a), Type::Named(b)) => a == b,
+            (Type::BoxResult(_), Type::BoxResult(_)) => true,
+            _ => false,
+        };
+        if !same {
+            self.diags.push(
+                Diag::error(
+                    "E0712",
+                    format!(
+                        "`?` on `{}` requires the enclosing function to return `{}`, but it returns `{}`",
+                        t.display(),
+                        t.display(),
+                        ret.display()
+                    ),
+                    span,
+                )
+                .with_note("cross-type propagation needs traits and is deferred (spec 02 §6.5)", None),
+            );
+        }
+        einfo
+            .variants
+            .iter()
+            .find(|v| v.name == ok_name)
+            .and_then(|v| v.payload.first().cloned())
+            .unwrap_or_else(Type::unit)
+    }
+
+    /// Reject a write target that reaches a field/element *through* a single-place
+    /// borrow without an explicit `.*` (design 0006 §2.4 read-only auto-deref;
+    /// spec 02 §6.3). Real front-end only: a write keeps every deref explicit, so
+    /// a mutation audit (grep `.\* =`) stays complete. Reads auto-deref freely.
+    pub(super) fn reject_autoderef_write(&mut self, target: &Expr) {
+        if !self.is_real() {
+            return;
+        }
+        if let Some(sp) = self.autoderef_write_violation(target) {
+            self.diags.push(
+                Diag::error(
+                    "E0713",
+                    "a write through a borrow needs an explicit `.*` dereference",
+                    sp,
+                )
+                .with_note(
+                    "read access auto-derefs a borrow, but every deref on a write target must be written `.*` (design 0006 §2.4)",
+                    None,
+                ),
+            );
+        }
+    }
+
+    fn autoderef_write_violation(&self, e: &Expr) -> Option<Span> {
+        match &e.kind {
+            ExprKind::Paren(i) => self.autoderef_write_violation(i),
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => {
+                let bt = self.ty_of_place(base);
+                let base_is_deref = matches!(
+                    strip_paren(base).kind,
+                    ExprKind::Prefix { op: PrefixOp::Deref, .. }
+                );
+                if matches!(bt, Type::Borrow(_) | Type::BorrowMut(_)) && !base_is_deref {
+                    Some(base.span)
+                } else {
+                    self.autoderef_write_violation(base)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Non-emitting type of a place expression, for the write-deref probe.
+    fn ty_of_place(&self, e: &Expr) -> Type {
+        match &e.kind {
+            ExprKind::Paren(i) => self.ty_of_place(i),
+            ExprKind::Ident(name) => {
+                if let Some(li) = self.lookup_local(name) {
+                    li.ty.clone()
+                } else if let Some((t, _)) = self.items.statics.get(name) {
+                    t.clone()
+                } else {
+                    Type::Error
+                }
+            }
+            ExprKind::Prefix { op: PrefixOp::Deref, expr } => {
+                match self.ty_of_place(expr) {
+                    Type::Borrow(x) | Type::BorrowMut(x) | Type::Box(x) => *x,
+                    _ => Type::Error,
+                }
+            }
+            ExprKind::Field { base, field } => {
+                let bt = peel_borrow(self.ty_of_place(base));
+                match bt {
+                    Type::Named(n) => self
+                        .items
+                        .lookup_struct(&n)
+                        .and_then(|st| st.fields.iter().find(|(f, _)| f == field).map(|(_, t)| t.clone()))
+                        .unwrap_or(Type::Error),
+                    _ => Type::Error,
+                }
+            }
+            ExprKind::Index { base, .. } => {
+                let bt = peel_borrow(self.ty_of_place(base));
+                match bt {
+                    Type::Array(e, _) | Type::Slice(e) | Type::SliceMut(e) => *e,
+                    _ => Type::Error,
+                }
+            }
+            _ => Type::Error,
         }
     }
 
@@ -1132,6 +1378,7 @@ impl<'a> Checker<'a> {
 
     fn check_out_arg(&mut self, arg: &Expr, expected: &Type) {
         self.reject_static_mutation(arg, "pass as `out`", arg.span);
+        self.reject_autoderef_write(arg);
         // An `out` argument is a write to the slot (§3.1), so it may not route
         // through a shared (`read`) deref — same gate as an assignment or an
         // exclusive reborrow (retest 2026-07-08, finding 1).
@@ -1728,5 +1975,55 @@ fn region_source_indices(sig: &crate::resolve::FnSig) -> Vec<usize> {
                 Vec::new()
             }
         }
+    }
+}
+
+
+/// Strip enclosing parentheses for structural inspection.
+fn strip_paren(e: &Expr) -> &Expr {
+    match &e.kind {
+        ExprKind::Paren(i) => strip_paren(i),
+        _ => e,
+    }
+}
+
+/// Peel single-place borrow/box layers off a type (the read auto-deref).
+fn peel_borrow(mut ty: Type) -> Type {
+    loop {
+        match ty {
+            Type::Borrow(x) | Type::BorrowMut(x) | Type::Box(x) => ty = *x,
+            other => return other,
+        }
+    }
+}
+
+/// The inclusive value range of an integer scalar type.
+fn scalar_range(s: ScalarTy) -> (i128, i128) {
+    match s {
+        ScalarTy::I8 => (i8::MIN as i128, i8::MAX as i128),
+        ScalarTy::I16 => (i16::MIN as i128, i16::MAX as i128),
+        ScalarTy::I32 => (i32::MIN as i128, i32::MAX as i128),
+        ScalarTy::I64 | ScalarTy::Isize => (i64::MIN as i128, i64::MAX as i128),
+        ScalarTy::U8 => (0, u8::MAX as i128),
+        ScalarTy::U16 => (0, u16::MAX as i128),
+        ScalarTy::U32 => (0, u32::MAX as i128),
+        ScalarTy::U64 | ScalarTy::Usize => (0, u64::MAX as i128),
+        ScalarTy::Bool | ScalarTy::Unit => (0, 0),
+    }
+}
+
+fn scalar_fits(v: i128, s: ScalarTy) -> bool {
+    let (min, max) = scalar_range(s);
+    v >= min && v <= max
+}
+
+/// Fold an expression to a compile-time integer constant, if it is one.
+fn const_int(e: &Expr) -> Option<i128> {
+    match &e.kind {
+        ExprKind::IntLit { value, .. } => Some(*value as i128),
+        ExprKind::NegIntLit { value, .. } => Some(-(*value as i128)),
+        ExprKind::Paren(i) => const_int(i),
+        ExprKind::Unary { op: UnOp::Neg, expr } => const_int(expr).map(|x| -x),
+        _ => None,
     }
 }

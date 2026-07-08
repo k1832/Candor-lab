@@ -1,0 +1,24 @@
+// Golden (real syntax): bare `[T]` slices, a region-tagged `read[r] [T]` slice,
+// slice indexing, and `conv`.
+fn dot(a: [i64], b: [i64]) -> i64 {
+    let mut i: usize = 0;
+    let mut acc: i64 = 0;
+    let n: usize = len(a);
+    while i < n {
+        acc = acc + a[i] * b[i];
+        i = i + 1;
+    }
+    return acc;
+}
+
+fn first[r](s: read[r] [i64]) -> read[r] [i64] {
+    return subslice(s, 0, 2);
+}
+
+fn main() -> i64 {
+    let xs: [3]i64 = [1, 2, 3];
+    let ys: [3]i64 = [4, 5, 6];
+    let d: i64 = dot(slice_of(xs), slice_of(ys));
+    let head: [i64] = first(slice_of(xs));
+    return d + conv i64 len(head);
+}

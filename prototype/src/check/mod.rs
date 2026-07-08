@@ -84,6 +84,10 @@ struct FnState {
     sig_params: Vec<(String, bool, Option<String>)>,
     ret_region: Option<String>,
     ret_is_borrow: bool,
+    /// Inside a `wrapping`/`saturating` regime block: a constant `conv` with
+    /// value loss is folded (allowed) rather than a compile error (design 0006
+    /// §2.4). Depth counter so nested regimes restore correctly.
+    regime_depth: usize,
 }
 
 impl FnState {
@@ -107,6 +111,7 @@ impl FnState {
             sig_params: Vec::new(),
             ret_region: None,
             ret_is_borrow: false,
+            regime_depth: 0,
         }
     }
 }
@@ -115,10 +120,28 @@ pub struct Checker<'a> {
     items: &'a Items,
     pub diags: Vec<Diag>,
     f: FnState,
+    /// True when checking an AST produced by the real (`.cnr`) front-end. Gates
+    /// the surface rules that are real-syntax-only: literal over-range rejection
+    /// (spec 01 §3.3), constant-`conv` loss rejection (design 0006 §2.4), and the
+    /// write-through-borrow-needs-explicit-`.*` rule (spec 02 §6.3). The shared
+    /// checker is otherwise identical for both front-ends.
+    real: bool,
 }
 
-/// Entry point: parse -> resolve -> check. Returns all diagnostics.
+/// Entry point: parse -> resolve -> check. Returns all diagnostics. Used by the
+/// throwaway (`.cn`) front-end.
 pub fn check_program(prog: &Program) -> Vec<Diag> {
+    check_program_opts(prog, false)
+}
+
+/// As [`check_program`], but enabling the real-syntax (`.cnr`) surface rules
+/// (design 0006 §2.4; spec 01 §3.3, spec 02 §6.3). The downstream analysis is
+/// identical; only the extra surface diagnostics differ.
+pub fn check_program_real(prog: &Program) -> Vec<Diag> {
+    check_program_opts(prog, true)
+}
+
+fn check_program_opts(prog: &Program, real: bool) -> Vec<Diag> {
     let mut diags = Vec::new();
     let mut items = resolve_program(prog, &mut diags);
 
@@ -150,6 +173,7 @@ pub fn check_program(prog: &Program) -> Vec<Diag> {
                     items: &snapshot,
                     diags: Vec::new(),
                     f: FnState::empty(),
+                    real,
                 };
                 let (fdecl, sig) = synth_drop_hook(sname, block, *span);
                 c.check_fn_with_sig(&fdecl, &sig);
@@ -173,6 +197,7 @@ pub fn check_program(prog: &Program) -> Vec<Diag> {
         items: &items,
         diags,
         f: FnState::empty(),
+        real,
     };
     for item in &prog.items {
         match item {
@@ -811,6 +836,19 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+    }
+
+    pub(super) fn in_regime(&self) -> bool {
+        self.f.regime_depth > 0
+    }
+    pub(super) fn regime_enter(&mut self) {
+        self.f.regime_depth += 1;
+    }
+    pub(super) fn regime_exit(&mut self) {
+        self.f.regime_depth -= 1;
+    }
+    pub(super) fn is_real(&self) -> bool {
+        self.real
     }
 
     fn require_unsafe(&mut self, span: Span, op: &str) {

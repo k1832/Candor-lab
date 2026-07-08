@@ -248,6 +248,7 @@ impl Counter {
     fn expr(&mut self, e: &Expr) {
         match &e.kind {
             ExprKind::IntLit { .. }
+            | ExprKind::NegIntLit { .. }
             | ExprKind::StrLit(_)
             | ExprKind::BoolLit(_)
             | ExprKind::Ident(_)
@@ -346,6 +347,9 @@ impl Counter {
                 }
             }
             ExprKind::Assert(x) | ExprKind::Panic(x) | ExprKind::Paren(x) => self.expr(x),
+            // `expr?` is an ordinary postfix operator (design 0006 §2.4): no
+            // unit-table impact, recurse into the operand.
+            ExprKind::Try(x) => self.expr(x),
         }
     }
 

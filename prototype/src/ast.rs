@@ -56,6 +56,10 @@ pub struct Variant {
     pub name: String,
     /// Zero or more payload types (design 0001 §8.2).
     pub payload: Vec<Ty>,
+    /// `ok`-marked success variant of a result-shaped enum (design 0006 §2.4;
+    /// spec 02 §2.2). Only the real (`.cnr`) front-end ever sets this; the
+    /// throwaway front-end always leaves it `false`.
+    pub ok: bool,
     pub span: Span,
 }
 
@@ -206,6 +210,8 @@ pub enum StmtKind {
 pub enum UnOp {
     Neg,
     Not,
+    /// `~a` — prefix bitwise-not (design 0006 §2.4). Integer operand only.
+    BitNot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,6 +237,12 @@ pub enum BinOp {
     Ge,
     And,
     Or,
+    // Bitwise / shift operators (design 0006 §2.4). Integer operands only.
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
 }
 
 #[derive(Clone, Debug)]
@@ -256,6 +268,10 @@ pub struct MatchArm {
 #[derive(Clone, Debug)]
 pub enum ExprKind {
     IntLit { value: u64, suffix: Option<ScalarTy> },
+    /// A negative-literal fold `-<int>` (design 0006 §2.4; spec 01 §3.4). The
+    /// stored `value` is the magnitude; the node denotes `-(value)`. Produced
+    /// only by the real front-end, which range-checks it against its type.
+    NegIntLit { value: u64, suffix: Option<ScalarTy> },
     StrLit(String),
     BoolLit(bool),
     Ident(String),
@@ -325,6 +341,11 @@ pub enum ExprKind {
     Result,
 
     Paren(Box<Expr>),
+
+    /// `expr?` — the postfix propagation operator (design 0006 §2.4; spec 02
+    /// §6.5). On a result-shaped enum, unwraps the `ok`-marked variant's
+    /// payload or early-returns the whole value. Real front-end only.
+    Try(Box<Expr>),
 }
 
 // ---------------------------------------------------------------------------

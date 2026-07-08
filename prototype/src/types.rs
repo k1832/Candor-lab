@@ -155,6 +155,9 @@ pub struct VariantTy {
 pub struct EnumTy {
     pub copy: bool,
     pub variants: Vec<VariantTy>,
+    /// The name of the single `ok`-marked variant, if this enum is
+    /// result-shaped (design 0006 §2.4; spec 02 §2.2). Drives the `?` operator.
+    pub ok_variant: Option<String>,
     pub span: Span,
 }
 

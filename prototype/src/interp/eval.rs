@@ -590,6 +590,16 @@ impl<'a> Interp<'a> {
                 self.write_bytes(a, &bytes[..size as usize])?;
                 Ok(RVal { ty: Type::Scalar(sty), addr: a, origin: Origin::None })
             }
+            ExprKind::NegIntLit { value, suffix } => {
+                // The negative-literal fold: `-(value)` written into its type
+                // (design 0006 §2.4). The checker has already range-checked it.
+                let sty = self.int_type(suffix, expected);
+                let size = Layout::scalar_size(sty).max(1);
+                let a = self.mem.stack_alloc(size, size);
+                self.write_int(a, -(*value as i128), sty)?;
+                Ok(RVal { ty: Type::Scalar(sty), addr: a, origin: Origin::None })
+            }
+            ExprKind::Try(inner) => self.eval_try(inner, e.span),
             ExprKind::BoolLit(b) => {
                 let a = self.mem.stack_alloc(1, 1);
                 self.write_bytes(a, &[*b as u8])?;
@@ -815,6 +825,18 @@ impl<'a> Interp<'a> {
         }
     }
 
+    /// Reduce `value` to the bit pattern of `sty` (width-exact bitwise ops and
+    /// shifts, design 0006 §2.4): mask mod 2^bits, then reinterpret sign.
+    fn fit_bits(&self, value: i128, sty: ScalarTy) -> i128 {
+        let (_, _, bits, signed) = ty_range(sty);
+        let m = 1i128 << bits;
+        let mut x = value.rem_euclid(m);
+        if signed && x >= (m >> 1) {
+            x -= m;
+        }
+        x
+    }
+
     fn eval_unary(&mut self, op: UnOp, expr: &Expr, expected: Option<&Type>) -> R<RVal> {
         match op {
             UnOp::Neg => {
@@ -832,6 +854,17 @@ impl<'a> Interp<'a> {
                 let a = self.mem.stack_alloc(1, 1);
                 self.write_bytes(a, &[(b == 0) as u8])?;
                 Ok(RVal { ty: Type::bool(), addr: a, origin: Origin::None })
+            }
+            UnOp::BitNot => {
+                let v = self.eval_value(expr, expected)?;
+                let sty = self.concretize(&v.ty);
+                let x = self.read_int(v.addr, sty)?;
+                // Width-exact complement, re-fitted into the type's bit pattern.
+                let r = self.fit_bits(!x, sty);
+                let size = Layout::scalar_size(sty).max(1);
+                let a = self.mem.stack_alloc(size, size);
+                self.write_int(a, r, sty)?;
+                Ok(RVal { ty: Type::Scalar(sty), addr: a, origin: Origin::None })
             }
         }
     }
@@ -923,6 +956,64 @@ impl<'a> Interp<'a> {
                 self.write_int(a, res, sty)?;
                 Ok(RVal { ty: Type::Scalar(sty), addr: a, origin: Origin::None })
             }
+            BitAnd | BitOr | BitXor => {
+                let opty = expected.filter(|t| t.is_integer()).cloned();
+                let l = self.eval_value(lhs, opty.as_ref())?;
+                let sty = match &opty {
+                    Some(Type::Scalar(s)) => *s,
+                    _ => self.concretize(&l.ty),
+                };
+                let r = self.eval_value(rhs, Some(&Type::Scalar(sty)))?;
+                let lv = self.read_int(l.addr, sty)?;
+                let rv = self.read_int(r.addr, sty)?;
+                let raw = match op {
+                    BitAnd => lv & rv,
+                    BitOr => lv | rv,
+                    _ => lv ^ rv,
+                };
+                let res = self.fit_bits(raw, sty);
+                let a = self.mem.stack_alloc(Layout::scalar_size(sty).max(1), Layout::scalar_size(sty).max(1));
+                self.write_int(a, res, sty)?;
+                Ok(RVal { ty: Type::Scalar(sty), addr: a, origin: Origin::None })
+            }
+            Shl | Shr => {
+                self.cur_span = span;
+                let opty = expected.filter(|t| t.is_integer()).cloned();
+                let l = self.eval_value(lhs, opty.as_ref())?;
+                let sty = match &opty {
+                    Some(Type::Scalar(s)) => *s,
+                    _ => self.concretize(&l.ty),
+                };
+                let r = self.eval_value(rhs, None)?;
+                let rsty = self.concretize(&r.ty);
+                let lv = self.read_int(l.addr, sty)?;
+                let amt = self.read_int(r.addr, rsty)?;
+                let bits = ty_range(sty).2 as i128;
+                self.cur_span = span;
+                // Shift amount >= bitwidth: fault in the default regime, mask mod
+                // bitwidth under `wrapping`, clamp under `saturating` (design 0006).
+                let amt = if amt < 0 {
+                    return Err(self.fault(FaultKind::Overflow, "negative shift amount"));
+                } else if amt >= bits {
+                    match self.regime() {
+                        Regime::Checked => {
+                            return Err(self.fault(FaultKind::Overflow, "shift amount exceeds bit width"));
+                        }
+                        Regime::Wrapping => amt % bits,
+                        Regime::Saturating => bits - 1,
+                    }
+                } else {
+                    amt
+                };
+                let raw = match op {
+                    Shl => lv << amt,
+                    _ => lv >> amt, // arithmetic for signed, logical for unsigned (i128 read is sign-correct)
+                };
+                let res = self.fit_bits(raw, sty);
+                let a = self.mem.stack_alloc(Layout::scalar_size(sty).max(1), Layout::scalar_size(sty).max(1));
+                self.write_int(a, res, sty)?;
+                Ok(RVal { ty: Type::Scalar(sty), addr: a, origin: Origin::None })
+            }
         }
     }
 
@@ -956,6 +1047,58 @@ impl<'a> Interp<'a> {
         let a = self.mem.stack_alloc(Layout::scalar_size(tsty).max(1), Layout::scalar_size(tsty).max(1));
         self.write_int(a, out, tsty)?;
         Ok(RVal { ty: Type::Scalar(tsty), addr: a, origin: Origin::None })
+    }
+
+    /// Evaluate `expr?` (spec 02 §6.5): unwrap the `ok` variant's payload, or
+    /// early-return the whole value from the enclosing function.
+    fn eval_try(&mut self, inner: &Expr, span: Span) -> R<RVal> {
+        self.cur_span = span;
+        let v = self.eval_value(inner, None)?;
+        let enum_addr = v.addr;
+        let ok_name = match &v.ty {
+            Type::Named(n) => self.items.enums.get(n).and_then(|e| e.ok_variant.clone()),
+            Type::BoxResult(_) => Some("boxed".to_string()),
+            _ => None,
+        };
+        let ok_name = match ok_name {
+            Some(n) => n,
+            None => return Err(self.fault(FaultKind::Panic, "`?` on a non-result-shaped enum")),
+        };
+        let einfo = self
+            .lay()
+            .enum_info(&v.ty)
+            .ok_or_else(|| self.fault(FaultKind::Panic, "`?` on a non-enum"))?;
+        let ok_idx = einfo
+            .iter()
+            .position(|(n, _)| n == &ok_name)
+            .ok_or_else(|| self.fault(FaultKind::Panic, "`?`: missing ok variant"))?;
+        let tag = self.read_u64(enum_addr)? as usize;
+        if tag == ok_idx {
+            let payloads = einfo[ok_idx].1.clone();
+            if payloads.is_empty() {
+                if !is_copy(&v.ty, self.items) {
+                    self.consume(&v.origin);
+                }
+                let a = self.mem.stack_alloc(0, 1);
+                return Ok(RVal { ty: Type::unit(), addr: a, origin: Origin::None });
+            }
+            let (pty, off) = self.lay().payload_offset(&payloads, 0);
+            let (taddr, tid) = self.alloc_temp(pty.clone());
+            let size = self.size_of(&pty);
+            self.move_bytes(taddr, enum_addr + off, size)?;
+            // Mark the source enum consumed so its now-moved payload is not
+            // double-dropped; the payload lives on in the fresh temp.
+            self.consume(&v.origin);
+            Ok(RVal { ty: pty, addr: taddr, origin: Origin::Temp(tid) })
+        } else {
+            let rty = self.cur_ret_ty();
+            let size = self.size_of(&rty);
+            let align = self.align_of(&rty);
+            let addr = self.mem.stack_alloc(size.max(1), align.max(1));
+            self.move_to(addr, v)?;
+            self.f().ret = Some((rty, addr));
+            Err(Ctl::Return)
+        }
     }
 
     fn eval_clone(&mut self, expr: &Expr) -> R<RVal> {
