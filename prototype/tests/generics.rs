@@ -355,3 +355,117 @@ fn legal_generic_impl_across_modules_runs() {
         other => panic!("ok_impl_generic did not run: {:?}", matches!(other, RunResult::Ok(_))),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Impl/interface method-signature conformance (design 0007 §3.5, §4.1)
+// One negative per divergence axis, plus a multi-axis conforming positive.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn conformance_self_mode_divergence() {
+    // interface: `read self`; impl: `write self` -> E1021.
+    assert_code(
+        "interface W { fn w(read self) -> i64; }\nstruct N { v: i64 }\n\
+         impl W for N { fn w(write self) -> i64 { return self.v; } }\n\
+         fn main() -> i64 { return 0; }\n",
+        "E1021",
+    );
+}
+
+#[test]
+fn conformance_self_presence_divergence() {
+    // interface: no `self` (associated fn); impl: adds `read self` -> E1021.
+    assert_code(
+        "interface Mk { fn mk(x: i64) -> Self; }\nstruct N { v: i64 }\n\
+         impl Mk for N { fn mk(read self, x: i64) -> Self { return N { v: x }; } }\n\
+         fn main() -> i64 { return 0; }\n",
+        "E1021",
+    );
+}
+
+#[test]
+fn conformance_param_count_divergence() {
+    // interface: one non-self param; impl: none -> E1022.
+    assert_code(
+        "interface W { fn w(read self, a: i64) -> i64; }\nstruct N { v: i64 }\n\
+         impl W for N { fn w(read self) -> i64 { return self.v; } }\n\
+         fn main() -> i64 { return 0; }\n",
+        "E1022",
+    );
+}
+
+#[test]
+fn conformance_param_mode_divergence() {
+    // interface: `a: read N`; impl: `a: write N` -> E1023.
+    assert_code(
+        "interface W { fn w(read self, a: read N) -> i64; }\nstruct N { v: i64 }\n\
+         impl W for N { fn w(read self, a: write N) -> i64 { return self.v; } }\n\
+         fn main() -> i64 { return 0; }\n",
+        "E1023",
+    );
+}
+
+#[test]
+fn conformance_param_type_divergence() {
+    // interface: `a: i64`; impl: `a: u8` -> E1024.
+    assert_code(
+        "interface W { fn w(read self, a: i64) -> i64; }\nstruct N { v: i64 }\n\
+         impl W for N { fn w(read self, a: u8) -> i64 { return self.v; } }\n\
+         fn main() -> i64 { return 0; }\n",
+        "E1024",
+    );
+}
+
+#[test]
+fn conformance_return_type_divergence() {
+    // interface: `-> i64`; impl: `-> bool` -> E1025.
+    assert_code(
+        "interface W { fn w(read self) -> i64; }\nstruct N { v: i64 }\n\
+         impl W for N { fn w(read self) -> bool { return true; } }\n\
+         fn main() -> i64 { return 0; }\n",
+        "E1025",
+    );
+}
+
+#[test]
+fn conformance_effect_marker_divergence() {
+    // interface: non-`alloc`; impl: `alloc` (may not exceed) -> E1026.
+    assert_code(
+        "interface W { fn w(read self) -> i64; }\nstruct N { v: i64 }\n\
+         impl W for N { fn w(read self) alloc -> i64 { return self.v; } }\n\
+         fn main() -> i64 { return 0; }\n",
+        "E1026",
+    );
+}
+
+#[test]
+fn conformance_generic_impl_return_divergence() {
+    // A generic impl whose method's return diverges after `Self` substitution.
+    // interface expects `-> i64`; impl returns `Wrap[T]` -> E1025.
+    assert_code(
+        "interface W { fn w(read self) -> i64; }\nstruct Wrap[T] { inner: T }\n\
+         impl[T] W for Wrap[T] { fn w(read self) -> Wrap[T] { return Wrap { inner: self.inner }; } }\n\
+         fn main() -> i64 { return 0; }\n",
+        "E1025",
+    );
+}
+
+#[test]
+fn conformance_conforming_impl_checks_clean_and_runs() {
+    // A multi-axis-non-trivial signature (`write self`, a value param, a return)
+    // that conforms exactly: checks clean and runs.
+    let src = "interface Sink { fn push(write self, v: i64) -> i64; }\nstruct Buf { total: i64 }\n\
+         impl Sink for Buf { fn push(write self, v: i64) -> i64 { self.*.total = self.*.total + v; return self.*.total; } }\n\
+         fn main() -> i64 { let mut b: Buf = Buf { total: 0 }; return b.push(5); }\n";
+    assert!(
+        check_source_real(src).unwrap().is_empty(),
+        "conforming impl should check clean, got {:?}",
+        check_source_real(src).unwrap()
+    );
+    match run_source_real(src) {
+        RunResult::Ok(r) => assert_eq!(r.ret, 5),
+        RunResult::Fault(f) => panic!("faulted: {}", f.to_json()),
+        RunResult::CheckErrors(d) => panic!("check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>()),
+        RunResult::ParseError(d) => panic!("parse error: {}", d.to_json()),
+    }
+}

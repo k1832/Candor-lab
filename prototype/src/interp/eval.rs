@@ -359,6 +359,20 @@ impl<'a> Interp<'a> {
         }
         None
     }
+    /// A clone of the current move-mask of the local named `name` (its live
+    /// moved-out/uninit sub-paths). Used by the reassignment drop-of-old to
+    /// honor the static rule that a moved-out place is not dropped (§1.5).
+    fn local_mask(&self, name: &str) -> MoveMask {
+        let fr = self.frames.last().unwrap();
+        for sc in fr.scopes.iter().rev() {
+            for l in sc.locals.iter().rev() {
+                if l.name == name {
+                    return l.mask.clone();
+                }
+            }
+        }
+        MoveMask::default()
+    }
 
     // ---- layout wrappers ----
     fn lay(&self) -> Layout<'_> {
@@ -2155,10 +2169,18 @@ impl<'a> Interp<'a> {
             }
             StmtKind::Assign { target, value } => {
                 let (addr, tty, pl) = self.eval_place(target)?;
-                if self.place_is_local_direct(&pl) && self.place_owned(&pl) {
-                    self.drop_value(addr, &tty, &MoveMask::default(), &mut Vec::new())?;
-                }
+                // Evaluate the RHS *before* dropping the old value (design 0001
+                // §1.5 evaluation order). The RHS may move the current value out
+                // of the target place — `lst = cons(take lst, ...)` — and a
+                // moved-out place is not dropped (§1.5). The drop-of-old below
+                // therefore consults the move state the RHS just updated (via
+                // `place_owned` and the local's live mask) rather than dropping
+                // unconditionally, which double-freed the moved-out value.
                 let rv = self.eval_value(value, Some(&tty))?;
+                if self.place_is_local_direct(&pl) && self.place_owned(&pl) {
+                    let mask = self.local_mask(&pl.root);
+                    self.drop_value(addr, &tty, &mask, &mut Vec::new())?;
+                }
                 self.move_to(addr, rv)?;
                 if self.place_is_local_direct(&pl) {
                     self.set_place_owned(&pl);

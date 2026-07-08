@@ -740,3 +740,16 @@ the same receiver syntax** (the earlier "owned receivers borrow, not consumed" w
 it held only for read/write self, and `take self` is exactly the consuming case 0009's `Iter::next`
 desugar depends on — see `docs/reviews/2026-07-08-design-0009-review-1.md` disp. 4); generic result
 enums keep their `ok` marker through substitution.
+
+**Stage-3 ruling (2026-07-08): impl-method-signature conformance and extra methods.**
+Each interface method an impl provides is checked at the impl's definition site to
+carry the SAME signature as the interface's after substituting `Self` -> the target,
+the interface's type parameters -> the impl's interface arguments, and the associated
+type -> the impl's binding (self receiver presence/mode, parameter count/modes/types,
+return type, and — per §4.1's uniform marker — an EXACT effect-marker match; regions
+are not independently declarable on interface/impl methods, so region conformance is
+subsumed by borrow-kind matching). Divergence on any axis is a definition-site error
+(E1021-E1026). **Extra impl methods not declared by the interface are REJECTED**
+(E1014, pre-existing): one interface, one shape — this edition grows no inherent-method
+concept on impls (§1.1's refusal of expressive growth), re-openable if the successor
+basket shows a need.

@@ -506,6 +506,12 @@ fn resolve_impl(
             ));
         }
     }
+    // Signature conformance (design 0007 §3.5/§4.1): each interface method the
+    // impl provides must carry the SAME signature — self receiver, parameter
+    // count/modes/types, return type, and effect marker — after substituting
+    // `Self` -> the target, the interface's type parameters -> the impl's
+    // interface arguments, and the associated type -> the impl's binding.
+    check_impl_conformance(im, &iface_info, &iface_args, &target, &target_args, &pset, known, gen, diags);
     // Associated-type binding (design 0009 §2.1): the impl must bind the member
     // the interface declares (`type Item = T`), and only that member.
     let assoc: Option<(String, Type)> = match (&iface_info.assoc_type, &im.assoc_binding) {
@@ -1449,4 +1455,236 @@ pub(crate) fn unify_inst(decl: &Type, arg: &Type, out: &mut HashMap<String, Type
         | (Type::Array(a, _), Type::Array(b, _)) => unify_inst(a, b, out),
         _ => false,
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// Impl/interface method-signature conformance (design 0007 §3.5, §4.1)
+// ---------------------------------------------------------------------------
+
+/// Check every interface method present in `im` for signature conformance with
+/// its interface declaration (design 0007 §3.5, §4.1). Divergence on any axis —
+/// self receiver, parameter count/mode/type, return type, or effect marker —
+/// is a definition-site error naming both signatures. Missing/extra methods are
+/// E1015/E1014 (reported by the caller); this only checks present-on-both ones.
+#[allow(clippy::too_many_arguments)]
+fn check_impl_conformance(
+    im: &ImplDecl,
+    iface_info: &IfaceInfo,
+    iface_args: &[Type],
+    target: &str,
+    target_args: &[Type],
+    pset: &HashSet<String>,
+    known: &HashSet<String>,
+    gen: &HashSet<String>,
+    diags: &mut Vec<Diag>,
+) {
+    let target_ty = if target_args.is_empty() {
+        Type::Named(target.to_string())
+    } else {
+        Type::App(target.to_string(), target_args.to_vec())
+    };
+    // Interface-side substitution: Self -> target, iface params -> iface args,
+    // and (if any) `Self::Assoc` -> the impl's associated-type binding.
+    let mut smap: HashMap<String, Type> = HashMap::new();
+    smap.insert("Self".to_string(), target_ty.clone());
+    for (pname, arg) in iface_info.type_params.iter().zip(iface_args) {
+        smap.insert(pname.clone(), arg.clone());
+    }
+    if let (Some(aname), Some((_, bty))) = (&iface_info.assoc_type, &im.assoc_binding) {
+        let mut scratch = Vec::new();
+        let resolved = resolve_gty(bty, pset, known, gen, &mut scratch);
+        let mut m2 = HashMap::new();
+        m2.insert("Self".to_string(), target_ty.clone());
+        smap.insert(format!("Self::{aname}"), subst(&resolved, &m2));
+    }
+    // Impl-side substitution: `Self` in a written method type -> the target.
+    let mut impl_smap: HashMap<String, Type> = HashMap::new();
+    impl_smap.insert("Self".to_string(), target_ty.clone());
+
+    for want in &iface_info.methods {
+        let m = match im.methods.iter().find(|m| m.name == want.name) {
+            Some(m) => m,
+            None => continue, // missing method: E1015 already reported
+        };
+        let impl_has_self = m.params.first().is_some_and(|p| p.name == "self");
+        let impl_self_mode = if impl_has_self { m.params[0].mode } else { ParamMode::Take };
+        let impl_nonself: Vec<&Param> = if impl_has_self {
+            m.params.iter().skip(1).collect()
+        } else {
+            m.params.iter().collect()
+        };
+
+        // Both signatures rendered in a common (substituted, un-lowered) form so
+        // the diagnostics can name each side (P4).
+        let exp_params: Vec<(ParamMode, Type)> = want
+            .params
+            .iter()
+            .map(|(md, t)| (*md, unlower(*md, subst(t, &smap))))
+            .collect();
+        let exp_ret = subst(&want.ret, &smap);
+        let mut scratch = Vec::new();
+        let impl_params_ty: Vec<(ParamMode, Type)> = impl_nonself
+            .iter()
+            .map(|p| (p.mode, subst(&resolve_gty(&p.ty, pset, known, gen, &mut scratch), &impl_smap)))
+            .collect();
+        let impl_ret = match &m.ret {
+            Some(rt) => {
+                let base = resolve_gty(&rt.ty, pset, known, gen, &mut scratch);
+                let wrapped = match rt.borrow {
+                    Some(BorrowKind::Shared) => Type::Borrow(Box::new(base)),
+                    Some(BorrowKind::Exclusive) => Type::BorrowMut(Box::new(base)),
+                    None => base,
+                };
+                subst(&wrapped, &impl_smap)
+            }
+            None => Type::unit(),
+        };
+        let exp_sig = fmt_iface_sig(&want.name, want.has_self, want.self_mode, &exp_params, want.alloc, &exp_ret);
+        let got_sig = fmt_iface_sig(&want.name, impl_has_self, impl_self_mode, &impl_params_ty, m.alloc, &impl_ret);
+        let both = |d: Diag| {
+            d.with_note(format!("interface declares: {exp_sig}"), None)
+                .with_note(format!("this impl has:      {got_sig}"), None)
+        };
+
+        // Axis 1 — the `self` receiver (presence, then mode).
+        if impl_has_self != want.has_self {
+            diags.push(both(Diag::error(
+                "E1021",
+                format!(
+                    "impl method `{}` of `{}` for `{}` {} a `self` receiver, but the interface {}",
+                    want.name, im.iface, target,
+                    if impl_has_self { "takes" } else { "omits" },
+                    if want.has_self { "declares one" } else { "declares none" },
+                ),
+                m.span,
+            )));
+            continue;
+        }
+        if impl_has_self && impl_self_mode != want.self_mode {
+            diags.push(both(Diag::error(
+                "E1021",
+                format!(
+                    "impl method `{}` of `{}` for `{}` takes `{} self`, but the interface declares `{} self`",
+                    want.name, im.iface, target, mode_kw(impl_self_mode), mode_kw(want.self_mode),
+                ),
+                m.span,
+            )));
+        }
+        // Axis 2 — parameter count (skip per-parameter checks if it diverges).
+        if impl_nonself.len() != want.params.len() {
+            diags.push(both(Diag::error(
+                "E1022",
+                format!(
+                    "impl method `{}` of `{}` for `{}` takes {} parameter(s), but the interface declares {}",
+                    want.name, im.iface, target, impl_nonself.len(), want.params.len(),
+                ),
+                m.span,
+            )));
+            continue;
+        }
+        // Axes 3 & 4 — per-parameter mode and type.
+        for (i, ((emode, ety), (amode, aty))) in exp_params.iter().zip(&impl_params_ty).enumerate() {
+            if emode != amode {
+                diags.push(both(Diag::error(
+                    "E1023",
+                    format!(
+                        "parameter {} of impl method `{}` of `{}` for `{}` has mode `{}`, but the interface declares `{}`",
+                        i + 1, want.name, im.iface, target, mode_kw(*amode), mode_kw(*emode),
+                    ),
+                    m.span,
+                )));
+            }
+            if type_comparable(ety) && type_comparable(aty) && ety != aty {
+                diags.push(both(Diag::error(
+                    "E1024",
+                    format!(
+                        "parameter {} of impl method `{}` of `{}` for `{}` has type `{}`, but the interface declares `{}`",
+                        i + 1, want.name, im.iface, target, aty.display(), ety.display(),
+                    ),
+                    m.span,
+                )));
+            }
+        }
+        // Axis 5 — return type.
+        if type_comparable(&exp_ret) && type_comparable(&impl_ret) && exp_ret != impl_ret {
+            diags.push(both(Diag::error(
+                "E1025",
+                format!(
+                    "impl method `{}` of `{}` for `{}` returns `{}`, but the interface declares `{}`",
+                    want.name, im.iface, target, impl_ret.display(), exp_ret.display(),
+                ),
+                m.span,
+            )));
+        }
+        // Axis 6 — effect marker (uniform across impls, exact — §4.1).
+        if m.alloc != want.alloc {
+            diags.push(both(Diag::error(
+                "E1026",
+                format!(
+                    "impl method `{}` of `{}` for `{}` is {}, but the interface method is {}",
+                    want.name, im.iface, target,
+                    if m.alloc { "`alloc`" } else { "not `alloc`" },
+                    if want.alloc { "`alloc`" } else { "not `alloc`" },
+                ),
+                m.span,
+            ).with_note("an interface method's effect marker is uniform across impls — exact match required (design 0007 §4.1)", None)));
+        }
+    }
+}
+
+/// Strip the borrow wrapper a `read`/`write` parameter's lowered type carries, to
+/// recover its written (underlying) type for conformance comparison.
+fn unlower(mode: ParamMode, t: Type) -> Type {
+    match mode {
+        ParamMode::Read => match t { Type::Borrow(i) => *i, other => other },
+        ParamMode::Write => match t { Type::BorrowMut(i) => *i, other => other },
+        _ => t,
+    }
+}
+
+fn mode_kw(m: ParamMode) -> &'static str {
+    match m {
+        ParamMode::Read => "read",
+        ParamMode::Write => "write",
+        ParamMode::Take => "take",
+        ParamMode::Out => "out",
+    }
+}
+
+/// A type is comparable for conformance only when it has no unresolved projection
+/// or error node — an unresolved `Self::Assoc` means the impl's associated-type
+/// binding itself errored (E1018), so a cascading signature mismatch is suppressed.
+fn type_comparable(t: &Type) -> bool {
+    match t {
+        Type::Proj(_, _) | Type::Error => false,
+        Type::App(_, a) => a.iter().all(type_comparable),
+        Type::Array(e, _) | Type::Slice(e) | Type::SliceMut(e) | Type::RawPtr(e)
+        | Type::Box(e) | Type::BoxResult(e) | Type::Borrow(e) | Type::BorrowMut(e) => type_comparable(e),
+        Type::FnPtr(f) => f.params.iter().all(|(_, t)| type_comparable(t)) && type_comparable(&f.ret),
+        _ => true,
+    }
+}
+
+/// Render a method signature from its resolved pieces for a P4 diagnostic.
+fn fmt_iface_sig(
+    name: &str,
+    has_self: bool,
+    self_mode: ParamMode,
+    params: &[(ParamMode, Type)],
+    alloc: bool,
+    ret: &Type,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if has_self {
+        parts.push(format!("{} self", mode_kw(self_mode)));
+    }
+    for (m, t) in params {
+        let pfx = match m {
+            ParamMode::Take => String::new(),
+            other => format!("{} ", mode_kw(*other)),
+        };
+        parts.push(format!("{pfx}{}", t.display()));
+    }
+    format!("fn {name}({}){} -> {}", parts.join(", "), if alloc { " alloc" } else { "" }, ret.display())
 }

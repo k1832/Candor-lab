@@ -519,3 +519,115 @@ fn retest_hook_body_runtime_fault_div_by_zero() {
     );
     assert_eq!(f.kind, FaultKind::DivByZero);
 }
+
+// --------------------------------------------------------------------------
+// Reassign-through-move must not double-drop the moved-out value (§1.5).
+// `lst = push(a, lst)` consumes the current `lst` into the RHS, then rebinds;
+// the old value is moved into the new chain, so it must NOT also be dropped at
+// the reassignment. A counting allocator (traces +1 on alloc, -1 on free) plus a
+// drop-hooked payload observe that each box and each element drops exactly once.
+// --------------------------------------------------------------------------
+
+// Like ALLOC, but the allocator traces +1 on each successful alloc and -1 on
+// each free, so a balanced heap sums to zero and the (+1,-1) counts are equal.
+const CALLOC: &str = "
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free:  fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize }
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe \"pool owns [ctx..)\" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let mask: usize = align - 1;
+        let aligned: usize = (b.next + mask) / align * align;
+        if aligned + size > b.end { return ptr_null[u8](); }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
+        trace(5555);
+        return addr_to_ptr[u8](aligned);
+    }
+}
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    unsafe \"note the free\" { trace(0 - 5555); }
+}
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+fn mk_alloc(state: write Bump) -> Alloc {
+    unsafe \"handle + backing outlive every Box\" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(deref state)), vt: addr_of(BUMP_VT) };
+    }
+}
+";
+
+#[test]
+fn reassign_through_move_boxed_chain_drops_each_once() {
+    // A Box-bearing recursive chain, each node carrying a drop-hooked `Res`.
+    // Build it by REASSIGNING `lst = push(a, id, lst)` three times: each push
+    // consumes the current `lst` into `box`, so the old value is moved into the
+    // new chain and must not be dropped at the reassignment.
+    let src = format!(
+        "{CALLOC}{RES}enum Chain {{ End, Link(Res, Box Chain) }}
+        fn push(a: Alloc, id: i64, tail: Chain) alloc -> Chain {{
+            match box(a, tail) {{
+                case BoxResult::oom => return Chain::End,
+                case BoxResult::boxed(b) => return Chain::Link(Res {{ id: id }}, b),
+            }}
+        }}
+        fn main() alloc -> i64 {{
+            let mut st: Bump = Bump {{ next: 16777216, end: 25165824 }};
+            let a: Alloc = mk_alloc(write st);
+            let mut lst: Chain = Chain::End;
+            lst = push(a, 1, lst);
+            lst = push(a, 2, lst);
+            lst = push(a, 3, lst);
+            return 0;
+        }}"
+    );
+    let r = run(&src);
+    // Heap balance: equal counts of alloc (+5555) and free (-5555) markers.
+    let allocs = r.trace.iter().filter(|&&x| x == 5555).count();
+    let frees = r.trace.iter().filter(|&&x| x == -5555).count();
+    assert_eq!(allocs, 3, "three boxes allocated; trace={:?}", r.trace);
+    assert_eq!(frees, allocs, "each box must free exactly once; trace={:?}", r.trace);
+    // Each drop-hooked element (ids 1,2,3) drops exactly once.
+    for id in [1i64, 2, 3] {
+        assert_eq!(
+            r.trace.iter().filter(|&&x| x == id).count(),
+            1,
+            "element {id} must drop exactly once; trace={:?}",
+            r.trace
+        );
+    }
+}
+
+#[test]
+fn reassign_through_move_pure_box_chain_balances() {
+    // The stage-3 masked shape isolated (MEMORY.md): a pure Box chain grown by
+    // `lst = push(a, lst)` — no drop hook, only the box free is observable. Under
+    // the no-op bump allocator this double-free was invisible; the counting
+    // allocator here unmasks it: allocs must equal frees.
+    let src = format!(
+        "{CALLOC}enum Chain {{ End, Link(Box Chain) }}
+        fn push(a: Alloc, tail: Chain) alloc -> Chain {{
+            match box(a, tail) {{
+                case BoxResult::oom => return Chain::End,
+                case BoxResult::boxed(b) => return Chain::Link(b),
+            }}
+        }}
+        fn main() alloc -> i64 {{
+            let mut st: Bump = Bump {{ next: 16777216, end: 25165824 }};
+            let a: Alloc = mk_alloc(write st);
+            let mut lst: Chain = Chain::End;
+            lst = push(a, lst);
+            lst = push(a, lst);
+            lst = push(a, lst);
+            lst = push(a, lst);
+            return 0;
+        }}"
+    );
+    let r = run(&src);
+    let allocs = r.trace.iter().filter(|&&x| x == 5555).count();
+    let frees = r.trace.iter().filter(|&&x| x == -5555).count();
+    assert_eq!(allocs, 4, "four boxes allocated; trace={:?}", r.trace);
+    assert_eq!(frees, allocs, "each box frees exactly once; trace={:?}", r.trace);
+}

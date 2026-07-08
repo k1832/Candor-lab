@@ -16,8 +16,9 @@ designed and reviewed (0007/0008), the novel fault-window semantics is formalize
 to its single-threaded core (reviewed, repaired), and the prototype implements
 the real syntax with a working P15 migrator, multi-file modules, full stage-2
 generics (definition-site-checked, monomorphized without re-analysis, generic
-impls and drop hooks), a first core/std library seed written in Candor whose
-P9 layering the checker itself proves, and VS Code support (TextMate grammar
+impls and drop hooks), a growing core/std library written in Candor (Opt/Res/Arena/List, iteration
+protocols, Opt::map, From-based error widening) whose P9 layering the checker
+itself proves, iteration and associated types (design 0009), and VS Code support (TextMate grammar
 + a diagnostics LSP over the P4 machine-readable diagnostics). The checker has survived eight
 adversarial review rounds (twelve soundness holes found and closed, all
 documented). Live records: [docs/RESULTS.md](docs/RESULTS.md),
