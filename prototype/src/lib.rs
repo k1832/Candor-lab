@@ -5,9 +5,11 @@
 //! binary is a thin CLI over `parse_source`.
 
 pub mod ast;
+pub mod audit;
 pub mod check;
 pub mod count;
 pub mod diag;
+pub mod foreign;
 pub mod generics;
 pub mod interp;
 pub mod lexer;

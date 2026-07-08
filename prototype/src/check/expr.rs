@@ -469,6 +469,7 @@ impl<'a> Checker<'a> {
                 .map(|p| (p.mode, p.decl_ty.clone()))
                 .collect(),
             alloc: sig.alloc,
+            foreign: sig.foreign,
             ret: Box::new(sig.ret.clone()),
         })
     }
@@ -1252,6 +1253,16 @@ impl<'a> Checker<'a> {
             if let Some(sig) = self.items.fns.get(name).cloned() {
                 return self.check_user_call(&sig, args, span);
             }
+            // A foreign (`extern`) call (design 0011 §2): the ground source of the
+            // `foreign` effect. It is unsafe in principle and either discharges (in
+            // a boundary wrapper covered by trust) or propagates — decided at the
+            // function's end from the accumulated set.
+            if let Some(es) = self.items.externs.get(name).cloned() {
+                self.require_unsafe_foreign(span, &format!("`{}`", es.name));
+                self.record_extern_call(&es.name, es.has_trust(), span);
+                let sig = es.to_fn_sig();
+                return self.check_user_call(&sig, args, span);
+            }
         }
         // A method call: `receiver.method(args)` parses as a call whose callee is a
         // field access. Resolve it against interface impls (design 0007 §2.3).
@@ -1278,6 +1289,12 @@ impl<'a> Checker<'a> {
                 self.reject_consuming_call(fp.params.iter().map(|(m, t)| (*m, t)), span);
                 if fp.alloc {
                     self.note_alloc(span, "indirect call through an `alloc` fn-pointer (§6.1)");
+                }
+                if fp.foreign {
+                    // An indirect call through a `foreign` fn-pointer is a foreign
+                    // call (design 0011 §2): unsafe, and undischargeable here.
+                    self.require_unsafe_foreign(span, "a `foreign` function pointer");
+                    self.record_foreign_candor("<fn-pointer>", span);
                 }
                 self.clear_carried();
                 *fp.ret
@@ -1349,6 +1366,15 @@ impl<'a> Checker<'a> {
         self.reject_consuming_call(sig.params.iter().map(|p| (p.mode, &p.decl_ty)), span);
         if sig.alloc {
             self.note_alloc(span, format!("call to `alloc` function `{}` (§6.3)", sig.name));
+        }
+        // A call to a `foreign`-marked Candor function propagates the effect
+        // (design 0011 §2 rule 3). Extern ground sources are recorded separately by
+        // the caller (they carry trust and may discharge); this branch fires only
+        // for an already-`foreign` Candor wrapper (`sig.name` is the extern's own
+        // synthesized sig only when reached via the extern path, where propagation
+        // is intended too — the discharge rule still extinguishes it there).
+        if sig.foreign && !self.items.externs.contains_key(&sig.name) {
+            self.record_foreign_candor(&sig.name, span);
         }
         // Return-borrow extension: the returned borrow keeps the loan(s) on the
         // argument(s) tagged with the return's region alive (§3.1/§3.3).

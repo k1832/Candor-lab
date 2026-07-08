@@ -30,6 +30,74 @@ pub enum Item {
     /// An `impl I[args] for Type { .. }` block attaching an interface's methods
     /// to a type (design 0007 §2.3).
     Impl(ImplDecl),
+    /// An `extern "C" { .. }` block of foreign declarations (design 0011 §1).
+    /// Well-formed only inside a `boundary` file; `boundary_file` records whether
+    /// its file carried the marker (the E1101 placement check reads it).
+    Extern(ExternBlock),
+    /// An `export "C" fn sym(..) -> R = candor_fn;` reverse-direction declaration
+    /// (design 0011 §1.5). Also boundary-file-only.
+    Export(ExportDecl),
+}
+
+// ---------------------------------------------------------------------------
+// Foreign boundary (design 0011)
+// ---------------------------------------------------------------------------
+
+/// An `extern "<abi>" { .. }` block (design 0011 §1). `abi` is the ABI string
+/// (only `"C"` is defined this edition). `boundary_file` is set by the parser to
+/// the file's `boundary`-preamble status, so the placement rule (E1101) survives
+/// the module merge, which flattens files into one program.
+#[derive(Clone, Debug)]
+pub struct ExternBlock {
+    pub abi: String,
+    pub boundary_file: bool,
+    pub fns: Vec<ExternFn>,
+    pub span: Span,
+}
+
+/// One foreign function signature inside an `extern` block. It is implicitly
+/// `foreign` (the ground source of the effect, §2) and may carry a `trust`
+/// clause discharging its preconditions (§3).
+#[derive(Clone, Debug)]
+pub struct ExternFn {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub ret: Option<RetTy>,
+    pub trust: Option<TrustDecl>,
+    pub span: Span,
+}
+
+/// A `trust "justification" { pred(args), .. }` clause (design 0011 §3): a
+/// mandatory non-empty justification string plus zero or more predicates drawn
+/// from the closed vocabulary. Every predicate is `assumed-proven` — recorded
+/// and enumerated, never evaluated.
+#[derive(Clone, Debug)]
+pub struct TrustDecl {
+    pub justification: String,
+    pub predicates: Vec<TrustPred>,
+    pub span: Span,
+}
+
+/// One trust predicate: a name from the closed set and its identifier arguments.
+#[derive(Clone, Debug)]
+pub struct TrustPred {
+    pub name: String,
+    pub args: Vec<String>,
+    pub span: Span,
+}
+
+/// An `export "<abi>" fn <symbol>(params) -> ret = <candor_fn>;` declaration
+/// (design 0011 §1.5): the reverse direction, binding an existing `pub` Candor
+/// function to a stable C symbol under a C-mapped signature.
+#[derive(Clone, Debug)]
+pub struct ExportDecl {
+    pub abi: String,
+    pub boundary_file: bool,
+    pub symbol: String,
+    pub params: Vec<Param>,
+    pub ret: Option<RetTy>,
+    pub candor_fn: String,
+    pub span: Span,
 }
 
 /// A declared type parameter with its bounds (design 0007 §1.2, §6.4). Bounds are
@@ -153,6 +221,13 @@ pub struct FnDecl {
     pub params: Vec<Param>,
     /// The `alloc` effect marker (design 0001 §3.2).
     pub alloc: bool,
+    /// The `foreign` effect marker (design 0011 §2): the function reaches
+    /// undischarged foreign trust. An upper bound like `alloc`.
+    pub foreign: bool,
+    /// Set by the real front-end when this function's file carried the `boundary`
+    /// preamble (design 0008 §4). Only a boundary-module wrapper may *discharge*
+    /// the `foreign` effect (design 0011 §2 rule 4).
+    pub boundary: bool,
     pub requires: Vec<Expr>,
     pub ensures: Vec<Expr>,
     /// Return spec; `None` means the unit return (`-> unit` omitted).
@@ -248,6 +323,9 @@ pub enum TyKind {
 pub struct FnPtrTy {
     pub params: Vec<FnPtrParam>,
     pub alloc: bool,
+    /// The `foreign` effect on a function-pointer type (design 0011 §2): an
+    /// indirect call through it is a foreign call.
+    pub foreign: bool,
     pub ret: Box<Ty>,
 }
 

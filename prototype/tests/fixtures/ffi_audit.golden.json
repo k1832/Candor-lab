@@ -1,0 +1,78 @@
+{
+  "boundary_modules": [
+    {
+      "module": "main",
+      "file": "main.cnr",
+      "abi": [
+        "C"
+      ],
+      "externs": [
+        {
+          "name": "c_len",
+          "signature": "fn c_len(rawptr u8) foreign -> usize",
+          "foreign": true,
+          "trust": {
+            "justification": "POSIX 7: reads bytes to a NUL, retains nothing, no thread state",
+            "span": {
+              "start": 74,
+              "end": 220
+            },
+            "predicates": [
+              {
+                "predicate": "valid_nul_terminated",
+                "args": [
+                  "s"
+                ],
+                "span": {
+                  "start": 160,
+                  "end": 183
+                }
+              },
+              {
+                "predicate": "no_retain",
+                "args": [
+                  "s"
+                ],
+                "span": {
+                  "start": 197,
+                  "end": 209
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "c_raw",
+          "signature": "fn c_raw(rawptr u8) foreign -> usize",
+          "foreign": true,
+          "trust": null
+        }
+      ],
+      "exports": [
+        {
+          "symbol": "candor_checksum",
+          "signature": "fn candor_checksum(usize) -> u32",
+          "candor_fn": "checksum",
+          "inbound_fault": "root policy (abort; no unwinding across C frames)"
+        }
+      ]
+    }
+  ],
+  "effect_reach": [
+    {
+      "function": "main::safe_len",
+      "status": "discharges foreign"
+    },
+    {
+      "function": "main::thin_raw",
+      "status": "propagates foreign (undischarged)"
+    }
+  ],
+  "summary": {
+    "boundary_modules": 1,
+    "externs": 2,
+    "trust_predicates": 2,
+    "undischarged_foreign_wrappers": 1,
+    "exports": 1
+  }
+}

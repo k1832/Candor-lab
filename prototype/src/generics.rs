@@ -37,6 +37,7 @@ pub fn is_generic_program(prog: &Program) -> bool {
         Item::Enum(e) => !e.type_params.is_empty(),
         Item::Fn(f) => !f.type_params.is_empty(),
         Item::Static(_) => false,
+        Item::Extern(_) | Item::Export(_) => false,
     })
 }
 
@@ -127,6 +128,7 @@ pub fn resolve_gty(
                 .map(|p| (p.mode, resolve_gty(&p.ty, params, known_types, generic_types, diags)))
                 .collect(),
             alloc: fp.alloc,
+            foreign: fp.foreign,
             ret: Box::new(resolve_gty(&fp.ret, params, known_types, generic_types, diags)),
         }),
     }
@@ -323,6 +325,7 @@ pub fn resolve_tables(prog: &Program, items: &mut Items, diags: &mut Vec<Diag>) 
                     regions: f.regions.clone(),
                     params,
                     alloc: f.alloc,
+                    foreign: f.foreign,
                     ret,
                     ret_region,
                     ret_span,

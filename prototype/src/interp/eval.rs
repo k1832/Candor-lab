@@ -565,6 +565,7 @@ impl<'a> Interp<'a> {
             TyKind::FnPtr(fp) => Type::FnPtr(crate::types::FnPtrTy {
                 params: fp.params.iter().map(|p| (p.mode, self.resolve_ty(&p.ty))).collect(),
                 alloc: fp.alloc,
+                foreign: fp.foreign,
                 ret: Box::new(self.resolve_ty(&fp.ret)),
             }),
             TyKind::App { .. } | TyKind::Proj { .. } => {
@@ -578,6 +579,7 @@ impl<'a> Interp<'a> {
         Type::FnPtr(crate::types::FnPtrTy {
             params: sig.params.iter().map(|p| (p.mode, p.decl_ty.clone())).collect(),
             alloc: sig.alloc,
+            foreign: sig.foreign,
             ret: Box::new(sig.ret.clone()),
         })
     }
@@ -862,6 +864,15 @@ impl<'a> Interp<'a> {
 // ===========================================================================
 // Arithmetic, comparison, conversion
 // ===========================================================================
+
+/// The scalar width a C-mappable (wordy) foreign type reads/writes as: pointers
+/// and `usize`-shaped words are `u64`; scalars keep their own width (design 0011).
+fn foreign_scalar_of(ty: &Type) -> ScalarTy {
+    match ty {
+        Type::Scalar(s) => *s,
+        _ => ScalarTy::U64,
+    }
+}
 
 fn ty_range(sty: ScalarTy) -> (i128, i128, u32, bool) {
     let (bits, signed): (u32, bool) = match sty {
@@ -1390,6 +1401,11 @@ impl<'a> Interp<'a> {
                 let sig = self.items.fns[name.as_str()].clone();
                 return self.eval_user_call(fnd, &sig, args);
             }
+            // Foreign (`extern`) call (design 0011 §5): dispatch through the shim
+            // registry, or raise `no_foreign_runtime` if unregistered.
+            if let Some(es) = self.items.externs.get(name.as_str()).cloned() {
+                return self.eval_extern_call(&es, args, span);
+            }
         }
         // Interface method call `recv.m(args)` (design 0007 static dispatch): the
         // impl is chosen by the receiver's runtime nominal type.
@@ -1476,6 +1492,42 @@ impl<'a> Interp<'a> {
             self.set_place_owned(pl);
         }
         self.ret_to_rval(ret)
+    }
+
+    /// A foreign (`extern`) call (design 0011 §5): read each argument as a scalar
+    /// word, dispatch through the shim registry, and materialize the shim's word
+    /// result as the declared return type. An unregistered symbol raises the
+    /// defined `no_foreign_runtime` fault.
+    fn eval_extern_call(&mut self, es: &crate::resolve::ExternSig, args: &[Expr], span: Span) -> R<RVal> {
+        self.cur_span = span;
+        let mut vals: Vec<i128> = Vec::with_capacity(args.len());
+        for (p, a) in es.params.iter().zip(args) {
+            let a: &Expr = match &a.kind {
+                ExprKind::OutArg(inner) => inner,
+                _ => a,
+            };
+            let rv = self.eval_value(a, Some(&p.lowered))?;
+            let sty = foreign_scalar_of(&p.lowered);
+            vals.push(self.read_int(rv.addr, sty)?);
+        }
+        let result = match crate::foreign::dispatch(&es.name, &vals) {
+            Some(v) => v,
+            None => {
+                // Deliver at the extern declaration span so the fault is identical
+                // across the tree-walker and MIR engines (design 0011 §5).
+                return Err(Ctl::Fault(Fault::new(
+                    FaultKind::NoForeignRuntime,
+                    es.span,
+                    format!("no foreign runtime for `{}` (no shim registered; native backend is a 0010 forward dependency)", es.name),
+                )));
+            }
+        };
+        if self.size_of(&es.ret) == 0 {
+            return Ok(self.unit_val());
+        }
+        let (addr, id) = self.alloc_temp(es.ret.clone());
+        self.write_int(addr, result, foreign_scalar_of(&es.ret))?;
+        Ok(RVal { ty: es.ret.clone(), addr, origin: Origin::Temp(id) })
     }
 
     fn ret_to_rval(&mut self, ret: RetVal) -> R<RVal> {

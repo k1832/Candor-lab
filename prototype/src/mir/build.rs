@@ -450,6 +450,7 @@ impl<'a> Lowerer<'a> {
                     .map(|pp| Ok((pp.mode, self.resolve_ty(&pp.ty)?)))
                     .collect::<LR<Vec<_>>>()?,
                 alloc: fp.alloc,
+                foreign: fp.foreign,
                 ret: Box::new(self.resolve_ty(&fp.ret)?),
             }),
             other => return unsupported(format!("type {other:?}")),
@@ -1655,6 +1656,12 @@ impl<'a> Lowerer<'a> {
             if let Some(sig) = self.items.fns.get(name.as_str()).cloned() {
                 return self.lower_direct_call(name.clone(), &sig, args, span);
             }
+            // A foreign (`extern`) call (design 0011 §5): lower to a direct call on
+            // the C symbol; the interpreter dispatches it through the shim registry.
+            if let Some(es) = self.items.externs.get(name.as_str()) {
+                let sig = es.to_fn_sig();
+                return self.lower_direct_call(name.clone(), &sig, args, span);
+            }
             // An indirect call through a fn-pointer local.
             if self.lookup(name).is_some() {
                 return self.lower_indirect_call(callee, args, span);
@@ -1808,9 +1815,10 @@ impl<'a> Lowerer<'a> {
             Some(sig) => Type::FnPtr(crate::types::FnPtrTy {
                 params: sig.params.iter().map(|p| (p.mode, p.decl_ty.clone())).collect(),
                 alloc: sig.alloc,
+                foreign: sig.foreign,
                 ret: Box::new(sig.ret.clone()),
             }),
-            None => Type::FnPtr(crate::types::FnPtrTy { params: Vec::new(), alloc: false, ret: Box::new(Type::unit()) }),
+            None => Type::FnPtr(crate::types::FnPtrTy { params: Vec::new(), alloc: false, foreign: false, ret: Box::new(Type::unit()) }),
         }
     }
     fn fnptr_sig(&self, fty: &Type) -> crate::resolve::FnSig {
@@ -1836,6 +1844,7 @@ impl<'a> Lowerer<'a> {
             regions: Vec::new(),
             params,
             alloc: fp.alloc,
+            foreign: fp.foreign,
             ret: (*fp.ret).clone(),
             ret_region: None,
             ret_span: Span::point(0),

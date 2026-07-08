@@ -36,3 +36,10 @@ pub fn parse_module(src: &str) -> Result<(Program, Vec<crate::ast::UseDecl>, Vec
     let tokens = lexer::lex(src)?;
     parser::parse_module(tokens)
 }
+
+/// Parse a real-syntax source string, returning the AST and the file's
+/// `boundary`-preamble status (design 0011 audit). Used by `candor-proto audit`.
+pub fn parse_with_boundary(src: &str) -> Result<(Program, bool), Diag> {
+    let tokens = lexer::lex(src)?;
+    parser::parse_with_boundary(tokens)
+}

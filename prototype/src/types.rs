@@ -26,6 +26,8 @@ pub enum ArrayLen {
 pub struct FnPtrTy {
     pub params: Vec<(ParamMode, Type)>,
     pub alloc: bool,
+    /// The `foreign` effect on the fn-pointer type (design 0011 §2).
+    pub foreign: bool,
     pub ret: Box<Type>,
 }
 
@@ -116,9 +118,10 @@ impl Type {
             Type::FnPtr(f) => {
                 let ps: Vec<String> = f.params.iter().map(|(_, t)| t.display()).collect();
                 format!(
-                    "fn({}){} -> {}",
+                    "fn({}){}{} -> {}",
                     ps.join(", "),
                     if f.alloc { " alloc" } else { "" },
+                    if f.foreign { " foreign" } else { "" },
                     f.ret.display()
                 )
             }
@@ -248,6 +251,7 @@ pub fn subst(ty: &Type, map: &std::collections::HashMap<String, Type>) -> Type {
         Type::Borrow(e) => Type::Borrow(Box::new(subst(e, map))),
         Type::BorrowMut(e) => Type::BorrowMut(Box::new(subst(e, map))),
         Type::FnPtr(f) => Type::FnPtr(FnPtrTy {
+            foreign: f.foreign,
             params: f.params.iter().map(|(m, t)| (*m, subst(t, map))).collect(),
             alloc: f.alloc,
             ret: Box::new(subst(&f.ret, map)),
@@ -568,6 +572,8 @@ pub fn assignable(from: &Type, to: &Type) -> bool {
                 && a.ret == b.ret
                 // effect: source alloc requires target alloc (upper bound).
                 && (!a.alloc || b.alloc)
+                // effect: source foreign requires target foreign (design 0011 §2).
+                && (!a.foreign || b.foreign)
         }
         _ => false,
     }

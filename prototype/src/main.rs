@@ -30,6 +30,7 @@ fn main() -> ExitCode {
         (Some("check"), Some(path)) => run_check(path),
         (Some("run"), Some(_)) => run_run(&args[2..]),
         (Some("count"), Some(path)) => run_count(path),
+        (Some("audit"), Some(path)) => run_audit(path),
         (Some("migrate"), Some(path)) => run_migrate(path, &args[3..]),
         _ => {
             eprintln!("usage: candor-proto (parse|check|run|count) <file>  |  run [--engine=mir] <file>  |  migrate <file.cn> [-o <out.cnr>]  (.cnr = real syntax, .cn = throwaway)");
@@ -273,6 +274,20 @@ fn report_run(outcome: candor_proto::RunResult) -> ExitCode {
         }
         candor_proto::RunResult::ParseError(d) => {
             println!("{}", d.to_json());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `audit <dir_or_file>` — the boundary-module audit surface (design 0011 §6).
+fn run_audit(path: &str) -> ExitCode {
+    match candor_proto::audit::audit_path(std::path::Path::new(path)) {
+        Ok(json) => {
+            println!("{json}");
+            ExitCode::SUCCESS
+        }
+        Err(diag) => {
+            println!("{}", diag.to_json());
             ExitCode::FAILURE
         }
     }

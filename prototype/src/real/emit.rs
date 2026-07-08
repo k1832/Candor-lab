@@ -82,6 +82,9 @@ impl Emitter {
             Item::Interface(_) | Item::Impl(_) => {
                 unreachable!("throwaway syntax has no generic items")
             }
+            Item::Extern(_) | Item::Export(_) => {
+                unreachable!("throwaway syntax has no foreign items (design 0011)")
+            }
         }
     }
 

@@ -165,6 +165,23 @@ impl Counter {
                     self.block(&m.body.stmts);
                 }
             }
+            // Foreign-boundary items (design 0011): each declaration counts as one
+            // logical statement; declared foreign signatures have no body.
+            Item::Extern(eb) => {
+                self.logical_statements += 1;
+                self.stmt_spans.push(eb.span);
+                for ef in &eb.fns {
+                    self.logical_statements += 1;
+                    self.stmt_spans.push(ef.span);
+                    for p in &ef.params {
+                        self.decl_rawptr(&p.ty);
+                    }
+                }
+            }
+            Item::Export(ex) => {
+                self.logical_statements += 1;
+                self.stmt_spans.push(ex.span);
+            }
         }
     }
 

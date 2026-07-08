@@ -31,6 +31,9 @@ pub struct FnSig {
     pub regions: Vec<String>,
     pub params: Vec<ParamInfo>,
     pub alloc: bool,
+    /// The `foreign` effect (design 0011 §2). `true` for an undischarged foreign
+    /// wrapper and for an `extern` signature (the ground source).
+    pub foreign: bool,
     pub ret: Type,
     /// Region tag on a borrow return (design 0001 §3.3), if written.
     pub ret_region: Option<String>,
@@ -47,6 +50,7 @@ pub struct GenericFnSig {
     pub regions: Vec<String>,
     pub params: Vec<ParamInfo>,
     pub alloc: bool,
+    pub foreign: bool,
     pub ret: Type,
     pub ret_region: Option<String>,
     pub ret_span: Span,
@@ -100,6 +104,66 @@ pub struct ImplInfo {
     pub span: Span,
 }
 
+/// A resolved `trust` clause (design 0011 §3): its justification string and the
+/// closed-vocabulary predicates, each with span, for enumeration by the audit.
+#[derive(Clone, Debug)]
+pub struct TrustInfo {
+    pub justification: String,
+    pub predicates: Vec<(String, Vec<String>, Span)>,
+    pub span: Span,
+}
+
+/// A resolved `extern` foreign signature (design 0011 §1/§2): the ground source
+/// of the `foreign` effect. Kept out of `Items::fns` (it has no body) in its own
+/// table so the interpreter/MIR engines dispatch it through the shim registry.
+#[derive(Clone, Debug)]
+pub struct ExternSig {
+    pub name: String,
+    pub abi: String,
+    pub params: Vec<ParamInfo>,
+    pub ret: Type,
+    pub ret_span: Span,
+    pub trust: Option<TrustInfo>,
+    /// The extern's file carried the `boundary` preamble (design 0011 §1, E1101).
+    pub boundary_file: bool,
+    pub span: Span,
+}
+
+impl ExternSig {
+    pub fn has_trust(&self) -> bool {
+        self.trust.is_some()
+    }
+    /// A `FnSig` view of the extern (implicitly `foreign`), reusing the ordinary
+    /// call machinery for argument lowering and type checking.
+    pub fn to_fn_sig(&self) -> FnSig {
+        FnSig {
+            name: self.name.clone(),
+            regions: Vec::new(),
+            params: self.params.clone(),
+            alloc: false,
+            foreign: true,
+            ret: self.ret.clone(),
+            ret_region: None,
+            ret_span: self.ret_span,
+            span: self.span,
+        }
+    }
+}
+
+/// A resolved `export` declaration (design 0011 §1.5): a `pub` Candor function
+/// re-exposed at a stable C symbol under a C-mapped signature.
+#[derive(Clone, Debug)]
+pub struct ExportInfo {
+    pub symbol: String,
+    pub abi: String,
+    pub params: Vec<ParamInfo>,
+    pub ret: Type,
+    pub ret_span: Span,
+    pub candor_fn: String,
+    pub boundary_file: bool,
+    pub span: Span,
+}
+
 /// The resolved program item table.
 #[derive(Clone, Default)]
 pub struct Items {
@@ -112,6 +176,10 @@ pub struct Items {
     pub interfaces: HashMap<String, IfaceInfo>,
     pub impls: Vec<ImplInfo>,
     pub generic_defs: HashMap<String, crate::types::GenericDecl>,
+    /// Foreign `extern` signatures (design 0011 §1), keyed by symbol name.
+    pub externs: HashMap<String, ExternSig>,
+    /// `export` declarations (design 0011 §1.5), in source order.
+    pub exports: Vec<ExportInfo>,
     /// The type parameters in scope at the *current* def-site check, mapping each
     /// to whether it carries the `copy` bound. Empty for concrete checking.
     pub type_param_copy: HashMap<String, bool>,
@@ -195,6 +263,7 @@ impl<'a> Resolver<'a> {
                 Type::FnPtr(crate::types::FnPtrTy {
                     params,
                     alloc: fp.alloc,
+                    foreign: fp.foreign,
                     ret: Box::new(self.resolve_ty(&fp.ret)),
                 })
             }
@@ -253,6 +322,8 @@ pub fn resolve_program(prog: &Program, diags: &mut Vec<Diag>) -> Items {
             // Interfaces/impls are handled by the generics layer, not the base
             // resolver; a monomorphized program contains none.
             Item::Interface(_) | Item::Impl(_) => {}
+            // Foreign-boundary items (design 0011) are resolved in phase 1.
+            Item::Extern(_) | Item::Export(_) => {}
         }
     }
 
@@ -428,6 +499,7 @@ pub fn resolve_program(prog: &Program, diags: &mut Vec<Diag>) -> Items {
                             regions: f.regions.clone(),
                             params,
                             alloc: f.alloc,
+                            foreign: f.foreign,
                             ret,
                             ret_region,
                             ret_span,
@@ -438,6 +510,48 @@ pub fn resolve_program(prog: &Program, diags: &mut Vec<Diag>) -> Items {
                 Item::Static(s) => {
                     let ty = r.resolve_ty(&s.ty);
                     items.statics.insert(s.name.clone(), (ty, s.span));
+                }
+                Item::Extern(eb) => {
+                    for ef in &eb.fns {
+                        let params = resolve_fn_params(&mut r, &ef.params);
+                        let (ret, ret_span) = resolve_opt_ret(&mut r, &ef.ret, ef.span);
+                        let trust = ef.trust.as_ref().map(|t| TrustInfo {
+                            justification: t.justification.clone(),
+                            predicates: t
+                                .predicates
+                                .iter()
+                                .map(|p| (p.name.clone(), p.args.clone(), p.span))
+                                .collect(),
+                            span: t.span,
+                        });
+                        items.externs.insert(
+                            ef.name.clone(),
+                            ExternSig {
+                                name: ef.name.clone(),
+                                abi: eb.abi.clone(),
+                                params,
+                                ret,
+                                ret_span,
+                                trust,
+                                boundary_file: eb.boundary_file,
+                                span: ef.span,
+                            },
+                        );
+                    }
+                }
+                Item::Export(ex) => {
+                    let params = resolve_fn_params(&mut r, &ex.params);
+                    let (ret, ret_span) = resolve_opt_ret(&mut r, &ex.ret, ex.span);
+                    items.exports.push(ExportInfo {
+                        symbol: ex.symbol.clone(),
+                        abi: ex.abi.clone(),
+                        params,
+                        ret,
+                        ret_span,
+                        candor_fn: ex.candor_fn.clone(),
+                        boundary_file: ex.boundary_file,
+                        span: ex.span,
+                    });
                 }
                 Item::Interface(_) | Item::Impl(_) => {}
             }
@@ -504,6 +618,41 @@ pub fn resolve_program(prog: &Program, diags: &mut Vec<Diag>) -> Items {
     }
 
     items
+}
+
+/// Resolve a list of foreign/export parameters into [`ParamInfo`]s (design 0011).
+fn resolve_fn_params(r: &mut Resolver, params: &[Param]) -> Vec<ParamInfo> {
+    let mut out = Vec::new();
+    for p in params {
+        let dty = r.resolve_ty(&p.ty);
+        r.check_mode_on_borrow(p.mode, &dty, p.ty.span);
+        let lowered = lower_param(p.mode, dty.clone());
+        out.push(ParamInfo {
+            name: p.name.clone(),
+            mode: p.mode,
+            region: p.region.clone(),
+            decl_ty: dty,
+            lowered,
+            span: p.span,
+        });
+    }
+    out
+}
+
+/// Resolve an optional return spec into `(Type, span)` (unit when absent).
+fn resolve_opt_ret(r: &mut Resolver, ret: &Option<RetTy>, fallback: Span) -> (Type, Span) {
+    match ret {
+        Some(rt) => {
+            let base = r.resolve_ty(&rt.ty);
+            let t = match rt.borrow {
+                Some(BorrowKind::Shared) => Type::Borrow(Box::new(base)),
+                Some(BorrowKind::Exclusive) => Type::BorrowMut(Box::new(base)),
+                None => base,
+            };
+            (t, rt.span)
+        }
+        None => (Type::unit(), fallback),
+    }
 }
 
 fn dup_check(

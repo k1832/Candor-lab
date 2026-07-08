@@ -74,6 +74,7 @@ impl<'a> Checker<'a> {
         Type::FnPtr(crate::types::FnPtrTy {
             params,
             alloc: sig.alloc,
+            foreign: false,
             ret: Box::new(subst(&sig.ret, &map)),
         })
     }
@@ -286,7 +287,7 @@ pub fn check_generic_program(prog: &Program, real: bool) -> GenericCheck {
         }
     }
 
-    let mut c = Checker { items: &items, diags, f: FnState::empty(), real, insts: Vec::new(), def_site: false, shapes: std::collections::HashMap::new(), type_params: Vec::new(), param_bounds: Vec::new(), expected_ty: None, cur_generic: None };
+    let mut c = Checker { items: &items, diags, f: FnState::empty(), real, insts: Vec::new(), def_site: false, shapes: std::collections::HashMap::new(), type_params: Vec::new(), param_bounds: Vec::new(), expected_ty: None, cur_generic: None, foreign_report: Vec::new() };
 
     // --- Definition-site checks (opaque T, once per generic) ---
     for it in &prog.items {
@@ -359,6 +360,7 @@ fn synth_hook(h: &HookInfo) -> (FnDecl, FnSig, std::collections::HashMap<String,
             span: h.span,
         }],
         alloc: true,
+        foreign: false,
         ret: Type::unit(),
         ret_region: None,
         ret_span: h.span,
@@ -368,6 +370,8 @@ fn synth_hook(h: &HookInfo) -> (FnDecl, FnSig, std::collections::HashMap<String,
         name: sig.name.clone(),
         type_params: Vec::new(),
         regions: Vec::new(),
+        foreign: false,
+        boundary: false,
         params: vec![Param {
             name: "self".to_string(),
             mode: ParamMode::Write,
@@ -407,7 +411,7 @@ fn hook_is_alloc(items: &crate::resolve::Items, h: &HookInfo, real: bool) -> boo
         type_params: pnames,
         param_bounds: h.type_params.clone(),
         expected_ty: None,
-        cur_generic: None,
+        cur_generic: None, foreign_report: Vec::new(),
     };
     c.check_fn_with_sig(&fdecl, &sig);
     c.f.alloc.site.is_some()
@@ -429,7 +433,7 @@ fn check_one_hook(outer: &mut Checker, items: &crate::resolve::Items, h: &HookIn
         type_params: pnames,
         param_bounds: h.type_params.clone(),
         expected_ty: None,
-        cur_generic: None,
+        cur_generic: None, foreign_report: Vec::new(),
     };
     c.check_fn_with_sig(&fdecl, &sig);
     outer.diags = c.diags;
@@ -454,6 +458,7 @@ impl<'a> Checker<'a> {
             regions: sig.regions.clone(),
             params: sig.params.clone(),
             alloc: sig.alloc,
+            foreign: sig.foreign,
             ret: sig.ret.clone(),
             ret_region: sig.ret_region.clone(),
             ret_span: sig.ret_span,
@@ -470,7 +475,7 @@ impl<'a> Checker<'a> {
             type_params: Vec::new(),
             param_bounds: Vec::new(),
             expected_ty: None,
-            cur_generic: None,
+            cur_generic: None, foreign_report: Vec::new(),
         };
         c.type_params = sig.type_params.iter().map(|(n, _)| n.clone()).collect();
         c.param_bounds = sig.type_params.clone();
@@ -510,7 +515,7 @@ impl<'a> Checker<'a> {
                     type_params: Vec::new(),
                     param_bounds: Vec::new(),
                     expected_ty: None,
-                    cur_generic: None,
+                    cur_generic: None, foreign_report: Vec::new(),
                 };
                 c.check_fn_with_sig(&fdecl, &sig);
                 self.diags = c.diags;
@@ -545,7 +550,7 @@ impl<'a> Checker<'a> {
                 type_params: tp_names.clone(),
                 param_bounds: param_bounds.clone(),
                 expected_ty: None,
-                cur_generic: None,
+                cur_generic: None, foreign_report: Vec::new(),
             };
             let sig = c.impl_method_sig(&fdecl, "", &[]);
             c.check_fn_with_sig(&fdecl, &sig);
@@ -581,6 +586,7 @@ impl<'a> Checker<'a> {
             regions: m.regions.clone(),
             params,
             alloc: m.alloc,
+            foreign: m.foreign,
             ret,
             ret_region,
             ret_span,

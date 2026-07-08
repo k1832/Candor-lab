@@ -134,6 +134,7 @@ fn fault_msg(kind: crate::interp::FaultKind) -> &'static str {
         Requires => "`requires` clause violated",
         Ensures => "`ensures` clause violated",
         BadPointer => "bad pointer",
+        NoForeignRuntime => "no foreign runtime (native backend is a 0010 forward dependency)",
     }
 }
 

@@ -293,6 +293,8 @@ impl Parser {
             regions,
             params,
             alloc,
+            foreign: false,
+            boundary: false,
             requires,
             ensures,
             ret,
@@ -496,6 +498,7 @@ impl Parser {
         Ok(FnPtrTy {
             params,
             alloc,
+            foreign: false,
             ret: Box::new(ret),
         })
     }

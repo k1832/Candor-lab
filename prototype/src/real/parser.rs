@@ -35,13 +35,17 @@ pub struct RParser {
     mod_uses: Vec<UseDecl>,
     /// Visibility (`pub`) of each item, parallel to the returned `Program.items`.
     mod_vis: Vec<bool>,
+    /// Whether this file opened with the `boundary` preamble (design 0008 §4).
+    /// Recorded on every `fn`/`extern`/`export` so the placement and discharge
+    /// rules of design 0011 survive the module merge.
+    boundary: bool,
 }
 
 type PResult<T> = Result<T, Diag>;
 
 impl RParser {
     pub fn new(tokens: Vec<RToken>) -> RParser {
-        RParser { tokens, pos: 0, last_end: 0, no_struct: false, for_ctr: 0, mod_uses: Vec::new(), mod_vis: Vec::new() }
+        RParser { tokens, pos: 0, last_end: 0, no_struct: false, for_ctr: 0, mod_uses: Vec::new(), mod_vis: Vec::new(), boundary: false }
     }
 
     // ----- cursor ----------------------------------------------------------
@@ -118,6 +122,14 @@ impl RParser {
     // ----- program & items -------------------------------------------------
     pub fn parse_program(&mut self) -> PResult<Program> {
         let mut items = Vec::new();
+        // File-level `boundary` preamble (design 0008 §4): a contextual keyword
+        // valid only as the very first item-preamble token of a file. It marks the
+        // whole file (module) as a boundary module (the only place `extern`/
+        // `export` may sit, design 0011 §1).
+        if self.at_ident("boundary") {
+            self.bump();
+            self.boundary = true;
+        }
         while !self.at(&RTok::Eof) {
             // Item-preamble `pub` (design 0008 §2) and `use` (§3) are contextual
             // keywords recognized only at item-leading position, so they stay
@@ -174,6 +186,12 @@ impl RParser {
         }
         if !copy && self.at_ident("impl") {
             return Ok(Item::Impl(self.parse_impl()?));
+        }
+        if !copy && self.at_ident("extern") {
+            return Ok(Item::Extern(self.parse_extern()?));
+        }
+        if !copy && self.at_ident("export") {
+            return Ok(Item::Export(self.parse_export()?));
         }
         match self.peek() {
             RTok::Kw(RKw::Struct) => Ok(Item::Struct(self.parse_struct(copy)?)),
@@ -391,12 +409,120 @@ impl RParser {
             regions: Vec::new(),
             params,
             alloc,
+            foreign: false,
+            boundary: self.boundary,
             requires: Vec::new(),
             ensures: Vec::new(),
             ret,
             body,
             span: self.span_from(lo),
         })
+    }
+
+    /// Parse an `extern "<abi>" { <extern fns> }` block (design 0011 §1). The
+    /// `boundary`-file status is captured so the placement rule (E1101) survives
+    /// the module merge. Parsing succeeds anywhere; ill placement is a checker
+    /// diagnostic, not a parse error, so the message is a P4 semantic one.
+    fn parse_extern(&mut self) -> PResult<ExternBlock> {
+        let lo = self.cur_start();
+        self.bump(); // `extern`
+        let abi = self.expect_abi_string()?;
+        self.expect(&RTok::LBrace, "`{`")?;
+        let mut fns = Vec::new();
+        while !self.at(&RTok::RBrace) && !self.at(&RTok::Eof) {
+            fns.push(self.parse_extern_fn()?);
+        }
+        self.expect(&RTok::RBrace, "`}`")?;
+        Ok(ExternBlock { abi, boundary_file: self.boundary, fns, span: self.span_from(lo) })
+    }
+
+    /// One `fn name(params) foreign -> ret trust "..." { .. };` inside an extern
+    /// block. The `foreign` effect marker is optional in the surface (an extern is
+    /// implicitly foreign); the trailing `trust` clause is optional.
+    fn parse_extern_fn(&mut self) -> PResult<ExternFn> {
+        let lo = self.cur_start();
+        self.expect(&RTok::Kw(RKw::Fn), "`fn`")?;
+        let name = self.expect_ident("a foreign function name")?;
+        self.expect(&RTok::LParen, "`(`")?;
+        let mut params = Vec::new();
+        while !self.at(&RTok::RParen) {
+            params.push(self.parse_param()?);
+            if !self.eat(&RTok::Comma) {
+                break;
+            }
+        }
+        self.expect(&RTok::RParen, "`)`")?;
+        // The implicit `foreign` marker (accepted, not required — an extern is a
+        // ground source of the effect regardless).
+        let _ = self.at_ident("foreign") && { self.bump(); true };
+        let ret = if self.eat(&RTok::Arrow) { Some(self.parse_ret_ty()?) } else { None };
+        let trust = if self.at_ident("trust") { Some(self.parse_trust()?) } else { None };
+        self.expect(&RTok::Semi, "`;`")?;
+        Ok(ExternFn { name, params, ret, trust, span: self.span_from(lo) })
+    }
+
+    /// Parse a `trust "justification" { pred(args), .. }` clause (design 0011 §3).
+    fn parse_trust(&mut self) -> PResult<TrustDecl> {
+        let lo = self.cur_start();
+        self.bump(); // `trust`
+        let justification = match self.peek().clone() {
+            RTok::Str(s) => { self.bump(); s }
+            _ => return Err(self.unexpected("a trust justification string")),
+        };
+        self.expect(&RTok::LBrace, "`{`")?;
+        let mut predicates = Vec::new();
+        while !self.at(&RTok::RBrace) && !self.at(&RTok::Eof) {
+            let plo = self.cur_start();
+            let name = self.expect_ident("a trust predicate name")?;
+            let mut args = Vec::new();
+            if self.eat(&RTok::LParen) {
+                while !self.at(&RTok::RParen) {
+                    args.push(self.expect_ident("a predicate argument")?);
+                    if !self.eat(&RTok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&RTok::RParen, "`)`")?;
+            }
+            predicates.push(TrustPred { name, args, span: self.span_from(plo) });
+            if !self.eat(&RTok::Comma) {
+                break;
+            }
+        }
+        self.expect(&RTok::RBrace, "`}`")?;
+        Ok(TrustDecl { justification, predicates, span: self.span_from(lo) })
+    }
+
+    /// Parse an `export "<abi>" fn <symbol>(params) -> ret = <candor_fn>;` item
+    /// (design 0011 §1.5).
+    fn parse_export(&mut self) -> PResult<ExportDecl> {
+        let lo = self.cur_start();
+        self.bump(); // `export`
+        let abi = self.expect_abi_string()?;
+        self.expect(&RTok::Kw(RKw::Fn), "`fn`")?;
+        let symbol = self.expect_ident("an export C symbol name")?;
+        self.expect(&RTok::LParen, "`(`")?;
+        let mut params = Vec::new();
+        while !self.at(&RTok::RParen) {
+            params.push(self.parse_param()?);
+            if !self.eat(&RTok::Comma) {
+                break;
+            }
+        }
+        self.expect(&RTok::RParen, "`)`")?;
+        let ret = if self.eat(&RTok::Arrow) { Some(self.parse_ret_ty()?) } else { None };
+        self.expect(&RTok::Eq, "`=`")?;
+        let candor_fn = self.expect_ident("the exported Candor function name")?;
+        self.expect(&RTok::Semi, "`;`")?;
+        Ok(ExportDecl { abi, boundary_file: self.boundary, symbol, params, ret, candor_fn, span: self.span_from(lo) })
+    }
+
+    /// An ABI string after `extern`/`export` (`"C"`). Only a string literal.
+    fn expect_abi_string(&mut self) -> PResult<String> {
+        match self.peek().clone() {
+            RTok::Str(s) => { self.bump(); Ok(s) }
+            _ => Err(self.unexpected("an ABI string, e.g. `\"C\"`")),
+        }
     }
 
     fn parse_struct(&mut self, copy: bool) -> PResult<StructDecl> {
@@ -497,14 +623,18 @@ impl RParser {
         }
         self.expect(&RTok::RParen, "`)`")?;
 
-        // SigTail: `alloc` (contextual) and contract clauses in any order.
+        // SigTail: `alloc`/`foreign` (contextual) and contract clauses, any order.
         let mut alloc = false;
+        let mut foreign = false;
         let mut requires = Vec::new();
         let mut ensures = Vec::new();
         loop {
             if self.at_ident("alloc") {
                 self.bump();
                 alloc = true;
+            } else if self.at_ident("foreign") {
+                self.bump();
+                foreign = true;
             } else if self.eat_kw(RKw::Requires) {
                 self.expect(&RTok::LParen, "`(`")?;
                 requires.push(self.parse_delimited_expr()?);
@@ -524,7 +654,7 @@ impl RParser {
             None
         };
         let body = self.parse_block()?;
-        Ok(FnDecl { name, type_params, regions, params, alloc, requires, ensures, ret, body, span: self.span_from(lo) })
+        Ok(FnDecl { name, type_params, regions, params, alloc, foreign, boundary: self.boundary, requires, ensures, ret, body, span: self.span_from(lo) })
     }
 
     fn parse_param(&mut self) -> PResult<Param> {
@@ -789,15 +919,12 @@ impl RParser {
             }
         }
         self.expect(&RTok::RParen, "`)`")?;
-        let alloc = if self.at_ident("alloc") {
-            self.bump();
-            true
-        } else {
-            false
-        };
+        // Effect markers in canonical order `alloc foreign`, either optional.
+        let alloc = if self.at_ident("alloc") { self.bump(); true } else { false };
+        let foreign = if self.at_ident("foreign") { self.bump(); true } else { false };
         self.expect(&RTok::Arrow, "`->`")?;
         let ret = self.parse_type()?;
-        Ok(FnPtrTy { params, alloc, ret: Box::new(ret) })
+        Ok(FnPtrTy { params, alloc, foreign, ret: Box::new(ret) })
     }
 
     fn parse_fnptr_param(&mut self) -> PResult<FnPtrParam> {
@@ -1746,4 +1873,11 @@ pub fn parse_module(tokens: Vec<RToken>) -> PResult<(Program, Vec<UseDecl>, Vec<
     let mut p = RParser::new(tokens);
     let prog = p.parse_program()?;
     Ok((prog, p.mod_uses, p.mod_vis))
+}
+
+/// Parse and also report the file's `boundary`-preamble status (design 0011).
+pub fn parse_with_boundary(tokens: Vec<RToken>) -> PResult<(Program, bool)> {
+    let mut p = RParser::new(tokens);
+    let prog = p.parse_program()?;
+    Ok((prog, p.boundary))
 }

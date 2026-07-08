@@ -512,6 +512,21 @@ impl<'a> Engine<'a> {
                 for a in args {
                     vals.push(self.eval_operand(a, mf, frame)?);
                 }
+                // A foreign (`extern`) call: no MIR fn exists; dispatch through the
+                // shim registry, faulting `no_foreign_runtime` if unregistered
+                // (design 0011 §5). Both engines share the one registry, so the
+                // trace matches the tree-walker exactly.
+                if let Some(es) = self.items.externs.get(func.as_str()) {
+                    let sp = es.span;
+                    return match crate::foreign::dispatch(func, &vals) {
+                        Some(v) => Ok(v),
+                        None => Err(Fault::new(
+                            FaultKind::NoForeignRuntime,
+                            sp,
+                            format!("no foreign runtime for `{func}` (no shim registered; native backend is a 0010 forward dependency)"),
+                        )),
+                    };
+                }
                 let ret_addr = self.call(func, &vals)?;
                 let rty = self.prog.get(func).map(|f| f.locals[0].ty.clone()).unwrap_or(Type::unit());
                 if is_wordy(&rty) {

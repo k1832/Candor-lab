@@ -8,6 +8,7 @@
 
 pub mod dataflow;
 pub mod effects;
+pub mod foreign;
 pub mod init;
 pub mod loans;
 pub mod patterns;
@@ -32,6 +33,7 @@ use crate::types::*;
 
 use dataflow::{Access, Cfg, CfgBlock, FlowState, LoanKind, Place, St, Term};
 use effects::AllocEffect;
+use foreign::{ForeignEffect, ForeignFnInfo};
 use loans::{Anchor, LoanInfo, LoanTables};
 
 /// How an expression's result is consumed at its use site.
@@ -76,6 +78,8 @@ struct FnState {
     /// body scopes they unwind.
     loops: Vec<(usize, usize, usize)>,
     alloc: AllocEffect,
+    /// The `foreign` effect accumulator (design 0011 §2).
+    foreign: ForeignEffect,
     // ---- Stage 3 loan machinery ----
     /// Every loan created in the body (design 0001 §2.3).
     loans: Vec<LoanInfo>,
@@ -111,6 +115,7 @@ impl FnState {
             cur: None,
             loops: Vec::new(),
             alloc: AllocEffect::default(),
+            foreign: ForeignEffect::default(),
             loans: Vec::new(),
             call_groups: Vec::new(),
             carried: Vec::new(),
@@ -154,6 +159,8 @@ pub struct Checker<'a> {
     /// The generic function currently being definition-site checked (for the
     /// polymorphic-recursion self-instantiation check, design 0007 §5.1.1).
     cur_generic: Option<String>,
+    /// Per-function foreign-effect resolution (design 0011 §2), for the audit.
+    pub foreign_report: Vec<ForeignFnInfo>,
 }
 
 /// Entry point: parse -> resolve -> check. Returns all diagnostics. Used by the
@@ -173,6 +180,19 @@ pub fn check_program_real(prog: &Program) -> Vec<Diag> {
 }
 
 fn check_program_opts(prog: &Program, real: bool) -> Vec<Diag> {
+    check_program_collect(prog, real).0
+}
+
+/// As [`check_program_real`] but also returns the per-function foreign-effect
+/// report (design 0011 §2), for the `audit` command's effect-reach section.
+pub fn check_program_real_foreign(prog: &Program) -> (Vec<Diag>, Vec<ForeignFnInfo>) {
+    if crate::generics::is_generic_program(prog) {
+        return (generics::check_generic_program(prog, true).0, Vec::new());
+    }
+    check_program_collect(prog, true)
+}
+
+fn check_program_collect(prog: &Program, real: bool) -> (Vec<Diag>, Vec<ForeignFnInfo>) {
     let mut diags = Vec::new();
     let mut items = resolve_program(prog, &mut diags);
 
@@ -211,7 +231,7 @@ fn check_program_opts(prog: &Program, real: bool) -> Vec<Diag> {
                     type_params: Vec::new(),
                     param_bounds: Vec::new(),
                     expected_ty: None,
-                    cur_generic: None,
+                    cur_generic: None, foreign_report: Vec::new(),
                 };
                 let (fdecl, sig) = synth_drop_hook(sname, block, *span);
                 c.check_fn_with_sig(&fdecl, &sig);
@@ -231,6 +251,9 @@ fn check_program_opts(prog: &Program, real: bool) -> Vec<Diag> {
         }
     }
 
+    // Foreign-boundary item checks (design 0011): placement, mappability, trust.
+    foreign::check_foreign_items(&items, prog, &mut diags);
+
     let mut c = Checker {
         items: &items,
         diags,
@@ -242,7 +265,7 @@ fn check_program_opts(prog: &Program, real: bool) -> Vec<Diag> {
         type_params: Vec::new(),
         param_bounds: Vec::new(),
         expected_ty: None,
-        cur_generic: None,
+        cur_generic: None, foreign_report: Vec::new(),
     };
     for item in &prog.items {
         match item {
@@ -256,7 +279,7 @@ fn check_program_opts(prog: &Program, real: bool) -> Vec<Diag> {
         let (fdecl, sig) = synth_drop_hook(sname, block, *span);
         c.check_fn_with_sig(&fdecl, &sig);
     }
-    c.diags
+    (c.diags, c.foreign_report)
 }
 
 /// Build the synthetic `fn drop(self: write StructT) -> unit` whose body is the
@@ -277,6 +300,7 @@ fn synth_drop_hook(struct_name: &str, block: &Block, span: Span) -> (FnDecl, FnS
             span,
         }],
         alloc: true,
+        foreign: false,
         ret: Type::unit(),
         ret_region: None,
         ret_span: span,
@@ -297,6 +321,8 @@ fn synth_drop_hook(struct_name: &str, block: &Block, span: Span) -> (FnDecl, FnS
             span,
         }],
         alloc: true,
+        foreign: false,
+        boundary: false,
         requires: Vec::new(),
         ensures: Vec::new(),
         ret: None,
@@ -752,6 +778,38 @@ impl<'a> Checker<'a> {
         if let Some(d) = self.f.alloc.finish(f.alloc, &f.name, f.span) {
             self.diags.push(d);
         }
+
+        // The `foreign` effect discharge decision (design 0011 §2). Depends on the
+        // whole set of foreign sites gathered during the body walk.
+        let (discharges, propagates, needs_mark) = self.f.foreign.resolve(f.boundary, f.foreign);
+        if needs_mark {
+            let (site, reason) = self
+                .f
+                .foreign
+                .externs
+                .first()
+                .map(|e| (e.span, format!("reaches undischarged foreign trust via `{}`", e.name)))
+                .or_else(|| self.f.foreign.foreign_candor.clone().map(|(s, n)| (s, format!("calls `foreign` function `{n}`"))))
+                .unwrap_or((f.span, "reaches foreign trust".to_string()));
+            self.diags.push(
+                Diag::error(
+                    "E1103",
+                    format!("function `{}` reaches undischarged foreign trust but is not marked `foreign`", f.name),
+                    site,
+                )
+                .with_note(reason, Some(site))
+                .with_note(
+                    "add `foreign` to the signature, or discharge it in a `boundary` wrapper whose externs all carry `trust` clauses (design 0011 §2)",
+                    Some(f.span),
+                ),
+            );
+        }
+        self.foreign_report.push(ForeignFnInfo {
+            name: f.name.clone(),
+            boundary: f.boundary,
+            discharges,
+            propagates,
+        });
     }
 
     fn check_static(&mut self, s: &StaticDecl) {
@@ -851,6 +909,7 @@ impl<'a> Checker<'a> {
                 Type::FnPtr(crate::types::FnPtrTy {
                     params,
                     alloc: fp.alloc,
+                    foreign: fp.foreign,
                     ret: Box::new(self.resolve_ty(&fp.ret)),
                 })
             }
@@ -949,6 +1008,38 @@ impl<'a> Checker<'a> {
                 )
                 .with_note("only holding/moving/copying/comparing a rawptr is safe (§4.2)", None),
             );
+        }
+    }
+
+    /// A foreign (`extern` or foreign-fn-pointer) call is unsafe in principle
+    /// (design 0011 §2 rule 2): it reuses the one `unsafe` valve, not a new one.
+    pub(super) fn require_unsafe_foreign(&mut self, span: Span, what: &str) {
+        if !self.f.in_unsafe {
+            self.diags.push(
+                Diag::error(
+                    "E0501",
+                    format!("foreign call to {what} requires an `unsafe` block"),
+                    span,
+                )
+                .with_note("a foreign call reuses the one `unsafe` valve; it points it at a foreign symbol (design 0011 §2)", None),
+            );
+        }
+    }
+
+    /// Record a direct `extern` (ground-source) call in the foreign accumulator.
+    pub(super) fn record_extern_call(&mut self, name: &str, has_trust: bool, span: Span) {
+        self.f.foreign.externs.push(crate::check::foreign::ExternCall {
+            name: name.to_string(),
+            has_trust,
+            span,
+        });
+    }
+
+    /// Record a propagated foreign contribution (a call to a `foreign` Candor fn or
+    /// through a foreign fn-pointer) — undischargeable at this wrapper.
+    pub(super) fn record_foreign_candor(&mut self, name: &str, span: Span) {
+        if self.f.foreign.foreign_candor.is_none() {
+            self.f.foreign.foreign_candor = Some((span, name.to_string()));
         }
     }
 }

@@ -29,6 +29,15 @@ the shim/real per-symbol differential obligation recorded in both docs' seam (§
 F11 by-value argument classification named as the backend's duty, distinct from
 layout compatibility (§1, §1.4).
 
+**Prototype status — parse/check/audit surface shipped.** The `boundary` marker,
+`extern`/`trust`/`export` parsing (real front-end, boundary-file-gated, E1101),
+the recursive C-mappability check (E1102), the `foreign` effect partition with the
+§2 discharge rule (E1103; foreign calls reuse the `unsafe` valve), the closed
+trust vocabulary (E1105/E1106), and the §6 `audit` JSON are live in the prototype;
+the shim registry runs extern calls identically on the tree-walker and MIR engines,
+with the `no_foreign_runtime` fault otherwise. Real C-ABI calls and export
+trampolines remain the 0010 native-backend forward dependency.
+
 ## Problem
 
 P14 and P17 have sat as principle since v2 with no mechanism. 0008 gave them a

@@ -148,6 +148,11 @@ pub fn build_tree(dir: &Path) -> Result<ModuleBuild, Diag> {
                 // table, resolved after merge).
                 Item::Interface(i) => (&i.name, Kind::Type, false),
                 Item::Impl(_) => continue,
+                // Foreign-boundary items (design 0011): an extern block and an
+                // export bind C symbols, not importable Candor names in this
+                // stage — the wrapper that calls the extern lives in the same
+                // boundary file.
+                Item::Extern(_) | Item::Export(_) => continue,
             };
             let export = Export { global: mangle(&path, name, kind), is_pub, is_fn };
             match kind {
@@ -276,6 +281,9 @@ fn rename_item(m: &Module, item: &mut Item) {
         // An impl's own name is not qualified, but it is tagged with its home
         // module for the orphan check (design 0007 §2.3 / 0008).
         Item::Impl(im) => im.home = Some(path_str(&m.path)),
+        // Foreign symbols keep their literal C names (design 0011); they are not
+        // module-qualified.
+        Item::Extern(_) | Item::Export(_) => {}
     }
 }
 
@@ -403,6 +411,27 @@ impl<'a> Rewriter<'a> {
                     if let Some(rt) = &mut m.ret {
                         self.rewrite_ty(&mut rt.ty);
                     }
+                }
+            }
+            Item::Extern(eb) => {
+                for ef in &mut eb.fns {
+                    for p in &mut ef.params {
+                        self.rewrite_ty(&mut p.ty);
+                    }
+                    if let Some(rt) = &mut ef.ret {
+                        self.rewrite_ty(&mut rt.ty);
+                    }
+                }
+            }
+            Item::Export(ex) => {
+                for p in &mut ex.params {
+                    self.rewrite_ty(&mut p.ty);
+                }
+                if let Some(rt) = &mut ex.ret {
+                    self.rewrite_ty(&mut rt.ty);
+                }
+                if let Some(g) = self.scope.value_scope.get(&ex.candor_fn) {
+                    ex.candor_fn = g.clone();
                 }
             }
             Item::Impl(im) => {

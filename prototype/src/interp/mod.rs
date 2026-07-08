@@ -68,6 +68,9 @@ pub enum FaultKind {
     Panic,
     /// Reading an address beyond the memory model, or the init-byte guard.
     BadPointer,
+    /// A foreign (`extern`) call to a symbol with no registered shim and no
+    /// native backend (design 0011 §5). The honest runtime gap before 0010.
+    NoForeignRuntime,
 }
 
 /// A structured, machine-readable fault report (design 0001 §7.4, P4/P7).

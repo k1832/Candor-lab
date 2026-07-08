@@ -65,6 +65,9 @@ pub fn kind_code(k: FaultKind) -> u32 {
         FaultKind::Ensures => 6,
         FaultKind::Panic => 7,
         FaultKind::BadPointer => 8,
+        // Foreign calls are not yet lowered by the native backend (0011 §5, a
+        // 0010 forward dependency); the code exists only for match totality.
+        FaultKind::NoForeignRuntime => 9,
     }
 }
 
@@ -77,6 +80,7 @@ pub fn code_kind(c: u32) -> FaultKind {
         4 => FaultKind::Assert,
         5 => FaultKind::Requires,
         6 => FaultKind::Ensures,
+        9 => FaultKind::NoForeignRuntime,
         7 => FaultKind::Panic,
         _ => FaultKind::BadPointer,
     }
