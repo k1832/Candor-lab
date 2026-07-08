@@ -1,0 +1,8 @@
+enum Opt[T] { ok Some(T), None }
+
+fn checked_sub(a: u32, b: u32) -> Opt[u32] {
+    if a < b {
+        return Opt::None;
+    }
+    return Opt::Some(a - b);
+}

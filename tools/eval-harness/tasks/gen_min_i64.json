@@ -1,0 +1,22 @@
+{
+  "id": "gen_min_i64",
+  "category": "generate",
+  "title": "min of two i64",
+  "statement": "Warm-up. Write exactly `fn min_i64(a: i64, b: i64) -> i64` returning the smaller of the two (return `a` on a tie). Comparison operators are non-associative; one comparison per `if`. Define only the function.",
+  "submission_filename": "gen_min_i64.cnr",
+  "prompt_material": {
+    "spec_pack": [
+      "docs/specpack/grammar.md",
+      "docs/specpack/semantics.md",
+      "docs/specpack/idioms.md",
+      "docs/specpack/diagnostics.md"
+    ],
+    "given_program": null,
+    "given_diagnostic": null
+  },
+  "anchor": {
+    "kind": "run_sentinel",
+    "battery_file": "anchors/gen_min_i64.battery.cnr",
+    "expected_sentinel": "10"
+  }
+}

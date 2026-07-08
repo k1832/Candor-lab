@@ -1,0 +1,12 @@
+fn bump(p: write i64) -> unit {
+    p.* = p.* + 1i64;
+}
+
+fn main() -> i64 {
+    let mut x: i64 = 5i64;
+    let a: write i64 = write x;
+    let b: write i64 = write x;
+    bump(a);
+    bump(b);
+    return x;
+}

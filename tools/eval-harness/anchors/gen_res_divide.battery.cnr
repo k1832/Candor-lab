@@ -1,0 +1,12 @@
+// Hidden acceptance battery. Authored against docs/specpack/idioms.md #1 (Res + ?).
+fn main() -> i64 {
+    match div_then(100i64, 5i64, 2i64) {
+        Res::Ok(v) => { assert(v == 10i64); }
+        Res::Err(e) => { assert(false); }
+    }
+    match div_then(100i64, 0i64, 2i64) {
+        Res::Ok(v) => { assert(false); }
+        Res::Err(e) => { }
+    }
+    return 0;
+}

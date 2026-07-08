@@ -1,0 +1,22 @@
+{
+  "id": "gen_from_widen_question",
+  "category": "generate",
+  "title": "cross-type `?` via a From-widening impl",
+  "statement": "From docs/specpack/idioms.md #1. Define `enum Res[T, E] { ok Ok(T), Err(E) }`, `enum IoErr { Eof }`, `enum AppErr { FromIo(IoErr), Denied }`, `interface From[E] { fn from(e: E) -> Self; }`, an `impl From[IoErr] for AppErr` widening `IoErr` to `AppErr::FromIo`, `fn read_byte(ok: bool) -> Res[i64, IoErr]` (Ok(42) when `ok`, else Err(Eof)), and `fn read_wide(ok: bool) -> Res[i64, AppErr]` that calls `read_byte(ok)?` (cross-type `?` uses the From impl) and returns Ok of the byte. Define only these items.",
+  "submission_filename": "gen_from_widen_question.cnr",
+  "prompt_material": {
+    "spec_pack": [
+      "docs/specpack/grammar.md",
+      "docs/specpack/semantics.md",
+      "docs/specpack/idioms.md",
+      "docs/specpack/diagnostics.md"
+    ],
+    "given_program": null,
+    "given_diagnostic": null
+  },
+  "anchor": {
+    "kind": "run_sentinel",
+    "battery_file": "anchors/gen_from_widen_question.battery.cnr",
+    "expected_sentinel": "0"
+  }
+}

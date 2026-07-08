@@ -1,0 +1,12 @@
+// Hidden acceptance battery. Authored against docs/basket/spec-arena.md.
+fn main() -> i64 {
+    let mut a: Arena = Arena { mem: [0i64; 8], count: 0u32 };
+    let ok1: bool = push(write a, 10i64);
+    let ok2: bool = push(write a, 20i64);
+    assert(ok1);
+    assert(ok2);
+    assert(get(read a, 0u32) == 10i64);
+    assert(get(read a, 1u32) == 20i64);
+    assert(a.count == 2u32);
+    return 0;
+}

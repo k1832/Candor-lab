@@ -1,0 +1,4 @@
+fn align_up(x: usize, align: usize) -> usize {
+    let mask: usize = align - 1;
+    return (x + mask) / align * align;
+}

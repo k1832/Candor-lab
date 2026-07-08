@@ -1,0 +1,8 @@
+// Hidden acceptance battery. Authored against docs/specpack/semantics.md
+// (saturating regime) + docs/basket/spec-mmio.md register math.
+fn main() -> i64 {
+    assert(sat_add(200u8, 100u8) == 255u8);
+    assert(sat_add(10u8, 20u8) == 30u8);
+    assert(sat_add(255u8, 1u8) == 255u8);
+    return 0;
+}

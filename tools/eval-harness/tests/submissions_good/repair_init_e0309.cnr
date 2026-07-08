@@ -1,0 +1,12 @@
+struct R { id: i64 } drop(write self) { trace(self.id); }
+
+fn main() -> i64 {
+    let cond: bool = true;
+    let r: R;
+    if cond {
+        r = R { id: 1i64 };
+    } else {
+        r = R { id: 2i64 };
+    }
+    return 0;
+}

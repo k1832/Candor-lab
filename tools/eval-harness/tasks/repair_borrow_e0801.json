@@ -1,0 +1,42 @@
+{
+  "id": "repair_borrow_e0801",
+  "category": "repair",
+  "title": "resolve a conflicting exclusive borrow (E0801)",
+  "statement": "This program does not compile: two live exclusive borrows of `x` overlap. Fix the single reported defect so it compiles clean and `main` returns 7 (`x` incremented twice from 5).",
+  "submission_filename": "repair_borrow_e0801.cnr",
+  "prompt_material": {
+    "spec_pack": [
+      "docs/specpack/grammar.md",
+      "docs/specpack/semantics.md",
+      "docs/specpack/idioms.md",
+      "docs/specpack/diagnostics.md"
+    ],
+    "given_program": "anchors/repair_borrow_e0801.buggy.cnr",
+    "given_diagnostic": {
+      "severity": "error",
+      "code": "E0801",
+      "message": "conflicting borrow of `x` (an exclusive borrow excludes all other borrows) (\u00a72.2)",
+      "span": {
+        "start": 164,
+        "end": 165
+      },
+      "notes": [
+        {
+          "message": "...conflicts with the borrow of `x` created here",
+          "span": {
+            "start": 132,
+            "end": 133
+          }
+        },
+        {
+          "message": "a place under a live borrow may be accessed only through that borrow (\u00a72.2)"
+        }
+      ]
+    }
+  },
+  "anchor": {
+    "kind": "diagnostic_resolved",
+    "battery_file": null,
+    "expected_sentinel": "7"
+  }
+}

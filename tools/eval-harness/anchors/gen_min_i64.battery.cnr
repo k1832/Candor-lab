@@ -1,0 +1,5 @@
+// Hidden acceptance battery. Returns a COMPUTED sentinel (10) rather than
+// asserting: a wrong `min` fails at the `wrong-sentinel` stage, not a fault.
+fn main() -> i64 {
+    return min_i64(3i64, 7i64) + min_i64(7i64, 3i64) + min_i64(4i64, 4i64);
+}

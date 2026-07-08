@@ -1,0 +1,11 @@
+// Hidden acceptance battery (P19 external anchor).
+// Authored fresh against docs/basket/spec-allocator.md + docs/specpack/*.
+// Appended after the model's submission; a correct `align_up` yields sentinel 0.
+fn main() -> i64 {
+    assert(align_up(13usize, 8usize) == 16usize);
+    assert(align_up(16usize, 8usize) == 16usize);
+    assert(align_up(0usize, 4usize) == 0usize);
+    assert(align_up(1usize, 1usize) == 1usize);
+    assert(align_up(7usize, 8usize) == 8usize);
+    return 0;
+}

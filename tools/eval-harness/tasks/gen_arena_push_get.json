@@ -1,0 +1,22 @@
+{
+  "id": "gen_arena_push_get",
+  "category": "generate",
+  "title": "bounded fixed-capacity arena push/get",
+  "statement": "From docs/basket/spec-arena.md. Define `struct Arena { mem: [8]i64, count: u32 }` and two functions: `fn push(ar: write Arena, x: i64) -> bool` (append if `count < 8`, returning whether it was stored; capacity spent is a value, not a fault) and `fn get(ar: read Arena, i: u32) -> i64` (copy element `i` out). Write-path derefs are explicit (`ar.*.count`); read-path auto-derefs. Define only these items.",
+  "submission_filename": "gen_arena_push_get.cnr",
+  "prompt_material": {
+    "spec_pack": [
+      "docs/specpack/grammar.md",
+      "docs/specpack/semantics.md",
+      "docs/specpack/idioms.md",
+      "docs/specpack/diagnostics.md"
+    ],
+    "given_program": null,
+    "given_diagnostic": null
+  },
+  "anchor": {
+    "kind": "run_sentinel",
+    "battery_file": "anchors/gen_arena_push_get.battery.cnr",
+    "expected_sentinel": "0"
+  }
+}

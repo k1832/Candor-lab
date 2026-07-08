@@ -1,0 +1,7 @@
+// Hidden acceptance battery. Authored against docs/specpack/idioms.md #2.
+fn main() -> i64 {
+    assert(unwrap_or(Opt::Some(7i64), 0i64) == 7i64);
+    assert(unwrap_or(Opt::None, 5i64) == 5i64);
+    assert(unwrap_or(Opt::Some(0i64), 9i64) == 0i64);
+    return 0;
+}

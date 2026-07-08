@@ -1,0 +1,13 @@
+// Hidden acceptance battery. Authored against docs/specpack/idioms.md #1
+// (From-widening cross-type `?`).
+fn main() -> i64 {
+    match read_wide(true) {
+        Res::Ok(v) => { assert(v == 42i64); }
+        Res::Err(e) => { assert(false); }
+    }
+    match read_wide(false) {
+        Res::Ok(v) => { assert(false); }
+        Res::Err(e) => { }
+    }
+    return 0;
+}

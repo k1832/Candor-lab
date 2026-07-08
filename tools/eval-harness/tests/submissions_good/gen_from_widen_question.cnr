@@ -1,0 +1,23 @@
+enum Res[T, E] { ok Ok(T), Err(E) }
+enum IoErr { Eof }
+enum AppErr { FromIo(IoErr), Denied }
+
+interface From[E] { fn from(e: E) -> Self; }
+
+impl From[IoErr] for AppErr {
+    fn from(e: IoErr) -> Self {
+        return AppErr::FromIo(e);
+    }
+}
+
+fn read_byte(ok: bool) -> Res[i64, IoErr] {
+    if ok {
+        return Res::Ok(42i64);
+    }
+    return Res::Err(IoErr::Eof);
+}
+
+fn read_wide(ok: bool) -> Res[i64, AppErr] {
+    let b: i64 = read_byte(ok)?;
+    return Res::Ok(b);
+}

@@ -1,0 +1,16 @@
+// Hidden acceptance battery. Authored against docs/basket/spec-arena.md bounds rules.
+fn main() -> i64 {
+    match checked_sub(10u32, 3u32) {
+        Opt::Some(v) => { assert(v == 7u32); }
+        Opt::None => { assert(false); }
+    }
+    match checked_sub(3u32, 10u32) {
+        Opt::Some(v) => { assert(false); }
+        Opt::None => { }
+    }
+    match checked_sub(4u32, 4u32) {
+        Opt::Some(v) => { assert(v == 0u32); }
+        Opt::None => { assert(false); }
+    }
+    return 0;
+}

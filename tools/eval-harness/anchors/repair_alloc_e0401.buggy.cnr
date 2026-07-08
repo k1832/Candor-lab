@@ -1,0 +1,9 @@
+enum List { Nil, Cons(i64, Box List) }
+
+fn drop_list(l: List) -> i64 {
+    return 0;
+}
+
+fn main() -> i64 {
+    return 0;
+}

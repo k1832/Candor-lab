@@ -1,0 +1,22 @@
+{
+  "id": "gen_opt_checked_sub",
+  "category": "generate",
+  "title": "checked_sub returning a result-shaped Opt",
+  "statement": "From docs/basket/spec-arena.md bounds discipline. Define `enum Opt[T] { ok Some(T), None }` and `fn checked_sub(a: u32, b: u32) -> Opt[u32]` that returns `Opt::None` when `a < b` (would underflow) and `Opt::Some(a - b)` otherwise. Expected failure is an error value, never a fault. Define only these items.",
+  "submission_filename": "gen_opt_checked_sub.cnr",
+  "prompt_material": {
+    "spec_pack": [
+      "docs/specpack/grammar.md",
+      "docs/specpack/semantics.md",
+      "docs/specpack/idioms.md",
+      "docs/specpack/diagnostics.md"
+    ],
+    "given_program": null,
+    "given_diagnostic": null
+  },
+  "anchor": {
+    "kind": "run_sentinel",
+    "battery_file": "anchors/gen_opt_checked_sub.battery.cnr",
+    "expected_sentinel": "0"
+  }
+}

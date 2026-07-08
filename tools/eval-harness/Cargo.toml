@@ -1,0 +1,17 @@
+[package]
+name = "eval-harness"
+version = "0.1.0"
+edition = "2021"
+description = "Candor P19 externally-anchored evaluation-harness seed (defines and scores model-competence tasks; scores against candor-proto)"
+
+[[bin]]
+name = "eval-harness"
+path = "src/main.rs"
+
+[lib]
+name = "eval_harness"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

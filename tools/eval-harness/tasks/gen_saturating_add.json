@@ -1,0 +1,22 @@
+{
+  "id": "gen_saturating_add",
+  "category": "generate",
+  "title": "saturating u8 addition",
+  "statement": "From docs/specpack/semantics.md (scoped arithmetic regimes) and docs/basket/spec-mmio.md register math. Write `fn sat_add(a: u8, b: u8) -> u8` that returns `a + b` clamped to `u8` range using a `saturating { ... }` block (a statement-form regime containing the `return`). Define only the function.",
+  "submission_filename": "gen_saturating_add.cnr",
+  "prompt_material": {
+    "spec_pack": [
+      "docs/specpack/grammar.md",
+      "docs/specpack/semantics.md",
+      "docs/specpack/idioms.md",
+      "docs/specpack/diagnostics.md"
+    ],
+    "given_program": null,
+    "given_diagnostic": null
+  },
+  "anchor": {
+    "kind": "run_sentinel",
+    "battery_file": "anchors/gen_saturating_add.battery.cnr",
+    "expected_sentinel": "0"
+  }
+}

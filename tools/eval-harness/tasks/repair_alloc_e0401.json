@@ -1,0 +1,46 @@
+{
+  "id": "repair_alloc_e0401",
+  "category": "repair",
+  "title": "add the missing alloc effect marker (E0401)",
+  "statement": "This program does not compile: a non-`alloc` function lets a `Box`-bearing value drop (freeing is allocator work). Fix the single reported defect so it compiles clean and `main` returns 0.",
+  "submission_filename": "repair_alloc_e0401.cnr",
+  "prompt_material": {
+    "spec_pack": [
+      "docs/specpack/grammar.md",
+      "docs/specpack/semantics.md",
+      "docs/specpack/idioms.md",
+      "docs/specpack/diagnostics.md"
+    ],
+    "given_program": "anchors/repair_alloc_e0401.buggy.cnr",
+    "given_diagnostic": {
+      "severity": "error",
+      "code": "E0401",
+      "message": "non-`alloc` function `drop_list` performs allocation",
+      "span": {
+        "start": 0,
+        "end": 0
+      },
+      "notes": [
+        {
+          "message": "drop of `Box`-bearing place `l` frees (\u00a76.2/\u00a76.3)",
+          "span": {
+            "start": 0,
+            "end": 0
+          }
+        },
+        {
+          "message": "add the `alloc` effect to the signature, or remove the allocation",
+          "span": {
+            "start": 40,
+            "end": 86
+          }
+        }
+      ]
+    }
+  },
+  "anchor": {
+    "kind": "diagnostic_resolved",
+    "battery_file": null,
+    "expected_sentinel": "0"
+  }
+}

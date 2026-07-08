@@ -1,0 +1,12 @@
+struct Big { v: i64 }
+
+fn consume(b: Big) -> i64 {
+    return b.v;
+}
+
+fn main() -> i64 {
+    let b: Big = Big { v: 5i64 };
+    let x: i64 = consume(b);
+    let y: i64 = consume(b);
+    return x + y;
+}

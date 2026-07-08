@@ -1,0 +1,35 @@
+{
+  "id": "repair_move_e0301",
+  "category": "repair",
+  "title": "fix a use-after-move (E0301)",
+  "statement": "This program does not compile. Fix the single reported defect so it compiles clean and `main` returns 10 (the value of consuming a `Big{v:5}` twice). Change nothing else about the observable behavior.",
+  "submission_filename": "repair_move_e0301.cnr",
+  "prompt_material": {
+    "spec_pack": [
+      "docs/specpack/grammar.md",
+      "docs/specpack/semantics.md",
+      "docs/specpack/idioms.md",
+      "docs/specpack/diagnostics.md"
+    ],
+    "given_program": "anchors/repair_move_e0301.buggy.cnr",
+    "given_diagnostic": {
+      "severity": "error",
+      "code": "E0301",
+      "message": "use of moved value `b`",
+      "span": {
+        "start": 177,
+        "end": 178
+      },
+      "notes": [
+        {
+          "message": "value was moved out on an earlier path (\u00a71.2)"
+        }
+      ]
+    }
+  },
+  "anchor": {
+    "kind": "diagnostic_resolved",
+    "battery_file": null,
+    "expected_sentinel": "10"
+  }
+}

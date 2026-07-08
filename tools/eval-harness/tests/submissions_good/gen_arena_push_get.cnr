@@ -1,0 +1,18 @@
+struct Arena {
+    mem: [8]i64,
+    count: u32,
+}
+
+fn push(ar: write Arena, x: i64) -> bool {
+    if ar.*.count >= 8u32 {
+        return false;
+    }
+    let i: u32 = ar.*.count;
+    ar.*.mem[conv usize i] = x;
+    ar.*.count = i + 1u32;
+    return true;
+}
+
+fn get(ar: read Arena, i: u32) -> i64 {
+    return ar.mem[conv usize i];
+}

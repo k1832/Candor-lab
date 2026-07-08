@@ -1,0 +1,38 @@
+{
+  "id": "repair_init_e0309",
+  "category": "repair",
+  "title": "fix path-dependent init at a drop point (E0309)",
+  "statement": "This program does not compile: a `drop`-hooked place is initialized on only one path at a scope-exit drop point. Fix the single reported defect so it compiles clean and `main` returns 0. Keep the drop-bearing type.",
+  "submission_filename": "repair_init_e0309.cnr",
+  "prompt_material": {
+    "spec_pack": [
+      "docs/specpack/grammar.md",
+      "docs/specpack/semantics.md",
+      "docs/specpack/idioms.md",
+      "docs/specpack/diagnostics.md"
+    ],
+    "given_program": "anchors/repair_init_e0309.buggy.cnr",
+    "given_diagnostic": {
+      "severity": "error",
+      "code": "E0309",
+      "message": "place `r` may be initialized here but not on every path reaching this scope exit",
+      "span": {
+        "start": 171,
+        "end": 179
+      },
+      "notes": [
+        {
+          "message": "its type runs drop work, so its drop must be a static fact of this program point, not a runtime decision (\u00a71.6 dual)"
+        },
+        {
+          "message": "initialize it on every path, consume it on every path, or narrow its scope (finding 2026-07-07)"
+        }
+      ]
+    }
+  },
+  "anchor": {
+    "kind": "diagnostic_resolved",
+    "battery_file": null,
+    "expected_sentinel": "0"
+  }
+}

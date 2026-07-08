@@ -1,0 +1,14 @@
+enum Res[T, E] { ok Ok(T), Err(E) }
+enum MathErr { DivZero }
+
+fn div(a: i64, b: i64) -> Res[i64, MathErr] {
+    if b == 0i64 {
+        return Res::Err(MathErr::DivZero);
+    }
+    return Res::Ok(a / b);
+}
+
+fn div_then(a: i64, b: i64, c: i64) -> Res[i64, MathErr] {
+    let q: i64 = div(a, b)?;
+    return div(q, c);
+}

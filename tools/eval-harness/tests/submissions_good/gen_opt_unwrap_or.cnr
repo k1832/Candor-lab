@@ -1,0 +1,8 @@
+enum Opt[T] { ok Some(T), None }
+
+fn unwrap_or[T: copy](o: Opt[T], d: T) -> T {
+    match o {
+        Opt::Some(v) => { return v; }
+        Opt::None => { return d; }
+    }
+}

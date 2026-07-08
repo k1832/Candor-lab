@@ -1,0 +1,5 @@
+fn sat_add(a: u8, b: u8) -> u8 {
+    saturating {
+        return a + b;
+    }
+}
