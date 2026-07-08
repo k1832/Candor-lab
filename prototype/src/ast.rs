@@ -289,6 +289,10 @@ pub enum ExprKind {
     AddrToPtr { ty: Ty, arg: Box<Expr> },
     PtrNull { ty: Ty },
     Offsetof { ty: Ty, field: String },
+    /// `field_ptr(p, f)` — safe typed field projection (design 0004): the
+    /// address of field `f` of the struct `p` points at. `p` is an expression,
+    /// `f` a field selector in field position (no symbol table to parse).
+    FieldPtr { ptr: Box<Expr>, field: String },
     Sizeof(Ty),
     Alignof(Ty),
 

@@ -318,3 +318,9 @@ storage here, an aliasing fact not otherwise legible at the call site), so it
 stays priced at item 3 and stays explicit, per P13's own test that a keyword
 marking an aliasing distinction earns its tokens.
 
+
+**Implementation note (2026-07-08):** a *shared*-borrow call result passed bare to a `read`-mode
+parameter was already legal before this design — the value gear copies the borrow (shared borrows
+are `copy`), which is sound and unchanged. "Explicit form still required" for non-place arguments
+therefore bites only where exclusivity makes reborrow-vs-move a genuine distinction; surfaced
+during implementation, recorded here rather than silently.

@@ -192,3 +192,36 @@ fn cross_counter_fixture_valve_statements() {
     assert_eq!(c.valve_statements, 6);
     assert_eq!(c.unit_ext_version, "2");
 }
+
+#[test]
+fn field_ptr_region_rule_preserved_outside_and_inside_unsafe() {
+    // Design 0004: `field_ptr` is a SAFE op and opens NO valve region. The frozen
+    // region rule (BET5_CRITERION2 §4.1) is preserved BOTH ways:
+    //   (1) a `field_ptr` statement OUTSIDE any `unsafe` region contributes ZERO
+    //       valve statements; and
+    //   (2) the SAME statement INSIDE an `unsafe` block still counts exactly as
+    //       its enclosing region does (like any statement there).
+    // rust-count has no `field_ptr` token, so this Candor-side test suffices and
+    // the shared cross-counter fixture is not extended.
+    let outside = counts(
+        "struct T { a: i64, b: i64 } \
+         fn f(p: rawptr T) -> unit { let q: rawptr i64 = field_ptr(p, b); }",
+    );
+    // struct + fn + let = 3 logical statements. The only valve region is the
+    // `rawptr T` parameter type node; the fn strictly encloses it and the body
+    // `let` does not intersect it — so the field_ptr statement is NOT a valve
+    // statement.
+    assert_eq!(outside.logical_statements, 3);
+    assert_eq!(outside.valve_statements, 0);
+
+    let inside = counts(
+        "struct T { a: i64, b: i64 } \
+         fn g(p: rawptr T) -> unit { unsafe \"x\" { let q: rawptr i64 = field_ptr(p, b); } }",
+    );
+    // struct + fn + unsafe-stmt + inner let = 4 logical statements. The `unsafe`
+    // block opens a valve region; the unsafe-block statement and the inner
+    // field_ptr `let` both intersect it → 2 valve statements. `field_ptr` still
+    // contributes no region of its own — the count comes entirely from `unsafe`.
+    assert_eq!(inside.logical_statements, 4);
+    assert_eq!(inside.valve_statements, 2);
+}

@@ -935,6 +935,18 @@ impl Parser {
                 self.expect(&TokKind::RParen, "`)`")?;
                 ExprKind::Offsetof { ty, field }
             }
+            TokKind::Kw(Kw::FieldPtr) => {
+                // `field_ptr(p, f)` — first arg an expression, second a field
+                // selector (identifier in field position; no symbol table needed
+                // to parse, NN#13). Design 0004.
+                self.bump();
+                self.expect(&TokKind::LParen, "`(`")?;
+                let ptr = self.parse_expr()?;
+                self.expect(&TokKind::Comma, "`,`")?;
+                let field = self.expect_ident("a field name")?;
+                self.expect(&TokKind::RParen, "`)`")?;
+                ExprKind::FieldPtr { ptr: Box::new(ptr), field }
+            }
             TokKind::Kw(Kw::Sizeof) => {
                 self.bump();
                 self.expect(&TokKind::LParen, "`(`")?;

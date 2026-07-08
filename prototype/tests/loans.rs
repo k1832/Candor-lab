@@ -326,3 +326,89 @@ fn named_binding_control_stays_rejected() {
         "E0803",
     );
 }
+
+// ---- design 0005: implicit call-site reborrow -----------------------------
+
+#[test]
+fn implicit_exclusive_reborrow_accepted() {
+    // A bare exclusive borrow `b` passed to a `write`-mode parameter reborrows
+    // (it does NOT move); the desugared node is `write (deref b)`.
+    assert_clean(
+        "fn setn(s: write S, v: i64) -> unit { (deref s).n = v; } \
+         fn bump(b: write S) -> unit { setn(b, 42); }",
+    );
+}
+
+#[test]
+fn implicit_shared_reborrow_accepted() {
+    // A bare shared borrow `b` passed to a `read`-mode parameter reborrows.
+    assert_clean(
+        "fn getn(s: read S) -> i64 { return (deref s).n; } \
+         fn peek(b: read S) -> i64 { return getn(b); }",
+    );
+}
+
+#[test]
+fn implicit_shared_downgrade_from_exclusive() {
+    // A bare EXCLUSIVE borrow to a `read`-mode parameter is a SHARED reborrow
+    // (legal downgrade), exactly as the explicit `read (deref b)` is.
+    assert_clean(
+        "fn getn(s: read S) -> i64 { return (deref s).n; } \
+         fn viaexcl(b: write S) -> i64 { return getn(b); }",
+    );
+}
+
+#[test]
+fn take_mode_borrow_param_bare_moves_use_after_move() {
+    // A `take`-mode borrow-typed parameter is UNTOUCHED by 0005: bare `b` is a
+    // MOVE of the borrow value, so a second use is a use-after-move (E0301).
+    assert_has(
+        "fn consume(x: borrow_mut S) -> unit { } \
+         fn f(b: borrow_mut S) -> unit { consume(b); consume(b); }",
+        "E0301",
+    );
+}
+
+#[test]
+fn nonplace_borrow_arg_requires_explicit_reborrow() {
+    // A non-place borrow argument (a call result) is NOT implicitly reborrowed:
+    // an exclusive-borrow result passed bare to a `read`-mode parameter is a type
+    // mismatch (E0703) — the explicit `read (deref ...)` downgrade is still
+    // required for non-places.
+    assert_has(
+        "fn idm(s: write S) -> write S { return s; } \
+         fn getn(s: read S) -> i64 { return (deref s).n; } \
+         fn f(b: write S) -> i64 { return getn(idm(b)); }",
+        "E0703",
+    );
+    // The explicit reborrow of the call result is accepted (the required form).
+    assert_clean(
+        "fn idm(s: write S) -> write S { return s; } \
+         fn getn(s: read S) -> i64 { return (deref s).n; } \
+         fn f(b: write S) -> i64 { return getn(read (deref idm(b))); }",
+    );
+}
+
+#[test]
+fn implicit_reborrow_composes_with_return_extension_s1() {
+    // Design 0005 × the S1 return-extension shape. A bare exclusive borrow `w`
+    // passed to the compact-default borrow-returning `get` (a `read`-mode param)
+    // is an implicit SHARED reborrow; the returned borrow return-extends the loan
+    // on the PARENT `w`, carried over the match binding `inner`. Writing through
+    // `w` in the arm then conflicts exactly as the explicit spelling does (E0803).
+    let base = "struct Big { a: i64, b: i64 } enum Wrap { one(Big), none } \
+        fn get(w: read Wrap) -> read Wrap { return read (deref w); } ";
+    let implicit = format!(
+        "{base}fn outer(w: write Wrap) -> i64 {{ match get(w) {{ \
+         case Wrap::one(inner) => {{ (deref w) = Wrap::none; return (deref inner).a; }} \
+         case Wrap::none => {{ return 0; }} }} }}"
+    );
+    assert_has(&implicit, "E0803");
+    // The explicit spelling `get(read (deref w))` yields the identical diagnostic.
+    let explicit = format!(
+        "{base}fn outer(w: write Wrap) -> i64 {{ match get(read (deref w)) {{ \
+         case Wrap::one(inner) => {{ (deref w) = Wrap::none; return (deref inner).a; }} \
+         case Wrap::none => {{ return 0; }} }} }}"
+    );
+    assert_has(&explicit, "E0803");
+}

@@ -8,6 +8,15 @@ symbol table), P4 (diagnostics as structured data with provenance), P13
 `LANG_PHYLOSOPHY.md` and to design `0001-memory-model.md`, which this document
 serves and does not amend.
 
+**Revision note (2026-07-08).** This document's v1 token/grammar freeze served
+the now-dead first Bet-5 registration. The `field_ptr` production added below,
+and the implicit call-site reborrow it is paired with, are **post-Bet-5
+evolution governed by designs 0004 (`field_ptr`) and 0005 (implicit reborrow)**,
+not amendments to 0001. Only 0004's `field_ptr` is a *grammar* change (a new
+primary form); 0005's implicit reborrow is a checker desugaring — a bare
+borrow-typed place in argument position already parses under the unchanged
+`Primary`/`ArgList` rules, so no production changes for it.
+
 ## Problem
 
 Design 0001 specifies the memory model of the throwaway-syntax prototype in
@@ -134,7 +143,7 @@ let mut if else match case loop while break continue return
 requires ensures assert panic result
 unsafe wrapping saturating
 deref clone conv
-cast_ptr addr_to_ptr ptr_null offsetof sizeof alignof
+cast_ptr addr_to_ptr ptr_null offsetof field_ptr sizeof alignof
 true false
 ```
 
@@ -243,7 +252,7 @@ Primary = INT | STRING | "true" | "false" | "self"
         | ArrayLit
         | Block | If | Match | Loop | While | Unsafe
         | "wrapping" Block | "saturating" Block
-        | TypeArgIntrinsic | Offsetof | Sizeof | Alignof
+        | TypeArgIntrinsic | Offsetof | FieldPtr | Sizeof | Alignof
         | "BoxResult" "::" IDENT [ "(" [ ArgList ] ")" ]   -- compiler-known enum
         | IDENT "::" IDENT [ "(" [ ArgList ] ")" ]          -- EnumCtor
         | IDENT "{" [ FieldInitList ] "}"                   -- StructLit (if allowed)
@@ -256,6 +265,7 @@ FieldInit     = IDENT ":" Expr
 TypeArgIntrinsic = ("cast_ptr"|"addr_to_ptr"|"ptr_null") "[" Type "]"
                    "(" [ ArgList ] ")"
 Offsetof = "offsetof" "(" Type "," IDENT ")"
+FieldPtr = "field_ptr" "(" Expr "," IDENT ")"   -- design 0004: safe field projection; IDENT is a field selector (field position)
 Sizeof   = "sizeof" "(" Type ")"
 Alignof  = "alignof" "(" Type ")"
 

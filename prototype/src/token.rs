@@ -87,6 +87,7 @@ pub enum Kw {
     AddrToPtr,
     PtrNull,
     Offsetof,
+    FieldPtr,
     Sizeof,
     Alignof,
     // literals
@@ -206,6 +207,7 @@ pub fn keyword_from_str(s: &str) -> Option<Kw> {
         "addr_to_ptr" => Kw::AddrToPtr,
         "ptr_null" => Kw::PtrNull,
         "offsetof" => Kw::Offsetof,
+        "field_ptr" => Kw::FieldPtr,
         "sizeof" => Kw::Sizeof,
         "alignof" => Kw::Alignof,
         "true" => Kw::True,

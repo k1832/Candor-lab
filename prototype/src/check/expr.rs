@@ -104,6 +104,7 @@ impl<'a> Checker<'a> {
                 let _ = self.resolve_ty(ty);
                 Type::usize()
             }
+            ExprKind::FieldPtr { ptr, field } => self.check_field_ptr(ptr, field, e.span),
             ExprKind::Sizeof(ty) | ExprKind::Alignof(ty) => {
                 let _ = self.resolve_ty(ty);
                 Type::usize()
@@ -721,6 +722,68 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `field_ptr(p, f)` (design 0004): SAFE typed field projection. `p` must be
+    /// `rawptr StructT` for a compiler-known struct and `f` a statically known
+    /// field of `StructT`; otherwise E0510. Result is `rawptr FieldT`. Not gated
+    /// by E0501 — it joins `offsetof`/`is_null` on the safe side (§4.2, 0003 §2.5).
+    fn check_field_ptr(&mut self, ptr: &Expr, field: &str, span: Span) -> Type {
+        let pt = self.check_expr(ptr, Use::Value);
+        match &pt {
+            Type::Error => Type::Error,
+            Type::RawPtr(inner) => match &**inner {
+                Type::Error => Type::Error,
+                Type::Named(n) => {
+                    let fld = self
+                        .items
+                        .lookup_struct(n)
+                        .and_then(|s| s.fields.iter().find(|(fn_, _)| fn_ == field).cloned());
+                    match fld {
+                        Some((_, fty)) => Type::RawPtr(Box::new(fty)),
+                        None => {
+                            self.diags.push(
+                                Diag::error(
+                                    "E0510",
+                                    format!("`{n}` has no field `{field}` for `field_ptr`"),
+                                    span,
+                                )
+                                .with_note(
+                                    "`field_ptr(p, f)` needs `f` a statically known field of the struct `p` points at (0004)",
+                                    None,
+                                ),
+                            );
+                            Type::Error
+                        }
+                    }
+                }
+                other => {
+                    self.diags.push(
+                        Diag::error(
+                            "E0510",
+                            format!(
+                                "`field_ptr` needs `rawptr` of a struct, found `rawptr {}`",
+                                other.display()
+                            ),
+                            span,
+                        )
+                        .with_note("`field_ptr(p, f)` projects a field of a struct pointee (0004)", None),
+                    );
+                    Type::Error
+                }
+            },
+            other => {
+                self.diags.push(
+                    Diag::error(
+                        "E0510",
+                        format!("`field_ptr` needs a `rawptr StructT` operand, found `{}`", other.display()),
+                        span,
+                    )
+                    .with_note("`field_ptr(p, f)` projects a field of a struct pointee (0004)", None),
+                );
+                Type::Error
+            }
+        }
+    }
+
     // ----- calls ----------------------------------------------------------
 
     fn check_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> Type {
@@ -841,6 +904,58 @@ impl<'a> Checker<'a> {
         sig.ret.clone()
     }
 
+    /// Design 0005 implicit call-site reborrow. If `inner` is a place that
+    /// already denotes a borrow (a borrow-typed local, or a chained `deref b`)
+    /// passed to a `read`/`write`-mode parameter, desugar it to the explicit
+    /// reborrow node `read (deref inner)` / `write (deref inner)` BEFORE loan
+    /// analysis, so the inserted node is indistinguishable from the hand-written
+    /// form to Stage 3. Bare `b` to such a parameter is a reborrow, never a move.
+    /// Non-place borrow arguments (call results) and owned places return `None`
+    /// and keep their existing treatment; `take`-mode never reaches here.
+    /// `write`-param + shared source desugars to `write (deref b)`, which the
+    /// existing machinery rejects as "cannot reborrow exclusive from shared".
+    fn reborrow_desugar(&self, inner: &Expr, op: PrefixOp) -> Option<Expr> {
+        if !matches!(
+            self.place_borrow_ty(inner),
+            Some(Type::Borrow(_) | Type::BorrowMut(_))
+        ) {
+            return None;
+        }
+        let deref = Expr {
+            kind: ExprKind::Prefix {
+                op: PrefixOp::Deref,
+                expr: Box::new(inner.clone()),
+            },
+            span: inner.span,
+        };
+        Some(Expr {
+            kind: ExprKind::Prefix {
+                op,
+                expr: Box::new(deref),
+            },
+            span: inner.span,
+        })
+    }
+
+    /// Non-emitting probe of the type a place expression holds, for the
+    /// borrow-denoting-place test above. Only the place shapes that can denote a
+    /// borrow are recognized (identifier, `deref` chain, `paren`); §3.4 bans
+    /// borrow-typed struct/enum fields, so there is no `p.f` case.
+    fn place_borrow_ty(&self, e: &Expr) -> Option<Type> {
+        match &e.kind {
+            ExprKind::Paren(i) => self.place_borrow_ty(i),
+            ExprKind::Ident(name) => self.lookup_local(name).map(|li| li.ty.clone()),
+            ExprKind::Prefix {
+                op: PrefixOp::Deref,
+                expr,
+            } => match self.place_borrow_ty(expr)? {
+                Type::Borrow(x) | Type::BorrowMut(x) | Type::Box(x) => Some(*x),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn check_arg_mode(&mut self, mode: ParamMode, decl_ty: &Type, arg: &Expr) {
         let out_marked = matches!(&arg.kind, ExprKind::OutArg(_));
         let inner: &Expr = match &arg.kind {
@@ -863,11 +978,17 @@ impl<'a> Checker<'a> {
             }
             ParamMode::Read => {
                 let expected = Type::Borrow(Box::new(decl_ty.clone()));
-                self.check_against(inner, &expected);
+                match self.reborrow_desugar(inner, PrefixOp::Read) {
+                    Some(node) => self.check_against(&node, &expected),
+                    None => self.check_against(inner, &expected),
+                };
             }
             ParamMode::Write => {
                 let expected = Type::BorrowMut(Box::new(decl_ty.clone()));
-                self.check_against(inner, &expected);
+                match self.reborrow_desugar(inner, PrefixOp::Write) {
+                    Some(node) => self.check_against(&node, &expected),
+                    None => self.check_against(inner, &expected),
+                };
             }
             ParamMode::Out => {
                 if !out_marked {

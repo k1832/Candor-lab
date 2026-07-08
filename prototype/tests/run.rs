@@ -488,3 +488,20 @@ fn ensures_reading_live_param_runs() {
                fn main() -> i64 { return f(R { v: 7 }); }";
     assert_eq!(run(src).ret, 7);
 }
+
+// --------------------------------------------------------------------------
+// design 0004: `field_ptr` runs (safe field-address projection)
+// --------------------------------------------------------------------------
+
+#[test]
+fn field_ptr_projects_field_address_and_reads_it() {
+    // Compute the address of field `b` in SAFE code via `field_ptr`, then read
+    // through it inside `unsafe` (deref stays gated). Expect 32. Design 0004.
+    let src = "struct T { a: i64, b: i64 } \
+      fn base_ptr(t: write T) -> rawptr T { unsafe \"addr of a live T\" { return addr_of_mut(deref t); } } \
+      fn read_i64(p: rawptr i64) -> i64 { unsafe \"p is a valid i64 address\" { return ptr_read(p); } } \
+      fn main() -> i64 { let mut t: T = T { a: 10, b: 32 }; \
+        let fp: rawptr i64 = field_ptr(base_ptr(write t), b); \
+        return read_i64(fp); }";
+    assert_eq!(run(src).ret, 32);
+}

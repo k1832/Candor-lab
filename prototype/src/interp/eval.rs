@@ -641,6 +641,24 @@ impl<'a> Interp<'a> {
                 };
                 self.usize_val(n)
             }
+            ExprKind::FieldPtr { ptr, field } => {
+                // `field_ptr(p, f)` = address(p) + offsetof(StructT, f) — plain
+                // arithmetic, no null check (design 0004).
+                let pv = self.eval_value(ptr, None)?;
+                let struct_name = match &pv.ty {
+                    Type::RawPtr(inner) => match &**inner {
+                        Type::Named(n) => n.clone(),
+                        _ => String::new(),
+                    },
+                    _ => String::new(),
+                };
+                let base = self.read_u64(pv.addr)?;
+                let (fty, off) = self.field_offset(&struct_name, field);
+                let na = base.wrapping_add(off);
+                let a = self.mem.stack_alloc(8, 8);
+                self.write_bytes(a, &na.to_le_bytes())?;
+                Ok(RVal { ty: Type::RawPtr(Box::new(fty)), addr: a, origin: Origin::None })
+            }
             ExprKind::Sizeof(ty) => {
                 let n = self.size_of(&self.resolve_ty(ty));
                 self.usize_val(n)

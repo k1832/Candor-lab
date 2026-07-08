@@ -304,6 +304,12 @@ impl Counter {
             }
             ExprKind::CastPtr { arg, .. } | ExprKind::AddrToPtr { arg, .. } => self.expr(arg),
 
+            // `field_ptr(p, f)` is a SAFE op (design 0004): it opens NO valve
+            // region (the region rule is untouched — a field_ptr outside `unsafe`
+            // is not a valve statement; inside one it counts like any statement).
+            // Recurse only into `p`; `f` is a field selector, not an expression.
+            ExprKind::FieldPtr { ptr, .. } => self.expr(ptr),
+
             ExprKind::Block(b) => self.block(&b.stmts),
             ExprKind::If {
                 cond,

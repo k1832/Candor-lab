@@ -839,3 +839,41 @@ fn static_read_and_read_borrow_are_clean() {
          fn f() -> i64 { return g(read COUNTER) + COUNTER; }",
     );
 }
+
+// ---- design 0004: safe typed field projection (`field_ptr`) ---------------
+
+#[test]
+fn field_ptr_is_safe_no_unsafe_needed() {
+    // `field_ptr(p, f)` computes a field's address by static offset: SAFE, no
+    // `unsafe` region required (design 0004; joins offsetof/is_null on the safe
+    // side of E0501). Result type is `rawptr FieldT`.
+    assert_clean(
+        "struct T { a: i64, b: i64 } \
+         fn f(p: rawptr T) -> rawptr i64 { return field_ptr(p, b); }",
+    );
+}
+
+#[test]
+fn field_ptr_unknown_field_is_e0510() {
+    assert_has(
+        "struct T { a: i64, b: i64 } \
+         fn f(p: rawptr T) -> rawptr i64 { return field_ptr(p, zzz); }",
+        "E0510",
+    );
+}
+
+#[test]
+fn field_ptr_non_struct_pointee_is_e0510() {
+    assert_has(
+        "fn f(p: rawptr i64) -> rawptr i64 { return field_ptr(p, a); }",
+        "E0510",
+    );
+}
+
+#[test]
+fn field_ptr_non_rawptr_operand_is_e0510() {
+    assert_has(
+        "struct T { a: i64 } fn f(p: T) -> rawptr i64 { return field_ptr(p, a); }",
+        "E0510",
+    );
+}
