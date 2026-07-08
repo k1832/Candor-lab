@@ -288,6 +288,10 @@ Stage 3 is NLL-lite: backward liveness of borrow-carrying bindings plus a confli
   `push(write v, read v[0])` is a false positive it deliberately reports rather than accepts.
 - **All-paths-return (E0810).** A non-unit function with any reachable `FallThrough` terminator is
   rejected, so a returned borrow's provenance check (below) is not bypassed by falling off the end.
+  The `?` operator (`ExprKind::Try`) is modeled here as a **conditional early return**: each `?` site
+  forks the CFG into an `ok` fall-through and a genuine `Term::Return` edge carrying the propagated value,
+  so the exit-point analyses (this rule, ensures re-emission §2.7, and the E0309 drop points of §2.1) all
+  see the propagate path exactly as a written `return` (checker-soundness fix, 2026-07-08).
 - **Return provenance (E0806/E0807/E0808), now TOTAL (review #1 finding 1).** `check_return_provenance`
   rejects returning a borrow of a local or of an owned (`take`) parameter, and enforces that an explicitly
   region-tagged return derives from the region's parameter — a borrow may not outlive its body (§3.3),
@@ -396,6 +400,8 @@ never suppresses one.
   and an explicit **`Panic`**. Each is raised at the operation and propagated as `Ctl::Fault`, unwinding to the
   top without yielding the operation's would-be result — the interpreter has no path that both raises a fault
   and returns a derived value.
+  A `?` that takes its non-`ok` branch is **not** a fault: it is a modeled *normal early return* (§2.2, the
+  same `Ctl::Return`/`Term::Return` a written `return` uses), outside this fault enumeration (2026-07-08).
 - **The ninth variant, `BadPointer`, is outside claim (e)'s scope — named and placed, not omitted.** It is
   raised only at **raw-pointer** operations (an address beyond the memory model on `ptr_read`/`ptr_write`/
   `ptr_offset`), plus an **init-byte guard** diagnostic aid that traps a read of never-written storage. Both are

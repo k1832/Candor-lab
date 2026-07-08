@@ -164,3 +164,166 @@ fn parity_same_result_both_syntaxes() {
     assert_eq!(throwaway, real, "parity mismatch: .cn={throwaway} .cnr={real}");
     assert_eq!(real, 42);
 }
+
+// ---- `?` early-return is modeled in the CFG as a conditional return ---------
+// (soundness fix, 2026-07-08). At each `?` the CFG forks: an `ok` fall-through
+// and a genuine `Return` carrying the propagated value. On that exit edge the
+// exit-point analyses now fire — E0309 drop points, ensures re-emission, and
+// move/init state per the return-path rules — closing the gap where they were
+// skipped at every `?` site.
+
+fn run_real_src_ret(src: &str) -> i64 {
+    match run_source_real(src) {
+        RunResult::Ok(r) => r.ret,
+        other => panic!("run failed: {}", matches_kind(&other)),
+    }
+}
+
+/// A needs-drop local that is `MaybeInit` at a `?` exit is an E0309 drop point:
+/// the `?` return unwinds the open scopes, and the interpreter would otherwise
+/// decide the drop from a runtime flag.
+#[test]
+fn try_maybeinit_needsdrop_at_exit_is_e0309() {
+    let src = r#"
+struct Res { v: i64 } drop(write self) { }
+enum E { ok Good(i64), Bad }
+fn f(flag: bool, e: E) -> E {
+    let mut r: Res;
+    if flag {
+        r = Res { v: 1 };
+    }
+    let x: i64 = e?;
+    return E::Good(x);
+}
+"#;
+    let codes = real_error_codes(src);
+    assert!(codes.contains(&"E0309".to_string()), "expected E0309 at the `?` exit, got {codes:?}");
+}
+
+/// Control: the same shape with the needs-drop local `Init` on every path at the
+/// `?` checks clean — its drop at the `?` exit is a static fact.
+#[test]
+fn try_init_needsdrop_at_exit_clean() {
+    let src = r#"
+struct Res { v: i64 } drop(write self) { }
+enum E { ok Good(i64), Bad }
+fn g(e: E) -> E {
+    let r: Res = Res { v: 1 };
+    let x: i64 = e?;
+    return E::Good(x + r.v);
+}
+"#;
+    let codes = real_error_codes(src);
+    assert!(!codes.contains(&"E0309".to_string()), "Init-at-`?` must not error, got {codes:?}");
+}
+
+/// An `ensures` clause is re-emitted at the `?` return: reading a param moved by
+/// the body before the `?` is E0301 there. The ok path panics, so the `?` exit
+/// is the *only* return point — isolating the fix (without it, no return block
+/// exists and the clause is never checked at the propagate path).
+#[test]
+fn ensures_reading_param_moved_before_try_is_e0301() {
+    let src = r#"
+struct Res { v: i64 } drop(write self) { }
+enum E { ok Good(i64), Bad }
+fn sink(r: Res) -> unit { }
+fn f(e: E, r: Res) ensures(r.v > 0) -> E {
+    sink(r);
+    let x: i64 = e?;
+    panic("done");
+}
+"#;
+    let codes = real_error_codes(src);
+    assert!(codes.contains(&"E0301".to_string()), "expected E0301 at the `?` return, got {codes:?}");
+}
+
+/// `?` is control flow (an early return), not a read, so it is forbidden inside a
+/// contract condition (E0708) — in both `ensures` and `requires`.
+#[test]
+fn try_in_ensures_rejected() {
+    let src = r#"
+enum E { ok Good(i64), Bad }
+fn get() -> E { return E::Good(1); }
+fn f() ensures(get()? == 1) -> E {
+    return E::Good(1);
+}
+"#;
+    let codes = real_error_codes(src);
+    assert!(codes.contains(&"E0708".to_string()), "expected E0708 for `?` in ensures, got {codes:?}");
+}
+
+#[test]
+fn try_in_requires_rejected() {
+    let src = r#"
+enum E { ok Good(i64), Bad }
+fn get() -> E { return E::Good(1); }
+fn f() requires(get()? == 1) -> E {
+    return E::Good(1);
+}
+"#;
+    let codes = real_error_codes(src);
+    assert!(codes.contains(&"E0708".to_string()), "expected E0708 for `?` in requires, got {codes:?}");
+}
+
+/// The drop obligations legitimately differ between the two `?` paths: on the
+/// propagate path the needs-drop local is live and dropped at the `?` exit; on
+/// the ok path it is moved out (consumed) and so not dropped at the return. Both
+/// are legal and the program runs identically to the interpreter's control flow.
+#[test]
+fn try_differing_drop_obligations_ok_and_propagate() {
+    let src = r#"
+struct Res { v: i64 } drop(write self) { }
+enum E { ok Good(i64), Bad }
+fn consume(r: Res) -> unit { }
+fn f(e: E) -> E {
+    let r: Res = Res { v: 5 };
+    let x: i64 = e?;
+    consume(r);
+    return E::Good(x);
+}
+fn main() -> i64 {
+    let ok: E = f(E::Good(7));
+    let bad: E = f(E::Bad);
+    return match ok { E::Good(v) => v, E::Bad => 0 }
+         + match bad { E::Good(v) => v, E::Bad => 100 };
+}
+"#;
+    assert!(check_source_real(src).unwrap().is_empty(), "must check clean: {:?}", check_source_real(src).unwrap());
+    assert_eq!(run_real_src_ret(src), 107);
+}
+
+/// Multiple `?` in one statement each fork the CFG; the ok path chains through
+/// both payloads and the program runs.
+#[test]
+fn multiple_try_in_one_statement() {
+    let src = r#"
+enum E { ok Good(i64), Bad }
+fn add(x: i64, y: i64) -> i64 { return x + y; }
+fn f(a: E, b: E) -> E {
+    let s: i64 = add(a?, b?);
+    return E::Good(s);
+}
+fn main() -> i64 {
+    let r: E = f(E::Good(10), E::Good(20));
+    return match r { E::Good(v) => v, E::Bad => 0 };
+}
+"#;
+    assert!(check_source_real(src).unwrap().is_empty(), "must check clean: {:?}", check_source_real(src).unwrap());
+    assert_eq!(run_real_src_ret(src), 30);
+}
+
+/// A `?` consumes its operand on both paths, so the ok fall-through using that
+/// moved place is E0301.
+#[test]
+fn use_of_place_moved_into_try_is_e0301() {
+    let src = r#"
+enum E { ok Good(i64), Bad }
+fn f(a: E) -> E {
+    let x: i64 = a?;
+    return a;
+}
+"#;
+    let codes = real_error_codes(src);
+    assert!(codes.contains(&"E0301".to_string()), "expected E0301 for use of moved `a`, got {codes:?}");
+}
+

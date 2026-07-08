@@ -972,12 +972,61 @@ impl<'a> Checker<'a> {
                 .with_note("cross-type propagation needs traits and is deferred (spec 02 §6.5)", None),
             );
         }
-        einfo
+        let payload = einfo
             .variants
             .iter()
             .find(|v| v.name == ok_name)
             .and_then(|v| v.payload.first().cloned())
-            .unwrap_or_else(Type::unit)
+            .unwrap_or_else(Type::unit);
+        // A `?` is control flow (an early return), not a read, so it cannot be a
+        // read-only contract clause. The simplest sound rule is to forbid it
+        // inside a `requires`/`ensures`/`assert` condition outright (this fix):
+        // modeling its exit as a real return would early-return the function in
+        // the middle of contract evaluation, which is incoherent under P8 — and
+        // the ensures re-emission runs with `cur` pointing at a return block, so
+        // forking there would corrupt the CFG. Reject and do NOT fork.
+        if self.f_in_contract() {
+            self.diags.push(
+                Diag::error(
+                    "E0708",
+                    "the `?` operator is not allowed inside a contract clause",
+                    span,
+                )
+                .with_note(
+                    "a `requires`/`ensures`/`assert` condition is read-only and must not early-return; `?` is control flow, not a read (this fix)",
+                    None,
+                ),
+            );
+        } else if same {
+            // A well-typed `?` is a conditional early return: model it in the CFG.
+            self.emit_try_exit(span);
+        }
+        payload
+    }
+
+    /// Model `?` in the CFG as a conditional early return (design 0003 §2.2/§2.6).
+    /// The operand has just been evaluated (and consumed) into the current block;
+    /// here that block forks into the `ok` fall-through — where the `?` expression
+    /// yields the payload — and a genuine `Return` edge carrying the propagated
+    /// value. A `?` return IS a normal return, so the exit block unwinds the open
+    /// block scopes exactly as `check_return` does (§1.6 dual, driving the E0309
+    /// drop-point checks) and the ensures re-emission (mod.rs) treats it as a
+    /// return point (contracts must hold, the propagated value binds `result`).
+    fn emit_try_exit(&mut self, span: Span) {
+        let cur = match self.cur_get() {
+            Some(c) => c,
+            None => return,
+        };
+        let exit_bb = self.new_block();
+        let ok_bb = self.new_block();
+        self.set_join_span(exit_bb, span);
+        self.set_term(cur, Term::Branch(ok_bb, exit_bb));
+        // Propagate path: a real return that unwinds the open block scopes.
+        self.cur_set(Some(exit_bb));
+        self.emit_scope_exits(1, span);
+        self.set_term(exit_bb, Term::Return);
+        // Ok path: control continues; the payload is the expression's value.
+        self.cur_set(Some(ok_bb));
     }
 
     /// Reject a write target that reaches a field/element *through* a single-place

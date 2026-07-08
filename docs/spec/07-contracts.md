@@ -47,6 +47,13 @@ is in design 0001 and philosophy P8.
     the clause runs at runtime at each return). `requires` is entry-checked and
     obeys the same read-only rule.
 
+3.3 The `?` operator SHALL NOT appear inside a `requires`, `ensures`, or `assert`
+    condition (E0708). A `?` is control flow — a conditional early return — not a
+    read; a contract condition is a pure boolean with no escape, and modeling a
+    `?` exit as a real return in the middle of contract evaluation is incoherent
+    under the optimizer-never-assumes rule. This is the simplest sound rule
+    (checker-soundness fix, 2026-07-08).
+
 ---
 
 ## 4. The optimizer-never-assumes rule (NORMATIVE now — load-bearing and settled)
