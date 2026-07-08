@@ -12,6 +12,22 @@ reads); Bet 3 (imprecision restores scheduling, collapses where effects are
 dense); P4 (diagnostics as first-class); chapter 06 §3 (precise trap as sound
 refinement); chapter 09 (adopted consistency model, currently no-concurrency).
 
+**Revision history.** *2026-07-08* — amended per adversarial review #1
+(`docs/reviews/2026-07-08-fault-window-review-1.md`, all nine dispositions
+accepted). The review found the draft UNSOUND as originally written: R1 licensed
+reordering observables and fault-capable ops as if they were internal `τ`-steps,
+breaking three theorems. Amendments applied here: R1 restricted to `τ`-steps with
+observable events made effect-order-total (§5.1, §8.3); R1 window constraint added —
+no fault-capable op reorders before its `e⁻` (§5.1, resolving the R1/R3
+contradiction); control-dependence defined and folded into `→` (§3.4); dependence
+restated as static def-use on `f`'s output place (§3.3–§3.4); O2 rescoped to
+happens-before AND relaxed visibility with racy channels assigned to the unsafe
+author (§12.3); store-granularity/torn-transaction note added (§8.3); the
+`f★`-recovery/replay obligation made load-bearing (§6.5). The three review
+counterexamples appear as worked non-examples N1–N3 (§7.3). Theorem 2 fault-free is
+now the trivial consequence of effect-order-total observables, replacing the invalid
+per-address aliasing proof.
+
 ---
 
 ## 1. Scope, and what is vacuous today
@@ -94,18 +110,42 @@ refinement); chapter 09 (adopted consistency model, currently no-concurrency).
     `⟨k, σ, θ⟩ —fault(k,s,c)→ ⟨halted, σ, θ·fault·halt⟩`: it **produces no value**
     (chapter 06 §6.3 — no value derived from the faulting operation becomes
     observable), writes no place, and truncates. Write `⊥` for its (absent)
-    result.
+    result. The place `op` would have written is its **output place** `out(op)` —
+    a *static* location (chapter 03 §7.6), named by the program text independent of
+    whether `op` dynamically faults. Dependence (§3.4) is defined over `out(op)`
+    **statically**; **truncation is the dynamic fact** — that `op` actually faulted
+    on this `(P, i)` — layered on top of the static def-use structure, not part of
+    it.
 
-3.4 **Program order and data dependence.**
+3.4 **Program order, dependence, control-dependence.**
     - **Program order** `≤po` is the total order on operation occurrences fixed by
       the source's *defined* evaluation order (chapter 06 §5.2). It is a property
       of the program text and input, not of a build mode.
-    - `op₂` **data-depends** on `op₁` (`op₁ → op₂`) iff `op₂` reads a place `op₁`
-      writes, transitively via def-use through `σ`. Dependence implies order:
-      `op₁ → op₂ ⇒ op₁ <po op₂` (you cannot consume a value not yet produced).
-    - An operation is **fault-independent of `f`** iff it is not reachable from `f`
-      in `→` (it neither reads `f`'s result — which is `⊥` — nor is
-      control-dependent on `f`'s completion).
+    - **Static data-dependence.** `op₂` **data-depends** on `op₁`
+      (`op₁ →data op₂`) iff `op₂` names, among its input places, the **output
+      place** `out(op₁)` that `op₁` writes — a *static* def-use relation over the
+      program's places (chapter 03 §7.6), transitively closed. An observable's
+      dependence on a faulting `f` is thus read off `out(f)` **statically**, before
+      knowing whether `f` faults on `(P, i)`; whether it *does* fault is the
+      separate dynamic fact of §3.3.
+    - **Control-dependence.** Over the CFG of `P` (basic blocks, branch/switch
+      terminators, a unique exit), operation `op₂` in block `Y` **control-depends**
+      on branch `op₁` in block `X` (`op₁ →ctrl op₂`) iff (Ferrante–Ottenstein–
+      Warren): `X` has ≥2 CFG successors, `Y` **post-dominates** some successor of
+      `X`, and `Y` does **not** post-dominate `X`. Intuitively `op₁`'s outcome
+      decides whether `op₂` executes. A branch that tests a value data-depends on
+      that value; hence control flow gated on `f`'s result (which is `⊥`) is
+      captured by `→ctrl` composed with `→data` and is **not** launderable through
+      the CFG (non-example N3, §7.3).
+    - **Combined dependence.** `→ = (→data ∪ →ctrl)⁺` (transitive closure).
+      Dependence implies order: `op₁ → op₂ ⇒ op₁ <po op₂` (you cannot consume a
+      value — or take a branch on a value — not yet produced).
+    - An operation is **fault-independent of `f`** iff it is **not reachable from
+      `f` in `→`**: it neither reads `out(f)` (whose dynamic content is `⊥`), nor is
+      control-dependent on `f`'s completion, nor transitively depends on either.
+      Speculating an observable across a control edge reachable from `f` in `→` is
+      therefore **not** fault-independent, and R1 (§5.1) forbids hoisting it before
+      `f`.
 
 3.5 **The precise reference run.** For a program `P` and input `i`, the reference
     relation is *deterministic* (defined evaluation order, no declared
@@ -149,12 +189,21 @@ refinement); chapter 09 (adopted consistency model, currently no-concurrency).
     from the **legal-execution relation** `⇒R` defined by closing the reference
     relation §3 under the following rewrites, and no others:
 
-  - **(R1) Reorder / hoist / fuse independent effects.** Two operations that are
-    pairwise data-independent (`¬(op₁ → op₂) ∧ ¬(op₂ → op₁)`) and both
-    fault-independent of any fault they straddle MAY be executed in either order,
-    coalesced, or eliminated if dead. **A data-dependent pair keeps its `≤po`
-    order** (the optimizer respects `→`); this is the standard soundness side
-    condition and it is what makes Containment (§7) hold.
+  - **(R1) Reorder / hoist / fuse / eliminate independent *internal* steps.** Two
+    *internal* (`τ`) operations that are pairwise dependence-independent
+    (`¬(op₁ → op₂) ∧ ¬(op₂ → op₁)` under the combined data-and-control dependence
+    `→` of §3.4) and both fault-independent of any fault they straddle MAY be
+    executed in either order, coalesced, or eliminated if dead. **This license
+    applies to `τ`-steps only.** Observable events are **effect-order-total**
+    (§8.3): they are **never reordered, coalesced, or eliminated** — every legal
+    execution emits the events of `Obs` in full program order. Two side conditions
+    bind R1: **(i)** a dependent pair keeps its `≤po` order — the optimizer respects
+    `→`, *data and control* (this is what makes Containment §7 hold); and **(ii) the
+    window constraint** — **no fault-capable operation may be reordered before its
+    `e⁻`** (the po-greatest observable preceding it, §4.1). A potentially-faulting op
+    stays within its own window `[e⁻, e⁺)`; it may not be hoisted past an earlier
+    observable, so a fault can never suppress an observable that program-order-
+    precedes it.
 
   - **(R2) Vary window-interior retirement.** For a faulting run, any subset of
     the `τ`-operations of `W(f)` MAY have retired at delivery; the complement MAY
@@ -165,11 +214,23 @@ refinement); chapter 09 (adopted consistency model, currently no-concurrency).
     point in `W(f)` (batched/vectorized checking, hoisted arithmetic), provided
     delivery still precedes `e⁺`. R3 is the freedom Bet 3 buys.
 
-5.2 **What the license forbids.** No rewrite may (a) move a fault-*dependent*
-    operation before its producing fault (R1 side condition), (b) let any
-    observable event `≥po e⁺` retire (R2/§4.2), (c) suppress delivery when a fault
-    is enabled (inescapability, §8), or (d) read a place not statically proven
-    initialized (§9.2 — no rewrite touches the static init property).
+  - **(R1/R3 boundary — resolved.)** R3 moves the *detection* point of a fault
+    *within* its window `W(f)` (never earlier than `e⁻`, never at/after `e⁺`); R1's
+    window constraint (ii) forbids moving the *fault-capable operation itself*
+    before `e⁻`. The earlier draft let R1 reorder fault-capable ops freely, which
+    could hoist a fault before an observable that program-order-precedes it and
+    suppress that observable — a direct contradiction with R3's "delivery within the
+    window." Constraint (ii) removes the contradiction: R1 and R3 now both keep
+    every fault strictly inside `[e⁻, e⁺)`.
+
+5.2 **What the license forbids.** No rewrite may (a) move any operation *reachable
+    from a fault `f` in `→`* — data- or control-dependent — before `f`, nor move a
+    fault-capable op before its `e⁻` (R1 side conditions i–ii); (b) reorder,
+    coalesce, or eliminate any observable event, which are effect-order-total
+    (R1/§8.3); (c) let any observable event `≥po e⁺` retire (R2/§4.2); (d) suppress
+    delivery when a fault is enabled (inescapability, §8); or (e) read a place not
+    statically proven initialized (§9.2 — no rewrite touches the static init
+    property).
 
 ---
 
@@ -220,6 +281,20 @@ refinement); chapter 09 (adopted consistency model, currently no-concurrency).
     of §9 — the *kind* `k` and *span* `s` are pinned, `c` is advisory. Reviewers
     should attack §6.4 first (see §14).
 
+6.5 **The f★-recovery obligation (load-bearing).** Under Option A the recovery of
+    the po-earliest fault is a **proof-load-bearing obligation**, not a mere cost:
+    whenever a fused/vectorized/reordered build detects "some fault occurred in `W`"
+    without knowing *which* op is `f★`, it MUST recover `f★` before delivery. The
+    **replay origin** is the **last retired observable** — `e⁻` (§4.1): the build
+    re-executes the deterministic segment `(e⁻, f★]` in program order to identify
+    the `≤po`-earliest enabled-faulting op, then delivers `(k★, s★, ·)`. Replaying
+    from `e⁻` (rather than from program start) is sound because everything `≤po e⁻`
+    is an already-committed deterministic prefix (§8.2) and `W(f)` contains no
+    observable events (§4.3), so replay re-derives no observable and re-emits
+    nothing to `θ`. This obligation is what discharges "same fault identity across
+    builds" (§8.2, §10.3); a build that cannot replay from `e⁻` cannot claim Option
+    A conformance.
+
 ---
 
 ## 7. Theorem 1 — Containment
@@ -234,18 +309,45 @@ refinement); chapter 09 (adopted consistency model, currently no-concurrency).
     - *(b)* By §4.2 nothing at or after `e⁺` executes; R2 (§5.1) may only vary
       *window-interior* `τ`-operations and may never let an observable event
       `≥po e⁺` retire (§5.2b). So no observable event `≥po e⁺` is appended to `θ`.
-    - *(a)* Suppose an observable `g` with `f → g` (transitively) appears. By
-      §3.4, dependence implies `f <po g`. `g` is observable, so `g` is not in
-      `W(f)` (§4.3); being `>po f` and observable, `g ≥po e⁺`. By (b), `g` does
-      not appear — contradiction. The single load-bearing step is R1's side
-      condition (§5.1): the optimizer never reorders `g` before `f`, so
-      dependence-implies-order survives every legal rewrite. **Attack here:** if a
-      rewrite could break `f → g ⇒ f <po g` (e.g. speculative execution of `g`
-      before `f` resolves), (a) fails; the claim rests on R1 forbidding exactly
-      that.
+    - *(a)* Suppose an observable `g` reachable from `f` in `→` (data- **or**
+      control-dependent, §3.4) appears. By §3.4 dependence implies `f <po g`. `g` is
+      observable, so `g ∉ W(f)` (§4.3); being `>po f` and observable, `g ≥po e⁺`. By
+      (b), `g` does not appear — contradiction. Two load-bearing steps, both now
+      discharged by amended R1 (§5.1): the optimizer never reorders a fault-reachable
+      `g` before `f` (side condition i, extended to control-dependence), and
+      observable events are **effect-order-total**, so `g` can be neither hoisted nor
+      synthesized across a control edge (the laundering route). The
+      speculative-execution and control-laundering breaks the earlier draft admitted
+      are now blocked as worked non-examples N1 and N3 (§7.3).
     - *No value escapes.* `f` writes no place and yields `⊥` (§3.3, chapter 06
       §6.3); so even a *non-observable* consumer of `f` computes on no real value
       and, being `≥po e⁺` if observable, is truncated. ∎(sketch)
+
+7.3 **Worked non-examples (the three review counterexamples, each blocked).** Each
+    is a rewrite an earlier draft admitted; the amended rule that rejects it is named
+    on one line.
+
+    - **(N1) Suppressed observable — a fault hoisted before its `e⁻`.**
+      `mmio_w(p, 1); x = a / b`, with `a / b` reordered before the store: the fault
+      would truncate before `mmio_w` retires, deleting an observable that
+      program-order-precedes it. **Blocked by R1 constraint (ii)** (§5.1): a
+      fault-capable op may not be reordered before its `e⁻`, which here is the store.
+
+    - **(N2) MMIO reorder / DCE / per-address aliasing.**
+      Two distinct-address stores `mmio_w(p, 1); mmio_w(q, 2)` swapped, or a "dead"
+      `mmio_w` eliminated, or aliasing `p ≡ q` mis-modelled as independent.
+      **Blocked by effect-order-total R1** (§5.1, §8.3): observable events are never
+      reordered, coalesced, or eliminated — they keep full program order
+      unconditionally, so no per-address-independence premise is needed or used.
+
+    - **(N3) Control-flow laundering of a fault-dependent observable.**
+      `x = a / b; y = 0; if x > 0 { y = 1 }; mmio_w(p, y)` — `y` is only
+      *data*-independent of `f = a / b`, so a data-only `→` would let `mmio_w(p, y)`
+      hoist before `f`, leaking post-fault behaviour through the CFG. **Blocked by
+      control-dependence folded into `→`** (§3.4): the chain
+      `f →data (x > 0) →ctrl (y = 1) →data mmio_w(p, y)` makes the store reachable
+      from `f` in `→`, hence fault-*dependent*, and R1 side condition (i) forbids
+      hoisting it before `f`.
 
 ---
 
@@ -263,25 +365,30 @@ refinement); chapter 09 (adopted consistency model, currently no-concurrency).
     value-context `c` (§6.4).
 
 8.3 **Proof sketch.**
-    - *Fault-free.* With no fault, R2/R3 do not apply; only R1 (reorder
-      *independent* effects) is available. Observable events that are pairwise
-      independent commute, but on the single-thread observable substrate the only
-      program-authored observable events are `mmio_w/mmio_r` to fixed addresses;
-      two `mmio` accesses to *distinct* addresses are independent and their
-      relative order is not externally distinguishable at those distinct
-      addresses, while two accesses that could alias are data-dependent (§3.4) and
-      R1 keeps their order. Hence every legal reorder yields the same `tr`. The
-      **load-bearing assumption**: MMIO observability is *per-address*, so
-      reordering independent (distinct-address) accesses is not observable. Attack
-      here if a target's MMIO fabric imposes cross-address ordering (then those
-      accesses are *not* independent and must be modelled as dependent — a target
-      parameter, chapter 06 §7.3 window-collapse territory).
+    - *Fault-free (now trivial).* Observable events are **effect-order-total**
+      (§5.1 R1): no legal rewrite reorders, coalesces, or eliminates any member of
+      `Obs`, and R1 touches `τ`-steps only. Therefore every legal `E ∈ ⇒R` emits
+      exactly the reference program-order observable sequence — `tr(E) = tr★(P, i)`
+      — **by construction**. This is the honest, now-trivial proof; it makes **no**
+      premise about MMIO aliasing or per-address independence. The earlier draft's
+      invalid step (reordering distinct-address accesses and eliminating "dead"
+      observables under R1) is rejected as non-example N2 (§7.3). `τ`-reordering
+      under R1 remains invisible to `tr` because `τ`-steps append nothing to `θ`
+      (§3.2).
+    - *Store-granularity observability.* An observable is emitted at **individual
+      store granularity**: each `mmio_w(a, v)` is one indivisible observable event.
+      The model provides **no multi-store atomicity** — a logical device transaction
+      spanning several `mmio_w`s is a *sequence* of observables, and a fault may fall
+      between them, truncating (§4.2) after some stores and before others. Such a
+      **torn multi-store device transaction is P5-legal**, and is flagged for the
+      eventual volatile-access / atomic-MMIO design (§13.4); this draft does not
+      promise transactional device writes.
     - *Faulting.* By Theorem 1 the trace is `[obs ≤po e⁻] · fault · halt`. The
-      prefix `[obs ≤po e⁻]` is a fault-free observable segment, hence determined
-      by the fault-free argument above. The fault identity is `f★` by Option A
-      (§6.2). The only freedom left is R2 over `W(f)`'s `τ`-operations, which by
-      §4.3 append nothing to `θ`. Therefore `tr(E)` is identical across builds. ∎
-      (sketch)
+      prefix `[obs ≤po e⁻]` is a fault-free observable segment, hence determined by
+      the effect-order-total argument above. The fault identity is `f★` by Option A
+      (§6.2), recovered via the f★-recovery obligation (§6.5, replay from `e⁻`). The
+      only freedom left is R2 over `W(f)`'s `τ`-operations, which by §4.3 append
+      nothing to `θ`. Therefore `tr(E)` is identical across builds. ∎ (sketch)
 
 8.4 **Remark (the strengthening Option A buys).** Under Option B, 8.2 weakens to
     "identical up to `e⁻`, fault identity unconstrained." Option A upgrades it to
@@ -371,8 +478,15 @@ precise faulting). Discharge accounting is in §14.
 12.3 **Proof obligations this imposes (all currently OPEN):**
      - **(O1)** Define `W(f)` against `synchronizes-with`/happens-before, not only
        per-thread po; show `e⁺` is well-defined under all legal interleavings.
-     - **(O2)** *Cross-thread containment*: no thread observes a value data-
-       dependent on `f` via any `sw` edge (Theorem 1 lifted across threads).
+     - **(O2)** *Cross-thread containment*: no thread observes a value dependent on
+       `f` (data- **or** control-, §3.4) via any **happens-before** edge, **and**
+       none via **relaxed-atomic visibility** (inter-thread ordering weaker than
+       `sw`, e.g. `memory_order_relaxed` publication) — Theorem 1 lifted across
+       threads over *both* the hb and the relaxed-visibility relations. **Racy or
+       unsafe channels are out of scope of this guarantee**: a data race or a
+       raw-pointer cross-thread share carries no ordering the model can bound, and
+       post-window leakage through it is the **unsafe author's declared
+       responsibility** per §13.4 (chapter 05 §4), not a containment defect.
      - **(O3)** *Truncation under interleaving*: no observable effect ordered
        happens-after the fault-thread's bounding sync retires.
      - **(O4)** *SC-for-DRF preservation*: fault-free executions still enjoy the
@@ -407,13 +521,23 @@ precise faulting). Discharge accounting is in §14.
      next artifact. The proof sketches above are structured for mechanization
      (explicit relations, explicit side conditions).
 
-13.4 **Modelling assumptions a reviewer inherits.** (i) MMIO observability is
-     per-address (§8.3) — false on fabrics with cross-address ordering, which must
-     then be modelled as dependence. (ii) Allocation-address nondeterminism
-     (chapter 06 §5.3) does not reach `Obs` — true only while addresses are not
-     leaked to an observable channel; leaking an address via `mmio_w` is an
-     `unsafe`-authored observable and is the author's declared responsibility
-     (chapter 05 §4). (iii) `drop` is observable only via hook-body effects (§2.2).
+13.4 **Modelling assumptions a reviewer inherits.** (i) Observability is at
+     **individual-store granularity** with **no multi-store atomicity** (§8.3): a
+     logical device transaction spanning several `mmio_w`s may be **torn** by a
+     fault between stores (P5-legal), deferred to the eventual volatile-access /
+     atomic-MMIO design. The earlier "per-address MMIO observability" assumption is
+     **withdrawn** — the fault-free proof (§8.3) now rests on observable events being
+     effect-order-total, not on cross-address independence, so ordered-MMIO fabrics
+     need no special treatment. (ii) Allocation-address nondeterminism (chapter 06
+     §5.3) does not reach `Obs` — true only while addresses are not leaked to an
+     observable channel; leaking an address via `mmio_w` is an `unsafe`-authored
+     observable and is the author's declared responsibility (chapter 05 §4). (iii)
+     `drop` is observable only via hook-body effects (§2.2). (iv) **Racy / unsafe
+     cross-thread channels** (data races, raw-pointer sharing) carry no
+     model-bounded ordering; post-window leakage through them is assigned to the
+     **unsafe author** (chapter 05 §4), and cross-thread containment (§12.3 O2) is
+     claimed only over happens-before and relaxed-atomic visibility, not over racy
+     channels.
 
 ---
 
@@ -425,6 +549,12 @@ soundly with the adopted consistency model (chapter 09), preserving NN#1 and
 NN#5."*
 
 **Discharged by this draft (rigorous-informal, single-threaded):**
+- The reordering license `⇒R` is now **sound** as amended (review #1, §revision-
+  history): R1 is restricted to `τ`-steps, observable events are effect-order-total,
+  and the window constraint keeps every fault inside `[e⁻, e⁺)` so a fault can never
+  suppress an earlier observable. What is discharged is the **single-threaded core**,
+  now resting on a **sound reordering license** rather than the originally-unsound
+  one flagged by the review.
 - The §7.2 window bound is defined (§4) and the truncation/containment it names is
   proved-sketch (Theorem 1, §7).
 - Prefix-determinism (§8) establishes the P5 invariant's fault-free and faulting
@@ -458,12 +588,18 @@ conjecture is discharged.
 1. **§6.4 — the value-context ruling.** Making `c` advisory (not part of trace
    equality) is the softest normative move; if `c` must be deterministic, Option A
    costs more than claimed.
-2. **§7.2 (a) / §5.1 R1 side condition.** Containment rests entirely on the
-   optimizer never reordering a fault-*dependent* observable before its fault. A
-   speculative-execution counterexample would break it.
-3. **§8.3 — per-address MMIO observability.** The fault-free determinism proof
-   assumes distinct-address MMIO accesses are independent; targets with ordered
-   MMIO fabrics violate the premise.
+2. **§7.2 (a) / §5.1 R1 side conditions.** Containment rests on the optimizer never
+   reordering a fault-reachable observable (data **or** control, §3.4) before its
+   fault, and on observables being effect-order-total. The three review
+   counterexamples (suppressed observable, MMIO reorder/DCE, control-flow
+   laundering) are now blocked as worked non-examples N1–N3 (§7.3); attack whether
+   any *fourth* laundering route survives the amended `→`.
+3. **§8.3 — store-granularity / torn transactions.** The per-address-MMIO premise
+   is withdrawn (§13.4 i); the fault-free proof is now effect-order-total and
+   trivial. The residual soft spot is store-granularity: the model permits
+   fault-torn multi-store device transactions (§8.3), deferred to the
+   volatile-access design — contest whether P5 should instead promise transactional
+   device writes.
 4. **§12.2 — the delivery-before-sync-retires CONJECTURE.** The whole future
    novelty; contest whether it is even satisfiable under SC-for-DRF with an
    optimizing compiler.
