@@ -303,7 +303,7 @@ pub fn run_dir_mir(dir: &std::path::Path) -> MirRunResult {
 pub mod backend;
 
 /// Resolve, lower to MIR, JIT-compile and run natively. Assumes checked input.
-fn lower_and_run_native(program: &ast::Program) -> MirRunResult {
+fn lower_and_run_native(program: &ast::Program, optimize: bool) -> MirRunResult {
     let mut diags = Vec::new();
     let items = resolve::resolve_program(program, &mut diags);
     let mut consts = std::collections::HashMap::new();
@@ -315,15 +315,21 @@ fn lower_and_run_native(program: &ast::Program) -> MirRunResult {
         }
     }
     match mir::lower_checked(program, &items) {
-        Ok(mp) => match backend::run(&mp, &items, &consts) {
-            Ok(run) => MirRunResult::Ok(run),
-            Err(f) => MirRunResult::Fault(f),
-        },
+        Ok(mp) => {
+            // Stage D (native-opt engine): run the validated MIR-level R1 rewrite
+            // (INV-R1-ONLY, `mir::opt`) before lowering, then compile with the
+            // Cranelift optimizer on. The four-engine gate proves the trace survives.
+            let mp = if optimize { mir::opt::optimize(mp).prog } else { mp };
+            match backend::run(&mp, &items, &consts, optimize) {
+                Ok(run) => MirRunResult::Ok(run),
+                Err(f) => MirRunResult::Fault(f),
+            }
+        }
         Err(e) => MirRunResult::Unsupported(e.0),
     }
 }
 
-fn run_generic_native(program: &ast::Program) -> MirRunResult {
+fn run_generic_native(program: &ast::Program, optimize: bool) -> MirRunResult {
     let (diags, insts, shapes) = check::check_generic_program(program, true);
     if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
         return MirRunResult::CheckErrors(diags);
@@ -332,11 +338,19 @@ fn run_generic_native(program: &ast::Program) -> MirRunResult {
     if mono.diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
         return MirRunResult::CheckErrors(mono.diags);
     }
-    lower_and_run_native(&mono.program)
+    lower_and_run_native(&mono.program, optimize)
 }
 
-/// Throwaway (`.cn`) source through the native engine.
+/// Throwaway (`.cn`) source through the native engine (no optimization).
 pub fn run_source_native(src: &str) -> MirRunResult {
+    run_source_native_impl(src, false)
+}
+/// Stage D: throwaway (`.cn`) source through the OPTIMIZED native engine
+/// (MIR R1 rewrite + Cranelift `opt_level=speed`).
+pub fn run_source_native_opt(src: &str) -> MirRunResult {
+    run_source_native_impl(src, true)
+}
+fn run_source_native_impl(src: &str, optimize: bool) -> MirRunResult {
     let program = match parse_source(src) {
         Ok(p) => p,
         Err(d) => return MirRunResult::ParseError(d),
@@ -345,27 +359,41 @@ pub fn run_source_native(src: &str) -> MirRunResult {
     if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
         return MirRunResult::CheckErrors(diags);
     }
-    lower_and_run_native(&program)
+    lower_and_run_native(&program, optimize)
 }
 
 /// Real (`.cnr`) source through the native engine (monomorphizing generics first).
 pub fn run_source_real_native(src: &str) -> MirRunResult {
+    run_source_real_native_impl(src, false)
+}
+/// Stage D: real (`.cnr`) source through the OPTIMIZED native engine.
+pub fn run_source_real_native_opt(src: &str) -> MirRunResult {
+    run_source_real_native_impl(src, true)
+}
+fn run_source_real_native_impl(src: &str, optimize: bool) -> MirRunResult {
     let program = match real::parse_source(src) {
         Ok(p) => p,
         Err(d) => return MirRunResult::ParseError(d),
     };
     if generics::is_generic_program(&program) {
-        return run_generic_native(&program);
+        return run_generic_native(&program, optimize);
     }
     let diags = check::check_program_real(&program);
     if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
         return MirRunResult::CheckErrors(diags);
     }
-    lower_and_run_native(&program)
+    lower_and_run_native(&program, optimize)
 }
 
 /// Module-tree (`.cnr` directory) through the native engine.
 pub fn run_dir_native(dir: &std::path::Path) -> MirRunResult {
+    run_dir_native_impl(dir, false)
+}
+/// Stage D: module-tree through the OPTIMIZED native engine.
+pub fn run_dir_native_opt(dir: &std::path::Path) -> MirRunResult {
+    run_dir_native_impl(dir, true)
+}
+fn run_dir_native_impl(dir: &std::path::Path, optimize: bool) -> MirRunResult {
     let build = match modules::build_tree(dir) {
         Ok(b) => b,
         Err(d) => return MirRunResult::ParseError(d),
@@ -375,11 +403,11 @@ pub fn run_dir_native(dir: &std::path::Path) -> MirRunResult {
         if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
             return MirRunResult::CheckErrors(diags);
         }
-        return run_generic_native(&build.program);
+        return run_generic_native(&build.program, optimize);
     }
     diags.extend(check::check_program_real(&build.program));
     if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
         return MirRunResult::CheckErrors(diags);
     }
-    lower_and_run_native(&build.program)
+    lower_and_run_native(&build.program, optimize)
 }

@@ -146,3 +146,47 @@ One lesson per entry, one-line summary first.
   free. Fix: evaluate RHS first, then drop-old only if `place_owned` (which already
   consults the move mask) holds, using the local's LIVE mask not `MoveMask::default()`.
   A counting allocator (trace +5555/-5555) unmasks it in tests.
+
+- **Match the oracle's fault SPAN by simulating its `cur_span` threading at
+  lowering time, then bake the exact `(k,s)` into each MIR fault edge.** The
+  tree-walker's fault span is whatever `self.cur_span` last held: arithmetic
+  resets it to the *whole-binary-op* span before the check (overflow/div0 =
+  op span); conv/neg/`assert`/`requires`/bounds deliver at the *operand's
+  trailing* span (conv-loss = operand span, `assert(a<b)` = `b`'s span, bounds =
+  the base-array span). The MIR lowerer threads its own `cur_span` identically and
+  stamps the edge — no runtime span-threading needed, and the gate calibrates it.
+  Verified empirically before writing (probe the oracle's fault JSON), not by
+  reading alone (Stage A MIR, 2026-07-08).
+
+- **A value model (typed i128) beats reusing flat `interp::mem::Mem` for a
+  scalar-core alternate engine — the Stage-A gate tests `(k,s,θ)`, not bytes.**
+  0010 says "reuse the memory module is preferable", but that's load-bearing only
+  once rawptr/MMIO/Box/aggregate layout enter; for the scalar/control/contract
+  core a value model reproduces θ exactly at a fraction of the risk. Report the
+  substrate decision explicitly; reserve Mem for the aggregate extension.
+
+- **Lower AST→MIR per-construct in the oracle's evaluation order and let
+  out-of-subset constructs return `Unsupported`; point the gate at the WHOLE
+  corpus and it self-reports coverage.** Treating `Unsupported` as
+  "out-of-subset, not a failure" turns the differential harness into an honest,
+  automatic coverage meter (found 2 real fixtures — `bits`, `mono3` — in-subset
+  for free, incl. the generic→monomorphize→scalar path).
+
+- **Cranelift `opt_level=speed` turns a saturating-clamp `select` on i128 into
+  `smax.i128`/`smin.i128`, which its x86 backend has NO ISLE lowering for.** Only
+  the OPTIMIZER (egraph) exposes it — at `opt_level=none` the `select` lowers fine;
+  the failure surfaces as a *compile error*, not a trace divergence. Fix: keep the
+  min/max operands at i64 width (compare in i128, but `select` the already-fitted
+  i64 value) so no i128 min/max pattern forms. When flipping the native optimizer
+  on, run the FULL corpus under opt — codegen gaps hide behind `opt_level=none`
+  (Stage D, 2026-07-09).
+
+- **Marking rawptr/MMIO observables and lowering them as runtime-hook CALLS is the
+  honest F1 barrier on Cranelift — it has no volatile MemFlag.** A call with a side
+  effect is a barrier the egraph will not reorder past, coalesce, or DCE, so
+  INV-OBS-ORDER/INV-FAULT-ID hold by lowering discipline at `opt_level=speed`. In
+  the MIR, `let` bindings lower to `Store` into named locals (not dead `Assign`
+  temps), so an R1 dead-local pass must treat a BARE-ROOT `Store` as a def to fire
+  at all; projected stores (`.f`/`[i]`/`deref`) keep their root live. Fault-capable
+  rvalues (checked arith, `Div`/`Rem`/shift, index, checked conv) are NEVER
+  DCE-eligible — their fault is a potential observable (Stage D, 2026-07-09).

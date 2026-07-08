@@ -42,6 +42,7 @@ use crate::types::Type;
 
 pub mod build;
 pub mod interp;
+pub mod opt;
 
 pub use build::{lower_checked, LowerError};
 

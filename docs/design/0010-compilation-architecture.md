@@ -516,6 +516,47 @@ Per §8 sequencing, the arc is staged and honest about what each stage validates
   green on the full corpus *including fault identity*; T3–T5 are measured and
   tracked in CI as release criteria. Any optimization that changes an observable
   trace is a soundness bug that **blocks the stage**, never a tolerated perf win.
+  **Prototype status (2026-07-09 — Stage D: partial, the R1 license validated
+  empirically).** The native engine's optimizer is enabled (`opt_level=speed` via
+  `JITBuilder::with_flags`) as a **fourth** execution engine beside interpreted /
+  MIR / native-noopt (`run_source_native_opt`, `src/backend/lower.rs`). The **F1
+  discipline is now real, not deferred**: rawptr/MMIO reads and writes are
+  MIR-marked `observable` (`ptr_read`/`ptr_write` through a `rawptr`, the
+  formalization's §2.1 substrate note; in-model borrow derefs stay non-observable
+  per §2.2), and every observable — `trace` and the rawptr accesses — lowers to a
+  **runtime-hook CALL** (`rt_mmio_load`/`rt_mmio_store`/`rt_trace`), a barrier the
+  egraph will neither reorder past, coalesce, nor eliminate (the *ordering-safe,
+  honest, slower* option over atomic `MemFlags`, chosen because Cranelift has no
+  volatile flag and `atomic_load/store` carry alignment/type constraints; INV-OBS-
+  ORDER secured by lowering, not by the mid-end). One explicit **MIR-level R1
+  rewrite** proves the license machinery: a conservative dependence-respecting
+  dead-local elimination over `τ`-statements only (`src/mir/opt.rs`), with a
+  per-rewrite **validator asserting the R1 side conditions** — never observable,
+  never fault-capable (checked/`Div`/`Rem`/shift/index/checked-conv are excluded),
+  destination provably dead (`→`-independent), never the return place or a
+  parameter — the INV-R1-ONLY enforcement made executable; the four-engine gate
+  proves the rewritten MIR yields the identical `(k, s, θ)`. *Gate*
+  (`tests/stage_d.rs`): the **FULL 31-fixture runnable corpus** plus the scalar +
+  fault-injection and bounds/`?`-adjacent fault axes are asserted `(k, s, θ)`-equal
+  across **all four engines** (oracle · MIR · native-noopt · native-**opt**),
+  **fault identity `f★` included**; every `MirFn` stays `ReplayPolicy::Precise`
+  (detection is per-op, no R3 batching introduced, so the §6.5 replay obligation
+  stays vacuous — asserted). **One fault-axis surprise, reported and fixed:**
+  `opt_level=speed` rewrites the saturating clamp's i128 `select` into
+  `smax.i128`/`smin.i128`, for which Cranelift's x86 backend has **no ISLE
+  lowering** (a codegen gap the optimizer exposes, not a trace divergence); the
+  saturating lowering now selects the fitted **i64** value so no `smax.i128` forms.
+  The **P20 harness** ships (`benches/p20.rs`, `cargo bench --bench p20`, emits
+  JSON): it measures — over the corelib tree (8 modules, 424 lines) — T1's
+  incremental-rebuild shape (~0.5 ms), **T2's zero-downstream re-analysis** (0,
+  citing the Stage C gate), T4's check throughput shape (~230 k lines/s/core), and
+  the cold-build-vs-incremental-rebuild ratio (~6×). These are the measurement
+  INSTRUMENT's **baselines, not ratified claims** — T1/T3–T5's real numbers await
+  the real-toolchain scale (N = 200 modules, M ≈ 50 000 lines); T3 (vs `clang -O0`
+  SQLite) and T5 (LLVM vs `clang -O2`) await the codegen-cache and the optional
+  LLVM backend and are **not** yet instrumented. **416 prior tests green; +5
+  Stage-D four-engine/R1 gates = 421; `cargo test`/`clippy` clean.** The LLVM
+  second backend (§1) remains unbuilt (deferred, optional).
 
 Each gate is a hard precondition for the next: no backend before the IR is
 validated (A→B), no incrementality before native codegen agrees with the oracle

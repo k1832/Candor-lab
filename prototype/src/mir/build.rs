@@ -278,6 +278,19 @@ impl<'a> Lowerer<'a> {
         }
         self.blocks[self.cur].stmts.push(Statement { kind, span, observable });
     }
+    /// INV-OBS-ORDER: mark the just-emitted statement of the current block as an
+    /// observable (a rawptr/MMIO access — the formalization's substrate note, §2.1:
+    /// a volatile load/store through a raw pointer). Marking is conservative (it
+    /// only ever ADDS an ordering constraint the backend must honor); in-model
+    /// borrow derefs (§2.2) are left non-observable.
+    fn mark_last_observable(&mut self) {
+        if !self.reachable {
+            return;
+        }
+        if let Some(st) = self.blocks[self.cur].stmts.last_mut() {
+            st.observable = true;
+        }
+    }
     /// Terminate the current block; the region becomes unreachable until a caller
     /// switches to a fresh labeled block.
     fn terminate(&mut self, term: Terminator) {
@@ -1937,6 +1950,9 @@ impl<'a> Lowerer<'a> {
                 }
                 let place = self.deref_place(ptr, inner.clone());
                 let id = self.emit_temp(inner.clone(), Rvalue::Load { place, ty: inner.clone() }, span);
+                if matches!(pty, Type::RawPtr(_)) {
+                    self.mark_last_observable();
+                }
                 Ok((Operand::Local(id), inner))
             }
             "ptr_write" => {
@@ -1944,6 +1960,9 @@ impl<'a> Lowerer<'a> {
                 let inner = Self::pointee(&pty)?;
                 let place = self.deref_place(ptr, inner.clone());
                 self.lower_into(&args[1], &place, &inner)?;
+                if matches!(pty, Type::RawPtr(_)) {
+                    self.mark_last_observable();
+                }
                 Ok(self.unit())
             }
             "ptr_offset" => {
@@ -2015,6 +2034,9 @@ impl<'a> Lowerer<'a> {
                 let inner = Self::pointee(&pty)?;
                 let place = self.deref_place(ptr, inner.clone());
                 self.emit(StatementKind::CopyVal { dst: dst.clone(), src: place, ty: inner }, span, false);
+                if matches!(pty, Type::RawPtr(_)) {
+                    self.mark_last_observable();
+                }
                 Ok(())
             }
             "unbox" => {

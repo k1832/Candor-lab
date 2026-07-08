@@ -20,3 +20,7 @@ cranelift-frontend = "=0.132.3"
 cranelift-module = "=0.132.3"
 cranelift-jit = "=0.132.3"
 libc = "0.2"
+
+[[bench]]
+name = "p20"
+harness = false

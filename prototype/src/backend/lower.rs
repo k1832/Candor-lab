@@ -44,7 +44,8 @@ use crate::interp::layout::Layout;
 use crate::interp::FaultKind;
 use crate::ast::{BinOp, UnOp};
 use crate::mir::{
-    FaultEdge, MirFn, MirProgram, Operand, Place, Proj, Regime, Rvalue, StatementKind, Terminator,
+    FaultEdge, MirFn, MirProgram, Operand, Place, Proj, Regime, Rvalue, Statement, StatementKind,
+    Terminator,
 };
 use crate::resolve::Items;
 use crate::span::Span;
@@ -153,11 +154,25 @@ pub fn compile(
     statics: &HashMap<String, u64>,
     strings: &HashMap<String, u64>,
     fnptr_table: *mut u64,
+    optimize: bool,
 ) -> Result<Compiled, String> {
-    let mut builder = JITBuilder::new(default_libcall_names()).map_err(|e| e.to_string())?;
+    // Stage D: flip the native engine's optimizer on. `opt_level=speed` enables
+    // Cranelift's egraph mid-end (constant folding, GVN, licm, DCE over `τ`-steps).
+    // Its INV-CHECK safety is structural (§1: `iadd` is wrapping, no signed-overflow
+    // UB, so it never deletes an overflow check as "dead"); INV-OBS-ORDER /
+    // INV-FAULT-ID are secured by the lowering (observables + faults are barrier
+    // CALLS the egraph will not reorder past — the F1 discipline made real).
+    let mut builder = if optimize {
+        JITBuilder::with_flags(&[("opt_level", "speed")], default_libcall_names())
+            .map_err(|e| e.to_string())?
+    } else {
+        JITBuilder::new(default_libcall_names()).map_err(|e| e.to_string())?
+    };
     builder.symbol("rt_stack_alloc", runtime::rt_stack_alloc as *const u8);
     builder.symbol("rt_copy", runtime::rt_copy as *const u8);
     builder.symbol("rt_trace", runtime::rt_trace as *const u8);
+    builder.symbol("rt_mmio_load", runtime::rt_mmio_load as *const u8);
+    builder.symbol("rt_mmio_store", runtime::rt_mmio_store as *const u8);
     builder.symbol("rt_fault", runtime::rt_fault as *const u8);
     let mut module = JITModule::new(builder);
 
@@ -300,6 +315,8 @@ struct Shims {
     stack_alloc: FuncId,
     copy: FuncId,
     trace: FuncId,
+    mmio_load: FuncId,
+    mmio_store: FuncId,
     fault: FuncId,
 }
 
@@ -327,6 +344,24 @@ impl Shims {
             .declare_function("rt_trace", Linkage::Import, &sigt)
             .map_err(|e| e.to_string())?;
 
+        // rt_mmio_load(addr: i64, size: i64) -> i64
+        let mut sigml = module.make_signature();
+        sigml.params.push(AbiParam::new(types::I64));
+        sigml.params.push(AbiParam::new(types::I64));
+        sigml.returns.push(AbiParam::new(types::I64));
+        let mmio_load = module
+            .declare_function("rt_mmio_load", Linkage::Import, &sigml)
+            .map_err(|e| e.to_string())?;
+
+        // rt_mmio_store(addr: i64, val: i64, size: i64)
+        let mut sigms = module.make_signature();
+        for _ in 0..3 {
+            sigms.params.push(AbiParam::new(types::I64));
+        }
+        let mmio_store = module
+            .declare_function("rt_mmio_store", Linkage::Import, &sigms)
+            .map_err(|e| e.to_string())?;
+
         let mut sigf = module.make_signature();
         for _ in 0..3 {
             sigf.params.push(AbiParam::new(types::I32));
@@ -335,7 +370,7 @@ impl Shims {
             .declare_function("rt_fault", Linkage::Import, &sigf)
             .map_err(|e| e.to_string())?;
 
-        Ok(Shims { stack_alloc, copy, trace, fault })
+        Ok(Shims { stack_alloc, copy, trace, mmio_load, mmio_store, fault })
     }
 }
 
@@ -461,6 +496,22 @@ impl Cg<'_, '_> {
         let r = self.shimref("copy", self.shims.copy);
         let l = self.iconst(len as i64);
         self.b.ins().call(r, &[dst, src, l]);
+    }
+
+    /// Observable rawptr/MMIO load (INV-OBS-ORDER): a barrier CALL, not an inline
+    /// `load` — so Cranelift's egraph (`opt_level=speed`) neither reorders it past a
+    /// fault/other observable nor eliminates it. Returns the zero-extended word.
+    fn call_mmio_load(&mut self, addr: Value, size: u64) -> Value {
+        let r = self.shimref("mmio_load", self.shims.mmio_load);
+        let sz = self.iconst(size as i64);
+        let c = self.b.ins().call(r, &[addr, sz]);
+        self.b.inst_results(c)[0]
+    }
+    /// Observable rawptr/MMIO store (INV-OBS-ORDER): the barrier-CALL counterpart.
+    fn call_mmio_store(&mut self, addr: Value, val: Value, size: u64) {
+        let r = self.shimref("mmio_store", self.shims.mmio_store);
+        let sz = self.iconst(size as i64);
+        self.b.ins().call(r, &[addr, val, sz]);
     }
     fn stack_alloc(&mut self, size: u64, align: u64) -> Value {
         let r = self.shimref("stack_alloc", self.shims.stack_alloc);
@@ -675,13 +726,21 @@ impl Cg<'_, '_> {
             }
             Regime::Wrapping => self.fit128(v128, sty),
             Regime::Saturating => {
+                // Compare in i128 but SELECT in i64: the egraph rewrites a
+                // select-min/max into `smax`/`smin`, and Cranelift's x86 backend has
+                // NO ISLE lowering for `smax.i128`/`smin.i128` (a codegen gap only
+                // `opt_level=speed` exposes — Stage D fault-axis finding). Selecting
+                // the already-fitted i64 value keeps every min/max at i64 width, which
+                // IS lowerable. The clamp bounds fit i64 (they are `sty`'s range).
                 let minc = self.iconst128(min);
                 let maxc = self.iconst128(max);
                 let lt = self.b.ins().icmp(IntCC::SignedLessThan, v128, minc);
                 let gt = self.b.ins().icmp(IntCC::SignedGreaterThan, v128, maxc);
-                let clamped_lo = self.b.ins().select(lt, minc, v128);
-                let clamped = self.b.ins().select(gt, maxc, clamped_lo);
-                self.fit128(clamped, sty)
+                let fit = self.fit128(v128, sty);
+                let min64 = self.iconst(min as i64);
+                let max64 = self.iconst(max as i64);
+                let lo = self.b.ins().select(lt, min64, fit);
+                self.b.ins().select(gt, max64, lo)
             }
         }
     }
@@ -804,8 +863,36 @@ impl Cg<'_, '_> {
     }
 
     // ---- statements ----
-    fn lower_stmt(&mut self, st: &StatementKind, mf: &MirFn) {
-        match st {
+    fn lower_stmt(&mut self, st: &Statement, mf: &MirFn) {
+        // INV-OBS-ORDER: an observable rawptr/MMIO scalar access lowers to a barrier
+        // CALL (rt_mmio_load/store) rather than an inline load/store, so the optimizer
+        // holds its program order (the F1 discipline, design 0010 §1/§2).
+        if st.observable {
+            match &st.kind {
+                StatementKind::Assign(local, Rvalue::Load { place, ty }) => {
+                    let (a, _) = self.place_addr(place, mf);
+                    let sty = scalar_of(ty);
+                    let size = crate::interp::layout::Layout::scalar_size(sty);
+                    let raw = self.call_mmio_load(a, size);
+                    let v = self.canon(raw, sty);
+                    let da = self.addr[*local];
+                    self.store_scalar(da, v, scalar_of(&mf.locals[*local].ty));
+                    return;
+                }
+                StatementKind::Store(place, rv) => {
+                    let val = self.eval_rvalue(rv, mf);
+                    let (a, ty) = self.place_addr(place, mf);
+                    let sty = scalar_of(&ty);
+                    let size = crate::interp::layout::Layout::scalar_size(sty);
+                    self.call_mmio_store(a, val, size);
+                    return;
+                }
+                // Aggregate observable read (CopyVal) already lowers to rt_copy — a
+                // barrier call — so it falls through to the normal path below.
+                _ => {}
+            }
+        }
+        match &st.kind {
             StatementKind::Assign(local, rv) => {
                 let val = self.eval_rvalue(rv, mf);
                 let a = self.addr[*local];
@@ -952,7 +1039,7 @@ impl Cg<'_, '_> {
                 continue;
             }
             for st in &block.stmts {
-                self.lower_stmt(&st.kind, mf);
+                self.lower_stmt(st, mf);
             }
             match &block.term {
                 Terminator::Goto(n) => {

@@ -5,11 +5,15 @@ authorship: memory-safe, explicit where meaning lives, locally verifiable, with
 source-declared semantics and a compiler built as a conversation partner rather
 than a gatekeeper.
 
-**Status: Candor compiles to native code.** Stage B of the compilation
-architecture is closed: MIR lowers through Cranelift to x86-64 with checked
-arithmetic, exact fault identity, and the full differential gate green - every
-runnable fixture produces identical observable traces interpreted, MIR-executed,
-and natively compiled. The language's
+**Status: the compilation architecture is fully realized (design 0010, stages
+A-D closed).** Candor compiles through a checked MIR to optimized native x86-64
+via Cranelift, with the fault-window reordering license enforced by an
+executable validator and the P5 invariant made empirical: four engines -
+interpreter, MIR, native, native-optimized - produce identical observable
+traces and identical fault identity across the entire corpus. Incremental
+builds prove zero-downstream re-analysis on body edits (P20's mechanism,
+measured); the P17 boundary and audit command run; the P20 measurement
+instrument reports baselines. The language's
 central bet (value-first memory model, Bet 5) was tested against a frozen,
 pre-registered kill criterion: killed as first registered, re-examined under a
 corrected successor registration (both on the public record), and **provisionally

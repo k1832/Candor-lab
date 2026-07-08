@@ -31,7 +31,7 @@ static RUN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Compile the whole program with Cranelift and run `main` natively, returning
 /// its `(ret, θ)` or the delivered fault `f★` — the same contract as
 /// `mir::interp::run`, so the Stage-B gate compares them directly.
-pub fn run(prog: &MirProgram, items: &Items, consts: &HashMap<String, u64>) -> Result<Run, Fault> {
+pub fn run(prog: &MirProgram, items: &Items, consts: &HashMap<String, u64>, optimize: bool) -> Result<Run, Fault> {
     let _guard = RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut rt = Runtime::new();
     let mem_base = rt.base as i64;
@@ -58,7 +58,7 @@ pub fn run(prog: &MirProgram, items: &Items, consts: &HashMap<String, u64>) -> R
     let table: &'static mut [u64] = vec![0u64; prog.fn_ptrs.len().max(1)].leak();
     let table_ptr = table.as_mut_ptr();
 
-    let compiled = match lower::compile(prog, items, consts, mem_base, &statics, &strings, table_ptr) {
+    let compiled = match lower::compile(prog, items, consts, mem_base, &statics, &strings, table_ptr, optimize) {
         Ok(c) => c,
         Err(e) => {
             // A genuinely unreachable construct for the JIT is reported, never

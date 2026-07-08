@@ -128,6 +128,34 @@ pub extern "C" fn rt_trace(v: i64) {
     rt().trace.push(v);
 }
 
+/// The observable rawptr/MMIO **load** hook (INV-OBS-ORDER, design 0010 §1/§2 F1
+/// discipline). A rawptr read (`ptr_read` through an `addr_to_ptr` pointer) is an
+/// observable per the formalization's substrate note (§2.1); lowering it as a call
+/// with a side effect makes it an ordering barrier **Cranelift's egraph respects**
+/// at `opt_level=speed` — it is never reordered, coalesced, or eliminated. Reads
+/// `size` bytes at the flat address, zero-extended; the caller sign/zero-canonicalizes.
+pub extern "C" fn rt_mmio_load(addr: u64, size: u64) -> i64 {
+    let r = rt();
+    let mut buf = [0u8; 8];
+    let n = (size as usize).min(8);
+    unsafe {
+        std::ptr::copy_nonoverlapping(r.base.add(addr as usize), buf.as_mut_ptr(), n);
+    }
+    i64::from_le_bytes(buf)
+}
+
+/// The observable rawptr/MMIO **store** hook (INV-OBS-ORDER): a rawptr write
+/// (`ptr_write` through an `addr_to_ptr` pointer), lowered as a barrier call.
+/// Writes the low `size` bytes of `val` at the flat address.
+pub extern "C" fn rt_mmio_store(addr: u64, val: i64, size: u64) {
+    let r = rt();
+    let bytes = val.to_le_bytes();
+    let n = (size as usize).min(8);
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), r.base.add(addr as usize), n);
+    }
+}
+
 /// The fault-exit hook: record `(k, s)` and `_longjmp` to the driver. Never
 /// returns; the lowering follows the call with an unreachable `trap`.
 pub extern "C" fn rt_fault(kind: u32, span_start: u32, span_end: u32) {
