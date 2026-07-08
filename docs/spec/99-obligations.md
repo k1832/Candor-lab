@@ -64,6 +64,10 @@ chapter's stated obligations bind now.
   is unblocked.
 - **Acceptance:** the spec defines boundary modules, the foreign-trust effect's
   typing and one-way partition, and the toolchain enumeration surface.
+- **Update (2026-07-09):** the boundary-module *marker* now has a SKELETON home in
+  chapter 11 §10.1 (file-level `boundary`, part of the interface artifact,
+  `candor audit --boundaries`); the FFI *content* remains deferred to design 0011
+  and this obligation.
 
 ### OBL-GENERICS — user-defined generics
 - **Chapter:** 03 §1.5 (excluded this edition).
@@ -74,6 +78,16 @@ chapter's stated obligations bind now.
 - **Acceptance:** the spec defines the interface/bound system, definition-site
   checking, coherence, and the documented, stable-within-edition instantiation
   strategy.
+- **Discharged (2026-07-09):** chapter 10 promoted to NORMATIVE-DRAFT — the
+  interface/bound system (the `copy` built-in, `[T: I]`/`+`, self modes, self-less
+  associated functions, the single associated-type member, uniform per-impl effect
+  markers), impls and the six conformance axes, coherence (module-granularity
+  orphan rule, instantiated-interface uniqueness key, unifiability rejection,
+  params-in-target), definition-site checking (opaque conservatism, the
+  conformance-error-not-type-error distinction), instantiation/inference
+  (expected-type + fn-pointer, `name::[T]`, no call-site turbofish), and
+  monomorphization determinism with the depth-limit resource bound are transcribed
+  from design 0007 (with the associated-type member of 0009 §2). Acceptance met.
 
 ### OBL-TEXT — the text-type budget
 - **Chapter:** 03 §8.3 (byte slices only this edition).
@@ -96,6 +110,9 @@ chapter's stated obligations bind now.
 - **Acceptance:** OBL-GENERICS's design uses a bracketing token other than `<>`
   for type arguments, preserving the design-0006 shift tokenization; discharged
   when OBL-GENERICS is discharged consistent with this constraint.
+- **Discharged (2026-07-09):** design 0007 §6.1 adopts `[…]` type-argument
+  brackets, never `<>` (`>>` stays the shift operator); transcribed in chapter 10
+  §1.1. Discharged with OBL-GENERICS.
 
 ---
 
@@ -200,3 +217,117 @@ unwritable (E1002: U uninferable from a fn-pointer return; no turbofish; the opa
 tax compounds it); (b) no swap/replace plus E0303 plus struct-only drop hooks make "mutable
 container with a user drop hook" mutually exclusive - containers free structurally or hooks live
 on wrapper cells. Both feed the iteration/associated-types design round.
+
+
+---
+
+## 6. Generics, modules, and iteration — discharges and new obligations (designs 0007/0008/0009)
+
+### OBL-GENERICS-ITER — iteration and associated types
+- **Discharged (2026-07-09):** design 0009 supplied the pressure cases 0007 §1.1
+  required; the minimal associated type (chapter 12 §1), the two by-value protocols
+  `Iter`/`Indexed` with their `for` desugar (chapter 12 §§2–4), and capture-free
+  higher-order code (chapter 12 §6.2) are transcribed. Its two residuals become
+  OBL-ITER-BORROW and OBL-GENERICS-CLOSURE below.
+
+### OBL-MODULES-ARTIFACT — the P20 interface-artifact / incrementality machinery
+- **Chapter:** 11 §§7–10 (SKELETON). **Hook:** **P20** (signature-bounded
+  incremental invalidation); NN#17; P17 (boundary); P9 (layering).
+- **Gate:** blocks the P20 incrementality guarantee — interface artifacts, the
+  signature/codegen two-hash tiers, the schema/toolchain salt, `inline`, `pub use`
+  facades and external reachability, `foo.cd`-beside-`foo/` directory bodies, the
+  boundary-marker semantics, package identity, and core/std layering. The shipped
+  multi-file subset (chapter 11 §§1–6: file=module, `use`, `pub`, acyclic DAG,
+  `::` lookahead) is unblocked.
+- **Acceptance:** the spec transcribes the interface-artifact format, the two-hash
+  invalidation tiers with the schema salt, `pub use` external reachability,
+  directory bodies, and the manifest/layering rules; the boundary FFI content
+  composes with OBL-FFI.
+
+### OBL-ITER-PIN (found by transcription, 2026-07-09) — the `for` library-shape mechanism
+- **Chapter:** 12 §2.3 (recorded in-place). **Hook:** **P11/P3** (the `for` desugar's
+  library targets; one canonical way).
+- **Gate:** blocks a complete normative account of how `for` resolves its targets.
+- **Found:** design 0009 fixes the interface *shapes* (`Iter`/`Indexed`/`IterStep`)
+  but does **not** specify the *resolution mechanism* — compiler-known lang-items on
+  a blessed `core` path versus ordinary in-scope name lookup — and it uses
+  `Opt[T]`/`Opt::Some`/`Opt::None` without defining `Opt` in designs 0007–0009.
+  Chapter 12 §2.3 adopts "well-known `core` interfaces, shapes fixed by the spec"
+  and records the mechanism as unestablished.
+- **Acceptance:** the name-resolution design fixes the `core` well-known-item
+  mechanism (or a chosen alternative), and `Opt`'s normative shape is established.
+
+### OBL-REGION-KEYWORD-GRAM (found by transcription, 2026-07-09) — region-keyword grammar coordination
+- **Chapter:** 02 §4, 04 §7, 01 (recorded). **Hook:** **NN#13/P2** (grammar
+  coherence); design 0007 §6.1.1.
+- **Gate:** blocks chapter 02/04 internal consistency with chapter 10.
+- **Found:** design 0007 §6.1.1's `region r` keyword form supersedes the bare-`[r]`
+  region list, and is transcribed in chapter 10 §1.3, but chapter 02 §4
+  (`Regions`/`Mode`) and chapter 04 §7 still spell the bare `[r]` form; chapter 01
+  has no contextual-keyword entry for `for`/`in`/`type` or a status for `region`.
+  These three chapters made only the authorized single for-statement edit to
+  chapter 02 (§8.3); the region-keyword and lexical-keyword updates are recorded,
+  not resolved.
+- **Acceptance:** chapters 01/02/04 updated to the `region r` form and the
+  contextual-keyword inventory (`for`, `in`, `type`).
+
+### OBL-ITER-BORROW (new, design 0009 §3.4)
+- **Chapter:** 12 §6.1 (SKELETON pointer). **Hook:** **P12/P11** (value-first; the
+  no-borrow-field rule of chapter 04 §8 / chapter 10 §2.3).
+- **Gate:** blocks borrowed-item iteration (`read Item`), mutating iteration
+  (`write coll`), and non-consuming pointer-chain (`List`) iteration.
+- **Acceptance:** chapter 10 §2.3's region-parameterized-type question reopened, or
+  a region-free borrowed-yield model found.
+
+### OBL-GENERICS-CLOSURE (new, design 0009 §5.4)
+- **Chapter:** 12 §6.2. **Hook:** **P12/P2** (visible value over hidden environment).
+- **Gate:** blocks full capturing closures; capture-free threading (fn-pointer +
+  explicit `ctx`) is the shipped surface.
+- **Acceptance:** BOTH (a) a basket-grade measured case where capture-free threading
+  is the dominant reading-friction or expressiveness failure, AND (b) a capture
+  model compatible with chapter 10 §2.3 — move/copy captures only, closure a
+  synthesized owned aggregate with ordinary drop glue and alloc-on-drop, borrow
+  captures remaining refused.
+
+### OBL-GENERIC-STRATEGY (new, design 0007 §5.3)
+- **Chapter:** 10 §10.1. **Hook:** **P11** (strategy overridable where cost demands).
+- **Gate:** blocks the source-level instantiation-strategy override; the
+  monomorphization default is unblocked.
+- **Acceptance (trigger):** a measured code-size regression on the basket (or its
+  stdlib successor) attributable to monomorphization bloat.
+
+### OBL-GENERIC-TURBOFISH (new, design 0007 §6.2)
+- **Chapter:** 10 §9.3. **Hook:** **P11/NN#13** (generics without a symbol table).
+- **Gate:** blocks call-site explicit type arguments; inference + type-position
+  annotations cover the shipped surface.
+- **Acceptance:** a basket case where inference + annotations cannot cover, resolved
+  by a keyword-led turbofish preserving the NN#13 tokenization.
+
+### OBL-GENERIC-EFFECT (new, design 0007 §3.4)
+- **Chapter:** 10 §5.5; chapter 12 §5.2. **Hook:** **P2/NN#19** (the closed,
+  non-transforming effect set).
+- **Gate:** blocks per-instantiation effect polymorphism; conservative def-site
+  alloc-marking (the opaque-drop tax) is the shipped rule.
+- **Acceptance:** a measured, real opaque-drop `alloc` tax on the basket justifies a
+  per-instantiation `alloc` variable (so e.g. `Container[u8]::drop` is provably
+  non-alloc).
+
+### Prototype inference note — E1002 (design 0009 §5.3)
+- **Chapter:** 10 §9.2. Inferring a type parameter from a fn-pointer argument's
+  *return* type is a completeness gap **within** design 0007 §2.2 body-local
+  inference — an implementation obligation with **no surface change**, to close as
+  the corelib port's own commit.
+
+## Obligation count update (2026-07-09)
+
+The generics/modules/iteration round **discharges three** prior obligations
+(OBL-GENERICS, OBL-GENERIC-BRACKET, OBL-GENERICS-ITER) and **adds eight** tracked
+obligations: OBL-MODULES-ARTIFACT (one SKELETON-chapter gate for chapter 11
+§§7–10), OBL-ITER-BORROW, OBL-GENERICS-CLOSURE, OBL-GENERIC-STRATEGY,
+OBL-GENERIC-TURBOFISH, OBL-GENERIC-EFFECT (five feature/expressiveness gates), and
+**two found by transcription** — OBL-ITER-PIN (the `for` library-shape resolution
+mechanism, and `Opt` undefined) and OBL-REGION-KEYWORD-GRAM (the `region r`
+grammar coordination across chapters 01/02/04). The E1002 inference note is an
+implementation obligation with no surface. The philosophy-named pre-stability tier
+(OBL-WINDOW, OBL-ALIAS, OBL-CONSIST) is unchanged; no "1.0" precedes its discharge
+(chapter 00 §3.4).

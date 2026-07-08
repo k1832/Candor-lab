@@ -158,7 +158,7 @@ grouping, `"lit"` terminal, UPPER a token class from chapter 01.
            | BlockLikeExpr                  -- no trailing ";" (see 5.2)
            | Expr ";"                       -- simple expression statement
     Let    = "let" [ "mut" ] IDENT [ ":" Type ] [ "=" Expr ] ";"
-    BlockLikeExpr = Block | If | Match | Loop | While | Unsafe
+    BlockLikeExpr = Block | If | Match | Loop | While | For | Unsafe
                   | "wrapping" Block | "saturating" Block
 
 5.1 **Assignment is statement position only** (precedence level 13; §6). `=` is
@@ -315,6 +315,7 @@ grouping, `"lit"` terminal, UPPER a token class from chapter 01.
     If    = "if" ExprNoStruct Block [ "else" ( If | Block ) ]
     Loop  = "loop" Block
     While = "while" ExprNoStruct Block
+    For   = "for" Pattern "in" ExprNoStruct Block
 
 8.1 **The per-arm `case` is dropped** (design 0006 §2.5): an arm is
     `Pattern "=>" Expr`, comma-separated. The arm separator comma is **optional
@@ -327,6 +328,16 @@ grouping, `"lit"` terminal, UPPER a token class from chapter 01.
     there SHALL be parenthesized. The restriction is lifted inside any `(…)`,
     `[…]`, call-argument list, or index. This is what keeps `match` symbol-table-
     free (design 0002 §0.7, retained by 0006 §2.5).
+
+8.3 **The `for` statement (design 0009 §4.4; chapter 12).** `for` and `in` are
+    **contextual keywords** — keywords only in the for-statement header (`for` in
+    statement-leading position, `in` separating `Pattern` from `OPERAND`), and
+    ordinary identifiers everywhere else. The operand parses as **`ExprNoStruct`**
+    (§8.2), extending the `if`/`while`/`match` restriction so the `{` opening the
+    loop body is never misread as a struct literal; a struct-literal operand SHALL
+    be parenthesized. The operand's borrow mode (`coll` versus `read coll`, both
+    `ExprNoStruct` via the borrow-operator `Prefix`, §6.2) selects the iteration
+    protocol — a checker fact, not a parse fact (chapter 12 §3).
 
 ---
 
