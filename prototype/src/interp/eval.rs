@@ -167,6 +167,13 @@ pub struct Interp<'a> {
     /// Full impl records (iface, iface_args, target) -> method free-fn names, for
     /// disambiguating `From[E1]`/`From[E2]` during cross-type `?` (§7.1).
     impls_full: Vec<ImplRec>,
+    /// Post-qualification name of the compiler-known `Alloc` handle struct
+    /// (fields `ctx`/`vt`), identified structurally so box/unbox resolve its
+    /// field offsets under the module tree's qualified names (finding F1).
+    alloc_struct: Option<String>,
+    /// Post-qualification name of the `AllocVtable` struct (fn-ptr fields
+    /// `alloc`/`free`), the pointee of `Alloc.vt`.
+    alloc_vtable_struct: Option<String>,
     frames: Vec<Frame>,
     cur_span: Span,
     trace: Vec<i64>,
@@ -215,6 +222,24 @@ impl<'a> Interp<'a> {
                 _ => {}
             }
         }
+        // Identify the compiler-known allocator structs structurally (never by a
+        // hardcoded name), so box/unbox resolve field offsets regardless of how
+        // the module tree qualifies `Alloc`/`AllocVtable` (finding F1). The
+        // vtable is the struct with fn-ptr fields `alloc` and `free`; the handle
+        // is the struct whose `vt` field is a `rawptr` to that vtable.
+        let alloc_vtable_struct = items.structs.iter().find(|(_, s)| {
+            s.fields.iter().any(|(n, t)| n == "alloc" && matches!(t, Type::FnPtr(_)))
+                && s.fields.iter().any(|(n, t)| n == "free" && matches!(t, Type::FnPtr(_)))
+        }).map(|(name, _)| name.clone());
+        let alloc_struct = alloc_vtable_struct.as_ref().and_then(|vt| {
+            items.structs.iter().find(|(_, s)| {
+                s.fields.iter().any(|(n, t)| {
+                    n == "vt"
+                        && matches!(t, Type::RawPtr(inner)
+                            if matches!(&**inner, Type::Named(x) if x == vt))
+                })
+            }).map(|(name, _)| name.clone())
+        });
         Interp {
             program,
             items,
@@ -227,6 +252,8 @@ impl<'a> Interp<'a> {
             statics: HashMap::new(),
             impl_dispatch,
             impls_full,
+            alloc_struct,
+            alloc_vtable_struct,
             frames: Vec::new(),
             cur_span: Span::point(0),
             trace: Vec::new(),
@@ -348,6 +375,16 @@ impl<'a> Interp<'a> {
     }
     fn field_offset(&self, s: &str, f: &str) -> (Type, u64) {
         self.lay().field_offset(s, f).unwrap_or((Type::Error, 0))
+    }
+
+    /// Resolved name of the `Alloc` handle struct (finding F1); falls back to
+    /// the bare name for the single-file image, where nothing is qualified.
+    fn alloc_struct_name(&self) -> &str {
+        self.alloc_struct.as_deref().unwrap_or("Alloc")
+    }
+    /// Resolved name of the `AllocVtable` struct (finding F1).
+    fn alloc_vtable_name(&self) -> &str {
+        self.alloc_vtable_struct.as_deref().unwrap_or("AllocVtable")
     }
 
     // ---- memory helpers ----
@@ -1204,7 +1241,7 @@ impl<'a> Interp<'a> {
         let fnname = self
             .impls_full
             .iter()
-            .find(|(iface, args, target, _)| iface == "From" && target == &e2nom && args.first() == Some(&e1ty))
+            .find(|(iface, args, target, _)| crate::generics::base_name(iface) == "From" && target == &e2nom && args.first() == Some(&e1ty))
             .and_then(|(_, _, _, methods)| methods.get("from").cloned())
             .ok_or_else(|| self.fault(FaultKind::Panic, "`?`: no matching `From` impl"))?;
         // Consume the operand (its payload moves into the conversion).
@@ -1277,7 +1314,7 @@ impl<'a> Interp<'a> {
         let vt = self.read_u64(src + 16)?;
         let size = self.size_of(inner);
         let align = self.align_of(inner);
-        let (_, alloc_off) = self.field_offset("AllocVtable", "alloc");
+        let (_, alloc_off) = self.field_offset(self.alloc_vtable_name(), "alloc");
         let afn = self.read_u64(vt + alloc_off)?;
         let newptr = self.call_scalar(afn, vec![(Type::RawPtr(Box::new(Type::Scalar(ScalarTy::U8))), ctx), (Type::usize(), size), (Type::usize(), align)])?;
         if newptr == 0 {
@@ -1579,15 +1616,15 @@ impl<'a> Interp<'a> {
             Type::Borrow(_) | Type::BorrowMut(_) => self.read_u64(av.addr)?,
             _ => av.addr,
         };
-        let (_, ctx_off) = self.field_offset("Alloc", "ctx");
-        let (_, vt_off) = self.field_offset("Alloc", "vt");
+        let (_, ctx_off) = self.field_offset(self.alloc_struct_name(), "ctx");
+        let (_, vt_off) = self.field_offset(self.alloc_struct_name(), "vt");
         let ctx = self.read_u64(alloc_addr + ctx_off)?;
         let vt = self.read_u64(alloc_addr + vt_off)?;
         let vv = self.eval_value(&args[1], None)?;
         let t = vv.ty.clone();
         let size = self.size_of(&t);
         let align = self.align_of(&t);
-        let (_, alloc_off) = self.field_offset("AllocVtable", "alloc");
+        let (_, alloc_off) = self.field_offset(self.alloc_vtable_name(), "alloc");
         let afn = self.read_u64(vt + alloc_off)?;
         let ret = self.call_scalar(afn, vec![
             (Type::RawPtr(Box::new(Type::Scalar(ScalarTy::U8))), ctx),
@@ -1630,7 +1667,7 @@ impl<'a> Interp<'a> {
     }
 
     fn call_free(&mut self, ctx: u64, vt: u64, ptr: u64, size: u64, align: u64) -> R<()> {
-        let (_, free_off) = self.field_offset("AllocVtable", "free");
+        let (_, free_off) = self.field_offset(self.alloc_vtable_name(), "free");
         let ffn = self.read_u64(vt + free_off)?;
         self.call_scalar(ffn, vec![
             (Type::RawPtr(Box::new(Type::Scalar(ScalarTy::U8))), ctx),

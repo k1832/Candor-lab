@@ -518,6 +518,14 @@ fn unify2(
     }
 }
 
+/// The final `::`-separated segment of a possibly module-qualified name. The
+/// cross-type `?` conversion interface `From` is a compiler-known lang item
+/// (design 0007 §7.1); the module tree qualifies it (`core::res::From`), so it
+/// is matched by base name rather than by a hardcoded qualified string (F2).
+pub fn base_name(name: &str) -> &str {
+    name.rsplit("::").next().unwrap_or(name)
+}
+
 /// The mangled free-function name an impl method lowers to.
 pub fn impl_method_fn_name(iface: &str, iface_args: &[Type], target: &str, method: &str) -> String {
     let mut key = iface.to_string();

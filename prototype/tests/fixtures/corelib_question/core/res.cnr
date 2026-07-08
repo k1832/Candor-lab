@@ -1,0 +1,15 @@
+// A minimal Res/From module exercising the `?` operator across a module tree
+// (finding F2): both same-type and cross-type `?` must resolve under the
+// module-tree checker, not just single-file. Mirrors the seed's `core::res`
+// surface but keeps `read_at` public so `main.cnr` can drive `?`.
+pub enum Res[T, E] { ok Ok(T), Err(E) }
+pub enum IoErr { Eof, Bad }
+pub enum AppErr { FromIo(IoErr), Denied }
+
+interface From[E] { fn from(e: E) -> Self; }
+impl From[IoErr] for AppErr { fn from(e: IoErr) -> Self { return AppErr::FromIo(e); } }
+
+pub fn read_at(ok: bool) -> Res[i64, IoErr] {
+    if ok { return Res::Ok(42); }
+    return Res::Err(IoErr::Eof);
+}

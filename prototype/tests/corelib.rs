@@ -58,13 +58,13 @@ fn tree_checks_clean() {
     assert!(codes.is_empty(), "corelib should check clean, got {codes:?}");
 }
 
-// ---- positive: the seed runs to its sentinel (single-file image, see F1) ----
+// ---- positive: the flattened single-file image runs to the sentinel (twin) --
 
 #[test]
 fn seed_runs_to_sentinel() {
-    // The module-tree driver cannot RUN allocation (finding F1), so the seed's
-    // end-to-end runtime is proven on its flattened single-file image, which
-    // uses the exact same module bodies (and the real cross-type `?`).
+    // Redundant twin of `tree_runs_to_sentinel` (finding F1 is fixed): the same
+    // module bodies, flattened into one file, run end-to-end to the sentinel
+    // (and exercise the real cross-type `?`).
     let src = fixture("corelib_flat.cnr");
     assert!(
         check_source_real(&src).unwrap().is_empty(),
@@ -180,23 +180,110 @@ fn unresolved_import_across_tree_rejected() {
     );
 }
 
-// ---- F1 regression guard: the module-tree driver cannot RUN allocation ------
+// ---- F1 (fixed): the module-tree DRIVER runs the allocating seed to sentinel -
 
 #[test]
-fn module_driver_cannot_run_allocation_yet() {
-    // Documents finding F1 as an executable tripwire: `run_dir` on the seed
-    // currently panics inside `bi_box` (bare-name offset lookup misses the
-    // module-qualified `Alloc`). When F1 is fixed this stops panicking and the
-    // assertion below trips, prompting a switch to a real `run_dir` sentinel.
-    let prev = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let outcome = std::panic::catch_unwind(|| run_dir(&dir("corelib")));
-    std::panic::set_hook(prev);
+fn tree_runs_to_sentinel() {
+    // Finding F1 is fixed: `box`/`unbox` now resolve the `Alloc`/`AllocVtable`
+    // layouts by their post-qualification names (identified structurally), so
+    // `run_dir` executes the seed's std allocator layer end-to-end. This is the
+    // primary runtime sentinel; the single-file image below is the redundant
+    // twin (same module bodies, flattened).
+    match run_dir(&dir("corelib")) {
+        RunResult::Ok(r) => assert_eq!(r.ret, SENTINEL),
+        other => panic!("corelib tree did not run to the sentinel: {}", describe(other)),
+    }
+}
+
+// ---- F2 (fixed): the `?` operator resolves under the module-tree checker ------
+
+#[test]
+fn question_operator_across_tree() {
+    // Finding F2 is fixed: both same-type and cross-type `?` now resolve in a
+    // MULTI-FILE program (the From-impl / interface lookup is matched by base
+    // name across the tree's qualified names, and same-type `?` on a generic
+    // result enum is recognized). The fixture drives `same` (same-type) and
+    // `cross` (widens `IoErr` -> `AppErr` via `impl From`, design 0007 §7.1).
+    let codes = tree_codes("corelib_question");
+    assert!(codes.is_empty(), "corelib_question should check clean, got {codes:?}");
+    match run_dir(&dir("corelib_question")) {
+        RunResult::Ok(r) => assert_eq!(r.ret, 186), // 43 (same) + 43 (cross ok) + 100 (cross err)
+        other => panic!("corelib_question did not run: {}", describe(other)),
+    }
+}
+
+// ---- F3 (fixed): a generic struct's scalar sibling of a Box-bearing field -----
+
+#[test]
+fn generic_struct_scalar_sibling_reads() {
+    // Finding F3 is fixed: a generic struct with a scalar field beside a
+    // recursive Box-bearing generic-enum field no longer misreads the scalar (it
+    // used to read 0 / panic `unknown enum`). Root cause: a niladic generic-enum
+    // ctor in a field position never pinned the struct parameter, so the resolved
+    // argument (from the expected type) was not folded back before substituting
+    // the field's expected type. `l.count` must read 7.
+    let src = r#"
+enum Node[T] { Nil, Cons(T, Box Node[T]) }
+struct Holder[T] { count: u32, head: Node[T] }
+fn main() alloc -> i64 {
+    let h: Holder[i64] = Holder { count: 7u32, head: Node::Nil };
+    return conv i64 h.count;
+}
+"#;
     assert!(
-        outcome.is_err(),
-        "F1 appears fixed: `run_dir` no longer panics on the allocating seed — \
-         replace `seed_runs_to_sentinel`'s single-file image with a real `run_dir` sentinel"
+        check_source_real(src).unwrap().is_empty(),
+        "F3 repro should check clean, got {:?}",
+        check_source_real(src).unwrap()
     );
+    match run_source_real(src) {
+        RunResult::Ok(r) => assert_eq!(r.ret, 7),
+        other => panic!("F3 repro did not run to 7: {}", describe(other)),
+    }
+}
+
+// ---- F4 (fixed): expected-type-driven inference for a niladic generic call ----
+
+#[test]
+fn niladic_generic_call_infers_from_annotation() {
+    // Finding F4 is fixed: `let x: List[i64] = nil();` where `nil` is
+    // `fn nil[T]() -> List[T]` now infers `T` from the annotation (design 0007
+    // §6.2) instead of E1002 — the value arguments give no evidence, so the
+    // declared return type is unified against the expected type.
+    let src = r#"
+enum List[T] { Nil, Cons(T, Box List[T]) }
+fn nil[T]() -> List[T] { return List::Nil; }
+fn is_empty[T](l: read List[T]) -> bool { match l { List::Nil => { return true; } List::Cons(x, t) => { return false; } } }
+fn main() alloc -> i64 { let x: List[i64] = nil(); if is_empty(read x) { return 5; } return 9; }
+"#;
+    assert!(
+        check_source_real(src).unwrap().is_empty(),
+        "F4 annotation repro should check clean, got {:?}",
+        check_source_real(src).unwrap()
+    );
+    match run_source_real(src) {
+        RunResult::Ok(r) => assert_eq!(r.ret, 5),
+        other => panic!("F4 annotation repro did not run to 5: {}", describe(other)),
+    }
+}
+
+#[test]
+fn niladic_generic_call_infers_from_assignment_target() {
+    // F4, assignment-target flavor: the expected type driving inference comes
+    // from the assignment target's type, not a `let` annotation.
+    let src = r#"
+enum List[T] { Nil, Cons(T, Box List[T]) }
+fn nil[T]() -> List[T] { return List::Nil; }
+fn main() alloc -> i64 { let mut x: List[i64] = List::Nil; x = nil(); return 0; }
+"#;
+    assert!(
+        check_source_real(src).unwrap().is_empty(),
+        "F4 assignment repro should check clean, got {:?}",
+        check_source_real(src).unwrap()
+    );
+    match run_source_real(src) {
+        RunResult::Ok(r) => assert_eq!(r.ret, 0),
+        other => panic!("F4 assignment repro did not run: {}", describe(other)),
+    }
 }
 
 fn describe(r: RunResult) -> String {

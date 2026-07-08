@@ -988,6 +988,10 @@ impl<'a> Checker<'a> {
         let ret = self.ret_ty_clone();
         let mut same = match (&t, &ret) {
             (Type::Named(a), Type::Named(b)) => a == b,
+            // Same-type `?` on a *generic* result enum: both sides are the same
+            // instantiation `App(head, args)` (this never reaches `Type::Named`,
+            // so without this arm even single-file generic `?` fell to E0712) (F2).
+            (Type::App(a, aa), Type::App(b, bb)) => a == b && aa == bb,
             (Type::BoxResult(_), Type::BoxResult(_)) => true,
             _ => false,
         };

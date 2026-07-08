@@ -620,6 +620,14 @@ impl<'a> Checker<'a> {
             arg_tys.push(at.clone());
             unify(&p.decl_ty, &at, &param_names, &mut subst_map);
         }
+        // Expected-type-driven inference (design 0007 §6.2): when the value
+        // arguments leave a parameter unpinned — e.g. a niladic generic call like
+        // `nil()` returning `List[T]` — unify the declared return type against the
+        // expected type (a `let`/assignment-target annotation) to recover it. Value
+        // arguments still take precedence (`unify` never overwrites) (F4).
+        if let Some(expected) = self.expected_ty.clone() {
+            unify(&sig.ret, &expected, &param_names, &mut subst_map);
+        }
         // Any parameter not inferred defaults to Error (reported as needing annotation).
         let mut targs: Vec<Type> = Vec::new();
         for (n, _) in &sig.type_params {
@@ -869,6 +877,16 @@ impl<'a> Checker<'a> {
             }
         }
         let targs = self.finish_type_args(name, g, &smap, span);
+        // Fold the resolved arguments (which may have come from the expected-type
+        // hint, not the field values) back into `smap`, so a field whose value
+        // gives no evidence for a parameter — e.g. a niladic generic-enum ctor
+        // like `Node::Nil` in `head: Node[T]` — still gets a *concrete* expected
+        // type below, rather than a leftover `Param` that mono cannot lower (F3).
+        for (p, t) in g.params.iter().zip(&targs) {
+            if !matches!(t, Type::Error) {
+                smap.insert(p.clone(), t.clone());
+            }
+        }
         for fi in fields {
             match g.fields.iter().find(|(fn_, _)| fn_ == &fi.name) {
                 Some((_, fty)) => {
@@ -927,6 +945,13 @@ impl<'a> Checker<'a> {
             ));
         }
         let targs = self.finish_type_args(enum_name, g, &smap, span);
+        // Fold resolved arguments back into `smap` (see `check_generic_struct_lit`)
+        // so a niladic-payload nesting still substitutes to a concrete type (F3).
+        for (p, t) in g.params.iter().zip(&targs) {
+            if !matches!(t, Type::Error) {
+                smap.insert(p.clone(), t.clone());
+            }
+        }
         for (a, pty) in args.iter().zip(&v.1) {
             let expect = subst(pty, &smap);
             self.check_against(a, &expect);
@@ -1017,7 +1042,10 @@ impl<'a> Checker<'a> {
             _ => return None,
         };
         let found = self.items.impls.iter().find(|im| {
-            if im.iface != "From" || im.target != e2_head || im.iface_args.first() != Some(&e1) {
+            if crate::generics::base_name(&im.iface) != "From"
+                || im.target != e2_head
+                || im.iface_args.first() != Some(&e1)
+            {
                 return false;
             }
             if im.target_args.len() != e2_args.len() {
@@ -1028,7 +1056,12 @@ impl<'a> Checker<'a> {
         })?;
         // Effect inheritance: the conversion inherits `From::from`'s declared
         // effect (design 0007 §7.1).
-        if let Some(iface) = self.items.interfaces.get("From") {
+        if let Some(iface) = self
+            .items
+            .interfaces
+            .values()
+            .find(|i| crate::generics::base_name(&i.name) == "From")
+        {
             if let Some(m) = iface.methods.iter().find(|m| m.name == "from") {
                 if m.alloc {
                     self.note_alloc(span, "cross-type `?` calls `alloc` `From::from` (§7.1)");
