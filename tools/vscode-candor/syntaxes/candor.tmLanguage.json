@@ -1,0 +1,451 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Candor",
+  "scopeName": "source.candor",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#unsafe-justification"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#keywords-contract"
+    },
+    {
+      "include": "#keywords-danger"
+    },
+    {
+      "include": "#ok-variant"
+    },
+    {
+      "include": "#declarations"
+    },
+    {
+      "include": "#keywords-control"
+    },
+    {
+      "include": "#keywords-declaration"
+    },
+    {
+      "include": "#keywords-mode"
+    },
+    {
+      "include": "#keywords-contextual"
+    },
+    {
+      "include": "#language-variables"
+    },
+    {
+      "include": "#operator-words"
+    },
+    {
+      "include": "#types-constructor"
+    },
+    {
+      "include": "#types-scalar"
+    },
+    {
+      "include": "#intrinsics"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#punctuation"
+    },
+    {
+      "include": "#enum-member"
+    },
+    {
+      "include": "#screaming"
+    },
+    {
+      "include": "#types-pascal"
+    },
+    {
+      "include": "#field-access"
+    },
+    {
+      "include": "#function-call"
+    },
+    {
+      "include": "#variables"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.candor",
+          "begin": "//",
+          "end": "$"
+        },
+        {
+          "name": "comment.block.candor",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "unsafe-justification": {
+      "patterns": [
+        {
+          "match": "(\\bunsafe\\b)(\\s+)(\"(?:\\\\.|[^\"\\\\\\n])*\")",
+          "name": "meta.unsafe.candor",
+          "captures": {
+            "1": {
+              "name": "keyword.control.unsafe.candor"
+            },
+            "3": {
+              "name": "string.quoted.double.unsafe-justification.candor"
+            }
+          }
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.candor",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.candor",
+              "match": "\\\\[\"\\\\nt]"
+            },
+            {
+              "name": "invalid.illegal.unknown-escape.candor",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "keywords-contract": {
+      "patterns": [
+        {
+          "match": "\\b(requires|ensures|assert|panic)\\b",
+          "name": "keyword.control.contract.candor"
+        }
+      ]
+    },
+    "keywords-danger": {
+      "patterns": [
+        {
+          "match": "\\b(unsafe)\\b",
+          "name": "keyword.control.unsafe.candor"
+        },
+        {
+          "match": "\\b(wrapping|saturating)\\b",
+          "name": "keyword.control.regime.candor"
+        }
+      ]
+    },
+    "ok-variant": {
+      "patterns": [
+        {
+          "match": "\\b(ok)\\b(\\s+)([A-Z][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.ok.candor"
+            },
+            "3": {
+              "name": "entity.name.type.variant.candor"
+            }
+          }
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "(\\bfn\\b)(\\s+)([a-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.function.candor"
+            },
+            "3": {
+              "name": "entity.name.function.candor"
+            }
+          }
+        },
+        {
+          "match": "(\\b(?:struct|enum|interface)\\b)(\\s+)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.type.candor"
+            },
+            "3": {
+              "name": "entity.name.type.candor"
+            }
+          }
+        },
+        {
+          "match": "\\b(impl|for)\\b",
+          "name": "keyword.declaration.impl.candor"
+        }
+      ]
+    },
+    "keywords-control": {
+      "patterns": [
+        {
+          "match": "\\b(if|else|match|loop|while|break|continue|return)\\b",
+          "name": "keyword.control.candor"
+        }
+      ]
+    },
+    "keywords-declaration": {
+      "patterns": [
+        {
+          "match": "\\b(fn|struct|enum|static|copy|drop)\\b",
+          "name": "keyword.declaration.candor"
+        },
+        {
+          "match": "\\b(let)\\b",
+          "name": "keyword.declaration.let.candor"
+        },
+        {
+          "match": "\\b(mut)\\b",
+          "name": "storage.modifier.mut.candor"
+        }
+      ]
+    },
+    "keywords-mode": {
+      "patterns": [
+        {
+          "match": "\\b(take|read|write|out)\\b",
+          "name": "storage.modifier.mode.candor"
+        }
+      ]
+    },
+    "keywords-contextual": {
+      "patterns": [
+        {
+          "match": "\\b(alloc)\\b",
+          "name": "keyword.other.effect.candor"
+        },
+        {
+          "match": "\\b(pub|use|region)\\b",
+          "name": "keyword.other.contextual.candor"
+        }
+      ]
+    },
+    "language-variables": {
+      "patterns": [
+        {
+          "match": "\\b(self|Self)\\b",
+          "name": "variable.language.self.candor"
+        },
+        {
+          "match": "\\b(result)\\b",
+          "name": "variable.language.result.candor"
+        }
+      ]
+    },
+    "operator-words": {
+      "patterns": [
+        {
+          "match": "\\b(conv|clone)\\b",
+          "name": "keyword.operator.word.candor"
+        }
+      ]
+    },
+    "types-constructor": {
+      "patterns": [
+        {
+          "match": "\\b(rawptr|Box|BoxResult)\\b",
+          "name": "support.type.candor"
+        }
+      ]
+    },
+    "types-scalar": {
+      "patterns": [
+        {
+          "match": "\\b(i8|i16|i32|i64|isize|u8|u16|u32|u64|usize|bool|unit)\\b",
+          "name": "support.type.builtin.candor"
+        }
+      ]
+    },
+    "intrinsics": {
+      "patterns": [
+        {
+          "match": "\\b(sizeof|alignof|min_of|max_of|offsetof|field_ptr|cast_ptr|addr_to_ptr|ptr_null)\\b",
+          "name": "support.function.builtin.candor"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "match": "\\b(true|false)\\b",
+          "name": "constant.language.boolean.candor"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "match": "\\b0[xX][0-9a-fA-F]+(i8|i16|i32|i64|isize|u8|u16|u32|u64|usize)?",
+          "name": "constant.numeric.hex.candor",
+          "captures": {
+            "1": {
+              "name": "keyword.other.numeric.suffix.candor"
+            }
+          }
+        },
+        {
+          "match": "\\b[0-9]+(i8|i16|i32|i64|isize|u8|u16|u32|u64|usize)?",
+          "name": "constant.numeric.decimal.candor",
+          "captures": {
+            "1": {
+              "name": "keyword.other.numeric.suffix.candor"
+            }
+          }
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "match": "\\.\\*",
+          "name": "keyword.operator.dereference.candor"
+        },
+        {
+          "match": "\\?",
+          "name": "keyword.operator.propagation.candor"
+        },
+        {
+          "match": "::",
+          "name": "keyword.operator.path.candor"
+        },
+        {
+          "match": "->",
+          "name": "keyword.operator.arrow.candor"
+        },
+        {
+          "match": "=>",
+          "name": "keyword.operator.arrow.fat.candor"
+        },
+        {
+          "match": "<<|>>",
+          "name": "keyword.operator.bitwise.shift.candor"
+        },
+        {
+          "match": "==|!=|<=|>=|<|>",
+          "name": "keyword.operator.comparison.candor"
+        },
+        {
+          "match": "&&|\\|\\||!",
+          "name": "keyword.operator.logical.candor"
+        },
+        {
+          "match": "&|\\||\\^|~",
+          "name": "keyword.operator.bitwise.candor"
+        },
+        {
+          "match": "\\+|-|\\*|/|%",
+          "name": "keyword.operator.arithmetic.candor"
+        },
+        {
+          "match": "=",
+          "name": "keyword.operator.assignment.candor"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "match": "\\.",
+          "name": "punctuation.accessor.candor"
+        },
+        {
+          "match": "[{}]",
+          "name": "punctuation.section.block.candor"
+        },
+        {
+          "match": "\\[|\\]",
+          "name": "punctuation.section.brackets.candor"
+        },
+        {
+          "match": "[()]",
+          "name": "punctuation.section.parens.candor"
+        },
+        {
+          "match": ",",
+          "name": "punctuation.separator.comma.candor"
+        },
+        {
+          "match": ";",
+          "name": "punctuation.terminator.statement.candor"
+        },
+        {
+          "match": ":",
+          "name": "punctuation.separator.colon.candor"
+        }
+      ]
+    },
+    "enum-member": {
+      "patterns": [
+        {
+          "match": "(?<=::)\\s*[A-Za-z_][A-Za-z0-9_]*",
+          "name": "variable.other.enummember.candor"
+        }
+      ]
+    },
+    "screaming": {
+      "patterns": [
+        {
+          "match": "\\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\\b",
+          "name": "constant.other.candor"
+        },
+        {
+          "match": "\\b[A-Z]{2,}\\b",
+          "name": "constant.other.candor"
+        }
+      ]
+    },
+    "types-pascal": {
+      "patterns": [
+        {
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b",
+          "name": "entity.name.type.candor"
+        }
+      ]
+    },
+    "field-access": {
+      "patterns": [
+        {
+          "match": "(?<=\\.)[a-z_][A-Za-z0-9_]*",
+          "name": "variable.other.property.candor"
+        }
+      ]
+    },
+    "function-call": {
+      "patterns": [
+        {
+          "match": "\\b[a-z_][A-Za-z0-9_]*(?=\\()",
+          "name": "entity.name.function.call.candor"
+        }
+      ]
+    },
+    "variables": {
+      "patterns": [
+        {
+          "match": "\\b[a-z_][A-Za-z0-9_]*\\b",
+          "name": "variable.other.candor"
+        }
+      ]
+    }
+  }
+}

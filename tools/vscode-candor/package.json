@@ -1,0 +1,70 @@
+{
+  "name": "vscode-candor",
+  "displayName": "Candor",
+  "description": "Syntax highlighting (layer 1) and a diagnostics-only LSP client (layer 2) for the Candor language. No hover/completion/go-to-def: those are deferred to the real Candor toolchain (P16).",
+  "version": "0.1.0",
+  "publisher": "candor-lang",
+  "license": "SEE LICENSE IN ../../GOVERNANCE.md",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:candor"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "candor",
+        "aliases": [
+          "Candor",
+          "candor"
+        ],
+        "extensions": [
+          ".cnr",
+          ".cn"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "candor",
+        "scopeName": "source.candor",
+        "path": "./syntaxes/candor.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Candor",
+      "properties": {
+        "candor.lsp.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the Candor diagnostics LSP server on activation."
+        },
+        "candor.lsp.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the candor-lsp binary. When empty, the extension looks for tools/candor-lsp/target/release/candor-lsp next to the extension, then falls back to 'candor-lsp' on PATH."
+        },
+        "candor.lsp.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace the JSON-RPC traffic between VS Code and candor-lsp."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

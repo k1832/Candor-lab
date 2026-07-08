@@ -185,3 +185,10 @@ Prefix-determinism, NN#1/NN#5 preservation, and the collapse-to-precise limit un
 effect-order-total reordering license. Open: concurrency composition (stated as conjecture with
 obligations O1-O5), mechanization, compiler correctness, and the fault-torn multi-store
 transaction residual (deferred to the volatile-access design).
+
+## OBL-MINMAX-INTRINSICS (found by editor-support work, 2026-07-08)
+
+Spec 01 §2.3 lists min_of/max_of as normative intrinsics; the real front-end defers them (stage-1
+report) and the lexer table omits them. Resolve by implementing the two intrinsics (trivial
+compile-time constants) or downgrading the spec entry to reserved; the grammar highlights them
+per spec meanwhile. Gate: chapter 01 NORMATIVE promotion for that clause.

@@ -1,0 +1,66 @@
+// sample.cnr — a screenshot-ready tour of the Candor grammar (spec 01/02).
+// Line comment. /* block comment, non-nesting */
+
+struct Acc { total: i64, count: i64 }
+
+// A result-shaped enum: exactly one `ok`-marked variant drives `?` (spec 02 2.2).
+enum Step { ok Cont(i64), Stop }
+
+static LIMIT: i64 = 3;
+
+// Modes wear keywords: `write Acc` is an exclusive borrow parameter (spec 02 4.1).
+fn advance(a: write Acc, delta: i64) -> Step {
+    a.*.total = a.total + delta;   // explicit `.*` on the write path; read auto-derefs
+    a.*.count = a.count + 1;
+    if a.count >= LIMIT {
+        return Step::Stop;
+    }
+    return Step::Cont(a.total);
+}
+
+fn drive(a: write Acc) -> Step {
+    let x: i64 = advance(a, 10)?;   // `?` propagates the non-ok variant
+    let y: i64 = advance(a, 20)?;
+    return Step::Cont(x + y);
+}
+
+// The bitwise set, shifts, `~`, `conv`, the negative-literal fold, hex and
+// suffixed literals, and a boolean.
+fn bits() -> i64 {
+    let mask: i64 = 0xF0;
+    let lo: i64 = 0x0F;
+    let mixed: i64 = (mask & lo) | (mask ^ lo);
+    let shifted: i64 = (1 << 8) >> 2;
+    let notv: i64 = ~0i64;
+    let floor: i64 = -9223372036854775808i64;   // i64::MIN via the fold
+    let byte: u8 = conv u8 mixed;
+    let flag: bool = true;
+    if flag {
+        return mixed + shifted + notv + floor + conv i64 byte;
+    }
+    return 0;
+}
+
+// The unsafe justification string is the audit surface — highlighted loud.
+fn measure() -> i64 {
+    unsafe "sizeof is a pure compile-time query; shown to exercise the audit string" {
+        return conv i64 sizeof(i64);
+    }
+}
+
+// `wrapping` selects modular integer arithmetic for its block (spec 02 6.9).
+fn wadd(a: i64, b: i64) -> i64 {
+    wrapping {
+        return a + b;
+    }
+}
+
+fn main() -> i64 {
+    let mut acc: Acc = Acc { total: 0, count: 0 };
+    let r: Step = drive(write acc);
+    let base: i64 = match r {
+        Step::Cont(v) => v,
+        Step::Stop => acc.total,
+    };
+    return wadd(base, measure()) + bits();
+}

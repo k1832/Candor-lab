@@ -1,0 +1,42 @@
+{
+  "comments": {
+    "lineComment": "//",
+    "blockComment": ["/*", "*/"]
+  },
+  "brackets": [
+    ["{", "}"],
+    ["[", "]"],
+    ["(", ")"]
+  ],
+  "autoClosingPairs": [
+    { "open": "{", "close": "}" },
+    { "open": "[", "close": "]" },
+    { "open": "(", "close": ")" },
+    { "open": "\"", "close": "\"", "notIn": ["string", "comment"] },
+    { "open": "/*", "close": " */", "notIn": ["string"] }
+  ],
+  "surroundingPairs": [
+    ["{", "}"],
+    ["[", "]"],
+    ["(", ")"],
+    ["\"", "\""]
+  ],
+  "colorizedBracketPairs": [
+    ["{", "}"],
+    ["[", "]"],
+    ["(", ")"]
+  ],
+  "__note_brackets": "The [ ] pair does double duty in Candor: bracketed lists/index (a[i], [1,2,3]) AND the type brackets for slices/arrays [T]/[N]T and the generic argument/param list Foo[T] / fn f[T]. There is no <...> generic bracketing (OBL-GENERIC-BRACKET), so [ ] is the sole type/generic bracket and is listed once.",
+  "wordPattern": "(::)?[A-Za-z_][A-Za-z0-9_]*",
+  "__note_wordPattern": "`::` is reserved exclusively for the enum-variant path (E::V). Including an optional leading `::` in the word pattern keeps double-click/rename selection sane around variant paths without treating `::` as an identifier character.",
+  "onEnterRules": [
+    {
+      "beforeText": "^\\s*//",
+      "action": { "indent": "none" }
+    }
+  ],
+  "indentationRules": {
+    "increaseIndentPattern": "^.*\\{[^}\"']*$|^.*\\([^)\"']*$|^.*\\[[^\\]\"']*$",
+    "decreaseIndentPattern": "^\\s*[)}\\]]"
+  }
+}
