@@ -124,3 +124,18 @@ generalizing P27 over R11. — **R31 (parser idiomaticity + verdict).** Confirme
 §11.4 (owned Box AST over borrowed input; valve = bump-allocator infrastructure only, two unsafe
 blocks). Valve-line 0.0408 vs 0.15: pass. Valve-function 3/30 = 0.1000, not strictly above the
 0.10 WARN line: no WARN. No cell-substitutable candidates.
+
+## 2026-07-08 — Philosophy-tier (§9) a-priori ruling: field_ptr measurement classification
+
+**Recorded BEFORE any re-port code exists** (design 0004's process obligation; the frozen
+successor registration is not modified — this ruling sits above it, per its own §9 hierarchy).
+
+**Ruling:** `field_ptr` is a safe operation (designs 0004/0001 §4.2/0003 §2.5, adversarially
+reviewed) and therefore opens no valve region; under the frozen region-based valve-statement
+metric (BET5_CRITERION2.md §4.1, which counts statements intersecting unsafe regions and needs
+no per-op table entry), a field_ptr statement outside an unsafe block is not a valve statement,
+and inside one it counts like any other statement. The frozen unit table is not amended. The
+updated counter (commit 3a18e82) parses the new grammar and carries a test demonstrating the
+region rule is preserved in both directions. The predicted effect on the scheduler re-measurement,
+stated a priori per design 0004: approximately one valve statement removed (t_link); the two
+shrunken blocks are metric-invisible. Objection window: open from this publication.
