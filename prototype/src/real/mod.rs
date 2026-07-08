@@ -10,7 +10,11 @@
 //! `.cn` = throwaway (unchanged). The checker runs its real-syntax-only surface
 //! rules (literal over-range, constant-`conv` loss, write-through-borrow needs
 //! `.*`) for programs parsed here (see [`crate::check::check_program_real`]).
+//!
+//! [`emit`] is the reverse direction: the P15 migrator's AST -> real-syntax
+//! pretty-printer (design 0006 §5), used by `candor-proto migrate`.
 
+pub mod emit;
 pub mod lexer;
 pub mod parser;
 pub mod token;

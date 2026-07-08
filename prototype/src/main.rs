@@ -9,6 +9,10 @@
 //!   candor-proto count <file>   -- parse + check, then emit the frozen Bet 5
 //!                                  unit-table counts as JSON (exit 0), or a
 //!                                  parse-error JSON (exit 1).
+//!   candor-proto migrate <file.cn> [-o <out.cnr>]
+//!                               -- P15 migrator (design 0006 §5): parse the
+//!                                  throwaway `.cn` file and emit real (`.cnr`)
+//!                                  syntax to stdout (or `-o` file).
 //!
 //! The surface syntax is chosen by file extension (design 0006; spec 01/02):
 //!   * `.cnr` -> the real toolchain syntax (borrows/slices as keywords, the
@@ -26,8 +30,9 @@ fn main() -> ExitCode {
         (Some("check"), Some(path)) => run_check(path),
         (Some("run"), Some(path)) => run_run(path),
         (Some("count"), Some(path)) => run_count(path),
+        (Some("migrate"), Some(path)) => run_migrate(path, &args[3..]),
         _ => {
-            eprintln!("usage: candor-proto (parse|check|run|count) <file>  (.cnr = real syntax, .cn = throwaway)");
+            eprintln!("usage: candor-proto (parse|check|run|count) <file>  |  migrate <file.cn> [-o <out.cnr>]  (.cnr = real syntax, .cn = throwaway)");
             ExitCode::from(2)
         }
     }
@@ -147,6 +152,54 @@ fn run_count(path: &str) -> ExitCode {
         }
         Err(diag) => {
             println!("{}", diag.to_json());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `migrate <file.cn> [-o <out.cnr>]` — parse the throwaway front-end and emit
+/// real syntax to stdout (default) or to the `-o` file.
+fn run_migrate(path: &str, rest: &[String]) -> ExitCode {
+    let mut out: Option<&str> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "-o" => match rest.get(i + 1) {
+                Some(o) => {
+                    out = Some(o);
+                    i += 2;
+                }
+                None => {
+                    eprintln!("error: `-o` requires an output path");
+                    return ExitCode::from(2);
+                }
+            },
+            other => {
+                eprintln!("error: unexpected argument `{other}`");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let src = match read(path) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    match candor_proto::migrate_source(&src) {
+        Ok(real) => match out {
+            Some(o) => match std::fs::write(o, real) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("error: cannot write `{o}`: {e}");
+                    ExitCode::from(2)
+                }
+            },
+            None => {
+                print!("{real}");
+                ExitCode::SUCCESS
+            }
+        },
+        Err(diag) => {
+            eprintln!("{}", diag.to_json());
             ExitCode::FAILURE
         }
     }

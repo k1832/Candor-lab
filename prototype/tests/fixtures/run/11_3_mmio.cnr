@@ -1,0 +1,54 @@
+enum State {
+    idle,
+    arming,
+    running,
+    faulted,
+}
+
+enum Event {
+    start,
+    ready,
+    err,
+    stop,
+}
+
+struct Uart {
+    base: usize,
+    state: State,
+}
+
+fn reg_write(base: usize, off: usize, val: u32) -> unit {
+    unsafe "device MMIO window at [base..base+0x40); volatile store" {
+        ptr_write(addr_to_ptr[u32](base + off), val);
+    }
+}
+
+fn reg_read(base: usize, off: usize) -> u32 {
+    unsafe "device MMIO window; volatile load" {
+        return ptr_read(addr_to_ptr[u32](base + off));
+    }
+}
+
+fn step(d: write Uart, ev: Event) -> unit {
+    let s: State = match ev {
+        Event::start => State::arming,
+        Event::ready => State::running,
+        Event::err => State::faulted,
+        Event::stop => State::idle,
+    };
+    match s {
+        State::arming => reg_write(d.base, 0, 1),
+        State::running => reg_write(d.base, 4, 1),
+        State::faulted => reg_write(d.base, 0, 0),
+        State::idle => reg_write(d.base, 0, 0),
+    }
+    d.*.state = s;
+}
+
+fn main() -> i64 {
+    let mut d: Uart = Uart { base: 3145728, state: State::idle };
+    step(write d, Event::start);
+    step(write d, Event::ready);
+    let v: u32 = reg_read(d.base, 4);
+    return conv i64 v + 41;
+}

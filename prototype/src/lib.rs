@@ -106,3 +106,18 @@ pub fn run_source_real(src: &str) -> RunResult {
         Err(f) => RunResult::Fault(f),
     }
 }
+
+// ---------------------------------------------------------------------------
+// P15 migrator (design 0006 §5): parse throwaway (`.cn`) syntax with the
+// existing front-end, then re-emit the shared AST in real (`.cnr`) syntax.
+// Semantic fidelity is by construction — the emitter only re-spells the AST the
+// throwaway parser produced. See `real::emit` for the mechanical/author-assisted
+// row handling.
+// ---------------------------------------------------------------------------
+
+/// Migrate a throwaway (`.cn`) source string to real (`.cnr`) surface syntax.
+/// Returns the emitted program text, or the throwaway front-end's parse `Diag`.
+pub fn migrate_source(src: &str) -> Result<String, Diag> {
+    let program = parse_source(src)?;
+    Ok(real::emit::emit_program(&program))
+}

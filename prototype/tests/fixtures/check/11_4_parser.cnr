@@ -1,0 +1,50 @@
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+}
+
+copy struct Alloc {
+    ctx: rawptr u8,
+    vt: rawptr AllocVtable,
+}
+
+enum Expr {
+    num(i64),
+    add(Box Expr, Box Expr),
+    mul(Box Expr, Box Expr),
+}
+
+static PLUS: u8 = 43u8;
+
+fn read_number(s: [u8], pos: write usize) -> i64 {
+    return 0;
+}
+
+fn peek(s: [u8], pos: read usize) -> u8 {
+    return 0u8;
+}
+
+fn advance(pos: write usize) -> unit {}
+
+fn parse_term(a: read Alloc, s: [u8], pos: write usize) alloc -> BoxResult Expr {
+    let n: i64 = read_number(s, pos);
+    return box(a, Expr::num(n));
+}
+
+fn parse_expr(a: read Alloc, s: [u8], pos: write usize) alloc -> BoxResult Expr {
+    // MIGRATE: two-arm BoxResult match -> `box(a, v)?` (author-assisted, design 0006 §5)
+    match parse_term(a, s, pos) {
+        BoxResult::oom => return BoxResult::oom,
+        BoxResult::boxed(lhs) => {
+            if peek(s, pos) == PLUS {
+                advance(pos);
+                // MIGRATE: two-arm BoxResult match -> `box(a, v)?` (author-assisted, design 0006 §5)
+                match parse_expr(a, s, pos) {
+                    BoxResult::oom => return BoxResult::oom,
+                    BoxResult::boxed(rhs) => return box(a, Expr::add(lhs, rhs)),
+                }
+            }
+            return BoxResult::boxed(lhs);
+        },
+    }
+}
