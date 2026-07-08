@@ -30,8 +30,8 @@ use crate::types::{is_copy, needs_drop, ArrayLen, Type};
 
 use super::{
     check_invariants, BasicBlock, BlockId, FaultEdge, LocalDecl, LocalId, MirFn, MirProgram,
-    Operand, Place, Predicate, Proj, Regime, ReplayPolicy, Rvalue, Statement, StatementKind,
-    Terminator,
+    Operand, Place, Predicate, Proj, Regime, ReplayPolicy, Rvalue, StaticInit, Statement,
+    StatementKind, Terminator,
 };
 
 /// A construct outside the Stage-A MIR subset. The gate treats it as out-of-subset
@@ -42,6 +42,63 @@ pub struct LowerError(pub String);
 fn unsupported<T>(what: impl Into<String>) -> Result<T, LowerError> {
     Err(LowerError(what.into()))
 }
+
+/// Interface-impl dispatch, built from the monomorphized AST (design 0007): the
+/// generics layer resolved these; `resolve::Items` does not carry them.
+/// One `From`-impl record: (iface base, iface args, target nominal, method map).
+type FromImpl = (String, Vec<Type>, String, HashMap<String, String>);
+
+/// The borrow mode a match scrutinee is held under (design 0001 §4.1).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Hold {
+    Owned,
+    Shared,
+    Excl,
+}
+
+#[derive(Default)]
+struct ImplTables {
+    /// (target nominal, method name) -> the impl method's free-function name.
+    dispatch: HashMap<(String, String), String>,
+    /// (iface base, iface args, target, methods) — for `From` resolution in `?`.
+    from_impls: Vec<FromImpl>,
+}
+
+fn build_impl_tables(program: &Program) -> ImplTables {
+    let mut t = ImplTables::default();
+    for it in &program.items {
+        if let Item::Impl(im) = it {
+            if let TyKind::Named(target) = &im.target.kind {
+                let iface_args: Vec<Type> = im.iface_args.iter().map(resolve_impl_ty).collect();
+                let mut methods = HashMap::new();
+                for m in &im.methods {
+                    let fnname = crate::generics::impl_method_fn_name(&im.iface, &iface_args, target, &m.name);
+                    t.dispatch.insert((target.clone(), m.name.clone()), fnname.clone());
+                    methods.insert(m.name.clone(), fnname);
+                }
+                t.from_impls.push((crate::generics::base_name(&im.iface).to_string(), iface_args, target.clone(), methods));
+            }
+        }
+    }
+    t
+}
+
+/// Resolve an impl's interface-argument AST type to a semantic type (concrete in
+/// a monomorphized program) — mirrors the oracle's `resolve_impl_ty`.
+fn resolve_impl_ty(ty: &Ty) -> Type {
+    match &ty.kind {
+        TyKind::Scalar(s) => Type::Scalar(*s),
+        TyKind::Named(n) => Type::Named(n.clone()),
+        TyKind::Box(e) => Type::Box(Box::new(resolve_impl_ty(e))),
+        TyKind::BoxResult(e) => Type::BoxResult(Box::new(resolve_impl_ty(e))),
+        TyKind::App { name, args } => Type::App(name.clone(), args.iter().map(resolve_impl_ty).collect()),
+        TyKind::RawPtr(e) => Type::RawPtr(Box::new(resolve_impl_ty(e))),
+        TyKind::Slice(e) => Type::Slice(Box::new(resolve_impl_ty(e))),
+        TyKind::SliceMut(e) => Type::SliceMut(Box::new(resolve_impl_ty(e))),
+        _ => Type::Error,
+    }
+}
+
 
 /// Lower a checked, resolved program to MIR. Generic programs must be
 /// monomorphized first; a still-generic item is reported as unsupported here.
@@ -54,16 +111,49 @@ pub fn lower_checked(program: &Program, items: &Items) -> Result<MirProgram, Low
             }
         }
     }
+    // Build the interface-impl dispatch tables from the (monomorphized) AST — the
+    // impls the generics layer resolved, not carried in `Items` (design 0007). A
+    // method call `recv.m` lowers to the mono-resolved free fn; cross-type `?`
+    // finds its `From` impl the same way the oracle does.
+    let impls = build_impl_tables(program);
+
+    // Assign fn-pointer ids up front over every callable name (user fns, drop
+    // hooks, static inits), so a fn value / vtable slot is a stable `u64` index
+    // (design 0007 §6.2). The lowering bakes ids; the interpreter resolves them.
+    let mut fn_ptrs: Vec<String> = Vec::new();
+    let mut fn_ptr_id: HashMap<String, usize> = HashMap::new();
+    let reg = |name: String, fn_ptrs: &mut Vec<String>, fn_ptr_id: &mut HashMap<String, usize>| {
+        if !fn_ptr_id.contains_key(&name) {
+            fn_ptr_id.insert(name.clone(), fn_ptrs.len());
+            fn_ptrs.push(name);
+        }
+    };
+    for it in &program.items {
+        match it {
+            Item::Struct(sd) if sd.drop_hook.is_some() => {
+                reg(format!("<drop {}>", sd.name), &mut fn_ptrs, &mut fn_ptr_id);
+            }
+            Item::Static(st) => {
+                reg(format!("<init {}>", st.name), &mut fn_ptrs, &mut fn_ptr_id);
+            }
+            Item::Fn(fnd) => {
+                reg(fnd.name.clone(), &mut fn_ptrs, &mut fn_ptr_id);
+            }
+            _ => {}
+        }
+    }
+
     let mut fns = Vec::new();
     let mut fn_index = HashMap::new();
     let mut drop_hooks = HashMap::new();
+    let mut statics = Vec::new();
     // Lower each struct `drop` hook to an ordinary MIR function taking `write self`
     // (INV-DROP: the schedule is static; the hook is called at the drop point).
     for it in &program.items {
         if let Item::Struct(sd) = it {
             if let Some(block) = &sd.drop_hook {
                 let hook_name = format!("<drop {}>", sd.name);
-                let mut lw = Lowerer::new(items, &consts);
+                let mut lw = Lowerer::new(items, &consts, &fn_ptr_id, &impls);
                 let mf = lw.lower_hook(&hook_name, &sd.name, block)?;
                 check_invariants(&mf);
                 drop_hooks.insert(sd.name.clone(), hook_name.clone());
@@ -72,12 +162,29 @@ pub fn lower_checked(program: &Program, items: &Items) -> Result<MirProgram, Low
             }
         }
     }
+    // Lower each `static`'s initializer to an `<init NAME>` fn returning the value.
+    for it in &program.items {
+        if let Item::Static(st) = it {
+            let sty = items
+                .statics
+                .get(&st.name)
+                .map(|(t, _)| t.clone())
+                .ok_or_else(|| LowerError(format!("no type for static `{}`", st.name)))?;
+            let init_name = format!("<init {}>", st.name);
+            let mut lw = Lowerer::new(items, &consts, &fn_ptr_id, &impls);
+            let mf = lw.lower_static_init(&init_name, &sty, &st.value)?;
+            check_invariants(&mf);
+            fn_index.insert(init_name.clone(), fns.len());
+            fns.push(mf);
+            statics.push(StaticInit { name: st.name.clone(), ty: sty, init_fn: init_name });
+        }
+    }
     for it in &program.items {
         if let Item::Fn(fnd) = it {
             if !fnd.type_params.is_empty() {
                 return unsupported(format!("generic fn `{}`", fnd.name));
             }
-            let mut lw = Lowerer::new(items, &consts);
+            let mut lw = Lowerer::new(items, &consts, &fn_ptr_id, &impls);
             let mf = lw.lower_fn(fnd)?;
             debug_assert_eq!(mf.name, fnd.name);
             check_invariants(&mf);
@@ -85,7 +192,7 @@ pub fn lower_checked(program: &Program, items: &Items) -> Result<MirProgram, Low
             fns.push(mf);
         }
     }
-    Ok(MirProgram { fns, fn_index, drop_hooks })
+    Ok(MirProgram { fns, fn_index, drop_hooks, fn_ptrs, statics })
 }
 
 type LR<T> = Result<T, LowerError>;
@@ -103,6 +210,13 @@ struct Loop {
 struct Lowerer<'a> {
     items: &'a Items,
     consts: &'a HashMap<String, u64>,
+    fn_ptr_id: &'a HashMap<String, usize>,
+    impls: &'a ImplTables,
+    /// Static move state (the compile-time analog of the oracle's `MoveMask`):
+    /// per-local, the field-name paths already moved out. Consulted when emitting
+    /// a `Drop` so the drop skips moved sub-paths — the static mask baked into the
+    /// MIR (design 0010 §2 INV-DROP), NO runtime flag.
+    moves: HashMap<LocalId, Vec<Vec<String>>>,
     locals: Vec<LocalDecl>,
     blocks: Vec<BasicBlock>,
     cur: BlockId,
@@ -118,10 +232,18 @@ struct Lowerer<'a> {
 }
 
 impl<'a> Lowerer<'a> {
-    fn new(items: &'a Items, consts: &'a HashMap<String, u64>) -> Lowerer<'a> {
+    fn new(
+        items: &'a Items,
+        consts: &'a HashMap<String, u64>,
+        fn_ptr_id: &'a HashMap<String, usize>,
+        impls: &'a ImplTables,
+    ) -> Lowerer<'a> {
         Lowerer {
             items,
             consts,
+            fn_ptr_id,
+            impls,
+            moves: HashMap::new(),
             locals: Vec::new(),
             blocks: Vec::new(),
             cur: 0,
@@ -183,12 +305,27 @@ impl<'a> Lowerer<'a> {
     fn pop_scope_with_drops(&mut self) {
         let sc = self.scopes.pop().unwrap();
         // INV-DROP: drop the scope's owned locals in reverse declaration order.
-        for (_, id, _ty) in sc.locals.iter().rev() {
-            if self.locals[*id].drop_obligation {
-                self.emit(StatementKind::Drop(*id), Span::point(0), false);
-            }
+        let ids: Vec<LocalId> = sc.locals.iter().rev().map(|(_, id, _)| *id).collect();
+        for id in ids {
+            self.emit_drop(id);
         }
     }
+
+    /// Emit a `Drop` for a needs-drop local, pruned by the static move mask: skip
+    /// entirely if the whole value is moved; otherwise carry the moved sub-paths
+    /// so the drop runs only the still-owned remainder (INV-DROP, no runtime flag).
+    fn emit_drop(&mut self, id: LocalId) {
+        if !self.reachable || !self.locals[id].drop_obligation {
+            return;
+        }
+        let mask = self.moves.get(&id).cloned().unwrap_or_default();
+        // Whole-value moved (empty path in the mask): nothing to drop.
+        if mask.iter().any(|m| m.is_empty()) {
+            return;
+        }
+        self.emit(StatementKind::Drop { local: id, moved: mask }, Span::point(0), false);
+    }
+
     /// Emit the drop schedule for *every* live scope, innermost-first — the drops
     /// that run when control leaves the function via `return` (INV-DROP). The
     /// caller terminates immediately after, so the natural scope-exit drops below
@@ -201,9 +338,7 @@ impl<'a> Lowerer<'a> {
             .flat_map(|sc| sc.locals.iter().rev().map(|(_, id, _)| *id))
             .collect();
         for id in ids {
-            if self.locals[id].drop_obligation {
-                self.emit(StatementKind::Drop(id), Span::point(0), false);
-            }
+            self.emit_drop(id);
         }
     }
 
@@ -219,9 +354,41 @@ impl<'a> Lowerer<'a> {
             .flat_map(|sc| sc.locals.iter().rev().map(|(_, id, _)| *id))
             .collect();
         for id in ids {
-            if self.locals[id].drop_obligation {
-                self.emit(StatementKind::Drop(id), Span::point(0), false);
+            self.emit_drop(id);
+        }
+    }
+
+    // ---- static move tracking (the compile-time MoveMask) ----
+
+    /// The (root local, field-name path) a place expression denotes, if it is a
+    /// local reached by only `.field` steps (the shape the checker permits a
+    /// non-copy move out of; deref/index moves are E0310-rejected). `None` for a
+    /// non-trackable operand (temp, call result, opaque place).
+    fn ast_place_path(&self, e: &Expr) -> Option<(LocalId, Vec<String>)> {
+        match &e.kind {
+            ExprKind::Paren(i) | ExprKind::OutArg(i) => self.ast_place_path(i),
+            ExprKind::Ident(name) => self.lookup(name).map(|(id, _)| (id, Vec::new())),
+            ExprKind::Field { base, field } => {
+                let (id, mut path) = self.ast_place_path(base)?;
+                path.push(field.clone());
+                Some((id, path))
             }
+            _ => None,
+        }
+    }
+
+    /// Mark the value `e` names as moved out (a non-copy by-value consume), so its
+    /// scheduled drop is pruned. No-op for non-trackable operands.
+    fn mark_moved(&mut self, e: &Expr) {
+        if let Some((id, path)) = self.ast_place_path(e) {
+            self.moves.entry(id).or_default().push(path);
+        }
+    }
+
+    /// Mark a moved local path re-initialized (a reassignment restores ownership).
+    fn set_owned(&mut self, id: LocalId, path: &[String]) {
+        if let Some(v) = self.moves.get_mut(&id) {
+            v.retain(|m| !(prefix(m, path) || prefix(path, m)));
         }
     }
 
@@ -276,6 +443,15 @@ impl<'a> Lowerer<'a> {
             TyKind::SliceMut(e) => Type::SliceMut(Box::new(self.resolve_ty(e)?)),
             TyKind::Box(e) => Type::Box(Box::new(self.resolve_ty(e)?)),
             TyKind::BoxResult(e) => Type::BoxResult(Box::new(self.resolve_ty(e)?)),
+            TyKind::FnPtr(fp) => Type::FnPtr(crate::types::FnPtrTy {
+                params: fp
+                    .params
+                    .iter()
+                    .map(|pp| Ok((pp.mode, self.resolve_ty(&pp.ty)?)))
+                    .collect::<LR<Vec<_>>>()?,
+                alloc: fp.alloc,
+                ret: Box::new(self.resolve_ty(&fp.ret)?),
+            }),
             other => return unsupported(format!("type {other:?}")),
         })
     }
@@ -333,12 +509,8 @@ impl<'a> Lowerer<'a> {
                     }
                 }
                 ParamMode::Take => {
-                    // By-value aggregate params are in subset when drop-inert; a
-                    // needs-drop by-value aggregate would need an owned-param drop
-                    // schedule we don't yet emit.
-                    if !self.is_wordy(&p.lowered) && needs_drop(&p.lowered, self.items) {
-                        return unsupported("needs-drop by-value aggregate parameter");
-                    }
+                    // By-value aggregate params (drop-inert or needs-drop) are owned;
+                    // the param scope's drop schedule runs any drop at fn exit.
                 }
                 _ => return unsupported(format!("param mode {:?}", p.mode)),
             }
@@ -469,14 +641,24 @@ impl<'a> Lowerer<'a> {
                             self.bind(name, id, lty);
                         }
                         None => {
-                            // No annotation: only the wordy/scalar inference path.
-                            let (op, oty) = self.lower_value(e, None)?;
-                            if !self.is_wordy(&oty) {
-                                return unsupported("non-word inferred local");
+                            // No annotation (e.g. the `for` desugar's `let __it = list`):
+                            // infer the type, then move/copy the value into the local.
+                            match self.infer_ty(e) {
+                                Some(oty) if !self.is_wordy(&oty) => {
+                                    let id = self.new_local(oty.clone(), Some(name.clone()));
+                                    self.lower_into(e, &Place::local(id), &oty)?;
+                                    self.bind(name, id, oty);
+                                }
+                                _ => {
+                                    let (op, oty) = self.lower_value(e, None)?;
+                                    if !self.is_wordy(&oty) {
+                                        return unsupported("non-word inferred local");
+                                    }
+                                    let id = self.new_local(oty.clone(), Some(name.clone()));
+                                    self.emit(StatementKind::Assign(id, Rvalue::Use(op)), s.span, false);
+                                    self.bind(name, id, oty);
+                                }
                             }
-                            let id = self.new_local(oty.clone(), Some(name.clone()));
-                            self.emit(StatementKind::Assign(id, Rvalue::Use(op)), s.span, false);
-                            self.bind(name, id, oty);
                         }
                     },
                     None => {
@@ -490,6 +672,11 @@ impl<'a> Lowerer<'a> {
             StmtKind::Assign { target, value } => {
                 let (place, tty) = self.lower_place(target)?;
                 self.lower_into(value, &place, &tty)?;
+                // A reassignment reinitializes the target place (design 0001 §1.5):
+                // clear its moved paths so a later drop of it is not pruned.
+                if let Some((id, path)) = self.ast_place_path(target) {
+                    self.set_owned(id, &path);
+                }
                 Ok(())
             }
             StmtKind::Expr(e) => {
@@ -516,10 +703,32 @@ impl<'a> Lowerer<'a> {
             }
             ExprKind::BoolLit(b) => Ok((Operand::Const(*b as i128, ScalarTy::Bool), Type::bool())),
             ExprKind::Ident(name) => {
-                let (id, ty) = self
-                    .lookup(name)
-                    .ok_or_else(|| LowerError(format!("unknown name `{name}`")))?;
-                Ok((Operand::Local(id), ty))
+                if let Some((id, ty)) = self.lookup(name) {
+                    Ok((Operand::Local(id), ty))
+                } else if let Some((sty, _)) = self.items.statics.get(name) {
+                    // A `static` read by value (design 0008): load from its place.
+                    if self.is_wordy(sty) {
+                        let sty = sty.clone();
+                        let (place, _) = self.lower_place(e)?;
+                        let id = self.emit_temp(sty.clone(), Rvalue::Load { place, ty: sty.clone() }, self.cur_span);
+                        Ok((Operand::Local(id), sty))
+                    } else {
+                        unsupported("aggregate static in value position")
+                    }
+                } else if let Some(id) = self.fn_ptr_id.get(name) {
+                    // A function named as a value (design 0007 §6.2): its fn-ptr id.
+                    Ok((Operand::Const(*id as i128, ScalarTy::U64), self.fnptr_ty(name)))
+                } else {
+                    unsupported(format!("unknown name `{name}`"))
+                }
+            }
+            ExprKind::GenericVal { name, .. } => {
+                // A monomorphized generic fn named as a value: its fn-ptr id.
+                if let Some(id) = self.fn_ptr_id.get(name) {
+                    Ok((Operand::Const(*id as i128, ScalarTy::U64), self.fnptr_ty(name)))
+                } else {
+                    unsupported(format!("generic value `{name}`"))
+                }
             }
             ExprKind::Unary { op, expr } => self.lower_unary(*op, expr, expected, e.span),
             ExprKind::Binary { op, lhs, rhs } => self.lower_binary(*op, lhs, rhs, expected, e.span),
@@ -610,6 +819,56 @@ impl<'a> Lowerer<'a> {
             }
             ExprKind::Prefix { op: PrefixOp::Read, expr } => self.lower_borrow(expr, false),
             ExprKind::Prefix { op: PrefixOp::Write, expr } => self.lower_borrow(expr, true),
+            // rawptr intrinsics that carry a bracketed type argument (design 0004).
+            ExprKind::CastPtr { ty, arg } => {
+                let (op, _) = self.lower_value(arg, None)?;
+                let rty = Type::RawPtr(Box::new(self.resolve_ty(ty)?));
+                let id = self.emit_temp(rty.clone(), Rvalue::Use(op), self.cur_span);
+                Ok((Operand::Local(id), rty))
+            }
+            ExprKind::AddrToPtr { ty, arg } => {
+                let (op, _) = self.lower_value(arg, Some(&Type::usize()))?;
+                let rty = Type::RawPtr(Box::new(self.resolve_ty(ty)?));
+                let id = self.emit_temp(rty.clone(), Rvalue::Use(op), self.cur_span);
+                Ok((Operand::Local(id), rty))
+            }
+            ExprKind::PtrNull { ty } => {
+                let rty = Type::RawPtr(Box::new(self.resolve_ty(ty)?));
+                let id = self.emit_temp(rty.clone(), Rvalue::Use(Operand::Const(0, ScalarTy::U64)), self.cur_span);
+                Ok((Operand::Local(id), rty))
+            }
+            ExprKind::Offsetof { ty, field } => {
+                let n = match self.resolve_ty(ty)? {
+                    Type::Named(name) => self.lay().field_offset(&name, field).map(|(_, o)| o).unwrap_or(0),
+                    _ => 0,
+                };
+                Ok((Operand::Const(n as i128, ScalarTy::Usize), Type::usize()))
+            }
+            ExprKind::Sizeof(ty) => {
+                let n = self.size_of(&self.resolve_ty(ty)?);
+                Ok((Operand::Const(n as i128, ScalarTy::Usize), Type::usize()))
+            }
+            ExprKind::Alignof(ty) => {
+                let n = self.align_of(&self.resolve_ty(ty)?);
+                Ok((Operand::Const(n as i128, ScalarTy::Usize), Type::usize()))
+            }
+            ExprKind::FieldPtr { ptr, field } => {
+                let (base, pty) = self.lower_value(ptr, None)?;
+                let (fty, off) = match &pty {
+                    Type::RawPtr(inner) => match &**inner {
+                        Type::Named(n) => self.lay().field_offset(n, field).unwrap_or((Type::Error, 0)),
+                        _ => (Type::Error, 0),
+                    },
+                    _ => (Type::Error, 0),
+                };
+                let rty = Type::RawPtr(Box::new(fty));
+                let id = self.emit_temp(
+                    rty.clone(),
+                    Rvalue::PtrArith { base, index: Operand::Const(off as i128, ScalarTy::Usize), stride: 1 },
+                    self.cur_span,
+                );
+                Ok((Operand::Local(id), rty))
+            }
             other => unsupported(format!("expr {}", variant_name(other))),
         }
     }
@@ -623,10 +882,21 @@ impl<'a> Lowerer<'a> {
         match &e.kind {
             ExprKind::Paren(i) => self.lower_place(i),
             ExprKind::Ident(name) => {
-                let (id, ty) = self
-                    .lookup(name)
-                    .ok_or_else(|| LowerError(format!("place of unknown `{name}`")))?;
-                Ok((Place::local(id), ty))
+                if let Some((id, ty)) = self.lookup(name) {
+                    Ok((Place::local(id), ty))
+                } else if let Some((sty, _)) = self.items.statics.get(name) {
+                    // A `static` place: reach it through its address (design 0008),
+                    // modeled as `*(&STATIC)` so field/index/addr_of compose.
+                    let sty = sty.clone();
+                    let root = self.emit_temp(
+                        Type::RawPtr(Box::new(sty.clone())),
+                        Rvalue::StaticAddr(name.clone()),
+                        self.cur_span,
+                    );
+                    Ok((Place { root, proj: vec![Proj::Deref { inner: sty.clone() }] }, sty))
+                } else {
+                    unsupported(format!("place of unknown `{name}`"))
+                }
             }
             ExprKind::Prefix { op: PrefixOp::Deref, expr } => {
                 let (mut pl, t) = self.lower_place(expr)?;
@@ -660,7 +930,14 @@ impl<'a> Lowerer<'a> {
                     Type::Array(elem, len) => {
                         let n = self.lay().array_len(len);
                         let stride = self.stride_of(elem);
-                        pl.proj.push(Proj::Index { index: idx, stride, len: n, span: self.cur_span });
+                        pl.proj.push(Proj::Index { index: idx, stride, len: n, span: self.cur_span, slice: false });
+                        Ok((pl, (**elem).clone()))
+                    }
+                    Type::Slice(elem) | Type::SliceMut(elem) => {
+                        let stride = self.stride_of(elem);
+                        // Slice index: the runtime length lives in the header (read
+                        // by the interpreter); the bounds fault is INV-CHECK.
+                        pl.proj.push(Proj::Index { index: idx, stride, len: 0, span: self.cur_span, slice: true });
                         Ok((pl, (**elem).clone()))
                     }
                     _ => unsupported("index of non-array"),
@@ -720,17 +997,26 @@ impl<'a> Lowerer<'a> {
             | ExprKind::Field { .. }
             | ExprKind::Index { .. }
             | ExprKind::Prefix { op: PrefixOp::Deref, .. } => self.lower_place(e),
-            ExprKind::Call { callee, .. } => {
-                let name = match &callee.kind {
-                    ExprKind::Ident(n) => n.clone(),
+            ExprKind::Call { callee, args } => {
+                let ret = match &callee.kind {
+                    ExprKind::Ident(n) if self.items.fns.contains_key(n.as_str()) => {
+                        self.items.fns[n.as_str()].ret.clone()
+                    }
+                    // A `box(alloc, v)` scrutinee: its `BoxResult[typeof v]`.
+                    ExprKind::Ident(n) if n == "box" => {
+                        let inner = self
+                            .infer_ty(&args[1])
+                            .ok_or_else(|| LowerError("cannot infer `box` value type".into()))?;
+                        Type::BoxResult(Box::new(inner))
+                    }
+                    ExprKind::Field { base, field } => {
+                        let (fnname, _) = self
+                            .resolve_method(base, field, args, e.span)
+                            .ok_or_else(|| LowerError("match on unresolved method call".into()))?;
+                        self.items.fns[fnname.as_str()].ret.clone()
+                    }
                     _ => return unsupported("match on an indirect call"),
                 };
-                let ret = self
-                    .items
-                    .fns
-                    .get(name.as_str())
-                    .map(|s| s.ret.clone())
-                    .ok_or_else(|| LowerError(format!("match on unknown call `{name}`")))?;
                 let place = self.materialize_place(e, &ret)?;
                 Ok((place, ret))
             }
@@ -741,6 +1027,52 @@ impl<'a> Lowerer<'a> {
                 unsupported("match on a freshly-constructed enum value")
             }
             _ => unsupported("unsupported match scrutinee"),
+            }
+    }
+
+    /// Best-effort static type of a value expression, for sizing a materialized
+    /// scrutinee / box inner (the checker already typed it; this recovers enough).
+    fn infer_ty(&self, e: &Expr) -> Option<Type> {
+        match &e.kind {
+            ExprKind::Paren(i) | ExprKind::OutArg(i) => self.infer_ty(i),
+            ExprKind::IntLit { suffix, .. } | ExprKind::NegIntLit { suffix, .. } => {
+                Some(Type::Scalar(suffix.unwrap_or(ScalarTy::I64)))
+            }
+            ExprKind::BoolLit(_) => Some(Type::bool()),
+            ExprKind::Ident(n) => self
+                .lookup(n)
+                .map(|(_, t)| t)
+                .or_else(|| self.items.statics.get(n).map(|(t, _)| t.clone())),
+            ExprKind::Field { .. } | ExprKind::Index { .. } | ExprKind::Prefix { op: PrefixOp::Deref, .. } => {
+                self.static_ty(e)
+            }
+            ExprKind::StructLit { name, .. } => Some(Type::Named(name.clone())),
+            ExprKind::EnumCtor { enum_name, .. } => Some(Type::Named(enum_name.clone())),
+            ExprKind::ArrayRepeat { value, size } => {
+                let elem = self.infer_ty(value)?;
+                let n = match &size.kind {
+                    ExprKind::IntLit { value, .. } => ArrayLen::Lit(*value),
+                    ExprKind::Ident(nm) => ArrayLen::Named(nm.clone()),
+                    _ => return None,
+                };
+                Some(Type::Array(Box::new(elem), n))
+            }
+            ExprKind::ArrayLit(els) => {
+                let elem = self.infer_ty(els.first()?)?;
+                Some(Type::Array(Box::new(elem), ArrayLen::Lit(els.len() as u64)))
+            }
+            ExprKind::Conv { ty, .. } => self.resolve_ty(ty).ok(),
+            ExprKind::Call { callee, args } => match &callee.kind {
+                ExprKind::Ident(n) if self.items.fns.contains_key(n.as_str()) => {
+                    Some(self.items.fns[n.as_str()].ret.clone())
+                }
+                ExprKind::Field { base, field } => {
+                    let (fnname, _) = self.resolve_method(base, field, args, e.span)?;
+                    Some(self.items.fns.get(&fnname)?.ret.clone())
+                }
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -756,10 +1088,17 @@ impl<'a> Lowerer<'a> {
         dst: Option<(&Place, &Type)>,
     ) -> LR<()> {
         let (mut splace, sty) = self.lower_scrutinee(scrutinee)?;
+        // The borrow mode of the scrutinee decides how non-copy payloads bind
+        // (design 0001 §4.1, mirroring the oracle's `Hold`): an owned scrutinee
+        // *moves* its payload out (and is pruned from its own drop); a borrowed
+        // scrutinee binds a *borrow* of the payload — a copy payload always copies.
+        let hold = match &sty {
+            Type::Borrow(_) => Hold::Shared,
+            Type::BorrowMut(_) => Hold::Excl,
+            _ => Hold::Owned,
+        };
+        let scrut_path = if hold == Hold::Owned { self.ast_place_path(scrutinee) } else { None };
         let ety = self.peel(&mut splace, sty);
-        if crate::types::needs_drop(&ety, self.items) {
-            return unsupported("match on a needs-drop enum (scrutinee drop/move unimplemented)");
-        }
         let einfo = self
             .lay()
             .enum_info(&ety)
@@ -781,7 +1120,7 @@ impl<'a> Lowerer<'a> {
             match &arm.pattern.kind {
                 PatKind::Wildcard | PatKind::Binding(_) => {
                     // Default arm (exhaustive tail): unconditional.
-                    self.lower_match_arm(arm, &splace, &einfo, None, dst)?;
+                    self.lower_match_arm(arm, &splace, &einfo, None, dst, hold, scrut_path.as_ref())?;
                     if self.reachable {
                         self.terminate(Terminator::Goto(join));
                     }
@@ -805,7 +1144,7 @@ impl<'a> Lowerer<'a> {
                     let next_bb = self.new_block();
                     self.terminate(Terminator::Branch { cond: Operand::Local(cmp), then_bb: arm_bb, else_bb: next_bb });
                     self.switch_to(arm_bb);
-                    self.lower_match_arm(arm, &splace, &einfo, Some(idx), dst)?;
+                    self.lower_match_arm(arm, &splace, &einfo, Some(idx), dst, hold, scrut_path.as_ref())?;
                     if self.reachable {
                         self.terminate(Terminator::Goto(join));
                     }
@@ -822,6 +1161,7 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn lower_match_arm(
         &mut self,
         arm: &MatchArm,
@@ -829,6 +1169,8 @@ impl<'a> Lowerer<'a> {
         einfo: &[(String, Vec<Type>)],
         idx: Option<usize>,
         dst: Option<(&Place, &Type)>,
+        hold: Hold,
+        scrut_path: Option<&(LocalId, Vec<String>)>,
     ) -> LR<()> {
         self.push_scope();
         if let (PatKind::Variant { sub, .. }, Some(idx)) = (&arm.pattern.kind, idx) {
@@ -840,26 +1182,53 @@ impl<'a> Lowerer<'a> {
                     PatKind::Variant { .. } => return unsupported("nested match patterns"),
                 };
                 let (pty, off) = self.lay().payload_offset(&payloads, i);
-                if !is_copy(&pty, self.items) {
-                    return unsupported("move payload bind in match (copy binds only)");
-                }
-                let local = self.new_local(pty.clone(), Some(name.clone()));
                 let mut src = splace.clone();
                 src.proj.push(Proj::Field { offset: off, ty: pty.clone() });
-                if self.is_wordy(&pty) {
-                    self.emit(
-                        StatementKind::Store(Place::local(local), Rvalue::Load { place: src, ty: pty.clone() }),
-                        self.cur_span,
-                        false,
-                    );
-                } else {
+                let copy = is_copy(&pty, self.items);
+                if copy {
+                    // Copy-bind: copy the payload into a fresh owned local.
+                    let local = self.new_local(pty.clone(), Some(name.clone()));
+                    if self.is_wordy(&pty) {
+                        self.emit(
+                            StatementKind::Store(Place::local(local), Rvalue::Load { place: src, ty: pty.clone() }),
+                            self.cur_span,
+                            false,
+                        );
+                    } else {
+                        self.emit(
+                            StatementKind::CopyVal { dst: Place::local(local), src, ty: pty.clone() },
+                            self.cur_span,
+                            false,
+                        );
+                    }
+                    self.bind(&name, local, pty);
+                } else if hold == Hold::Owned {
+                    // Move-bind: the payload moves into an owned local (a byte-move);
+                    // mark the scrutinee's `_i` path moved so it is not double-dropped.
+                    let local = self.new_local(pty.clone(), Some(name.clone()));
                     self.emit(
                         StatementKind::CopyVal { dst: Place::local(local), src, ty: pty.clone() },
                         self.cur_span,
                         false,
                     );
+                    if let Some((root, base)) = scrut_path {
+                        let mut path = base.clone();
+                        path.push(format!("_{i}"));
+                        self.moves.entry(*root).or_default().push(path);
+                    }
+                    self.bind(&name, local, pty);
+                } else {
+                    // Borrow-bind: the payload binds as a borrow of the scrutinee's
+                    // sub-place (a shared/exclusive loan; never moved or dropped).
+                    let bty = if hold == Hold::Excl {
+                        Type::BorrowMut(Box::new(pty.clone()))
+                    } else {
+                        Type::Borrow(Box::new(pty.clone()))
+                    };
+                    let local = self.new_local(bty.clone(), Some(name.clone()));
+                    self.emit(StatementKind::Assign(local, Rvalue::Ref(src)), self.cur_span, false);
+                    self.bind(&name, local, bty);
                 }
-                self.bind(&name, local, pty);
             }
         }
         match dst {
@@ -890,9 +1259,6 @@ impl<'a> Lowerer<'a> {
             },
             _ => return unsupported("`?` on a non-call operand"),
         };
-        if ety != self.ret_ty {
-            return unsupported("cross-type `?` (From conversion out of subset)");
-        }
         let ename = match &ety {
             Type::Named(n) => n.clone(),
             _ => return unsupported("`?` on a non-nominal enum"),
@@ -931,13 +1297,18 @@ impl<'a> Lowerer<'a> {
         let err_bb = self.new_block();
         let join = self.new_block();
         self.terminate(Terminator::Branch { cond: Operand::Local(cmp), then_bb: ok_bb, else_bb: err_bb });
-        // Error path: move the whole enum into the return place and early-return.
+        // Error path: same-type moves the whole value into the return place;
+        // cross-type runs the matching `From` conversion first (design 0007 §7.1).
         self.switch_to(err_bb);
-        self.emit(
-            StatementKind::CopyVal { dst: Place::local(0), src: splace.clone(), ty: ety.clone() },
-            span,
-            false,
-        );
+        if ety == self.ret_ty {
+            self.emit(
+                StatementKind::CopyVal { dst: Place::local(0), src: splace.clone(), ty: ety.clone() },
+                span,
+                false,
+            );
+        } else {
+            self.lower_try_from(&splace, &ety, &einfo, &ok, span)?;
+        }
         self.emit_return_drops();
         self.terminate(Terminator::Return);
         // Ok path: unwrap payload 0 (word-sized) as the `?` value.
@@ -991,6 +1362,7 @@ impl<'a> Lowerer<'a> {
                         stride,
                         len: elems.len() as u64,
                         span: el.span,
+                        slice: false,
                     });
                     self.lower_into(el, &sub, &elem)?;
                 }
@@ -1018,6 +1390,7 @@ impl<'a> Lowerer<'a> {
                         stride,
                         len: n,
                         span: self.cur_span,
+                        slice: false,
                     });
                     self.emit(
                         StatementKind::CopyVal { dst: sub, src: Place::local(tmp), ty: elem.clone() },
@@ -1027,14 +1400,11 @@ impl<'a> Lowerer<'a> {
                 }
                 Ok(())
             }
-            ExprKind::EnumCtor { enum_name, variant, args } => {
-                if enum_name == "BoxResult" {
-                    return unsupported("BoxResult constructor (Box out of subset)");
-                }
+            ExprKind::EnumCtor { variant, args, .. } => {
                 let einfo = self
                     .lay()
                     .enum_info(ty)
-                    .ok_or_else(|| LowerError(format!("enum ctor of non-enum `{enum_name}`")))?;
+                    .ok_or_else(|| LowerError("enum ctor of non-enum".into()))?;
                 let idx = einfo
                     .iter()
                     .position(|(n, _)| n == variant)
@@ -1056,26 +1426,45 @@ impl<'a> Lowerer<'a> {
                 Ok(())
             }
             ExprKind::Match { scrutinee, arms } => self.lower_match(scrutinee, arms, Some((dst, ty))),
+            ExprKind::Try(inner) => {
+                // `?` producing an aggregate value into `dst` (cross-type or
+                // aggregate-payload `?`): lower and store.
+                let (op, oty) = self.lower_try(inner, e.span)?;
+                if self.is_wordy(&oty) {
+                    self.emit(StatementKind::Store(dst.clone(), Rvalue::Use(op)), self.cur_span, false);
+                }
+                Ok(())
+            }
+            // A string literal materializes as a `[u8]` slice header (design 0001 §4.2).
+            ExprKind::StrLit(bytes) => {
+                self.lower_str_into(bytes, dst);
+                Ok(())
+            }
             _ if self.is_wordy(ty) => {
                 let (op, _) = self.lower_value(e, Some(ty))?;
                 self.emit(StatementKind::Store(dst.clone(), Rvalue::Use(op)), self.cur_span, false);
                 Ok(())
             }
-            // Aggregate-by-value return: call, then byte-copy the out-slot the
-            // callee returned (its address) into the destination.
+            // Aggregate-producing builtins (box/unbox/ptr_read/slice_of/subslice).
+            ExprKind::Call { callee, args } if matches!(&callee.kind, ExprKind::Ident(n) if is_builtin(n)) => {
+                let name = match &callee.kind { ExprKind::Ident(n) => n.clone(), _ => unreachable!() };
+                self.lower_builtin_into(&name, args, dst, ty)
+            }
+            // Aggregate-by-value return from a direct / method / indirect call.
             ExprKind::Call { callee, args } => {
-                let name = match &callee.kind {
-                    ExprKind::Ident(n) => n.clone(),
-                    _ => return unsupported("indirect/method aggregate call"),
+                let (fname, all): (String, Vec<Expr>) = match &callee.kind {
+                    ExprKind::Ident(n) if self.items.fns.contains_key(n.as_str()) => (n.clone(), args.to_vec()),
+                    ExprKind::Field { base, field } => match self.resolve_method(base, field, args, e.span) {
+                        Some(m) => m,
+                        None => return unsupported("aggregate method call"),
+                    },
+                    _ => return unsupported("indirect/unknown aggregate call"),
                 };
-                let sig = match self.items.fns.get(name.as_str()) {
-                    Some(s) => s.clone(),
-                    None => return unsupported(format!("aggregate call to `{name}`")),
-                };
-                let ops = self.lower_call_args(&sig, args)?;
+                let sig = self.items.fns[fname.as_str()].clone();
+                let ops = self.lower_call_args(&sig, &all)?;
                 let addr = self.new_local(Type::RawPtr(Box::new(ty.clone())), None);
                 self.emit(
-                    StatementKind::Assign(addr, Rvalue::Call { func: name, args: ops }),
+                    StatementKind::Assign(addr, Rvalue::Call { func: fname, args: ops }),
                     self.cur_span,
                     false,
                 );
@@ -1087,15 +1476,16 @@ impl<'a> Lowerer<'a> {
                 );
                 Ok(())
             }
-            // Whole-aggregate value coming from a place (`let q = p;`): byte-copy.
+            // Whole-aggregate value coming from a place (`let q = p;`): byte-copy,
+            // marking a non-copy source moved (INV-DROP static prune).
             ExprKind::Ident(_)
             | ExprKind::Field { .. }
             | ExprKind::Index { .. }
             | ExprKind::Prefix { op: PrefixOp::Deref, .. } => {
-                if needs_drop(ty, self.items) && !is_copy(ty, self.items) {
-                    return unsupported("move of a needs-drop aggregate (static drop pruning unimplemented)");
-                }
                 let (src, _) = self.lower_place(e)?;
+                if !is_copy(ty, self.items) {
+                    self.mark_moved(e);
+                }
                 self.emit(
                     StatementKind::CopyVal { dst: dst.clone(), src, ty: ty.clone() },
                     self.cur_span,
@@ -1232,10 +1622,12 @@ impl<'a> Lowerer<'a> {
                 let (op, _) = self.lower_value(a, Some(&p.lowered))?;
                 ops.push(op);
             } else {
-                if !is_copy(&p.lowered, self.items) && needs_drop(&p.lowered, self.items) {
-                    return unsupported("move of a needs-drop aggregate argument");
-                }
                 let place = self.materialize_place(a, &p.lowered)?;
+                // A by-value (`take`) non-copy aggregate arg moves the source; prune
+                // its later drop (INV-DROP static mask).
+                if p.mode == ParamMode::Take && !is_copy(&p.lowered, self.items) {
+                    self.mark_moved(a);
+                }
                 let id = self.emit_temp(
                     Type::RawPtr(Box::new(p.lowered.clone())),
                     Rvalue::Ref(place),
@@ -1248,27 +1640,60 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> LR<(Operand, Type)> {
-        let name = match &callee.kind {
-            ExprKind::Ident(n) => n.clone(),
-            _ => return unsupported("indirect/method call"),
-        };
-        if name == "trace" {
-            let (v, _) = self.lower_value(&args[0], Some(&Type::Scalar(ScalarTy::I64)))?;
-            self.emit(StatementKind::Trace(v), span, true);
-            return Ok(self.unit());
+        if let ExprKind::Ident(name) = &callee.kind {
+            // Word/unit-producing builtin intrinsics (aggregate ones flow through
+            // `lower_into`). `trace` is the observable (INV-OBS-ORDER).
+            if name == "trace" {
+                let (v, _) = self.lower_value(&args[0], Some(&Type::Scalar(ScalarTy::I64)))?;
+                self.emit(StatementKind::Trace(v), span, true);
+                return Ok(self.unit());
+            }
+            if is_builtin(name) {
+                return self.lower_builtin_value(name, args, span);
+            }
+            // A monomorphized method resolved to a free fn, or a direct user fn.
+            if let Some(sig) = self.items.fns.get(name.as_str()).cloned() {
+                return self.lower_direct_call(name.clone(), &sig, args, span);
+            }
+            // An indirect call through a fn-pointer local.
+            if self.lookup(name).is_some() {
+                return self.lower_indirect_call(callee, args, span);
+            }
+            return unsupported(format!("call to `{name}`"));
         }
-        let sig = match self.items.fns.get(name.as_str()) {
-            Some(s) => s.clone(),
-            None => return unsupported(format!("call to `{name}`")),
-        };
-        // Aggregate-by-value returns are handled by `lower_into`; here only
-        // word-sized (and unit) returns flow through the scalar `Call` rvalue.
+        // A method call `recv.m(args)` -> the mono-resolved impl free fn.
+        if let ExprKind::Field { base, field } = &callee.kind {
+            if let Some((fnname, all)) = self.resolve_method(base, field, args, span) {
+                let sig = self.items.fns[fnname.as_str()].clone();
+                return self.lower_direct_call(fnname, &sig, &all, span);
+            }
+        }
+        // Indirect call through any other fn-pointer-valued expression.
+        self.lower_indirect_call(callee, args, span)
+    }
+
+    fn lower_direct_call(&mut self, name: String, sig: &crate::resolve::FnSig, args: &[Expr], span: Span) -> LR<(Operand, Type)> {
         if !self.is_wordy(&sig.ret) && !matches!(sig.ret, Type::Scalar(ScalarTy::Unit)) {
             return unsupported("aggregate return in value position");
         }
-        let ops = self.lower_call_args(&sig, args)?;
+        let ops = self.lower_call_args(sig, args)?;
         let ret = sig.ret.clone();
         let id = self.emit_temp(ret.clone(), Rvalue::Call { func: name, args: ops }, span);
+        Ok((Operand::Local(id), ret))
+    }
+
+    fn lower_indirect_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> LR<(Operand, Type)> {
+        let (fop, fty) = self.lower_value(callee, None)?;
+        let ret = match &fty {
+            Type::FnPtr(fp) => (*fp.ret).clone(),
+            _ => return unsupported("indirect call of non-fn-pointer"),
+        };
+        if !self.is_wordy(&ret) && !matches!(ret, Type::Scalar(ScalarTy::Unit)) {
+            return unsupported("aggregate return through fn pointer");
+        }
+        let sig = self.fnptr_sig(&fty);
+        let ops = self.lower_call_args(&sig, args)?;
+        let id = self.emit_temp(ret.clone(), Rvalue::CallIndirect { func: fop, args: ops }, span);
         Ok((Operand::Local(id), ret))
     }
 
@@ -1348,6 +1773,423 @@ impl<'a> Lowerer<'a> {
         self.terminate(Terminator::Return);
         Ok(())
     }
+}
+
+
+impl<'a> Lowerer<'a> {
+    // ---- static initializer lowering ----
+    fn lower_static_init(&mut self, init_name: &str, ty: &Type, value: &Expr) -> LR<MirFn> {
+        self.ret_ty = ty.clone();
+        let _ret = self.new_local(ty.clone(), None); // _0
+        self.push_scope();
+        let entry = self.new_block();
+        self.switch_to(entry);
+        self.lower_into(value, &Place::local(0), ty)?;
+        if self.reachable {
+            self.terminate(Terminator::Return);
+        }
+        self.pop_scope_with_drops();
+        Ok(MirFn {
+            name: init_name.to_string(),
+            num_params: 0,
+            result_local: None,
+            locals: std::mem::take(&mut self.locals),
+            blocks: std::mem::take(&mut self.blocks),
+            entry,
+            requires: Vec::new(),
+            ensures: Vec::new(),
+            replay: ReplayPolicy::Precise,
+        })
+    }
+
+    // ---- fn-pointer types / synthetic signatures ----
+    fn fnptr_ty(&self, name: &str) -> Type {
+        match self.items.fns.get(name) {
+            Some(sig) => Type::FnPtr(crate::types::FnPtrTy {
+                params: sig.params.iter().map(|p| (p.mode, p.decl_ty.clone())).collect(),
+                alloc: sig.alloc,
+                ret: Box::new(sig.ret.clone()),
+            }),
+            None => Type::FnPtr(crate::types::FnPtrTy { params: Vec::new(), alloc: false, ret: Box::new(Type::unit()) }),
+        }
+    }
+    fn fnptr_sig(&self, fty: &Type) -> crate::resolve::FnSig {
+        let fp = match fty {
+            Type::FnPtr(fp) => fp,
+            _ => unreachable!("fnptr_sig on non-fn-pointer"),
+        };
+        let params = fp
+            .params
+            .iter()
+            .enumerate()
+            .map(|(i, (mode, ty))| crate::resolve::ParamInfo {
+                name: format!("_a{i}"),
+                mode: *mode,
+                region: None,
+                decl_ty: ty.clone(),
+                lowered: crate::resolve::lower_param(*mode, ty.clone()),
+                span: Span::point(0),
+            })
+            .collect();
+        crate::resolve::FnSig {
+            name: String::new(),
+            regions: Vec::new(),
+            params,
+            alloc: fp.alloc,
+            ret: (*fp.ret).clone(),
+            ret_region: None,
+            ret_span: Span::point(0),
+            span: Span::point(0),
+        }
+    }
+
+    // ---- interface method dispatch (mono-resolved to a free fn) ----
+    fn static_ty(&self, e: &Expr) -> Option<Type> {
+        match &e.kind {
+            ExprKind::Paren(i) | ExprKind::OutArg(i) => self.static_ty(i),
+            ExprKind::Ident(name) => self.lookup(name).map(|(_, t)| t),
+            ExprKind::Field { base, field } => {
+                let bt = self.static_ty(base)?;
+                let n = strip_to_nominal(&bt)?;
+                self.lay().field_offset(&n, field).map(|(t, _)| t)
+            }
+            ExprKind::Prefix { op: PrefixOp::Deref, expr } => match self.static_ty(expr)? {
+                Type::Box(e) | Type::Borrow(e) | Type::BorrowMut(e) | Type::RawPtr(e) => Some(*e),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    fn static_nominal(&self, e: &Expr) -> Option<String> {
+        strip_to_nominal(&self.static_ty(e)?)
+    }
+    fn resolve_method(&self, base: &Expr, field: &str, args: &[Expr], span: Span) -> Option<(String, Vec<Expr>)> {
+        let nominal = self.static_nominal(base)?;
+        let fnname = self.impls.dispatch.get(&(nominal, field.to_string())).cloned()?;
+        let self_mode = self.items.fns.get(&fnname).and_then(|s| s.params.first().map(|p| p.mode));
+        let base_is_borrow = matches!(self.static_ty(base), Some(Type::Borrow(_)) | Some(Type::BorrowMut(_)));
+        let recv = match self_mode {
+            Some(ParamMode::Read) if !base_is_borrow => Expr {
+                kind: ExprKind::Prefix { op: PrefixOp::Read, expr: Box::new(base.clone()) },
+                span,
+            },
+            Some(ParamMode::Write) if !base_is_borrow => Expr {
+                kind: ExprKind::Prefix { op: PrefixOp::Write, expr: Box::new(base.clone()) },
+                span,
+            },
+            _ => base.clone(),
+        };
+        let mut all = Vec::with_capacity(args.len() + 1);
+        all.push(recv);
+        all.extend(args.iter().cloned());
+        Some((fnname, all))
+    }
+
+    // ---- pointer / place helpers ----
+    fn deref_place(&mut self, ptr: Operand, inner: Type) -> Place {
+        let root = match ptr {
+            Operand::Local(id) => id,
+            other => self.emit_temp(Type::RawPtr(Box::new(inner.clone())), Rvalue::Use(other), self.cur_span),
+        };
+        Place { root, proj: vec![Proj::Deref { inner }] }
+    }
+    fn pointee(ty: &Type) -> LR<Type> {
+        match ty {
+            Type::RawPtr(x) | Type::Borrow(x) | Type::BorrowMut(x) | Type::Box(x) => Ok((**x).clone()),
+            _ => unsupported("deref of non-pointer intrinsic operand"),
+        }
+    }
+    /// The address of an `Alloc` handle argument (a borrow, or an owned handle).
+    fn alloc_addr_operand(&mut self, e: &Expr) -> LR<Operand> {
+        if let ExprKind::Prefix { op: PrefixOp::Read | PrefixOp::Write, .. } = &e.kind {
+            return Ok(self.lower_value(e, None)?.0);
+        }
+        let (pl, ty) = self.lower_place(e)?;
+        match &ty {
+            Type::Borrow(_) | Type::BorrowMut(_) => {
+                let id = self.emit_temp(ty.clone(), Rvalue::Load { place: pl, ty: ty.clone() }, self.cur_span);
+                Ok(Operand::Local(id))
+            }
+            _ => {
+                let id = self.emit_temp(Type::RawPtr(Box::new(ty.clone())), Rvalue::Ref(pl), self.cur_span);
+                Ok(Operand::Local(id))
+            }
+        }
+    }
+
+    // ---- word/unit builtin intrinsics ----
+    fn lower_builtin_value(&mut self, name: &str, args: &[Expr], span: Span) -> LR<(Operand, Type)> {
+        match name {
+            "ptr_read" => {
+                let (ptr, pty) = self.lower_value(&args[0], None)?;
+                let inner = Self::pointee(&pty)?;
+                if !self.is_wordy(&inner) {
+                    return unsupported("aggregate ptr_read in value position");
+                }
+                let place = self.deref_place(ptr, inner.clone());
+                let id = self.emit_temp(inner.clone(), Rvalue::Load { place, ty: inner.clone() }, span);
+                Ok((Operand::Local(id), inner))
+            }
+            "ptr_write" => {
+                let (ptr, pty) = self.lower_value(&args[0], None)?;
+                let inner = Self::pointee(&pty)?;
+                let place = self.deref_place(ptr, inner.clone());
+                self.lower_into(&args[1], &place, &inner)?;
+                Ok(self.unit())
+            }
+            "ptr_offset" => {
+                let (base, pty) = self.lower_value(&args[0], None)?;
+                let inner = Self::pointee(&pty)?;
+                let stride = self.size_of(&inner);
+                let (index, _) = self.lower_value(&args[1], Some(&Type::Scalar(ScalarTy::Isize)))?;
+                let rty = Type::RawPtr(Box::new(inner));
+                let id = self.emit_temp(rty.clone(), Rvalue::PtrArith { base, index, stride }, span);
+                Ok((Operand::Local(id), rty))
+            }
+            "addr_of" | "addr_of_mut" => {
+                let (pl, ty) = self.lower_place(&args[0])?;
+                let rty = Type::RawPtr(Box::new(ty));
+                let id = self.emit_temp(rty.clone(), Rvalue::Ref(pl), span);
+                Ok((Operand::Local(id), rty))
+            }
+            "is_null" => {
+                let (ptr, _) = self.lower_value(&args[0], None)?;
+                let id = self.emit_temp(Type::bool(), Rvalue::IsNull(ptr), span);
+                Ok((Operand::Local(id), Type::bool()))
+            }
+            "ptr_to_addr" => {
+                let (ptr, _) = self.lower_value(&args[0], None)?;
+                let id = self.emit_temp(Type::usize(), Rvalue::Use(ptr), span);
+                Ok((Operand::Local(id), Type::usize()))
+            }
+            "len" => {
+                let (pl, ty) = self.lower_place(&args[0])?;
+                match &ty {
+                    Type::Slice(_) | Type::SliceMut(_) => {
+                        let mut lp = pl;
+                        lp.proj.push(Proj::Field { offset: 8, ty: Type::Scalar(ScalarTy::U64) });
+                        let id = self.emit_temp(Type::usize(), Rvalue::Load { place: lp, ty: Type::usize() }, span);
+                        Ok((Operand::Local(id), Type::usize()))
+                    }
+                    Type::Array(_, l) => {
+                        let n = self.lay().array_len(l);
+                        Ok((Operand::Const(n as i128, ScalarTy::Usize), Type::usize()))
+                    }
+                    _ => unsupported("len of non-slice/array"),
+                }
+            }
+            "unbox" => {
+                let (bpl, bty) = self.lower_place(&args[0])?;
+                let inner = Self::pointee(&bty)?;
+                if !self.is_wordy(&inner) {
+                    return unsupported("aggregate unbox in value position");
+                }
+                let dst = self.new_local(inner.clone(), None);
+                self.emit(
+                    StatementKind::UnboxOp { dst: Place::local(dst), inner_ty: inner.clone(), boxed: bpl },
+                    span,
+                    false,
+                );
+                self.mark_moved(&args[0]);
+                Ok((Operand::Local(dst), inner))
+            }
+            _ => unsupported(format!("builtin `{name}` in value position")),
+        }
+    }
+
+    // ---- aggregate-producing builtins ----
+    fn lower_builtin_into(&mut self, name: &str, args: &[Expr], dst: &Place, ty: &Type) -> LR<()> {
+        let span = self.cur_span;
+        match name {
+            "ptr_read" => {
+                let (ptr, pty) = self.lower_value(&args[0], None)?;
+                let inner = Self::pointee(&pty)?;
+                let place = self.deref_place(ptr, inner.clone());
+                self.emit(StatementKind::CopyVal { dst: dst.clone(), src: place, ty: inner }, span, false);
+                Ok(())
+            }
+            "unbox" => {
+                let (bpl, _) = self.lower_place(&args[0])?;
+                self.emit(
+                    StatementKind::UnboxOp { dst: dst.clone(), inner_ty: ty.clone(), boxed: bpl },
+                    span,
+                    false,
+                );
+                self.mark_moved(&args[0]);
+                Ok(())
+            }
+            "box" => {
+                let inner = match ty {
+                    Type::BoxResult(t) => (**t).clone(),
+                    _ => return unsupported("box result is not a BoxResult"),
+                };
+                let alloc = self.alloc_addr_operand(&args[0])?;
+                let value = self.materialize_place(&args[1], &inner)?;
+                if !is_copy(&inner, self.items) {
+                    self.mark_moved(&args[1]);
+                }
+                self.emit(
+                    StatementKind::BoxOp { dst: dst.clone(), inner_ty: inner, result_ty: ty.clone(), alloc, value },
+                    span,
+                    false,
+                );
+                Ok(())
+            }
+            "slice_of" | "slice_of_mut" => {
+                let (apl, aty) = self.lower_place(&args[0])?;
+                match &aty {
+                    Type::Array(elem, l) => {
+                        let n = self.lay().array_len(l);
+                        let addr = self.emit_temp(Type::RawPtr(Box::new((**elem).clone())), Rvalue::Ref(apl), span);
+                        let mut f0 = dst.clone();
+                        f0.proj.push(Proj::Field { offset: 0, ty: Type::Scalar(ScalarTy::U64) });
+                        self.emit(StatementKind::Store(f0, Rvalue::Use(Operand::Local(addr))), span, false);
+                        let mut f8 = dst.clone();
+                        f8.proj.push(Proj::Field { offset: 8, ty: Type::Scalar(ScalarTy::U64) });
+                        self.emit(StatementKind::Store(f8, Rvalue::Use(Operand::Const(n as i128, ScalarTy::U64))), span, false);
+                        Ok(())
+                    }
+                    Type::Slice(_) | Type::SliceMut(_) => {
+                        self.emit(StatementKind::CopyVal { dst: dst.clone(), src: apl, ty: aty.clone() }, span, false);
+                        Ok(())
+                    }
+                    _ => unsupported("slice_of on non-array/slice"),
+                }
+            }
+            "subslice" => {
+                let elem = match ty {
+                    Type::Slice(e) | Type::SliceMut(e) => (**e).clone(),
+                    _ => return unsupported("subslice result is not a slice"),
+                };
+                let src = self.materialize_place(&args[0], ty)?;
+                let (lo, _) = self.lower_value(&args[1], Some(&Type::usize()))?;
+                let (hi, _) = self.lower_value(&args[2], Some(&Type::usize()))?;
+                let stride = self.stride_of(&elem);
+                self.emit(
+                    StatementKind::Subslice { dst: dst.clone(), src, lo, hi, stride, span },
+                    span,
+                    false,
+                );
+                Ok(())
+            }
+            _ => unsupported(format!("aggregate builtin `{name}`")),
+        }
+    }
+
+    fn lower_str_into(&mut self, bytes: &str, dst: &Place) {
+        let span = self.cur_span;
+        let mut f0 = dst.clone();
+        f0.proj.push(Proj::Field { offset: 0, ty: Type::Scalar(ScalarTy::U64) });
+        self.emit(StatementKind::Store(f0, Rvalue::StrAddr(bytes.to_string())), span, false);
+        let mut f8 = dst.clone();
+        f8.proj.push(Proj::Field { offset: 8, ty: Type::Scalar(ScalarTy::U64) });
+        self.emit(
+            StatementKind::Store(f8, Rvalue::Use(Operand::Const(bytes.len() as i128, ScalarTy::U64))),
+            span,
+            false,
+        );
+    }
+
+    // ---- cross-type `?` (From conversion, design 0007 §7.1) ----
+    fn lower_try_from(
+        &mut self,
+        splace: &Place,
+        ety: &Type,
+        einfo: &[(String, Vec<Type>)],
+        ok_name: &str,
+        span: Span,
+    ) -> LR<()> {
+        // The operand's single non-`ok` (error) variant -> e1.
+        let (nonok_idx, e1_payloads) = einfo
+            .iter()
+            .enumerate()
+            .find(|(_, (n, _))| n != ok_name)
+            .map(|(i, (_, p))| (i, p.clone()))
+            .ok_or_else(|| LowerError("`?`: no error variant".into()))?;
+        let _ = ety;
+        let (e1ty, e1off) = self.lay().payload_offset(&e1_payloads, 0);
+        // The return enum's non-`ok` variant -> e2.
+        let ret_ename = match &self.ret_ty {
+            Type::Named(n) => n.clone(),
+            _ => return unsupported("cross-type `?`: return is not a nominal enum"),
+        };
+        let ret_ok = self.items.enums.get(&ret_ename).and_then(|e| e.ok_variant.clone());
+        let ret_info = self
+            .lay()
+            .enum_info(&self.ret_ty)
+            .ok_or_else(|| LowerError("`?`: return is not an enum".into()))?;
+        let (ret_nonok_idx, e2_payloads) = ret_info
+            .iter()
+            .enumerate()
+            .find(|(_, (n, _))| Some(n) != ret_ok.as_ref())
+            .map(|(i, (_, p))| (i, p.clone()))
+            .ok_or_else(|| LowerError("`?`: no return error variant".into()))?;
+        let (e2ty, e2off) = self.lay().payload_offset(&e2_payloads, 0);
+        let e2nom = match &e2ty {
+            Type::Named(n) => n.clone(),
+            _ => return unsupported("cross-type `?`: error payload is not nominal"),
+        };
+        // Resolve the `From[e1] for e2` impl method.
+        let fnname = self
+            .impls
+            .from_impls
+            .iter()
+            .find(|(iface, args, target, _)| iface == "From" && target == &e2nom && args.first() == Some(&e1ty))
+            .and_then(|(_, _, _, methods)| methods.get("from").cloned())
+            .ok_or_else(|| LowerError("cross-type `?`: no matching `From` impl".into()))?;
+        let _ = nonok_idx;
+        // e1 lives at splace + e1off; pass it to `from` (by value/address per width).
+        let mut e1pl = splace.clone();
+        e1pl.proj.push(Proj::Field { offset: e1off, ty: e1ty.clone() });
+        let arg = if self.is_wordy(&e1ty) {
+            let id = self.emit_temp(e1ty.clone(), Rvalue::Load { place: e1pl, ty: e1ty.clone() }, span);
+            Operand::Local(id)
+        } else {
+            let id = self.emit_temp(Type::RawPtr(Box::new(e1ty.clone())), Rvalue::Ref(e1pl), span);
+            Operand::Local(id)
+        };
+        // e2 = from(e1); build the return enum in `_0`.
+        let addr = self.new_local(Type::RawPtr(Box::new(e2ty.clone())), None);
+        self.emit(
+            StatementKind::Assign(addr, Rvalue::Call { func: fnname, args: vec![arg] }),
+            span,
+            false,
+        );
+        let mut tagpl = Place::local(0);
+        tagpl.proj.push(Proj::Field { offset: 0, ty: Type::Scalar(ScalarTy::U64) });
+        self.emit(
+            StatementKind::Store(tagpl, Rvalue::Use(Operand::Const(ret_nonok_idx as i128, ScalarTy::U64))),
+            span,
+            false,
+        );
+        let mut e2dst = Place::local(0);
+        e2dst.proj.push(Proj::Field { offset: e2off, ty: e2ty.clone() });
+        let src = Place { root: addr, proj: vec![Proj::Deref { inner: e2ty.clone() }] };
+        self.emit(StatementKind::CopyVal { dst: e2dst, src, ty: e2ty }, span, false);
+        Ok(())
+    }
+}
+
+/// Strip borrow/box layers to the underlying nominal type name.
+fn strip_to_nominal(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Named(n) => Some(n.clone()),
+        Type::Borrow(e) | Type::BorrowMut(e) | Type::Box(e) => strip_to_nominal(e),
+        _ => None,
+    }
+}
+
+/// Names lowered as builtin intrinsics (not user functions).
+fn is_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "box" | "unbox" | "ptr_read" | "ptr_write" | "ptr_offset" | "addr_of" | "addr_of_mut"
+            | "is_null" | "ptr_to_addr" | "slice_of" | "slice_of_mut" | "subslice" | "len"
+    )
+}
+
+fn prefix(a: &[String], b: &[String]) -> bool {
+    a.len() <= b.len() && a[..] == b[..a.len()]
 }
 
 fn find_field<'f>(fields: &'f [FieldInit], name: &str) -> Option<&'f FieldInit> {

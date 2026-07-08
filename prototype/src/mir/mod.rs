@@ -85,7 +85,7 @@ pub enum Proj {
     /// `stride` is the element stride; `len` the compile-known length (arrays) or
     /// is ignored for slices (the runtime length is read from the slice header —
     /// but slices carry `len` == u64::MAX here so the header check is used).
-    Index { index: Operand, stride: u64, len: u64, span: Span },
+    Index { index: Operand, stride: u64, len: u64, span: Span, slice: bool },
 }
 
 /// A place: a root local plus a chain of projections (INV-DROP move masks apply
@@ -155,6 +155,20 @@ pub enum Rvalue {
     Load { place: Place, ty: Type },
     /// A direct call to a user function by name (non-generic subset).
     Call { func: String, args: Vec<Operand> },
+    /// An indirect call through a fn-pointer id value (design 0007 §6.2): the
+    /// `func` operand is a fn-pointer id, resolved to a `MirFn` at run time.
+    CallIndirect { func: Operand, args: Vec<Operand> },
+    /// Pointer arithmetic `base + index*stride` (wrapping, non-faulting): the
+    /// `ptr_offset`/`field_ptr` intrinsics (design 0004). Produces a `u64` address.
+    PtrArith { base: Operand, index: Operand, stride: u64 },
+    /// `is_null(p)`: the address equals the reserved null (0).
+    IsNull(Operand),
+    /// The address of a top-level `static` value (design 0008): a `u64` into the
+    /// static storage region, initialized before `main` by the static's init fn.
+    StaticAddr(String),
+    /// The address of an interned string literal's bytes in static storage
+    /// (design 0001 §4.2): a `u8` slice's data pointer.
+    StrAddr(String),
 }
 
 #[derive(Clone, Debug)]
@@ -171,10 +185,21 @@ pub enum StatementKind {
     /// move of a whole struct/array/enum — the checker's copy/move facts decide
     /// which, and a moved source is pruned from the drop schedule statically).
     CopyVal { dst: Place, src: Place, ty: Type },
-    /// A statically-scheduled drop of a local (INV-DROP). In the Stage-A scalar
-    /// subset every reachable local is drop-inert, so this is a no-op carrier —
-    /// but it is emitted at the exact scheduled point so the invariant is real.
-    Drop(LocalId),
+    /// A statically-scheduled drop of a local (INV-DROP), emitted at the exact
+    /// scheduled point. `moved` is the checker's static move mask: the set of
+    /// field paths already moved out of this local (baked at lowering time, NO
+    /// runtime flag) — the drop skips those sub-paths, running hooks/frees only on
+    /// the still-owned remainder (field-granular pruning, design 0010 §2 INV-DROP).
+    Drop { local: LocalId, moved: Vec<Vec<String>> },
+    /// `box(alloc, value)` (design 0001 §6.2): allocate through the handle's
+    /// vtable, move `value` into the block, and build the `BoxResult` at `dst`.
+    BoxOp { dst: Place, inner_ty: Type, result_ty: Type, alloc: Operand, value: Place },
+    /// `unbox(b)` (design 0001 §6.2): copy the pointee into `dst`, then free the
+    /// block through its stored vtable handle.
+    UnboxOp { dst: Place, inner_ty: Type, boxed: Place },
+    /// `subslice(s, lo, hi)` (design 0004): a bounds-checked slice re-header into
+    /// `dst`; `lo > hi || hi > len` faults `Bounds` at `span`.
+    Subslice { dst: Place, src: Place, lo: Operand, hi: Operand, stride: u64, span: Span },
 }
 
 #[derive(Clone, Debug)]
@@ -241,6 +266,15 @@ pub struct MirFn {
     pub replay: ReplayPolicy,
 }
 
+/// A top-level `static` value (design 0008): its type and the MIR init fn that
+/// computes it (run once, before `main`, into freshly reserved static storage).
+#[derive(Clone, Debug)]
+pub struct StaticInit {
+    pub name: String,
+    pub ty: Type,
+    pub init_fn: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct MirProgram {
     pub fns: Vec<MirFn>,
@@ -249,6 +283,11 @@ pub struct MirProgram {
     /// to (design 0010 §5). A monomorphized generic struct's hook is an ordinary
     /// concrete hook by lowering time; the interpreter calls it at the drop point.
     pub drop_hooks: HashMap<String, String>,
+    /// Fn-pointer id table (design 0007 §6.2): a fn value is a `u64` index into
+    /// this list; an indirect / vtable call resolves the id back to the `MirFn`.
+    pub fn_ptrs: Vec<String>,
+    /// Top-level statics, in program order (allocated + initialized before `main`).
+    pub statics: Vec<StaticInit>,
 }
 
 impl MirProgram {

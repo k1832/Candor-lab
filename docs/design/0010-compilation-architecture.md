@@ -406,7 +406,21 @@ Per §8 sequencing, the arc is staged and honest about what each stage validates
   and slice params, interface **method dispatch**, **cross-type `?`** (`From`),
   static drop **pruning of moved needs-drop aggregates**, and thus the full §11
   basket run fixtures, the corelib tree/flat, and the stress fixtures — Gate A is
-  **not yet closed on the full corpus**.
+  **not yet closed on the full corpus**. **A3 status (2026-07-09 — Gate A: CLOSED):**
+  the remainder shipped — `Box`/`Alloc` (box/unbox and drop-free through the
+  *structurally-identified* vtable), every `rawptr` intrinsic, slices
+  (`slice_of`/`subslice`/`len`/index with header-bounds faults), interface method
+  dispatch (mono-resolved to ordinary calls), fn-pointer / indirect calls, statics,
+  cross-type `?` (`From`), and **move-pruned drops** (the checker's static move
+  masks baked field-granular into each `Drop`, no runtime flag). The FULL runnable
+  corpus now asserts `(k, s, θ)` equality: the five §11 `.cn` run fixtures and
+  their five `.cnr` twins, the corelib tree + flat, the parity pair, and every
+  generics / real / iteration fixture — **31 runnable fixtures, zero out-of-subset**
+  (`tests/stage_a.rs::gate_full_corpus_equality`). **Stress handling:** the
+  allocator (`.cn 11_1`) and scheduler stress run in **milliseconds on both
+  engines** (same complexity class), so both are gated at **FULL** `(k, s, θ)`
+  equality — no reduced-iteration variant and no `#[ignore]` full-stress test were
+  needed (the >30-min escape hatch was not taken).
 
 - **Stage B — single backend (Cranelift), no optimization, whole-program.** Lower
   MIR→Cranelift IR→native; no incremental artifacts yet (whole-program each

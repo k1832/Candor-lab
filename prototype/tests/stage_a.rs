@@ -222,10 +222,14 @@ fn gate_aggregate_fault_axis() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Corpus classification: run every runnable fixture through both engines,
-//    classify in/out of subset, and assert every in-subset one matches. Prints a
-//    coverage summary (visible with `--nocapture`). Out-of-subset is NOT a
-//    failure — it is the honest coverage boundary.
+// 3. Gate A's closure (design 0010 §5): EVERY runnable fixture — the five §11
+//    `.cn` run fixtures and their five `.cnr` twins, the corelib module tree and
+//    its flat single-file form, the parity pair, and every generics / real /
+//    iteration fixture — is asserted `(k, s, θ)`-equal across the two engines,
+//    AND the classification asserts ZERO out-of-subset runnable fixtures. There
+//    is no honest coverage boundary left: the MIR is a faithful carrier of the
+//    full runnable corpus. (Directory trees `corelib` and `corelib_question` are
+//    included; `.cn`/`.cnr` single files under run/parity/real/generics too.)
 // ---------------------------------------------------------------------------
 
 fn dir() -> std::path::PathBuf {
@@ -250,15 +254,20 @@ fn fixture_files() -> Vec<std::path::PathBuf> {
 }
 
 #[test]
-fn gate_corpus_classification() {
-    let mut in_subset = 0usize;
-    let mut out_subset = 0usize;
+fn gate_full_corpus_equality() {
+    let mut equal = 0usize;
+    let mut out_subset: Vec<String> = Vec::new();
     let mut not_run = 0usize;
     let mut diffs: Vec<String> = Vec::new();
 
-    // Single-file fixtures.
-    for path in fixture_files() {
-        let src = std::fs::read_to_string(&path).unwrap();
+    // Single-file fixtures (run/parity/real/generics) plus the flat corelib.
+    let mut files = fixture_files();
+    files.push(dir().join("corelib_flat.cnr"));
+    for path in files {
+        let src = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
         let real = path.extension().map(|x| x == "cnr").unwrap_or(false);
         let o = match oracle(&src, real) {
             Some(o) => o,
@@ -270,42 +279,60 @@ fn gate_corpus_classification() {
         match mir(&src, real) {
             Ok(Some(m)) => {
                 if m == o {
-                    in_subset += 1;
+                    equal += 1;
                 } else {
                     diffs.push(format!("{}: mir={m:?} oracle={o:?}", path.display()));
                 }
             }
-            Ok(None) => out_subset += 1,
+            Ok(None) => out_subset.push(path.display().to_string()),
             Err(()) => not_run += 1,
         }
     }
 
-    // The corelib module tree (design 0008), run as a directory.
-    let corelib = dir().join("corelib");
-    if corelib.is_dir() {
-        let o = match candor_proto::run_dir(&corelib) {
+    // Module-tree fixtures (design 0008): the corelib seed and the cross-type `?`
+    // seed, each run as a directory through both engines.
+    for name in ["corelib", "corelib_question"] {
+        let d = dir().join(name);
+        if !d.is_dir() {
+            continue;
+        }
+        let o = match candor_proto::run_dir(&d) {
             RunResult::Ok(r) => Some(ok(r)),
             RunResult::Fault(f) => Some(faulted(f)),
             _ => None,
         };
-        if let Some(o) = o {
-            match candor_proto::run_dir_mir(&corelib) {
-                MirRunResult::Ok(r) => {
-                    if ok(r) == o { in_subset += 1; } else { diffs.push("corelib: DIFF".into()); }
-                }
-                MirRunResult::Fault(f) => {
-                    if faulted(f) == o { in_subset += 1; } else { diffs.push("corelib: DIFF".into()); }
-                }
-                MirRunResult::Unsupported(_) => out_subset += 1,
-                _ => not_run += 1,
+        let o = match o {
+            Some(o) => o,
+            None => {
+                not_run += 1;
+                continue;
             }
+        };
+        match candor_proto::run_dir_mir(&d) {
+            MirRunResult::Ok(r) => {
+                if ok(r) == o { equal += 1; } else { diffs.push(format!("{name}: DIFF")); }
+            }
+            MirRunResult::Fault(f) => {
+                if faulted(f) == o { equal += 1; } else { diffs.push(format!("{name}: DIFF")); }
+            }
+            MirRunResult::Unsupported(_) => out_subset.push(name.to_string()),
+            _ => not_run += 1,
         }
     }
 
     eprintln!(
-        "STAGE-A corpus coverage: in-subset(match)={in_subset}  out-of-subset={out_subset}  not-runnable={not_run}"
+        "GATE A CLOSED: {equal} runnable fixtures (k, s, θ)-equal; out-of-subset={}  not-runnable={not_run}",
+        out_subset.len()
     );
     assert!(diffs.is_empty(), "semantic-trace divergences:\n{}", diffs.join("\n"));
+    // Gate A's closure statement: NO runnable fixture is out of the MIR subset.
+    assert!(
+        out_subset.is_empty(),
+        "Gate A not closed: {} runnable fixtures still out-of-subset:\n{}",
+        out_subset.len(),
+        out_subset.join("\n")
+    );
+    assert!(equal >= 30, "expected the full runnable corpus (>=30 fixtures), got {equal}");
 }
 
 // ---------------------------------------------------------------------------
