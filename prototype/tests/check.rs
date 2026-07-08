@@ -1073,6 +1073,55 @@ fn retest_slice_of_mut_of_owned_array_ok() {
     );
 }
 
+// Retest #2 finding: `slice_of_mut` of an argument that is ITSELF a shared
+// `slice` (bare binding or subslice-of-shared result) upgrades shared to
+// exclusive unchecked — the path gate only peels derefs, it never examined
+// the argument's own type. Now rejected as E0809 independent of path
+// peeling.
+#[test]
+fn retest2_slice_of_mut_of_bare_shared_slice_rejected() {
+    assert_has(
+        "fn f(s: slice i64) -> unit { let sm = slice_of_mut(s); sm[0] = 5; }",
+        "E0809",
+    );
+}
+
+#[test]
+fn retest2_slice_of_mut_of_subslice_of_shared_rejected() {
+    assert_has(
+        "fn f(s: slice i64) -> unit { let t = subslice(s, 0, 1); let sm = slice_of_mut(t); sm[0] = 5; }",
+        "E0809",
+    );
+}
+
+#[test]
+fn retest2_slice_of_mut_of_owned_array_still_ok() {
+    assert_clean(
+        "fn f() -> unit { let mut a: [4]i64 = [0,0,0,0]; let sm = slice_of_mut(a); sm[0] = 5; }",
+    );
+}
+
+#[test]
+fn retest2_slice_of_mut_behind_exclusive_deref_still_ok() {
+    assert_clean(
+        "fn f() -> unit { let mut a: [4]i64 = [0,0,0,0]; let b = write a; \
+         let sm = slice_of_mut((deref b)); sm[0] = 5; }",
+    );
+}
+
+// End-to-end evil/main shape from the retest: a callee takes a shared
+// `slice` and tries to smuggle an exclusive reborrow out of it, writing
+// through it — this must reject rather than run and mutate the caller's
+// shared view.
+#[test]
+fn retest2_slice_of_mut_evil_callee_rejected() {
+    assert_has(
+        "fn evil(s: slice i64) -> unit { let sm = slice_of_mut(s); sm[0] = 99; } \
+         fn main() -> unit { let a: [1]i64 = [0]; let s = slice_of(a); evil(s); }",
+        "E0809",
+    );
+}
+
 // Finding 4: drop-hook bodies are ordinary checked code.
 #[test]
 fn retest_hook_body_unknown_name_rejected() {

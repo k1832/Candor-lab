@@ -1272,22 +1272,38 @@ impl<'a> Checker<'a> {
             }
             "slice_of_mut" => {
                 if args.len() == 1 {
-                    // `slice_of_mut` is an exclusive borrow of the run, so it may
-                    // not reborrow exclusively from behind a shared deref (§5.2;
-                    // retest 2026-07-08, finding 3) — same gate as a write.
-                    self.reject_write_through_shared(
-                        &args[0],
-                        "take an exclusive (`slice_mut`) slice",
-                        args[0].span,
-                    );
                     let (t, place) = self.check_place(&args[0]);
-                    self.emit_place_action(&place, Use::BorrowExcl, &t, args[0].span);
-                    match t {
-                        Type::Array(e, _) | Type::Slice(e) | Type::SliceMut(e) => Type::SliceMut(e),
-                        Type::Error => Type::Error,
-                        other => {
-                            self.mismatch(span, "slice_of_mut", "an array", &other);
-                            Type::Error
+                    // An exclusive reborrow of an argument that is ITSELF a
+                    // shared slice is illegal independent of any path peeling
+                    // — a bare shared binding, a subslice-of-shared result, or
+                    // any other expression of shared-slice type (E0809;
+                    // retest 2026-07-08 #2, finding 3 residual: the path gate
+                    // below only peels derefs, it never examines the
+                    // argument's own type).
+                    if matches!(t, Type::Slice(_)) {
+                        self.e0809(
+                            "exclusive reborrow of a shared slice",
+                            args[0].span,
+                        );
+                        Type::Error
+                    } else {
+                        // `slice_of_mut` is an exclusive borrow of the run, so
+                        // it may not reborrow exclusively from behind a
+                        // shared deref (§5.2; retest 2026-07-08, finding 3) —
+                        // same gate as a write.
+                        self.reject_write_through_shared(
+                            &args[0],
+                            "take an exclusive (`slice_mut`) slice",
+                            args[0].span,
+                        );
+                        self.emit_place_action(&place, Use::BorrowExcl, &t, args[0].span);
+                        match t {
+                            Type::Array(e, _) | Type::SliceMut(e) => Type::SliceMut(e),
+                            Type::Error => Type::Error,
+                            other => {
+                                self.mismatch(span, "slice_of_mut", "an array", &other);
+                                Type::Error
+                            }
                         }
                     }
                 } else {
