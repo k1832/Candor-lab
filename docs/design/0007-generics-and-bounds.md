@@ -2,7 +2,7 @@
 
 **Status:** draft
 **Date:** 2026-07-08
-**Prototype:** stage-1 core shipped in `prototype/` (parse; opaque def-site checking §3; `[T]`-bracket params/bounds/`interface`/concrete `impl`; value-argument inference §2.2 and `name::[T]` §6.2.1; monomorphization §5.1 with the depth backstop §5.1.1; coherence + module-granularity orphan §2.3; cross-type `?` via `From` §7.1). Deferred to later stages: generic `impl`s (`impl[T] I for List[T]`), generic-struct `drop` hooks, associated types/iteration (OBL-GENERICS-ITER), the source-level strategy override (OBL-GENERIC-STRATEGY), call-site turbofish (OBL-GENERIC-TURBOFISH), and effect polymorphism (OBL-GENERIC-EFFECT).
+**Prototype:** stage-1 + stage-2 core shipped in `prototype/`. Stage 1: parse; opaque def-site checking §3; `[T]`-bracket params/bounds/`interface`/concrete `impl`; value-argument inference §2.2 and `name::[T]` §6.2.1; monomorphization §5.1 with the depth backstop §5.1.1; coherence + module-granularity orphan §2.3; cross-type `?` via `From` §7.1. Stage 2 (this edition's core, complete): generic `impl`s (`impl[T] I for List[T]`, incl. bounded `impl[T: I2] …`) — def-site-checked once with opaque `T`, coherence by head-unification overlap (§2.3, two impl heads that unify are a compile-time duplicate), method/`?` dispatch monomorphized per reached target instance; generic-struct `drop` hooks — checked once with opaque `T`, def-site-fixed alloc-on-drop for all instances (§3.4 F5), run by the interpreter in the static drop schedule; and the ripple checks (E0303/E0310/E0401 and the loan machinery) over instantiated generic aggregates. Still deferred: associated types/iteration (OBL-GENERICS-ITER), the source-level strategy override (OBL-GENERIC-STRATEGY), call-site turbofish (OBL-GENERIC-TURBOFISH), and effect polymorphism (OBL-GENERIC-EFFECT).
 **Philosophy hooks:** **P11** (public generics checked completely at their
 *definition site* against declared interface bounds; a generic that compiles cannot
 fail to type-check at instantiation — NN#10; instantiation strategy is a
@@ -731,3 +731,8 @@ doc is the migration guidance. (2) Interface methods MAY be self-less associated
 from annotations resolve payload-less variant construction. (4) Interface-method call spelling is
 receiver syntax `recv.method(args)`; self-less associated functions are invoked through their
 interface path (stage 1: only internally by `?`).
+
+**Stage-2 rulings (2026-07-08):** a generic impl's type parameters must appear in the target type
+(E1016) — the only sound monomorphization driver absent use-site impl shapes; receiver lowering
+for `recv.method()` follows the method's self mode (owned receivers borrow, they are not consumed);
+generic result enums keep their `ok` marker through substitution.

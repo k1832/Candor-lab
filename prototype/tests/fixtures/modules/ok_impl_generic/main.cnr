@@ -1,0 +1,5 @@
+use list::{make, weigh_it, List};
+fn main() -> i64 {
+    let l: List[i64] = make(14);
+    return weigh_it(read l);
+}

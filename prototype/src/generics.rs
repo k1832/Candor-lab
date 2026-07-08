@@ -183,13 +183,6 @@ pub fn resolve_tables(prog: &Program, items: &mut Items, diags: &mut Vec<Diag>) 
         match it {
             Item::Struct(s) if !s.type_params.is_empty() => {
                 let pset: HashSet<String> = s.type_params.iter().map(|p| p.name.clone()).collect();
-                if s.drop_hook.is_some() {
-                    diags.push(Diag::error(
-                        "E1011",
-                        format!("generic struct `{}` may not declare a `drop` hook in stage 1", s.name),
-                        s.span,
-                    ));
-                }
                 let fields = s
                     .fields
                     .iter()
@@ -201,7 +194,8 @@ pub fn resolve_tables(prog: &Program, items: &mut Items, diags: &mut Vec<Diag>) 
                         params: s.type_params.iter().map(|p| p.name.clone()).collect(),
                         is_enum: false,
                         copy: s.copy,
-                        has_drop: false,
+                        has_drop: s.drop_hook.is_some(),
+                        alloc_on_drop: false,
                         fields,
                         variants: Vec::new(),
                     },
@@ -228,6 +222,7 @@ pub fn resolve_tables(prog: &Program, items: &mut Items, diags: &mut Vec<Diag>) 
                         is_enum: true,
                         copy: e.copy,
                         has_drop: false,
+                        alloc_on_drop: false,
                         fields: Vec::new(),
                         variants,
                     },
@@ -312,23 +307,25 @@ fn resolve_impl(
     items: &mut Items,
     known: &HashSet<String>,
     gen: &HashSet<String>,
-    no_params: &HashSet<String>,
+    _no_params: &HashSet<String>,
     diags: &mut Vec<Diag>,
 ) {
-    // Generic impls are deferred (stage 1).
-    if !im.type_params.is_empty() || matches!(&im.target.kind, TyKind::App { .. }) {
-        diags.push(
-            Diag::error(
-                "E1010",
-                "generic `impl` blocks are deferred in stage 1".to_string(),
-                im.span,
-            )
-            .with_note("only `impl I[concrete] for ConcreteType` is supported this stage (design 0007)", None),
-        );
-        return;
-    }
-    let target = match &im.target.kind {
-        TyKind::Named(n) => n.clone(),
+    // Type parameters of a generic impl (`impl[T] I for List[T]`), with bounds.
+    let type_params: Vec<(String, Vec<String>)> =
+        im.type_params.iter().map(|p| (p.name.clone(), p.bounds.clone())).collect();
+    let pset: HashSet<String> = type_params.iter().map(|(n, _)| n.clone()).collect();
+
+    // Resolve the target head + (parametric) arguments. A generic impl's target is
+    // an application `List[T]`; a concrete impl's is a bare nominal.
+    let (target, target_args): (String, Vec<Type>) = match &im.target.kind {
+        TyKind::Named(n) => (n.clone(), Vec::new()),
+        TyKind::App { name, args } => {
+            let ta: Vec<Type> = args
+                .iter()
+                .map(|a| resolve_gty(a, &pset, known, gen, diags))
+                .collect();
+            (name.clone(), ta)
+        }
         _ => {
             diags.push(Diag::error("E1012", "an impl target must be a nominal type".to_string(), im.target.span));
             return;
@@ -338,10 +335,31 @@ fn resolve_impl(
         diags.push(Diag::error("E0102", format!("unknown type `{target}`"), im.target.span));
         return;
     }
+    // A generic impl's parameters must all appear in the target so that each
+    // instantiation is driven by a reached target-type instance (design 0007 §5.1).
+    if !pset.is_empty() {
+        let mut mentioned: HashSet<String> = HashSet::new();
+        for a in &target_args {
+            collect_params(a, &mut mentioned);
+        }
+        for (n, _) in &type_params {
+            if !mentioned.contains(n) {
+                diags.push(
+                    Diag::error(
+                        "E1016",
+                        format!("impl type parameter `{n}` does not appear in the target type"),
+                        im.span,
+                    )
+                    .with_note("every generic-impl parameter must appear in the target so instances follow reached type instantiations (design 0007 §5.1)", None),
+                );
+                return;
+            }
+        }
+    }
     let iface_args: Vec<Type> = im
         .iface_args
         .iter()
-        .map(|a| resolve_gty(a, no_params, known, gen, diags))
+        .map(|a| resolve_gty(a, &pset, known, gen, diags))
         .collect();
     let iface_info = match items.interfaces.get(&im.iface) {
         Some(i) => i.clone(),
@@ -350,26 +368,30 @@ fn resolve_impl(
             return;
         }
     };
-    // Coherence: at most one impl per (I[args], T) key (design 0007 §2.3).
-    if items
-        .impls
-        .iter()
-        .any(|e| e.iface == im.iface && e.iface_args == iface_args && e.target == target)
-    {
+    // Coherence: no two impl heads for the same interface may unify (design 0007
+    // §2.3). This subsumes the concrete exact-duplicate case and rejects any pair
+    // of generic heads with a common instance — with no blanket/overlap impls there
+    // is at most one impl per instantiated `(I[args], T)` key.
+    if let Some(prev) = items.impls.iter().find(|e| {
+        e.iface == im.iface
+            && heads_overlap(
+                (&e.iface_args, &e.target_args, &e.type_params),
+                (&iface_args, &target_args, &type_params),
+            )
+    }) {
+        let _ = prev;
         diags.push(
             Diag::error(
                 "E1009",
-                format!("duplicate impl of `{}` for `{}`", im.iface, target),
+                format!("overlapping impl of `{}` for `{}`", im.iface, target),
                 im.span,
             )
-            .with_note("at most one impl of a given instantiated interface for a given type (§2.3)", None),
+            .with_note("at most one impl of a given instantiated interface for a given type; two heads that unify overlap (design 0007 §2.3)", None),
         );
         return;
     }
-    // Orphan rule at module granularity (design 0007 §2.3, 0008): the impl must
-    // live in the target's module or the interface's declaration module. In a
-    // single-file program `home` is absent and every module is "", so it is
-    // trivially satisfied.
+    // Orphan rule at module granularity (design 0007 §2.3): the impl must live in
+    // the target head's module or the interface's declaration module.
     let target_mod = module_of(&target);
     let iface_mod = module_of(&im.iface);
     let home = im.home.clone().unwrap_or_default();
@@ -387,7 +409,7 @@ fn resolve_impl(
         );
         return;
     }
-    // Verify method set matches the interface's; record mangled free-fn names.
+    // Verify the method set matches the interface's.
     let mut methods = HashMap::new();
     for m in &im.methods {
         if !iface_info.methods.iter().any(|im2| im2.name == m.name) {
@@ -412,9 +434,88 @@ fn resolve_impl(
         iface: im.iface.clone(),
         iface_args,
         target,
+        type_params,
+        target_args,
         methods,
         span: im.span,
     });
+}
+
+/// Collect every `Type::Param` name mentioned in `t`.
+fn collect_params(t: &Type, out: &mut HashSet<String>) {
+    match t {
+        Type::Param(n) => { out.insert(n.clone()); }
+        Type::App(_, a) => for x in a { collect_params(x, out); },
+        Type::Array(e, _) | Type::Slice(e) | Type::SliceMut(e) | Type::RawPtr(e)
+        | Type::Box(e) | Type::BoxResult(e) | Type::Borrow(e) | Type::BorrowMut(e) => collect_params(e, out),
+        _ => {}
+    }
+}
+
+type Head<'a> = (&'a Vec<Type>, &'a Vec<Type>, &'a Vec<(String, Vec<String>)>);
+
+/// Do two impl heads (iface_args + target_args) unify under their respective
+/// type-parameter sets? Each side's parameters are unification variables local to
+/// that side; the two are kept in separate binding maps so a shared spelling `T`
+/// on both sides does not falsely couple them (design 0007 §2.3 overlap check).
+fn heads_overlap(a: Head, b: Head) -> bool {
+    let (aif, atg, ap) = a;
+    let (bif, btg, bp) = b;
+    if aif.len() != bif.len() || atg.len() != btg.len() {
+        return false;
+    }
+    let aset: HashSet<&str> = ap.iter().map(|(n, _)| n.as_str()).collect();
+    let bset: HashSet<&str> = bp.iter().map(|(n, _)| n.as_str()).collect();
+    let mut amap: HashMap<String, Type> = HashMap::new();
+    let mut bmap: HashMap<String, Type> = HashMap::new();
+    aif.iter().zip(bif).all(|(x, y)| unify2(x, y, &aset, &bset, &mut amap, &mut bmap))
+        && atg.iter().zip(btg).all(|(x, y)| unify2(x, y, &aset, &bset, &mut amap, &mut bmap))
+}
+
+/// Two-sided unification for the overlap check.
+fn unify2(
+    x: &Type,
+    y: &Type,
+    aset: &HashSet<&str>,
+    bset: &HashSet<&str>,
+    amap: &mut HashMap<String, Type>,
+    bmap: &mut HashMap<String, Type>,
+) -> bool {
+    // A parameter of side A binds to `y` (consistently); likewise side B.
+    if let Type::Param(n) = x {
+        if aset.contains(n.as_str()) {
+            return match amap.get(n) {
+                Some(prev) => prev == y,
+                None => { amap.insert(n.clone(), y.clone()); true }
+            };
+        }
+    }
+    if let Type::Param(n) = y {
+        if bset.contains(n.as_str()) {
+            return match bmap.get(n) {
+                Some(prev) => prev == x,
+                None => { bmap.insert(n.clone(), x.clone()); true }
+            };
+        }
+    }
+    match (x, y) {
+        (Type::Scalar(a), Type::Scalar(b)) => a == b,
+        (Type::Named(a), Type::Named(b)) => a == b,
+        (Type::Param(a), Type::Param(b)) => a == b,
+        (Type::App(a, aa), Type::App(b, bb)) => {
+            a == b && aa.len() == bb.len()
+                && aa.iter().zip(bb).all(|(p, q)| unify2(p, q, aset, bset, amap, bmap))
+        }
+        (Type::Box(a), Type::Box(b))
+        | (Type::BoxResult(a), Type::BoxResult(b))
+        | (Type::RawPtr(a), Type::RawPtr(b))
+        | (Type::Slice(a), Type::Slice(b))
+        | (Type::SliceMut(a), Type::SliceMut(b))
+        | (Type::Borrow(a), Type::Borrow(b))
+        | (Type::BorrowMut(a), Type::BorrowMut(b))
+        | (Type::Array(a, _), Type::Array(b, _)) => unify2(a, b, aset, bset, amap, bmap),
+        _ => false,
+    }
 }
 
 /// The mangled free-function name an impl method lowers to.
@@ -495,6 +596,24 @@ struct Monomorphizer<'a> {
     generic_fns_ast: HashMap<String, FnDecl>,
     generic_structs_ast: HashMap<String, StructDecl>,
     generic_enums_ast: HashMap<String, EnumDecl>,
+    /// App-target impls (generic or concrete-instance), with their resolved head
+    /// info, emitted per reached target-type instance (design 0007 stage 2).
+    app_impls: Vec<AppImpl>,
+    /// Emitted impl instances, keyed by (impl span, concrete target instance name).
+    impl_done: HashSet<String>,
+    /// Pending impl instances to emit: (app_impls index, concrete param types).
+    impl_work: Vec<(usize, Vec<Type>)>,
+}
+
+/// A monomorphizable impl whose target is an application (`impl[T] I for List[T]`
+/// or a concrete `impl I for AppErr[i64]`): its AST plus the resolved parametric
+/// target/interface arguments and parameter names.
+struct AppImpl {
+    decl: ImplDecl,
+    param_names: Vec<String>,
+    target_head: String,
+    target_args: Vec<Type>,
+    iface_args: Vec<Type>,
 }
 
 /// Monomorphize `prog` into a concrete program using the checker-recorded shapes
@@ -521,6 +640,29 @@ pub fn monomorphize(
             _ => {}
         }
     }
+    // Resolve the impl tables (quietly) to recover each impl's parametric
+    // target/interface arguments, then keep the app-target impls for per-instance
+    // emission (design 0007 stage 2).
+    let mut qd = Vec::new();
+    let mut qitems = crate::resolve::resolve_program(prog, &mut qd);
+    resolve_tables(prog, &mut qitems, &mut qd);
+    let mut app_impls: Vec<AppImpl> = Vec::new();
+    for it in &prog.items {
+        if let Item::Impl(im) = it {
+            if !matches!(&im.target.kind, TyKind::App { .. }) {
+                continue; // bare-nominal target: emitted by `emit_impl`
+            }
+            if let Some(info) = qitems.impls.iter().find(|e| e.span == im.span) {
+                app_impls.push(AppImpl {
+                    decl: im.clone(),
+                    param_names: info.type_params.iter().map(|(n, _)| n.clone()).collect(),
+                    target_head: info.target.clone(),
+                    target_args: info.target_args.clone(),
+                    iface_args: info.iface_args.clone(),
+                });
+            }
+        }
+    }
     let mut m = Monomorphizer {
         shapes,
         fn_done: HashSet::new(),
@@ -533,6 +675,9 @@ pub fn monomorphize(
         generic_fns_ast,
         generic_structs_ast,
         generic_enums_ast,
+        app_impls,
+        impl_done: HashSet::new(),
+        impl_work: Vec::new(),
     };
 
     // Seed from checker-reached instantiations.
@@ -574,7 +719,7 @@ pub fn monomorphize(
                 m.rewrite_expr(&mut s2.value, &empty);
                 m.out.push(Item::Static(s2));
             }
-            Item::Impl(im) => m.emit_impl(im),
+            Item::Impl(im) if !matches!(&im.target.kind, TyKind::App { .. }) => m.emit_impl(im),
             _ => {}
         }
     }
@@ -593,18 +738,45 @@ impl<'a> Monomorphizer<'a> {
         if self.generic_fns_ast.contains_key(name) {
             let key = inst_fn_name(name, &args);
             if self.fn_done.insert(key) {
-                self.fn_work.push((name.to_string(), args));
+                self.fn_work.push((name.to_string(), args.clone()));
             }
         } else if self.generic_structs_ast.contains_key(name) || self.generic_enums_ast.contains_key(name) {
             let key = inst_type_name(name, &args);
             if self.type_done.insert(key) {
-                self.type_work.push((name.to_string(), args));
+                self.type_work.push((name.to_string(), args.clone()));
+            }
+        }
+        // Any app-target impl whose target head matches this instance is reached:
+        // unify its parametric target arguments with the concrete ones and queue
+        // the resulting impl instance (design 0007 stage 2 dispatch).
+        for idx in 0..self.app_impls.len() {
+            if self.app_impls[idx].target_head != name {
+                continue;
+            }
+            let mut map: HashMap<String, Type> = HashMap::new();
+            let ta = self.app_impls[idx].target_args.clone();
+            if ta.len() != args.len() {
+                continue;
+            }
+            let ok = ta.iter().zip(&args).all(|(d, a)| unify_inst(d, a, &mut map));
+            if !ok {
+                continue;
+            }
+            let pnames = self.app_impls[idx].param_names.clone();
+            let cargs: Vec<Type> = pnames.iter().map(|n| map.get(n).cloned().unwrap_or(Type::Error)).collect();
+            if cargs.iter().any(|t| matches!(t, Type::Param(_) | Type::Error)) {
+                continue;
+            }
+            let inst_name = inst_type_name(name, &args);
+            let key = format!("{}#{}", self.app_impls[idx].decl.span.start, inst_name);
+            if self.impl_done.insert(key) {
+                self.impl_work.push((idx, cargs));
             }
         }
     }
 
     fn drive(&mut self) {
-        while !self.fn_work.is_empty() || !self.type_work.is_empty() {
+        while !self.fn_work.is_empty() || !self.type_work.is_empty() || !self.impl_work.is_empty() {
             self.depth += 1;
             if self.depth > MONO_DEPTH_LIMIT {
                 self.diags.push(
@@ -617,7 +789,9 @@ impl<'a> Monomorphizer<'a> {
                 );
                 return;
             }
-            if let Some((name, args)) = self.type_work.pop() {
+            if let Some((idx, cargs)) = self.impl_work.pop() {
+                self.emit_impl_instance(idx, &cargs);
+            } else if let Some((name, args)) = self.type_work.pop() {
                 self.emit_type_instance(&name, &args);
             } else if let Some((name, args)) = self.fn_work.pop() {
                 self.emit_fn_instance(&name, &args);
@@ -649,6 +823,11 @@ impl<'a> Monomorphizer<'a> {
             s2.type_params = Vec::new();
             for fld in &mut s2.fields {
                 fld.ty = self.rewrite_ty(&fld.ty, &map);
+            }
+            // A generic struct's `drop` hook instantiates with the type arguments
+            // (design 0007 §3.4): the interpreter runs it exactly as a concrete one.
+            if let Some(b) = &mut s2.drop_hook {
+                self.rewrite_block(b, &map);
             }
             self.out.push(Item::Struct(s2));
         } else if let Some(e) = self.generic_enums_ast.get(name).cloned() {
@@ -698,6 +877,45 @@ impl<'a> Monomorphizer<'a> {
             kept.methods.push(stub);
         }
         kept.target = Ty { kind: TyKind::Named(target.clone()), span: im.target.span };
+        self.out.push(Item::Impl(kept));
+    }
+
+    /// Emit one concrete instance of an app-target impl: substitute the impl's
+    /// type parameters, mangle the target to its concrete nominal instance, and
+    /// lower each method to a concrete free function plus a signature stub in the
+    /// kept impl block (for the interpreter's dispatch table).
+    fn emit_impl_instance(&mut self, idx: usize, cargs: &[Type]) {
+        let ai = &self.app_impls[idx];
+        let im = ai.decl.clone();
+        let pnames = ai.param_names.clone();
+        let map = Self::param_map(&pnames, cargs);
+        let ctarget_args: Vec<Type> = ai.target_args.iter().map(|t| subst(t, &map)).collect();
+        let target = inst_type_name(&ai.target_head, &ctarget_args);
+        let ciface_args: Vec<Type> = ai.iface_args.iter().map(|t| subst(t, &map)).collect();
+        let mut kept = im.clone();
+        kept.methods.clear();
+        kept.type_params = Vec::new();
+        for mm in &im.methods {
+            let mut fm = mm.clone();
+            fm.type_params = Vec::new();
+            fm.name = impl_method_fn_name(&im.iface, &ciface_args, &target, &mm.name);
+            subst_self_fndecl(&mut fm, &target);
+            self.rewrite_fn(&mut fm, &map);
+            self.out.push(Item::Fn(fm));
+            let mut stub = mm.clone();
+            stub.type_params = Vec::new();
+            subst_self_fndecl(&mut stub, &target);
+            for p in &mut stub.params {
+                p.ty = self.rewrite_ty(&p.ty, &map);
+            }
+            if let Some(rt) = &mut stub.ret {
+                rt.ty = self.rewrite_ty(&rt.ty, &map);
+            }
+            stub.body = Block { stmts: Vec::new(), span: mm.span };
+            kept.methods.push(stub);
+        }
+        kept.target = Ty { kind: TyKind::Named(target.clone()), span: im.target.span };
+        kept.iface_args = ciface_args.iter().map(sem_to_ast_preserve).collect();
         self.out.push(Item::Impl(kept));
     }
 
@@ -963,6 +1181,24 @@ impl<'a> Monomorphizer<'a> {
     }
 }
 
+/// Replace every `Self` type in an impl method with the target type expression
+/// (a generic impl's `Self` is `List[T]`, an application, not a bare nominal).
+pub fn subst_self_ty(f: &mut FnDecl, target: &Ty) {
+    fn fix(ty: &mut Ty, target: &Ty) {
+        match &mut ty.kind {
+            TyKind::Named(n) if n == "Self" => *ty = target.clone(),
+            TyKind::App { args, .. } => for a in args { fix(a, target); },
+            TyKind::Array { elem, .. } => fix(elem, target),
+            TyKind::Slice(e) | TyKind::SliceMut(e) | TyKind::RawPtr(e) | TyKind::Box(e)
+            | TyKind::BoxResult(e) | TyKind::Borrow(e) | TyKind::BorrowMut(e) => fix(e, target),
+            TyKind::FnPtr(fp) => { for p in &mut fp.params { fix(&mut p.ty, target); } fix(&mut fp.ret, target); }
+            _ => {}
+        }
+    }
+    for p in &mut f.params { fix(&mut p.ty, target); }
+    if let Some(rt) = &mut f.ret { fix(&mut rt.ty, target); }
+}
+
 /// Replace every `Self` type in an impl method with its concrete target nominal.
 pub fn subst_self_fndecl(f: &mut FnDecl, target: &str) {
     fn fix(ty: &mut Ty, target: &str) {
@@ -978,4 +1214,50 @@ pub fn subst_self_fndecl(f: &mut FnDecl, target: &str) {
     }
     for p in &mut f.params { fix(&mut p.ty, target); }
     if let Some(rt) = &mut f.ret { fix(&mut rt.ty, target); }
+}
+
+/// Unify a parametric type `decl` (mentioning impl type parameters) against a
+/// concrete type `arg`, binding parameters in `out`. Used to drive app-target impl
+/// instantiation from a reached target-type instance (design 0007 stage 2).
+/// Convert a concrete semantic type to an AST type *preserving* generic
+/// applications (`App` stays `App`), so the interpreter's `resolve_impl_ty` maps
+/// it back to the same semantic type and mangles impl-method names identically.
+fn sem_to_ast_preserve(t: &Type) -> Ty {
+    let kind = match t {
+        Type::Scalar(s) => TyKind::Scalar(*s),
+        Type::Named(n) => TyKind::Named(n.clone()),
+        Type::App(n, args) => TyKind::App { name: n.clone(), args: args.iter().map(sem_to_ast_preserve).collect() },
+        Type::Box(e) => TyKind::Box(Box::new(sem_to_ast_preserve(e))),
+        Type::BoxResult(e) => TyKind::BoxResult(Box::new(sem_to_ast_preserve(e))),
+        Type::RawPtr(e) => TyKind::RawPtr(Box::new(sem_to_ast_preserve(e))),
+        Type::Slice(e) => TyKind::Slice(Box::new(sem_to_ast_preserve(e))),
+        Type::SliceMut(e) => TyKind::SliceMut(Box::new(sem_to_ast_preserve(e))),
+        _ => TyKind::Named("unit".to_string()),
+    };
+    Ty { kind, span: Span::point(0) }
+}
+
+pub(crate) fn unify_inst(decl: &Type, arg: &Type, out: &mut HashMap<String, Type>) -> bool {
+    match (decl, arg) {
+        (Type::Param(n), a) => {
+            match out.get(n) {
+                Some(prev) => prev == a,
+                None => { out.insert(n.clone(), a.clone()); true }
+            }
+        }
+        (Type::Scalar(a), Type::Scalar(b)) => a == b,
+        (Type::Named(a), Type::Named(b)) => a == b,
+        (Type::App(a, aa), Type::App(b, bb)) => {
+            a == b && aa.len() == bb.len() && aa.iter().zip(bb).all(|(x, y)| unify_inst(x, y, out))
+        }
+        (Type::Box(a), Type::Box(b))
+        | (Type::BoxResult(a), Type::BoxResult(b))
+        | (Type::RawPtr(a), Type::RawPtr(b))
+        | (Type::Slice(a), Type::Slice(b))
+        | (Type::SliceMut(a), Type::SliceMut(b))
+        | (Type::Borrow(a), Type::Borrow(b))
+        | (Type::BorrowMut(a), Type::BorrowMut(b))
+        | (Type::Array(a, _), Type::Array(b, _)) => unify_inst(a, b, out),
+        _ => false,
+    }
 }

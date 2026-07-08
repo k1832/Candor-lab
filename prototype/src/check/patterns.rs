@@ -70,7 +70,8 @@ pub fn resolve_enum(subject: &Type, items: &dyn ItemEnv) -> Option<(HoldMode, En
                     payload: payload.iter().map(|t| crate::types::subst(t, &map)).collect(),
                 })
                 .collect();
-            (HoldMode::Owned, EnumTy { copy: g.copy, variants, ok_variant: None, span: Span::point(0) }, n.clone())
+            let ok_variant = g.variants.iter().find(|(_, _, ok)| *ok).map(|(vn, _, _)| vn.clone());
+            (HoldMode::Owned, EnumTy { copy: g.copy, variants, ok_variant, span: Span::point(0) }, n.clone())
         }),
         Type::BoxResult(t) => Some((HoldMode::Owned, synth_box_result(t), "BoxResult".to_string())),
         Type::Borrow(inner) => {

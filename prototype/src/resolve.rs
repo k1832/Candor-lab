@@ -80,8 +80,16 @@ pub struct IfaceInfo {
 pub struct ImplInfo {
     pub iface: String,
     pub iface_args: Vec<Type>,
-    /// The target nominal name (`Named`) the impl is for.
+    /// The target nominal name the impl is for. For a generic impl
+    /// (`impl[T] I for List[T]`) this is the target's *head* (`List`); the
+    /// parametric arguments live in `target_args` (design 0007 stage 2).
     pub target: String,
+    /// A generic impl's type parameters and their bounds (empty for a concrete
+    /// impl). `iface_args`/`target_args` may mention these as `Type::Param`.
+    pub type_params: Vec<(String, Vec<String>)>,
+    /// The target's type arguments for a generic impl (`List[T]` -> `[Param(T)]`);
+    /// empty when the target is a bare nominal.
+    pub target_args: Vec<Type>,
     /// method name -> mangled free-function name.
     pub methods: HashMap<String, String>,
     pub span: Span,

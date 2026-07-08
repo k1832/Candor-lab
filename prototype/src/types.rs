@@ -201,6 +201,13 @@ pub struct GenericDecl {
     pub is_enum: bool,
     pub copy: bool,
     pub has_drop: bool,
+    /// The `drop` hook body allocates, boxes, or drops a non-`copy`/box-bearing
+    /// value, so every scheduled drop of any instance is allocator work — the
+    /// generic aggregate is *alloc-on-drop* for all instantiations, fixed once at
+    /// the definition (design 0007 §3.4, F5). Computed by checking the hook with an
+    /// opaque `T`. (A box-bearing field already propagates through `bears_box`; this
+    /// flag additionally catches a hook that allocates over a drop-inert `T`.)
+    pub alloc_on_drop: bool,
     /// Struct fields (empty for an enum).
     pub fields: Vec<(String, Type)>,
     /// Enum variants (empty for a struct); each is (name, payload types, ok).
@@ -424,8 +431,12 @@ fn box_subpaths_rec(
                 out.push(prefix.clone());
             }
         }
-        Type::App(_, _) => {
-            if bears_box(ty, env) {
+        Type::App(n, _) => {
+            // An alloc-on-drop generic aggregate frees at its own place regardless
+            // of a bare `Box` field (design 0007 §3.4, F5).
+            if env.lookup_generic(n).map(|g| g.alloc_on_drop).unwrap_or(false)
+                || bears_box(ty, env)
+            {
                 out.push(prefix.clone());
             }
         }

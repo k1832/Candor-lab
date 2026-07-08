@@ -137,17 +137,67 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Does `ty` (a concrete nominal) implement interface `iface`? (An impl with
-    /// matching target nominal exists.)
+    /// Does `ty` implement interface `iface`? A concrete nominal matches a
+    /// bare-target impl; a generic application (`List[i64]`) matches a generic
+    /// impl whose target head unifies with it (design 0007 stage 2).
     pub(super) fn type_implements(&self, ty: &Type, iface: &str) -> bool {
-        let nominal = match ty {
-            Type::Named(n) => n.clone(),
-            _ => return false,
-        };
-        self.items
-            .impls
-            .iter()
-            .any(|im| im.iface == iface && im.target == nominal)
+        self.resolve_impl_for(ty, iface).is_some()
+    }
+
+    /// Find the impl of `iface` covering `ty`, with the impl-parameter substitution
+    /// (empty for a bare-nominal impl). At most one exists (coherence, §2.3).
+    pub(super) fn resolve_impl_for(
+        &self,
+        ty: &Type,
+        iface: &str,
+    ) -> Option<(usize, std::collections::HashMap<String, Type>)> {
+        for (i, im) in self.items.impls.iter().enumerate() {
+            if im.iface != iface {
+                continue;
+            }
+            match ty {
+                Type::Named(n) => {
+                    if im.target == *n && im.target_args.is_empty() {
+                        return Some((i, HashMap::new()));
+                    }
+                }
+                Type::App(n, args) => {
+                    if im.target == *n && im.target_args.len() == args.len() {
+                        let mut map = HashMap::new();
+                        if im
+                            .target_args
+                            .iter()
+                            .zip(args)
+                            .all(|(d, a)| crate::generics::unify_inst(d, a, &mut map))
+                        {
+                            return Some((i, map));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The interface-method signature substitution for a resolved impl: the
+    /// interface's type parameters mapped to the impl's (concrete-ized) interface
+    /// arguments, plus `Self` mapped to the receiver type.
+    fn iface_method_subst(
+        &self,
+        impl_idx: usize,
+        self_ty: &Type,
+        impl_map: &std::collections::HashMap<String, Type>,
+    ) -> std::collections::HashMap<String, Type> {
+        let mut smap = std::collections::HashMap::new();
+        smap.insert("Self".to_string(), self_ty.clone());
+        let im = &self.items.impls[impl_idx];
+        if let Some(info) = self.items.interfaces.get(&im.iface) {
+            for (pname, arg) in info.type_params.iter().zip(&im.iface_args) {
+                smap.insert(pname.clone(), subst(arg, impl_map));
+            }
+        }
+        smap
     }
 }
 
@@ -156,7 +206,7 @@ impl<'a> Checker<'a> {
 // ---------------------------------------------------------------------------
 
 use crate::resolve::{resolve_program, FnSig, GenericFnSig as GFS};
-use super::{synth_drop_hook, FnState};
+use super::FnState;
 
 /// Diagnostics, reached instantiations, and per-node monomorphization shapes.
 pub type GenericCheck = (Vec<Diag>, Vec<(String, Vec<Type>)>, std::collections::HashMap<usize, crate::generics::Shape>);
@@ -171,14 +221,21 @@ pub fn check_generic_program(prog: &Program, real: bool) -> GenericCheck {
     let mut items = resolve_program(prog, &mut diags);
     crate::generics::resolve_tables(prog, &mut items, &mut diags);
 
-    // Concrete drop-hook alloc-on-drop fixpoint (same as the concrete driver).
-    let hooks: Vec<(String, Block, Span)> = prog
+    // Drop-hook alloc-on-drop fixpoint over both concrete and generic structs. A
+    // generic struct's hook is checked once with opaque type parameters and fixes
+    // its alloc-on-drop for *every* instance (design 0007 §3.4, F5); a concrete
+    // hook keeps the stage-1 behavior. One monotonic fixpoint covers the mutual
+    // dependencies (a hook may drop another alloc-on-drop aggregate).
+    let hooks: Vec<HookInfo> = prog
         .items
         .iter()
         .filter_map(|it| match it {
-            Item::Struct(s) if s.type_params.is_empty() => {
-                s.drop_hook.as_ref().map(|b| (s.name.clone(), b.clone(), s.span))
-            }
+            Item::Struct(s) => s.drop_hook.as_ref().map(|b| HookInfo {
+                name: s.name.clone(),
+                type_params: s.type_params.iter().map(|p| (p.name.clone(), p.bounds.clone())).collect(),
+                block: b.clone(),
+                span: s.span,
+            }),
             _ => None,
         })
         .collect();
@@ -187,14 +244,21 @@ pub fn check_generic_program(prog: &Program, real: bool) -> GenericCheck {
         loop {
             let snapshot = items.clone();
             let mut changed = false;
-            for (sname, block, span) in &hooks {
-                let mut c = Checker { items: &snapshot, diags: Vec::new(), f: FnState::empty(), real, insts: Vec::new(), def_site: false, shapes: std::collections::HashMap::new(), type_params: Vec::new(), param_bounds: Vec::new(), expected_ty: None, cur_generic: None };
-                let (fdecl, sig) = synth_drop_hook(sname, block, *span);
-                c.check_fn_with_sig(&fdecl, &sig);
-                if c.f.alloc.site.is_some() && !items.structs.get(sname).map(|s| s.alloc_on_drop).unwrap_or(false) {
-                    if let Some(s) = items.structs.get_mut(sname) {
-                        s.alloc_on_drop = true;
-                        changed = true;
+            for h in &hooks {
+                let alloc = hook_is_alloc(&snapshot, h, real);
+                if alloc {
+                    if h.type_params.is_empty() {
+                        if !items.structs.get(&h.name).map(|s| s.alloc_on_drop).unwrap_or(true) {
+                            if let Some(s) = items.structs.get_mut(&h.name) {
+                                s.alloc_on_drop = true;
+                                changed = true;
+                            }
+                        }
+                    } else if !items.generic_defs.get(&h.name).map(|g| g.alloc_on_drop).unwrap_or(true) {
+                        if let Some(g) = items.generic_defs.get_mut(&h.name) {
+                            g.alloc_on_drop = true;
+                            changed = true;
+                        }
                     }
                 }
             }
@@ -222,6 +286,8 @@ pub fn check_generic_program(prog: &Program, real: bool) -> GenericCheck {
             c.check_impl_methods_def_site(im);
         }
     }
+    // Generic-struct hooks are checked once with opaque `T` (their diagnostics are
+    // emitted by the final hook pass below; the alloc fixpoint ran on a snapshot).
 
     // --- Concrete code (typing generic uses, collecting instantiations) ---
     for it in &prog.items {
@@ -231,12 +297,127 @@ pub fn check_generic_program(prog: &Program, real: bool) -> GenericCheck {
             _ => {}
         }
     }
-    for (sname, block, span) in &hooks {
-        let (fdecl, sig) = synth_drop_hook(sname, block, *span);
-        c.check_fn_with_sig(&fdecl, &sig);
+    for h in &hooks {
+        check_one_hook(&mut c, &items, h, real);
     }
 
     (c.diags, c.insts, c.shapes)
+}
+
+/// A struct `drop` hook to check (concrete or generic).
+struct HookInfo {
+    name: String,
+    /// Type parameters and their bounds (empty for a concrete struct).
+    type_params: Vec<(String, Vec<String>)>,
+    block: Block,
+    span: Span,
+}
+
+/// Build the synthetic `fn drop(self: write StructT) -> unit` for a hook: a
+/// concrete struct's `self` is `Named`; a generic struct's is the parametric
+/// application `Wrap[T]` (design 0007 §3.4). Returns the decl, its signature, the
+/// param-copy view, and the type-parameter names.
+fn synth_hook(h: &HookInfo) -> (FnDecl, FnSig, std::collections::HashMap<String, bool>, Vec<String>) {
+    let pnames: Vec<String> = h.type_params.iter().map(|(n, _)| n.clone()).collect();
+    let (self_sem, self_ast_kind) = if pnames.is_empty() {
+        (Type::Named(h.name.clone()), TyKind::Named(h.name.clone()))
+    } else {
+        (
+            Type::App(h.name.clone(), pnames.iter().map(|n| Type::Param(n.clone())).collect()),
+            TyKind::App {
+                name: h.name.clone(),
+                args: pnames.iter().map(|n| Ty { kind: TyKind::Named(n.clone()), span: h.span }).collect(),
+            },
+        )
+    };
+    let sig = FnSig {
+        name: format!("drop({})", h.name),
+        regions: Vec::new(),
+        params: vec![crate::resolve::ParamInfo {
+            name: "self".to_string(),
+            mode: ParamMode::Write,
+            region: None,
+            decl_ty: self_sem.clone(),
+            lowered: crate::resolve::lower_param(ParamMode::Write, self_sem.clone()),
+            span: h.span,
+        }],
+        alloc: true,
+        ret: Type::unit(),
+        ret_region: None,
+        ret_span: h.span,
+        span: h.span,
+    };
+    let fdecl = FnDecl {
+        name: sig.name.clone(),
+        type_params: Vec::new(),
+        regions: Vec::new(),
+        params: vec![Param {
+            name: "self".to_string(),
+            mode: ParamMode::Write,
+            region: None,
+            ty: Ty { kind: self_ast_kind, span: h.span },
+            span: h.span,
+        }],
+        alloc: true,
+        requires: Vec::new(),
+        ensures: Vec::new(),
+        ret: None,
+        body: h.block.clone(),
+        span: h.span,
+    };
+    let copy_view = h
+        .type_params
+        .iter()
+        .map(|(n, b)| (n.clone(), b.iter().any(|x| x == "copy")))
+        .collect();
+    (fdecl, sig, copy_view, pnames)
+}
+
+/// Is a hook body alloc-effecting (making its type alloc-on-drop)? Checked on a
+/// read-only snapshot, opaque type parameters for a generic struct.
+fn hook_is_alloc(items: &crate::resolve::Items, h: &HookInfo, real: bool) -> bool {
+    let (fdecl, sig, copy_view, pnames) = synth_hook(h);
+    let mut view = items.clone();
+    view.type_param_copy = copy_view;
+    let mut c = Checker {
+        items: &view,
+        diags: Vec::new(),
+        f: FnState::empty(),
+        real,
+        insts: Vec::new(),
+        def_site: !pnames.is_empty(),
+        shapes: std::collections::HashMap::new(),
+        type_params: pnames,
+        param_bounds: h.type_params.clone(),
+        expected_ty: None,
+        cur_generic: None,
+    };
+    c.check_fn_with_sig(&fdecl, &sig);
+    c.f.alloc.site.is_some()
+}
+
+/// Definition-site check of one hook body (emitting diagnostics into `outer`).
+fn check_one_hook(outer: &mut Checker, items: &crate::resolve::Items, h: &HookInfo, real: bool) {
+    let (fdecl, sig, copy_view, pnames) = synth_hook(h);
+    let mut view = items.clone();
+    view.type_param_copy = copy_view;
+    let mut c = Checker {
+        items: &view,
+        diags: std::mem::take(&mut outer.diags),
+        f: FnState::empty(),
+        real,
+        insts: Vec::new(),
+        def_site: !pnames.is_empty(),
+        shapes: std::collections::HashMap::new(),
+        type_params: pnames,
+        param_bounds: h.type_params.clone(),
+        expected_ty: None,
+        cur_generic: None,
+    };
+    c.check_fn_with_sig(&fdecl, &sig);
+    outer.diags = c.diags;
+    outer.shapes.extend(c.shapes);
+    outer.insts.extend(c.insts);
 }
 
 impl<'a> Checker<'a> {
@@ -283,35 +464,73 @@ impl<'a> Checker<'a> {
         self.insts.extend(c.insts);
     }
 
-    /// Definition-site check of an impl's method bodies (concrete impls only in
-    /// stage 1, so `Self` = the concrete target — an ordinary function check).
+    /// Definition-site check of an impl's method bodies (design 0007 §2.1, §3).
+    /// A concrete impl's `Self` is its target nominal; a generic impl
+    /// (`impl[T] I for List[T]`) is checked once with opaque type parameters,
+    /// `Self` bound to the parametric target, and the parameters' bounds in scope.
     pub(super) fn check_impl_methods_def_site(&mut self, im: &ImplDecl) {
-        let target = match &im.target.kind {
-            TyKind::Named(n) => n.clone(),
-            _ => return,
-        };
-        if !im.type_params.is_empty() {
-            return; // deferred (already diagnosed)
+        let generic = !im.type_params.is_empty();
+        let app_target = matches!(&im.target.kind, TyKind::App { .. });
+        if !generic && !app_target {
+            // Concrete nominal-target impl (stage 1): `Self` = the target nominal.
+            let target = match &im.target.kind {
+                TyKind::Named(n) => n.clone(),
+                _ => return,
+            };
+            let iface_args: Vec<Type> = im.iface_args.iter().map(|a| self.resolve_ty(a)).collect();
+            for m in &im.methods {
+                let mut fdecl = m.clone();
+                crate::generics::subst_self_fndecl(&mut fdecl, &target);
+                let sig = self.impl_method_sig(&fdecl, &target, &iface_args);
+                let mut c = Checker {
+                    items: self.items,
+                    diags: std::mem::take(&mut self.diags),
+                    f: FnState::empty(),
+                    real: self.real,
+                    insts: Vec::new(),
+                    def_site: false,
+                    shapes: std::collections::HashMap::new(),
+                    type_params: Vec::new(),
+                    param_bounds: Vec::new(),
+                    expected_ty: None,
+                    cur_generic: None,
+                };
+                c.check_fn_with_sig(&fdecl, &sig);
+                self.diags = c.diags;
+                self.shapes.extend(c.shapes);
+                self.insts.extend(c.insts);
+            }
+            return;
         }
-        let iface_args: Vec<Type> = im.iface_args.iter().map(|a| self.resolve_ty(a)).collect();
+        // Generic (or concrete-application-target) impl: check each method body
+        // once with the impl's type parameters opaque and `Self` = the parametric
+        // target application (design 0007 §3 conservatism, same as a generic fn).
+        let mut view = self.items.clone();
+        view.type_param_copy = im
+            .type_params
+            .iter()
+            .map(|p| (p.name.clone(), p.bounds.iter().any(|b| b == "copy")))
+            .collect();
+        let tp_names: Vec<String> = im.type_params.iter().map(|p| p.name.clone()).collect();
+        let param_bounds: Vec<(String, Vec<String>)> =
+            im.type_params.iter().map(|p| (p.name.clone(), p.bounds.clone())).collect();
         for m in &im.methods {
-            // Substitute `Self` -> target throughout the method.
             let mut fdecl = m.clone();
-            crate::generics::subst_self_fndecl(&mut fdecl, &target);
-            let sig = self.impl_method_sig(&fdecl, &target, &iface_args);
+            crate::generics::subst_self_ty(&mut fdecl, &im.target);
             let mut c = Checker {
-                items: self.items,
+                items: &view,
                 diags: std::mem::take(&mut self.diags),
                 f: FnState::empty(),
                 real: self.real,
                 insts: Vec::new(),
-                def_site: false,
+                def_site: generic,
                 shapes: std::collections::HashMap::new(),
-                type_params: Vec::new(),
-                param_bounds: Vec::new(),
+                type_params: tp_names.clone(),
+                param_bounds: param_bounds.clone(),
                 expected_ty: None,
                 cur_generic: None,
             };
+            let sig = c.impl_method_sig(&fdecl, "", &[]);
             c.check_fn_with_sig(&fdecl, &sig);
             self.diags = c.diags;
             self.shapes.extend(c.shapes);
@@ -476,14 +695,16 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> Option<Type> {
         let recv_ty = self.synth_arg_type(base);
-        // The receiver's nominal or type-parameter identity.
+        // The receiver's nominal / application / type-parameter identity.
         match &recv_ty {
             Type::Param(pname) => {
                 // Def-site: only the bound interfaces provide methods (§2.1).
                 let ifaces = self.param_bound_ifaces(pname);
                 for iface in &ifaces {
                     if let Some(m) = self.iface_method(iface, method) {
-                        return Some(self.check_iface_method_call(base, &m, args, span));
+                        let mut smap = std::collections::HashMap::new();
+                        smap.insert("Self".to_string(), recv_ty.clone());
+                        return Some(self.check_iface_method_call(base, &m, &smap, args, span));
                     }
                 }
                 self.diags.push(
@@ -496,23 +717,45 @@ impl<'a> Checker<'a> {
                 );
                 Some(Type::Error)
             }
-            Type::Named(nominal) => {
-                // Concrete: find an impl providing the method for this type.
-                let found = self
-                    .items
-                    .impls
-                    .iter()
-                    .find(|im| im.target == *nominal && im.methods.contains_key(method))
-                    .map(|im| im.iface.clone());
-                match found {
-                    Some(iface) => {
-                        let m = self.iface_method(&iface, method)?;
-                        Some(self.check_iface_method_call(base, &m, args, span))
+            Type::Named(_) | Type::App(_, _) => {
+                // Concrete: find the impl providing the method for this type (a bare
+                // nominal or a generic application matching a generic impl head).
+                let found = (0..self.items.impls.len()).find(|&i| {
+                    let im = &self.items.impls[i];
+                    im.methods.contains_key(method) && self.impl_covers(i, &recv_ty)
+                });
+                let idx = found?;
+                let iface = self.items.impls[idx].iface.clone();
+                let (_, impl_map) = self.resolve_impl_for(&recv_ty, &iface)?;
+                // Bound conformance for the generic impl's own parameters (§2.1):
+                // a `List[NonShow]` receiver calling a method of an
+                // `impl[T: Show] … for List[T]` must supply a `Show` type.
+                let bounds: Vec<(String, Vec<String>)> = self.items.impls[idx].type_params.clone();
+                for (pn, bs) in &bounds {
+                    if let Some(arg) = impl_map.get(pn) {
+                        self.check_arg_conformance(arg, bs, span);
                     }
-                    None => None,
                 }
+                let m = self.iface_method(&iface, method)?;
+                let smap = self.iface_method_subst(idx, &recv_ty, &impl_map);
+                Some(self.check_iface_method_call(base, &m, &smap, args, span))
             }
             _ => None,
+        }
+    }
+
+    /// Does the impl at `idx` cover receiver type `ty` (target head + unify)?
+    fn impl_covers(&self, idx: usize, ty: &Type) -> bool {
+        let im = &self.items.impls[idx];
+        match ty {
+            Type::Named(n) => im.target == *n && im.target_args.is_empty(),
+            Type::App(n, args) => {
+                im.target == *n && im.target_args.len() == args.len() && {
+                    let mut map = std::collections::HashMap::new();
+                    im.target_args.iter().zip(args).all(|(d, a)| crate::generics::unify_inst(d, a, &mut map))
+                }
+            }
+            _ => false,
         }
     }
 
@@ -541,6 +784,7 @@ impl<'a> Checker<'a> {
         &mut self,
         base: &Expr,
         m: &crate::resolve::IfaceMethod,
+        smap: &std::collections::HashMap<String, Type>,
         args: &[Expr],
         span: Span,
     ) -> Type {
@@ -561,13 +805,14 @@ impl<'a> Checker<'a> {
         }
         for ((mode, pty), a) in m.params.iter().zip(args) {
             self.clear_carried();
-            self.check_arg_mode(*mode, pty, a);
+            let pty = subst(pty, smap);
+            self.check_arg_mode(*mode, &pty, a);
         }
         if m.alloc {
             self.note_alloc(span, format!("call to `alloc` interface method `{}` (§4.1)", m.name));
         }
         self.clear_carried();
-        m.ret.clone()
+        subst(&m.ret, smap)
     }
 }
 
@@ -764,13 +1009,22 @@ impl<'a> Checker<'a> {
         // E2 is the enclosing return enum's non-`ok` *payload* type (the error
         // type the conversion targets), not the return enum itself (§7.1).
         let e2 = non_ok_payload(&ret_enum)?;
-        let e2_nominal = match &e2 {
-            Type::Named(n) => n.clone(),
+        // `E2` is a bare nominal or a generic application (`AppErr[i64]`); find the
+        // `From[E1]` impl whose target head unifies with it (design 0007 stage 2).
+        let (e2_head, e2_args): (String, &[Type]) = match &e2 {
+            Type::Named(n) => (n.clone(), &[]),
+            Type::App(n, args) => (n.clone(), args.as_slice()),
             _ => return None,
         };
-        // Find `impl From[E1] for E2`.
         let found = self.items.impls.iter().find(|im| {
-            im.iface == "From" && im.target == e2_nominal && im.iface_args.first() == Some(&e1)
+            if im.iface != "From" || im.target != e2_head || im.iface_args.first() != Some(&e1) {
+                return false;
+            }
+            if im.target_args.len() != e2_args.len() {
+                return false;
+            }
+            let mut map = std::collections::HashMap::new();
+            im.target_args.iter().zip(e2_args).all(|(d, a)| crate::generics::unify_inst(d, a, &mut map))
         })?;
         // Effect inheritance: the conversion inherits `From::from`'s declared
         // effect (design 0007 §7.1).

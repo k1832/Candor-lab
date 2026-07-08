@@ -1,0 +1,6 @@
+use shape::{Weighable};
+pub struct List[T] { x: T, w: i64 }
+// Legal: the generic impl lives in the target head `List`'s own module (§2.3).
+impl[T] Weighable for List[T] { fn weight(read self) -> i64 { return self.w * 3; } }
+pub fn make(v: i64) -> List[i64] { return List { x: 0, w: v }; }
+pub fn weigh_it(l: read List[i64]) -> i64 { return l.weight(); }

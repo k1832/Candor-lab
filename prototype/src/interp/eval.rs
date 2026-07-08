@@ -134,6 +134,10 @@ fn resolve_impl_ty(ty: &Ty) -> Type {
         TyKind::Named(n) => Type::Named(n.clone()),
         TyKind::Box(e) => Type::Box(Box::new(resolve_impl_ty(e))),
         TyKind::BoxResult(e) => Type::BoxResult(Box::new(resolve_impl_ty(e))),
+        TyKind::App { name, args } => Type::App(name.clone(), args.iter().map(resolve_impl_ty).collect()),
+        TyKind::RawPtr(e) => Type::RawPtr(Box::new(resolve_impl_ty(e))),
+        TyKind::Slice(e) => Type::Slice(Box::new(resolve_impl_ty(e))),
+        TyKind::SliceMut(e) => Type::SliceMut(Box::new(resolve_impl_ty(e))),
         _ => Type::Error,
     }
 }
@@ -1303,12 +1307,26 @@ impl<'a> Interp<'a> {
     /// The receiver's static nominal type name (stripping borrows/box), for
     /// interface method dispatch. Handles the place shapes a receiver can take.
     fn expr_static_nominal(&self, e: &Expr) -> Option<String> {
-        let ty = match &e.kind {
-            ExprKind::Paren(i) | ExprKind::OutArg(i) => return self.expr_static_nominal(i),
-            ExprKind::Ident(name) => self.local_addr_ty(name).map(|(_, t)| t)?,
-            _ => return None,
-        };
-        strip_to_nominal(&ty)
+        strip_to_nominal(&self.expr_static_ty(e)?)
+    }
+
+    /// The static type of a place expression (local, field, dereference), for
+    /// interface method dispatch on a nested receiver like `self.inner.m()`.
+    fn expr_static_ty(&self, e: &Expr) -> Option<Type> {
+        match &e.kind {
+            ExprKind::Paren(i) | ExprKind::OutArg(i) => self.expr_static_ty(i),
+            ExprKind::Ident(name) => self.local_addr_ty(name).map(|(_, t)| t),
+            ExprKind::Field { base, field } => {
+                let bt = self.expr_static_ty(base)?;
+                let n = strip_to_nominal(&bt)?;
+                self.lay().field_offset(&n, field).map(|(t, _)| t)
+            }
+            ExprKind::Prefix { op: PrefixOp::Deref, expr } => match self.expr_static_ty(expr)? {
+                Type::Box(e) | Type::Borrow(e) | Type::BorrowMut(e) | Type::RawPtr(e) => Some(*e),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     fn eval_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> R<RVal> {
@@ -1329,8 +1347,29 @@ impl<'a> Interp<'a> {
                 if let Some(fnname) = self.impl_dispatch.get(&(nominal, field.clone())).cloned() {
                     let fnd = self.fns[fnname.as_str()];
                     let sig = self.items.fns[fnname.as_str()].clone();
+                    // Pass the receiver per the method's `self` mode: `read`/`write`
+                    // self is borrowed (the checker treated it so, §4.1); `take`
+                    // self moves the value in.
+                    // Already-borrowed receivers (a `read T`/`write T` parameter)
+                    // are passed through (a reborrow); an owned receiver place is
+                    // borrowed per the method's `self` mode.
+                    let base_is_borrow = matches!(
+                        self.expr_static_ty(base),
+                        Some(Type::Borrow(_)) | Some(Type::BorrowMut(_))
+                    );
+                    let recv = match sig.params.first().map(|p| p.mode) {
+                        Some(ParamMode::Read) if !base_is_borrow => Expr {
+                            kind: ExprKind::Prefix { op: PrefixOp::Read, expr: base.clone() },
+                            span,
+                        },
+                        Some(ParamMode::Write) if !base_is_borrow => Expr {
+                            kind: ExprKind::Prefix { op: PrefixOp::Write, expr: base.clone() },
+                            span,
+                        },
+                        _ => (**base).clone(),
+                    };
                     let mut all: Vec<Expr> = Vec::with_capacity(args.len() + 1);
-                    all.push((**base).clone());
+                    all.push(recv);
                     all.extend(args.iter().cloned());
                     return self.eval_user_call(fnd, &sig, &all);
                 }

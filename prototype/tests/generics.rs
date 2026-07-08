@@ -189,3 +189,169 @@ fn legal_cross_module_impl_runs() {
         other => panic!("ok_impl did not run: {:?}", matches!(other, RunResult::Ok(_))),
     }
 }
+
+// ===========================================================================
+// Stage 2: generic impls, generic-struct drop hooks, and their ripple checks
+// (design 0007 §2.3, §3.4). +16 tests.
+// ===========================================================================
+
+fn trace_of(rel: &str) -> Vec<i64> {
+    let src = fixture(rel);
+    assert!(
+        check_source_real(&src).unwrap().is_empty(),
+        "{rel} should check clean, got {:?}",
+        check_source_real(&src).unwrap()
+    );
+    match run_source_real(&src) {
+        RunResult::Ok(r) => r.trace,
+        other => panic!("{rel} did not run: ok={}", matches!(other, RunResult::Ok(_))),
+    }
+}
+
+// ---- positive: generic impls + drop hooks run ------------------------------
+
+#[test]
+fn generic_impl_method_dispatch() {
+    assert_eq!(run_ret("gimpl.cnr"), 40);
+}
+
+#[test]
+fn bounded_generic_impl_calls_bound_method() {
+    assert_eq!(run_ret("gbound.cnr"), 105);
+}
+
+#[test]
+fn generic_from_impl_cross_type_question() {
+    // good=false takes the error path through `AppErr[i64]::from(IoErr)`.
+    assert_eq!(run_ret("gfromq.cnr"), 7);
+}
+
+#[test]
+fn generic_drop_hook_runs_nested_in_order() {
+    // The `Wrap[Noisy]` hook fires first (tag 2), then its field `Noisy` (id 1).
+    assert_eq!(trace_of("gdrop.cnr"), vec![2, 1]);
+}
+
+#[test]
+fn generic_drop_hook_ground_floor_runs() {
+    // A non-allocating hook over a `copy` `T` stays non-`alloc` yet still runs.
+    assert_eq!(trace_of("gdrop_groundfloor.cnr"), vec![4]);
+}
+
+// ---- negatives: coherence / conformance ------------------------------------
+
+#[test]
+fn overlapping_generic_impls_are_rejected() {
+    // Two impl heads that unify (`List[T]` and `List[U]`) overlap (§2.3).
+    assert_code(
+        "interface I { fn m(read self) -> i64; }\nstruct List[T] { x: T }\n\
+         impl[T] I for List[T] { fn m(read self) -> i64 { return 1; } }\n\
+         impl[U] I for List[U] { fn m(read self) -> i64 { return 2; } }\n\
+         fn main() -> i64 { return 0; }\n",
+        "E1009",
+    );
+}
+
+#[test]
+fn generic_impl_param_not_in_target_is_rejected() {
+    // Every generic-impl parameter must appear in the target (§5.1 driving rule).
+    assert_code(
+        "interface I { fn m(read self) -> i64; }\nstruct N { v: i64 }\n\
+         impl[T] I for N { fn m(read self) -> i64 { return 1; } }\n\
+         fn main() -> i64 { return 0; }\n",
+        "E1016",
+    );
+}
+
+#[test]
+fn bounded_generic_impl_conformance_failure() {
+    // Calling a bounded impl's method on `Wrap[Plain]` where `Plain` lacks the
+    // bound interface is a use-site conformance error (§2.1).
+    assert_code(
+        "interface Show { fn show(read self) -> i64; }\n\
+         interface Weighable { fn weight(read self) -> i64; }\n\
+         struct Plain { n: i64 }\nstruct Wrap[T] { inner: T }\n\
+         impl[T: Show] Weighable for Wrap[T] { fn weight(read self) -> i64 { return self.inner.show(); } }\n\
+         fn main() -> i64 { let w: Wrap[Plain] = Wrap { inner: Plain { n: 5 } }; return w.weight(); }\n",
+        "E1008",
+    );
+}
+
+// ---- negatives: alloc-on-drop of generic aggregates (§3.4) ------------------
+
+#[test]
+fn generic_aggregate_box_dying_unmarked_is_e0401() {
+    assert_code(
+        "struct Wrap[T] { inner: T }\n\
+         fn sink(w: Wrap[Box[i64]]) -> i64 { return 0; }\n\
+         fn main() -> i64 { return 0; }\n",
+        "E0401",
+    );
+}
+
+#[test]
+fn generic_aggregate_box_dying_marked_is_clean() {
+    let src = "struct Wrap[T] { inner: T }\n\
+               fn sink(w: Wrap[Box[i64]]) alloc -> i64 { return 0; }\n\
+               fn main() -> i64 { return 0; }\n";
+    assert!(codes(src).is_empty(), "got {:?}", codes(src));
+}
+
+#[test]
+fn allocating_hook_makes_generic_aggregate_alloc_on_drop() {
+    // The hook allocates (calls an `alloc` fn), so every instance — even the
+    // drop-inert `Wrap[i64]` — is alloc-on-drop (§3.4 F5): the unmarked owner errors.
+    assert_code(
+        "fn boom() alloc -> i64 { return 0; }\n\
+         struct Wrap[T] { inner: T, tag: i64 } drop(write self) { let x: i64 = boom(); }\n\
+         fn sink(w: Wrap[i64]) -> i64 { return 0; }\n\
+         fn main() -> i64 { return 0; }\n",
+        "E0401",
+    );
+}
+
+// ---- negatives: partial-move / move-through-borrow over generic aggregates --
+
+#[test]
+fn move_opaque_field_through_borrow_is_e0310() {
+    assert_code(
+        "struct Pair[T] { a: T, b: T }\n\
+         fn take_a[T](p: read Pair[T]) -> T { return p.a; }\n\
+         fn main() -> i64 { return 0; }\n",
+        "E0310",
+    );
+}
+
+#[test]
+fn partial_move_of_drop_hooked_generic_is_e0303() {
+    assert_code(
+        "struct Pair[T] { a: T, b: T } drop(write self) { trace(0); }\n\
+         fn split[T](p: Pair[T]) -> T { return p.a; }\n\
+         fn main() -> i64 { return 0; }\n",
+        "E0303",
+    );
+}
+
+// ---- module-tree: generic-impl orphan rule (design 0008) --------------------
+
+#[test]
+fn generic_orphan_impl_across_modules_is_rejected() {
+    assert!(
+        mod_codes("bad_orphan_generic").contains(&"E1013".to_string()),
+        "got {:?}",
+        mod_codes("bad_orphan_generic")
+    );
+}
+
+#[test]
+fn legal_generic_impl_across_modules_runs() {
+    assert!(
+        mod_codes("ok_impl_generic").is_empty(),
+        "ok_impl_generic should check clean, got {:?}",
+        mod_codes("ok_impl_generic")
+    );
+    match run_dir(&moddir("ok_impl_generic")) {
+        RunResult::Ok(r) => assert_eq!(r.ret, 42),
+        other => panic!("ok_impl_generic did not run: {:?}", matches!(other, RunResult::Ok(_))),
+    }
+}

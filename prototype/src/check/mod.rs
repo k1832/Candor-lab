@@ -444,16 +444,30 @@ impl<'a> Checker<'a> {
             None => return false,
         };
         for proj in &place.proj {
-            if let Type::Named(n) = &ty {
-                if self.items.lookup_struct(n).map(|s| s.has_drop).unwrap_or(false) {
-                    return true;
+            match &ty {
+                Type::Named(n) => {
+                    if self.items.lookup_struct(n).map(|s| s.has_drop).unwrap_or(false) {
+                        return true;
+                    }
                 }
+                // A generic aggregate's `drop` hook is recorded on its generic decl
+                // (design 0007 §3.4): a partial move across it is equally forbidden.
+                Type::App(n, _) => {
+                    if self.items.lookup_generic(n).map(|g| g.has_drop).unwrap_or(false) {
+                        return true;
+                    }
+                }
+                _ => {}
             }
             let next = match (&ty, proj) {
                 (Type::Named(n), dataflow::Proj::Field(f)) => self
                     .items
                     .lookup_struct(n)
                     .and_then(|st| st.fields.iter().find(|(fn_, _)| fn_ == f).map(|(_, t)| t.clone())),
+                (Type::App(n, args), dataflow::Proj::Field(f)) => {
+                    crate::types::app_fields(self.items, n, args)
+                        .and_then(|fs| fs.into_iter().find(|(fn_, _)| fn_ == f).map(|(_, t)| t))
+                }
                 _ => None,
             };
             ty = match next {
