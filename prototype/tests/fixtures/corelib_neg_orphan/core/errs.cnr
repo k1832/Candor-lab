@@ -1,0 +1,2 @@
+pub enum IoErr { Eof }
+pub enum AppErr { FromIo(IoErr) }

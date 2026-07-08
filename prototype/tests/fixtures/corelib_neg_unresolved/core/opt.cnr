@@ -1,0 +1,2 @@
+pub enum Opt[T] { ok Some(T), None }
+pub fn is_some[T](o: read Opt[T]) -> bool { match o { Opt::Some(v) => { return true; } Opt::None => { return false; } } }

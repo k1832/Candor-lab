@@ -1,0 +1,70 @@
+// The corelib seed's integration exercise (design 0008 §2: program entry is
+// `fn main` in the root `main.cnr`). It drives every module's public surface
+// end-to-end and returns a sentinel. `main` is `alloc` because it uses the std
+// allocator layer; the core layer it also calls stays on the ground floor.
+use core::opt::{Opt, is_some, is_none, unwrap_or};
+use core::res::{Res, decode, is_ok};
+use core::arena::{Arena, new, push, get, reset, count};
+use std::alloc::{Alloc};
+use std::bump::{Bump, with_window, mk_alloc};
+use std::list::{List, Popped, Grow, Cell, CellRes, push_front, pop_front, length, cell, cell_get};
+
+fn main() alloc -> i64 {
+    // --- core/arena: fixed inline backing, T:copy, never allocates ----------
+    let mut ar: Arena[i64] = new(0);
+    let a0: bool = push(write ar, 10);
+    let a1: bool = push(write ar, 20);
+    let a2: bool = push(write ar, 30);
+    let asum: i64 = get(read ar, 0) + get(read ar, 1) + get(read ar, 2);   // 60
+    let acount: u32 = count(read ar);                                       // 3
+    reset(write ar);
+    let acount2: u32 = count(read ar);                                      // 0
+
+    // --- core/opt ------------------------------------------------------------
+    let s1: Opt[i64] = Opt::Some(1);
+    let n1: Opt[i64] = Opt::None;
+    let mut ob: i64 = 0;
+    if is_some(read s1) { ob = ob + 10; }                                   // +10
+    if is_none(read n1) { ob = ob + 100; }                                  // +100
+    let ov: i64 = unwrap_or(s1, 0) + unwrap_or(n1, 5);                      // 1 + 5 = 6
+
+    // --- core/res: error widening `IoErr` -> `AppErr` (From impl in `res`) ---
+    let mut dok: i64 = 0;
+    match decode(true) {
+        Res::Ok(v) => { dok = v; }                                         // 43
+        Res::Err(e) => { dok = -1; }
+    }
+    let okr: Res[i64, bool] = Res::Ok(9);
+    let mut ib: i64 = 0;
+    if is_ok(read okr) { ib = 7; }                                          // 7
+
+    // --- std/bump: build an Alloc over a caller-provided window --------------
+    let mut bs: Bump = with_window(16777216, 1048576);
+    let al: Alloc = mk_alloc(write bs);
+
+    // --- std/list: Box-chain over the Alloc; alloc-on-drop by construction ---
+    let mut lst: List[i64] = List::Nil;
+    match push_front(read al, lst, 3) { Grow::Grown(nl) => { lst = nl; } Grow::GrowOom => { return -2; } }
+    match push_front(read al, lst, 1) { Grow::Grown(nl) => { lst = nl; } Grow::GrowOom => { return -2; } }
+    match push_front(read al, lst, 4) { Grow::Grown(nl) => { lst = nl; } Grow::GrowOom => { return -2; } }
+    let ln: u32 = length(read lst);                                        // 3
+
+    // pop the front (4), keep the rest ([1, 3])
+    let pop1: Popped[i64] = pop_front(lst);
+    let it: Opt[i64] = pop1.item;
+    let rst: List[i64] = pop1.rest;
+    let popped_val: i64 = unwrap_or(it, 0);                                 // 4
+    let rest_len: u32 = length(read rst);                                  // 2
+
+    // --- std/list/Cell: the generic user drop hook (alloc-on-drop) -----------
+    let mut cv: i64 = 0;
+    match cell(read al, 99) {
+        CellRes::Made(c) => { cv = cell_get(read c); }                      // 99; c drops -> hook + free
+        CellRes::CellOom => { return -3; }
+    }
+
+    // rst (a List) drops here -> structural Box free -> alloc (main is alloc).
+    return asum + conv i64 acount + conv i64 acount2
+         + ob + ov + dok + ib
+         + conv i64 ln + popped_val + conv i64 rest_len + cv;
+}

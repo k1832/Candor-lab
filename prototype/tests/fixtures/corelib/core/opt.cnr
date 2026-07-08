@@ -1,0 +1,42 @@
+// core layer (design 0008 §5): the always-available, never-allocating floor.
+// NO function in this module carries `alloc`; the checker's effect partition
+// (design 0001 §3.2) proves it, so every item here is callable from the
+// ground floor (interrupt / no_std) — the P9 subtractive base.
+//
+// `Opt[T]` is result-shaped: `Some` is the `ok`-marked variant (design 0006),
+// so `?` propagates `None` through an `Opt`-returning caller.
+//
+// FRICTION — no closures / no higher-order inference. A `map[T,U](Opt[T],
+// fn(T)->U) -> Opt[U]` is deliberately NOT offered. Two measured language bites:
+//   (1) the prototype cannot infer `U` from a fn-pointer argument's *return*
+//       type (E1002) and there is no call-site turbofish (design 0007 §6.2),
+//       so a generic `map` is uncallable — it has nowhere to write the args; and
+//   (2) consuming an opaque `Opt[T]` by value trips the §3.4 opaque-drop `alloc`
+//       tax (the `None` arm drops a possibly-`Box`-bearing `T`), pushing `map`
+//       off the core ground floor.
+// A capturing closure would let a fold/map thread a transform by value; its
+// absence is the corelib's headline friction, recorded for OBL-GENERICS-ITER.
+pub enum Opt[T] { ok Some(T), None }
+
+pub fn is_some[T](o: read Opt[T]) -> bool {
+    match o {
+        Opt::Some(v) => { return true; }
+        Opt::None => { return false; }
+    }
+}
+
+pub fn is_none[T](o: read Opt[T]) -> bool {
+    match o {
+        Opt::Some(v) => { return false; }
+        Opt::None => { return true; }
+    }
+}
+
+// `T: copy` is load-bearing: the default `d` and the `Some` payload are returned
+// by value, and `copy` makes `Opt[T]` drop-inert so this stays non-`alloc`.
+pub fn unwrap_or[T: copy](o: Opt[T], d: T) -> T {
+    match o {
+        Opt::Some(v) => { return v; }
+        Opt::None => { return d; }
+    }
+}

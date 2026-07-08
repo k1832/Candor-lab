@@ -1,0 +1,1 @@
+pub interface From[E] { fn from(e: E) -> Self; }

@@ -1,0 +1,36 @@
+// std layer: a bump allocator over a caller-provided address window, producing
+// the `std::alloc` handle. Ported from the Bet-5 parser infrastructure (design
+// 0001 §11.4 shape) to real syntax + modules. Its two `unsafe` valves are the
+// ONLY valves in the seed; everything above them is value + borrow gear, and
+// each valve's justification is a true liveness/aliasing promise the checker
+// cannot verify (design 0001 §6.1).
+use std::alloc::{Alloc, AllocVtable};
+
+pub struct Bump { next: usize, end: usize }
+
+// the caller reserves the backing window `[base, base + size)` — a region of the
+// flat address space handed to this arena alone.
+pub fn with_window(base: usize, size: usize) -> Bump {
+    return Bump { next: base, end: base + size };
+}
+
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live Bump whose [next, end) window is reserved to this arena alone (no other code hands out addresses from it); the carved block stays inside [next, end)" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let aligned: usize = (b.next + align - 1) / align * align;
+        if aligned + size > b.end { return ptr_null[u8](); }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+
+// a bump arena never frees an individual block; it dies with its window.
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit { }
+
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+
+pub fn mk_alloc(state: write Bump) -> Alloc {
+    unsafe "ctx (the caller's Bump local) and vt (the static BUMP_VT) outlive every copy of this handle and every Box it serves: the caller guarantees the window and BUMP_VT live for the whole run, and every Box is dropped before the window dies" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) };
+    }
+}

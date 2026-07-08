@@ -1,0 +1,87 @@
+// std layer: a singly-linked (cons) `List[T]` over an explicit `Alloc` handle,
+// its chain owned through `Box` (design 0001 §6.2) — the exact shape of design
+// 0007 §8.1. Dropping a `List` frees the whole chain via the compiler's
+// structural `Box` drop, which is `alloc`-marked (§6.2/§6.3): `List` is
+// ALLOC-ON-DROP BY CONSTRUCTION. A *non-alloc* consumer that lets a `List` die
+// is rejected with E0401 — the P2 one-way partition working exactly as designed
+// (freeing is allocator work, forbidden on the ground floor; see the corelib
+// test `list_drop_is_alloc_taxed`).
+//
+// PROTOTYPE-BUG DEVIATION (stage-3 finding, see run report): the task's
+// `pub struct List[T] { .. }` wrapper (a `head` field beside a `u32` length)
+// cannot be used — a generic struct that contains a recursive `Box`-bearing
+// generic enum reads its *scalar* sibling fields as 0 (a monomorphization
+// layout bug; enum-typed siblings such as `Popped` below are unaffected). So
+// `List` is the recursive generic ENUM directly; the empty list is `List::Nil`
+// and `length` is computed by walking the chain.
+//
+// FRICTION — a user `drop` hook and a mutable container are mutually exclusive
+// here. Generic drop hooks just shipped, but a cons `List` carries none: an enum
+// cannot host a `drop` hook (parse error), and even a struct wrapper could not,
+// because a drop-hooked type cannot be partially moved (E0303) and there is no
+// swap/replace primitive, so `push_front`/`pop_front` (which move the head out
+// to rebuild the chain) would become inexpressible. A generic USER drop hook is
+// therefore exercised on `Cell[T]` below — the one shape where a hook and E0303
+// coexist: a value built, borrowed, and dropped, but never taken apart.
+// Recorded for OBL-GENERICS-ITER (mutation / iteration protocol).
+use core::opt::{Opt};
+use std::alloc::{Alloc};
+
+pub enum List[T] { Nil, Cons(T, Box List[T]) }
+
+// value-semantics: with no in-place mutation of an owned linked structure (no
+// swap; E0310 forbids moving the head out through a borrow), `pop_front`
+// consumes the list and returns the popped item alongside the shrunk rest.
+pub struct Popped[T] { item: Opt[T], rest: List[T] }
+
+// prepend result: `Grown` is `ok`-marked; OOM is a value (design 0001 §6.2).
+pub enum Grow[T] { ok Grown(List[T]), GrowOom }
+
+// `alloc`-marked because it calls `box` (unconditional, §4.1). The old list is
+// boxed WHOLE (a full move — never a partial move) and `x` is prepended.
+pub fn push_front[T](a: read Alloc, l: List[T], x: T) alloc -> Grow[T] {
+    match box(a, l) {
+        BoxResult::oom => { return Grow::GrowOom; }
+        BoxResult::boxed(b) => { return Grow::Grown(List::Cons(x, b)); }
+    }
+}
+
+// `alloc`-marked because `unbox` frees the head cell (§6.2). Returns the popped
+// item as `core::opt::Opt[T]` — a generic enum from another module.
+pub fn pop_front[T](l: List[T]) alloc -> Popped[T] {
+    match l {
+        List::Nil => {
+            return Popped { item: Opt::None, rest: List::Nil };
+        }
+        List::Cons(x, tail) => {
+            return Popped { item: Opt::Some(x), rest: unbox(tail) };
+        }
+    }
+}
+
+// walk-based length: `read (tail.*.*)` peels the match-borrow, then the `Box`,
+// to reborrow the pointee `List`. (Named `length`, not `len`: `len` is the
+// built-in slice-length intrinsic returning `usize`.)
+pub fn length[T](l: read List[T]) -> u32 {
+    match l {
+        List::Nil => { return 0u32; }
+        List::Cons(x, tail) => { return 1u32 + length(read (tail.*.*)); }
+    }
+}
+
+// A generic USER `drop` hook — its first real use in the seed (design 0007 §3.4).
+// `Cell[T]` owns a `Box T` (a direct field, not a recursive enum, so the layout
+// bug above does not apply); the hook runs before the structural `Box` free, so
+// `Cell` is alloc-on-drop and a non-alloc consumer dropping it is E0401-taxed,
+// exactly like `List`. `Cell` is never taken apart, so the hook and E0303 coexist.
+pub struct Cell[T] { boxed: Box T } drop(write self) { trace(0); }
+pub enum CellRes[T] { ok Made(Cell[T]), CellOom }
+
+pub fn cell[T](a: read Alloc, v: T) alloc -> CellRes[T] {
+    match box(a, v) {
+        BoxResult::oom => { return CellRes::CellOom; }
+        BoxResult::boxed(b) => { return CellRes::Made(Cell { boxed: b }); }
+    }
+}
+
+pub fn cell_get[T: copy](c: read Cell[T]) -> T { return c.boxed.*; }

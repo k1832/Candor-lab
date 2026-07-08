@@ -1,0 +1,36 @@
+// core layer: the generic fixed-backing arena of design 0007 §8.2, grown to
+// push/get/reset/count. `T: copy` is load-bearing (§3.1): the backing is an
+// *inline* `[N]T` array — NOT a `Box`, because core never allocates (design
+// 0008 §5) — and `get` copies an element out by value, so no borrow crosses the
+// signature and no region variable is needed. `T: copy` also makes `Arena[T]`
+// drop-inert (§3.3): it stays on the no-alloc ground floor even on `drop`, and
+// the §3.4 opaque-drop tax cannot bite. An out-of-range index faults through the
+// built-in array bounds check (design 0001 §5) — a fault, not a value (P7).
+pub struct Arena[T: copy] { mem: [8]T, count: u32 }
+
+// a `copy` fill seeds the fixed backing (arrays are fully initialized, NN#5).
+pub fn new[T: copy](fill: T) -> Arena[T] {
+    return Arena { mem: [fill, fill, fill, fill, fill, fill, fill, fill], count: 0u32 };
+}
+
+// push returns `false` when the fixed capacity is spent (a value, not a fault).
+pub fn push[T: copy](ar: write Arena[T], x: T) -> bool {
+    if ar.*.count >= 8u32 { return false; }
+    let i: u32 = ar.*.count;
+    ar.*.mem[conv usize i] = x;
+    ar.*.count = i + 1u32;
+    return true;
+}
+
+// bounds-faulting read: `i >= 8` faults on the array index (design 0001 §5).
+pub fn get[T: copy](ar: read Arena[T], i: u32) -> T {
+    return ar.mem[conv usize i];
+}
+
+pub fn reset[T: copy](ar: write Arena[T]) -> unit {
+    ar.*.count = 0u32;
+}
+
+pub fn count[T: copy](ar: read Arena[T]) -> u32 {
+    return ar.count;
+}

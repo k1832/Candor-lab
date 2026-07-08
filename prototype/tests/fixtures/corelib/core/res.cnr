@@ -1,0 +1,44 @@
+// core layer: a generic result `Res[T, E]`. `Ok` is the `ok`-marked variant.
+// Nothing here allocates.
+//
+// This module is the seed's cross-type error-conversion demonstration
+// (design 0007 §7.1): a `From` impl between two error types. The coherence key
+// is the *instantiated* interface `(From[IoErr], AppErr)` (§2.3), and the impl
+// is placed legally in `AppErr`'s own module — here (the orphan rule; the
+// misplaced-impl case is `corelib_neg_orphan`, which faults E1013).
+//
+// STAGE-3 FINDING (see the run report): the `?` operator is NOT wired into the
+// module-tree checker — E0712 fires for BOTH same-type and cross-type `?` in any
+// multi-file program, so the ergonomic `let n = read_at(ok)?;` (which desugars
+// to a call to `AppErr::from`, design 0007 §7.1) cannot appear in-tree. In-tree
+// we widen the error explicitly (the exact value `from` would produce); the
+// `From` impl still checks at its definition site (coherence). The `?` sugar is
+// verified single-file in the corelib test (`cross_type_question_single_file`).
+pub enum Res[T, E] { ok Ok(T), Err(E) }
+
+pub enum IoErr { Eof, Bad }
+pub enum AppErr { FromIo(IoErr), Denied }
+
+interface From[E] { fn from(e: E) -> Self; }
+impl From[IoErr] for AppErr { fn from(e: IoErr) -> Self { return AppErr::FromIo(e); } }
+
+// a low-level op that fails with the narrow `IoErr`.
+fn read_at(ok: bool) -> Res[i64, IoErr] {
+    if ok { return Res::Ok(42); }
+    return Res::Err(IoErr::Eof);
+}
+
+// widen `IoErr` -> `AppErr` (what cross-type `?` would do via the `From` impl).
+pub fn decode(ok: bool) -> Res[i64, AppErr] {
+    match read_at(ok) {
+        Res::Ok(v) => { return Res::Ok(v + 1); }
+        Res::Err(e) => { return Res::Err(AppErr::FromIo(e)); }
+    }
+}
+
+pub fn is_ok[T, E](r: read Res[T, E]) -> bool {
+    match r {
+        Res::Ok(v) => { return true; }
+        Res::Err(e) => { return false; }
+    }
+}

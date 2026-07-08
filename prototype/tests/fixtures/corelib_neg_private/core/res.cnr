@@ -1,0 +1,3 @@
+pub enum Res[T, E] { ok Ok(T), Err(E) }
+// `read_at` is a private helper (no `pub`) — internal to `res`.
+fn read_at(ok: bool) -> Res[i64, i64] { if ok { return Res::Ok(1); } return Res::Err(0); }

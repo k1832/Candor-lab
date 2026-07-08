@@ -192,3 +192,11 @@ Spec 01 §2.3 lists min_of/max_of as normative intrinsics; the real front-end de
 report) and the lexer table omits them. Resolve by implementing the two intrinsics (trivial
 compile-time constants) or downgrading the spec entry to reserved; the grammar highlights them
 per spec meanwhile. Gate: chapter 01 NORMATIVE promotion for that clause.
+
+## OBL-GENERICS-ITER evidence update (stdlib seed, 2026-07-08)
+
+The seed gathered the concrete friction: (a) no closures/higher-order inference makes Opt::map
+unwritable (E1002: U uninferable from a fn-pointer return; no turbofish; the opaque-drop alloc
+tax compounds it); (b) no swap/replace plus E0303 plus struct-only drop hooks make "mutable
+container with a user drop hook" mutually exclusive - containers free structurally or hooks live
+on wrapper cells. Both feed the iteration/associated-types design round.
