@@ -130,3 +130,19 @@ One lesson per entry, one-line summary first.
   Build with DISTINCT bindings (`l1 = f(.., l0)`) to avoid it; the bug itself is
   a pre-existing move-tracking gap in the interpreter's assignment drop, not the
   `for`-desugar (2026-07-08).
+
+- **Impl/interface conformance and the reassign double-drop were both real; fixed
+  2026-07-08.** (1) Interface method-set matching (E1014/E1015) existed but SIGNATURE
+  conformance did not — an impl could diverge on self mode, param count/mode/type,
+  return, or effect marker and be accepted. Now checked in `resolve_impl`
+  (`check_impl_conformance`, E1021-E1026) by substituting Self->target, iface
+  params->iface args, Self::Assoc->the impl binding, then comparing UNDER-LOWERED
+  param types + modes and borrow-wrapped returns. Interface/impl methods cannot
+  declare region variables in the grammar, so region conformance is subsumed by
+  borrow-kind matching (no independent region-divergence test is writable). Extra
+  impl methods stay REJECTED (E1014) — one interface, one shape. (2) The assign path
+  dropped the old value BEFORE evaluating the RHS, so `lst = push(a, lst)` freed the
+  old chain then re-embedded/re-freed it — double free, masked by the no-op bump
+  free. Fix: evaluate RHS first, then drop-old only if `place_owned` (which already
+  consults the move mask) holds, using the local's LIVE mask not `MoveMask::default()`.
+  A counting allocator (trace +5555/-5555) unmasks it in tests.
