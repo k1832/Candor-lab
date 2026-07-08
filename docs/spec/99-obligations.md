@@ -175,3 +175,13 @@ Resolution (2026-07-08, review #1): real-syntax spelling `read[r] [T]` /
 `write[r] [T]` adopted in design 0006 §2.2; 0001 §3.3 amended to state the
 counting rule (slice parameters count as borrow parameters); prototype stopgap
 `slice[r] T` / `slice_mut[r] T` added.
+
+## OBL-WINDOW status update (2026-07-08)
+
+The rigorous-informal single-threaded core is drafted, adversarially reviewed (three
+theorem-breaks found and repaired: docs/reviews/2026-07-08-fault-window-review-1.md), and
+revised (docs/spec/drafts/fault-window-formalization.md). Discharged: Containment,
+Prefix-determinism, NN#1/NN#5 preservation, and the collapse-to-precise limit under a sound
+effect-order-total reordering license. Open: concurrency composition (stated as conjecture with
+obligations O1-O5), mechanization, compiler correctness, and the fault-torn multi-store
+transaction residual (deferred to the volatile-access design).
