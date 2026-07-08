@@ -1,0 +1,10 @@
+// Root module (`main.cnr`): the program entry lives here (design 0008 §6).
+// Named import brings `area` in bare; namespace import binds `square` as an alias.
+use geometry::{area};
+use shapes::square;
+
+fn main() -> i64 {
+    let a: i64 = area(3, 4);
+    let u: i64 = square::unit_area();
+    return a + u;
+}

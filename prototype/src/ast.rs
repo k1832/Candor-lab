@@ -26,6 +26,18 @@ pub enum Item {
     Static(StaticDecl),
 }
 
+/// A `use` import declaration (design 0008 §3). Parsed by the real front-end
+/// only; the module layer (`crate::modules`) resolves it. `segments` is the
+/// module path (`use a::b` -> `["a","b"]`); `names` is `Some` for a group import
+/// (`use a::b::{x, y}` -> `Some(["x","y"])`) and `None` for a namespace import
+/// (`use a::b;`, binding the module `b` as an alias).
+#[derive(Clone, Debug)]
+pub struct UseDecl {
+    pub segments: Vec<String>,
+    pub names: Option<Vec<String>>,
+    pub span: Span,
+}
+
 #[derive(Clone, Debug)]
 pub struct StructDecl {
     pub copy: bool,

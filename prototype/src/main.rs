@@ -76,6 +76,9 @@ fn run_parse(path: &str) -> ExitCode {
 }
 
 fn run_check(path: &str) -> ExitCode {
+    if std::path::Path::new(path).is_dir() {
+        return report_diags(candor_proto::check_dir(std::path::Path::new(path)));
+    }
     let src = match read(path) {
         Ok(s) => s,
         Err(c) => return c,
@@ -103,7 +106,30 @@ fn run_check(path: &str) -> ExitCode {
     }
 }
 
+/// Print a diagnostics result (used by both single-file and module-tree check).
+fn report_diags(checked: Result<Vec<candor_proto::diag::Diag>, candor_proto::diag::Diag>) -> ExitCode {
+    match checked {
+        Ok(diags) => {
+            for d in &diags {
+                println!("{}", d.to_json());
+            }
+            if diags.is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(diag) => {
+            println!("{}", diag.to_json());
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn run_run(path: &str) -> ExitCode {
+    if std::path::Path::new(path).is_dir() {
+        return report_run(candor_proto::run_dir(std::path::Path::new(path)));
+    }
     let src = match read(path) {
         Ok(s) => s,
         Err(c) => return c,
@@ -113,6 +139,11 @@ fn run_run(path: &str) -> ExitCode {
     } else {
         candor_proto::run_source(&src)
     };
+    report_run(outcome)
+}
+
+/// Print a run outcome (shared by single-file and module-tree run).
+fn report_run(outcome: candor_proto::RunResult) -> ExitCode {
     match outcome {
         candor_proto::RunResult::Ok(run) => {
             println!("{}", run.ret);

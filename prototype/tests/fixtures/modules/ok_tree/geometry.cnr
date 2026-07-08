@@ -1,0 +1,9 @@
+// Module `geometry`. `area` is exported; `mul` is a private helper (no `pub`),
+// reachable only within this file.
+pub fn area(w: i64, h: i64) -> i64 {
+    return mul(w, h);
+}
+
+fn mul(a: i64, b: i64) -> i64 {
+    return a * b;
+}

@@ -1,0 +1,4 @@
+// Module `shapes::square` — a file in the `shapes/` namespace directory.
+pub fn unit_area() -> i64 {
+    return 1;
+}

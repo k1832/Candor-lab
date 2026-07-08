@@ -10,6 +10,7 @@ pub mod count;
 pub mod diag;
 pub mod interp;
 pub mod lexer;
+pub mod modules;
 pub mod parser;
 pub mod real;
 pub mod resolve;
@@ -102,6 +103,40 @@ pub fn run_source_real(src: &str) -> RunResult {
         return RunResult::CheckErrors(diags);
     }
     match interp::run_program(&program) {
+        Ok(run) => RunResult::Ok(run),
+        Err(f) => RunResult::Fault(f),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Module-tree (`.cnr` directory) entry points (design 0008 stage 1). A directory
+// argument is a module tree; it is discovered, `use`-resolved, visibility- and
+// cycle-checked, then merged into one program fed to the shared real-syntax
+// pipeline. Single files keep their existing behavior.
+// ---------------------------------------------------------------------------
+
+/// Check a module tree rooted at `dir`. Returns module-layer diagnostics
+/// (imports, visibility, cycles) followed by the shared checker's diagnostics,
+/// or a hard I/O/parse error as a single `Diag`.
+pub fn check_dir(dir: &std::path::Path) -> Result<Vec<Diag>, Diag> {
+    let build = modules::build_tree(dir)?;
+    let mut diags = build.diags;
+    diags.extend(check::check_program_real(&build.program));
+    Ok(diags)
+}
+
+/// Build, check, then run a module tree's `main` (in the root `main.cnr`).
+pub fn run_dir(dir: &std::path::Path) -> RunResult {
+    let build = match modules::build_tree(dir) {
+        Ok(b) => b,
+        Err(d) => return RunResult::ParseError(d),
+    };
+    let mut diags = build.diags;
+    diags.extend(check::check_program_real(&build.program));
+    if diags.iter().any(|d| matches!(d.severity, diag::Severity::Error)) {
+        return RunResult::CheckErrors(diags);
+    }
+    match interp::run_program(&build.program) {
         Ok(run) => RunResult::Ok(run),
         Err(f) => RunResult::Fault(f),
     }

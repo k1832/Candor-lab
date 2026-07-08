@@ -1,0 +1,5 @@
+use a::{fa};
+
+pub fn fb() -> i64 {
+    return fa();
+}

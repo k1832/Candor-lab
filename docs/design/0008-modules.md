@@ -200,6 +200,11 @@ across the whole build (and, with the reproducible-build guarantee of P16,
 across builds), so an instantiation `Vec<u32>` needed by two modules is emitted
 once, keyed by content, regardless of strategy.
 
+**Program entry (ruling, 2026-07-08, surfaced by stage 1):** a directory build's
+root module is the root-level file `main.cd` (prototype: `main.cnr`), and the
+program entry is its `fn main` — the filesystem-is-the-tree convention applied
+to entry as well; no manifest entry-point field.
+
 ### 3. The dependency DAG
 
 **Import spelling.** `use net::tcp;` brings the module `tcp` into scope (uses
@@ -342,6 +347,8 @@ single-file prototype, in this order:
 4. **The content-addressed codegen cache** for generics/`inline` (§2.4) — this
    stage co-arrives with the P11 generics implementation, since it is that
    feature's plumbing.
+
+**Status — stages 1–2 shipped** in the prototype (`prototype/src/modules.rs`, real (`.cnr`) front-end only; single files stay valid degenerate modules): filesystem→module mapping, `use` resolution, `pub`/private visibility (error family `E09xx`), and the acyclic-DAG check with the P4 cycle diagnostic; the `foo.cnr`-beside-`foo/` body merge, `pub use` re-exports, and the §2 interface-artifact/hash tiers remain deferred.
 
 Stages 1–2 are a small import resolver and can land before generics exist;
 stages 3–4 are where the P20 targets in CI (single-digit-second incremental

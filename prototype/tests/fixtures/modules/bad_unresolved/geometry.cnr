@@ -1,0 +1,3 @@
+pub fn area() -> i64 {
+    return 1;
+}

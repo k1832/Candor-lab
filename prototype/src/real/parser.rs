@@ -28,13 +28,18 @@ pub struct RParser {
     pos: usize,
     last_end: usize,
     no_struct: bool,
+    /// Module-layer side channel (design 0008): `use` decls collected during
+    /// `parse_program`, discarded by the single-file entry point.
+    mod_uses: Vec<UseDecl>,
+    /// Visibility (`pub`) of each item, parallel to the returned `Program.items`.
+    mod_vis: Vec<bool>,
 }
 
 type PResult<T> = Result<T, Diag>;
 
 impl RParser {
     pub fn new(tokens: Vec<RToken>) -> RParser {
-        RParser { tokens, pos: 0, last_end: 0, no_struct: false }
+        RParser { tokens, pos: 0, last_end: 0, no_struct: false, mod_uses: Vec::new(), mod_vis: Vec::new() }
     }
 
     // ----- cursor ----------------------------------------------------------
@@ -112,9 +117,52 @@ impl RParser {
     pub fn parse_program(&mut self) -> PResult<Program> {
         let mut items = Vec::new();
         while !self.at(&RTok::Eof) {
+            // Item-preamble `pub` (design 0008 §2) and `use` (§3) are contextual
+            // keywords recognized only at item-leading position, so they stay
+            // usable as ordinary identifiers elsewhere.
+            let is_pub = self.at_ident("pub");
+            if is_pub {
+                self.bump();
+            }
+            if self.at_ident("use") {
+                let u = self.parse_use()?;
+                // `pub use` (module re-export, design 0008 §3) is beyond stage 1;
+                // the visibility flag on an import is ignored here.
+                self.mod_uses.push(u);
+                continue;
+            }
             items.push(self.parse_item()?);
+            self.mod_vis.push(is_pub);
         }
         Ok(Program { items })
+    }
+
+    /// Parse a `use` import declaration (design 0008 §3). The path separator is
+    /// `::`; one-token lookahead after `::` decides the form — `{` opens a group
+    /// import, an identifier continues the module path.
+    fn parse_use(&mut self) -> PResult<UseDecl> {
+        let lo = self.cur_start();
+        self.bump(); // `use`
+        let mut segments = vec![self.expect_ident("a module path segment")?];
+        let mut names: Option<Vec<String>> = None;
+        while self.eat(&RTok::ColonColon) {
+            if self.at(&RTok::LBrace) {
+                self.bump();
+                let mut ns = Vec::new();
+                while !self.at(&RTok::RBrace) {
+                    ns.push(self.expect_ident("an imported item name")?);
+                    if !self.eat(&RTok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&RTok::RBrace, "`}`")?;
+                names = Some(ns);
+                break;
+            }
+            segments.push(self.expect_ident("a module path segment")?);
+        }
+        self.expect(&RTok::Semi, "`;`")?;
+        Ok(UseDecl { segments, names, span: self.span_from(lo) })
     }
 
     fn parse_item(&mut self) -> PResult<Item> {
@@ -1254,4 +1302,13 @@ fn describe(k: &RTok) -> String {
 /// Convenience wrapper: parse a real-syntax token stream into the shared AST.
 pub fn parse(tokens: Vec<RToken>) -> PResult<Program> {
     RParser::new(tokens).parse_program()
+}
+
+/// Parse a real-syntax token stream as a *module*: the shared AST plus the
+/// module-layer side channels (design 0008) — the `use` imports and the
+/// per-item visibility flags parallel to `Program.items`.
+pub fn parse_module(tokens: Vec<RToken>) -> PResult<(Program, Vec<UseDecl>, Vec<bool>)> {
+    let mut p = RParser::new(tokens);
+    let prog = p.parse_program()?;
+    Ok((prog, p.mod_uses, p.mod_vis))
 }

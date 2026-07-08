@@ -1,0 +1,4 @@
+// `secret` is private (no `pub`): importing it must be rejected (E0903).
+fn secret() -> i64 {
+    return 7;
+}
