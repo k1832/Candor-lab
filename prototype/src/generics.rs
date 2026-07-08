@@ -76,6 +76,20 @@ pub fn resolve_gty(
                 Type::Error
             }
         }
+        TyKind::Proj { base, assoc } => {
+            if base != "Self" && !params.contains(base) {
+                diags.push(
+                    Diag::error(
+                        "E1017",
+                        format!("associated-type projection `{base}::{assoc}` has no bounded base"),
+                        ty.span,
+                    )
+                    .with_note("`Base::Assoc` needs `Base` a type parameter bounded by an interface with that member (design 0009 §2.2)", None),
+                );
+                return Type::Error;
+            }
+            Type::Proj(base.clone(), assoc.clone())
+        }
         TyKind::App { name, args } => {
             let ra: Vec<Type> = args
                 .iter()
@@ -146,7 +160,14 @@ pub fn resolve_tables(prog: &Program, items: &mut Items, diags: &mut Vec<Diag>) 
     // Interfaces first (impls reference them).
     for it in &prog.items {
         if let Item::Interface(idecl) = it {
-            let pset: HashSet<String> = idecl.type_params.iter().map(|p| p.name.clone()).collect();
+            let mut pset: HashSet<String> = idecl.type_params.iter().map(|p| p.name.clone()).collect();
+            // A bare mention of the interface's associated-type member inside its
+            // own method signatures denotes `Self::Item` (design 0009 §2.1/§2.2):
+            // add it to the parameter scope so it resolves, then re-project it.
+            let assoc = &idecl.assoc_type;
+            if let Some(a) = assoc {
+                pset.insert(a.clone());
+            }
             let methods = idecl
                 .methods
                 .iter()
@@ -156,11 +177,11 @@ pub fn resolve_tables(prog: &Program, items: &mut Items, diags: &mut Vec<Diag>) 
                         .iter()
                         .map(|p| {
                             let t = resolve_gty(&p.ty, &pset, &known_types, &generic_types, diags);
-                            (p.mode, lower_param(p.mode, t))
+                            (p.mode, lower_param(p.mode, selfify_assoc(&t, assoc)))
                         })
                         .collect();
                     let ret = match &m.ret {
-                        Some(rt) => ret_type(rt, &pset, &known_types, &generic_types, diags),
+                        Some(rt) => selfify_assoc(&ret_type(rt, &pset, &known_types, &generic_types, diags), assoc),
                         None => Type::unit(),
                     };
                     IfaceMethod { name: m.name.clone(), has_self: m.has_self, self_mode: m.self_mode, params, alloc: m.alloc, ret, span: m.span }
@@ -171,6 +192,7 @@ pub fn resolve_tables(prog: &Program, items: &mut Items, diags: &mut Vec<Diag>) 
                 IfaceInfo {
                     name: idecl.name.clone(),
                     type_params: idecl.type_params.iter().map(|p| p.name.clone()).collect(),
+                    assoc_type: idecl.assoc_type.clone(),
                     methods,
                     span: idecl.span,
                 },
@@ -239,7 +261,7 @@ pub fn resolve_tables(prog: &Program, items: &mut Items, diags: &mut Vec<Diag>) 
                 continue;
             }
             let pset: HashSet<String> = f.type_params.iter().map(|p| p.name.clone()).collect();
-            let params = f
+            let params: Vec<ParamInfo> = f
                 .params
                 .iter()
                 .map(|p| {
@@ -262,6 +284,37 @@ pub fn resolve_tables(prog: &Program, items: &mut Items, diags: &mut Vec<Diag>) 
                 ),
                 None => (Type::unit(), None, f.span),
             };
+            // Validate every associated-type projection in the signature (design
+            // 0009 §2.2): `Base::Assoc` needs `Base` bounded by an interface that
+            // declares `Assoc`. Catches projection on an unbounded parameter.
+            {
+                let bounds: Vec<(String, Vec<String>)> =
+                    f.type_params.iter().map(|p| (p.name.clone(), p.bounds.clone())).collect();
+                let mut projs: Vec<(String, String)> = Vec::new();
+                for pi in &params {
+                    collect_projs(&pi.decl_ty, &mut projs);
+                }
+                collect_projs(&ret, &mut projs);
+                for (base, assoc) in &projs {
+                    let ok = base == "Self"
+                        || bounds.iter().any(|(n, bs)| {
+                            n == base
+                                && bs.iter().any(|b| {
+                                    items.interfaces.get(b).map(|i| i.assoc_type.as_deref() == Some(assoc.as_str())).unwrap_or(false)
+                                })
+                        });
+                    if !ok {
+                        diags.push(
+                            Diag::error(
+                                "E1017",
+                                format!("associated-type projection `{base}::{assoc}` requires `{base}` bounded by an interface declaring `type {assoc}`"),
+                                f.span,
+                            )
+                            .with_note("bound the parameter with the interface that owns the associated type (design 0009 §2.2)", None),
+                        );
+                    }
+                }
+            }
             items.generic_fns.insert(
                 f.name.clone(),
                 GenericFnSig {
@@ -284,6 +337,29 @@ pub fn resolve_tables(prog: &Program, items: &mut Items, diags: &mut Vec<Diag>) 
         if let Item::Impl(im) = it {
             resolve_impl(im, items, &known_types, &generic_types, &no_params, diags);
         }
+    }
+}
+
+/// Replace a bare `Named(assoc)` with `Proj("Self", assoc)` throughout a type:
+/// inside an interface, the member name denotes the projection on `Self` (§2.1).
+fn selfify_assoc(t: &Type, assoc: &Option<String>) -> Type {
+    let a = match assoc {
+        Some(a) => a,
+        None => return t.clone(),
+    };
+    match t {
+        Type::Param(n) if n == a => Type::Proj("Self".to_string(), a.clone()),
+        Type::Named(n) if n == a => Type::Proj("Self".to_string(), a.clone()),
+        Type::App(n, args) => Type::App(n.clone(), args.iter().map(|x| selfify_assoc(x, assoc)).collect()),
+        Type::Array(e, l) => Type::Array(Box::new(selfify_assoc(e, assoc)), l.clone()),
+        Type::Slice(e) => Type::Slice(Box::new(selfify_assoc(e, assoc))),
+        Type::SliceMut(e) => Type::SliceMut(Box::new(selfify_assoc(e, assoc))),
+        Type::RawPtr(e) => Type::RawPtr(Box::new(selfify_assoc(e, assoc))),
+        Type::Box(e) => Type::Box(Box::new(selfify_assoc(e, assoc))),
+        Type::BoxResult(e) => Type::BoxResult(Box::new(selfify_assoc(e, assoc))),
+        Type::Borrow(e) => Type::Borrow(Box::new(selfify_assoc(e, assoc))),
+        Type::BorrowMut(e) => Type::BorrowMut(Box::new(selfify_assoc(e, assoc))),
+        other => other.clone(),
     }
 }
 
@@ -430,6 +506,40 @@ fn resolve_impl(
             ));
         }
     }
+    // Associated-type binding (design 0009 §2.1): the impl must bind the member
+    // the interface declares (`type Item = T`), and only that member.
+    let assoc: Option<(String, Type)> = match (&iface_info.assoc_type, &im.assoc_binding) {
+        (Some(want), Some((got, bty))) => {
+            if want != got {
+                diags.push(Diag::error(
+                    "E1018",
+                    format!("impl of `{}` binds `type {got}`, but the interface declares `type {want}`", im.iface),
+                    im.span,
+                ));
+            }
+            Some((got.clone(), resolve_gty(bty, &pset, known, gen, diags)))
+        }
+        (Some(want), None) => {
+            diags.push(
+                Diag::error(
+                    "E1018",
+                    format!("impl of `{}` for `{}` is missing associated type `{want}`", im.iface, target),
+                    im.span,
+                )
+                .with_note("bind it with `type {want} = <type>;` in the impl body (design 0009 §2.1)", None),
+            );
+            None
+        }
+        (None, Some((got, _))) => {
+            diags.push(Diag::error(
+                "E1018",
+                format!("interface `{}` declares no associated type, but the impl binds `type {got}`", im.iface),
+                im.span,
+            ));
+            None
+        }
+        (None, None) => None,
+    };
     items.impls.push(ImplInfo {
         iface: im.iface.clone(),
         iface_args,
@@ -437,8 +547,21 @@ fn resolve_impl(
         type_params,
         target_args,
         methods,
+        assoc,
         span: im.span,
     });
+}
+
+/// Collect every associated-type projection `(base, assoc)` mentioned in `t`.
+fn collect_projs(t: &Type, out: &mut Vec<(String, String)>) {
+    match t {
+        Type::Proj(b, a) => out.push((b.clone(), a.clone())),
+        Type::App(_, args) => for x in args { collect_projs(x, out); },
+        Type::Array(e, _) | Type::Slice(e) | Type::SliceMut(e) | Type::RawPtr(e)
+        | Type::Box(e) | Type::BoxResult(e) | Type::Borrow(e) | Type::BorrowMut(e) => collect_projs(e, out),
+        Type::FnPtr(f) => { for (_, pt) in &f.params { collect_projs(pt, out); } collect_projs(&f.ret, out); }
+        _ => {}
+    }
 }
 
 /// Collect every `Type::Param` name mentioned in `t`.
@@ -560,6 +683,7 @@ pub fn mangle_ty(t: &Type) -> String {
         Type::BorrowMut(e) => format!("refmut_{}", mangle_ty(e)),
         Type::FnPtr(_) => "fnptr".to_string(),
         Type::Param(n) => n.clone(),
+        Type::Proj(b, a) => format!("{b}_{a}"),
         Type::Never => "never".to_string(),
         Type::Error => "err".to_string(),
     }
@@ -611,7 +735,16 @@ struct Monomorphizer<'a> {
     impl_done: HashSet<String>,
     /// Pending impl instances to emit: (app_impls index, concrete param types).
     impl_work: Vec<(usize, Vec<Type>)>,
+    /// Associated-type resolution table (design 0009 §2.2): each entry is
+    /// `(target_head, target_args, impl_param_names, assoc_member, assoc_type)`.
+    /// A projection `C::Assoc` resolves by unifying `C` with the target pattern
+    /// and substituting the impl params into `assoc_type`.
+    assoc_impls: Vec<AssocImpl>,
 }
+
+/// One associated-type resolution record (design 0009 §2.2):
+/// `(target_head, target_args, impl_param_names, assoc_member, assoc_type)`.
+type AssocImpl = (String, Vec<Type>, Vec<String>, String, Type);
 
 /// A monomorphizable impl whose target is an application (`impl[T] I for List[T]`
 /// or a concrete `impl I for AppErr[i64]`): its AST plus the resolved parametric
@@ -671,6 +804,18 @@ pub fn monomorphize(
             }
         }
     }
+    let mut assoc_impls: Vec<AssocImpl> = Vec::new();
+    for info in &qitems.impls {
+        if let Some((aname, aty)) = &info.assoc {
+            assoc_impls.push((
+                info.target.clone(),
+                info.target_args.clone(),
+                info.type_params.iter().map(|(n, _)| n.clone()).collect(),
+                aname.clone(),
+                aty.clone(),
+            ));
+        }
+    }
     let mut m = Monomorphizer {
         shapes,
         fn_done: HashSet::new(),
@@ -686,6 +831,7 @@ pub fn monomorphize(
         app_impls,
         impl_done: HashSet::new(),
         impl_work: Vec::new(),
+        assoc_impls,
     };
 
     // Seed from checker-reached instantiations.
@@ -983,6 +1129,10 @@ impl<'a> Monomorphizer<'a> {
             TyKind::Borrow(e) => Type::Borrow(Box::new(self.ast_to_type(e, map))),
             TyKind::BorrowMut(e) => Type::BorrowMut(Box::new(self.ast_to_type(e, map))),
             TyKind::FnPtr(_) => Type::Error,
+            TyKind::Proj { base, assoc } => {
+                let cbase = map.get(base).cloned().unwrap_or_else(|| Type::Named(base.clone()));
+                self.resolve_proj(&cbase, assoc)
+            }
         }
     }
 
@@ -1019,8 +1169,39 @@ impl<'a> Monomorphizer<'a> {
                 fp2.ret = Box::new(self.rewrite_ty(&fp2.ret, map));
                 TyKind::FnPtr(fp2)
             }
+            TyKind::Proj { base, assoc } => {
+                let cbase = map.get(base).cloned().unwrap_or_else(|| Type::Named(base.clone()));
+                let resolved = self.resolve_proj(&cbase, assoc);
+                self.type_to_ast_kind(&resolved)
+            }
         };
         Ty { kind, span: ty.span }
+    }
+
+    /// Resolve an associated-type projection `C::assoc` to its concrete type at
+    /// monomorphization (design 0009 §2.2): find the impl whose target unifies
+    /// with `C` and substitute its parameters into the `assoc` binding.
+    fn resolve_proj(&mut self, c: &Type, assoc: &str) -> Type {
+        for (head, targs, pnames, aname, aty) in self.assoc_impls.clone() {
+            if aname != assoc {
+                continue;
+            }
+            let mut map: HashMap<String, Type> = HashMap::new();
+            let matched = match c {
+                Type::Named(n) => *n == head && targs.is_empty(),
+                Type::App(n, args) => {
+                    *n == head
+                        && targs.len() == args.len()
+                        && targs.iter().zip(args).all(|(d, a)| unify_inst(d, a, &mut map))
+                }
+                _ => false,
+            };
+            if matched {
+                let _ = &pnames;
+                return subst(&aty, &map);
+            }
+        }
+        Type::Error
     }
 
     /// Semantic concrete `Type` -> AST `TyKind`, lowering generic apps to nominals.

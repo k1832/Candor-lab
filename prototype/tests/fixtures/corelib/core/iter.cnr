@@ -1,0 +1,28 @@
+// core layer (design 0009): the two by-value iteration protocols and their step
+// enum. These are ORDINARY library definitions — nothing compiler-known: two
+// interfaces each spending exactly one associated type (§2.3), and one generic
+// enum. The `for` statement desugars to `loop`+`match` over these (§4.2); the
+// operand's borrow mode selects the protocol (§4.1).
+//
+// `Iter` is the consuming protocol: `next(take self)` returns the item alongside
+// the successor iterator, dodging swap/replace (§3.1). It is `alloc`-marked,
+// uniformly (0007 §4.1): `List::next` must `unbox` its tail, so the marker is
+// forced onto the interface — consuming iteration is never the no-alloc floor.
+//
+// `Indexed` is the borrow-copy protocol: `at(read self, i)` copies an item out of
+// a `read` borrow with a loop-owned `usize` cursor (§3.2). It carries NO effect
+// marker — a copy-out over a `read` borrow allocates nothing — so `for x in read
+// coll` over an `Indexed` collection is the ground-floor, interrupt-callable walk.
+use core::opt::{Opt};
+
+pub enum IterStep[T, S] { ok More(T, S), Done }
+
+pub interface Iter {
+    type Item;
+    fn next(take self) alloc -> IterStep[Item, Self];
+}
+
+pub interface Indexed {
+    type Item;
+    fn at(read self, i: usize) -> Opt[Item];
+}

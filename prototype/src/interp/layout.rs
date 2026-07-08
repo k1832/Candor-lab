@@ -59,7 +59,7 @@ impl<'a> Layout<'a> {
                 }
             }
             Type::Never | Type::Error => 1,
-            Type::Param(_) | Type::App(_, _) => {
+            Type::Param(_) | Type::App(_, _) | Type::Proj(_, _) => {
                 unreachable!("generic types are monomorphized before interpretation")
             }
         }
@@ -90,7 +90,7 @@ impl<'a> Layout<'a> {
                 }
             }
             Type::Never | Type::Error => 0,
-            Type::Param(_) | Type::App(_, _) => {
+            Type::Param(_) | Type::App(_, _) | Type::Proj(_, _) => {
                 unreachable!("generic types are monomorphized before interpretation")
             }
         }

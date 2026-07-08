@@ -472,6 +472,11 @@ impl<'a> Rewriter<'a> {
                 }
                 self.rewrite_ty(&mut fp.ret);
             }
+            TyKind::Proj { base, .. } => {
+                if let Some(g) = self.scope.type_scope.get(base) {
+                    *base = g.clone();
+                }
+            }
             TyKind::Scalar(_) => {}
         }
     }

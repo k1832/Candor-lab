@@ -70,6 +70,8 @@ pub struct IfaceMethod {
 pub struct IfaceInfo {
     pub name: String,
     pub type_params: Vec<String>,
+    /// The one associated-type member name (design 0009 §2.1), if declared.
+    pub assoc_type: Option<String>,
     pub methods: Vec<IfaceMethod>,
     pub span: Span,
 }
@@ -92,6 +94,9 @@ pub struct ImplInfo {
     pub target_args: Vec<Type>,
     /// method name -> mangled free-function name.
     pub methods: HashMap<String, String>,
+    /// The resolved associated-type binding (`type Item = T`, design 0009 §2.1):
+    /// `(member name, bound type)`; the type may mention the impl's `Param`s.
+    pub assoc: Option<(String, Type)>,
     pub span: Span,
 }
 
@@ -164,6 +169,7 @@ impl<'a> Resolver<'a> {
                 name.clone(),
                 args.iter().map(|a| self.resolve_ty(a)).collect(),
             ),
+            TyKind::Proj { base, assoc } => Type::Proj(base.clone(), assoc.clone()),
             TyKind::Array { size, elem } => {
                 let len = match &size.kind {
                     ExprKind::IntLit { value, .. } => ArrayLen::Lit(*value),

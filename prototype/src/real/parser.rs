@@ -28,6 +28,8 @@ pub struct RParser {
     pos: usize,
     last_end: usize,
     no_struct: bool,
+    /// Fresh-name counter for the `for`-loop desugar (design 0009 §4.2).
+    for_ctr: usize,
     /// Module-layer side channel (design 0008): `use` decls collected during
     /// `parse_program`, discarded by the single-file entry point.
     mod_uses: Vec<UseDecl>,
@@ -39,7 +41,7 @@ type PResult<T> = Result<T, Diag>;
 
 impl RParser {
     pub fn new(tokens: Vec<RToken>) -> RParser {
-        RParser { tokens, pos: 0, last_end: 0, no_struct: false, mod_uses: Vec::new(), mod_vis: Vec::new() }
+        RParser { tokens, pos: 0, last_end: 0, no_struct: false, for_ctr: 0, mod_uses: Vec::new(), mod_vis: Vec::new() }
     }
 
     // ----- cursor ----------------------------------------------------------
@@ -230,11 +232,28 @@ impl RParser {
         let (_regions, type_params) = self.parse_decl_brackets()?;
         self.expect(&RTok::LBrace, "`{`")?;
         let mut methods = Vec::new();
+        let mut assoc_type: Option<String> = None;
         while !self.at(&RTok::RBrace) && !self.at(&RTok::Eof) {
+            // Contextual `type Ident;` associated-type member (design 0009 §4.4):
+            // `type` is a keyword only in an interface/impl body.
+            if self.at_ident("type") {
+                self.bump();
+                let aname = self.expect_ident("an associated type name")?;
+                self.expect(&RTok::Semi, "`;`")?;
+                if assoc_type.is_some() {
+                    return Err(Diag::error(
+                        "P0009",
+                        "an interface declares at most one associated type (design 0009 §2.3)",
+                        self.cur_span(),
+                    ));
+                }
+                assoc_type = Some(aname);
+                continue;
+            }
             methods.push(self.parse_method_sig()?);
         }
         self.expect(&RTok::RBrace, "`}`")?;
-        Ok(InterfaceDecl { name, type_params, methods, span: self.span_from(lo) })
+        Ok(InterfaceDecl { name, type_params, assoc_type, methods, span: self.span_from(lo) })
     }
 
     /// A method *signature* line inside an interface: `fn m(SELF, params) TAIL ->
@@ -315,11 +334,22 @@ impl RParser {
         let target = self.parse_type()?;
         self.expect(&RTok::LBrace, "`{`")?;
         let mut methods = Vec::new();
+        let mut assoc_binding: Option<(String, Ty)> = None;
         while !self.at(&RTok::RBrace) && !self.at(&RTok::Eof) {
+            // Contextual `type Ident = Type;` associated-type binding (§4.4).
+            if self.at_ident("type") {
+                self.bump();
+                let aname = self.expect_ident("an associated type name")?;
+                self.expect(&RTok::Eq, "`=`")?;
+                let bty = self.parse_type()?;
+                self.expect(&RTok::Semi, "`;`")?;
+                assoc_binding = Some((aname, bty));
+                continue;
+            }
             methods.push(self.parse_impl_method()?);
         }
         self.expect(&RTok::RBrace, "`}`")?;
-        Ok(ImplDecl { type_params, iface, iface_args, target, methods, home: None, span: self.span_from(lo) })
+        Ok(ImplDecl { type_params, iface, iface_args, target, assoc_binding, methods, home: None, span: self.span_from(lo) })
     }
 
     /// An impl method: like a free `fn` but its first parameter is a `self`
@@ -597,6 +627,14 @@ impl RParser {
             RTok::LBracket => self.parse_bracket_type()?,
             RTok::Ident(name) => {
                 self.bump();
+                // `Base::Assoc` in type position is an associated-type projection
+                // (design 0009 §2.2): a path whose head is a type-name token and
+                // whose final segment names the member. NN#13-clean (§4.4).
+                if self.at(&RTok::ColonColon) {
+                    self.bump();
+                    let assoc = self.expect_ident("an associated type name")?;
+                    return Ok(Ty { kind: TyKind::Proj { base: name, assoc }, span: self.span_from(lo) });
+                }
                 // A bracket *following* a type-name is a type-argument list
                 // (design 0007 §6.1.1 use-rule): `List[i64]`, `Pair[T]`.
                 if self.at(&RTok::LBracket) {
@@ -616,7 +654,13 @@ impl RParser {
             }
             RTok::Kw(RKw::SelfKw) => {
                 self.bump();
-                TyKind::Named("Self".to_string())
+                if self.at(&RTok::ColonColon) {
+                    self.bump();
+                    let assoc = self.expect_ident("an associated type name")?;
+                    TyKind::Proj { base: "Self".to_string(), assoc }
+                } else {
+                    TyKind::Named("Self".to_string())
+                }
             }
             _ => return Err(self.unexpected("a type")),
         };
@@ -785,6 +829,11 @@ impl RParser {
         if self.at_kw(RKw::Let) {
             return self.parse_let(lo);
         }
+        // `for` is a contextual keyword only in statement-leading position
+        // (design 0009 §4.4): a statement beginning with `for` is the loop.
+        if self.at_ident("for") {
+            return self.parse_for(lo);
+        }
         // A block-like expression in statement position terminates the statement
         // (spec 02 §5.2): no trailing `;`, and a following `(` starts a new
         // statement (never a call). Parse it directly, bypassing postfix.
@@ -818,6 +867,99 @@ impl RParser {
         };
         self.expect(&RTok::Semi, "`;`")?;
         Ok(Stmt { kind: StmtKind::Let { mutable, name, ty, init }, span: self.span_from(lo) })
+    }
+
+    /// Parse and DESUGAR `for PATTERN in OPERAND { BODY }` (design 0009 §4).
+    /// The operand's borrow mode selects the protocol (§4.1): a `read`-prefixed
+    /// operand is `Indexed` (borrow + copy), any other operand is `Iter`
+    /// (consuming). The desugar lowers to `loop` + `match` over existing AST
+    /// nodes (§4.2). `for`/`in` are contextual (§4.4); operand is `ExprNoStruct`.
+    fn parse_for(&mut self, lo: usize) -> PResult<Stmt> {
+        self.bump(); // `for`
+        let pat = self.parse_pattern()?;
+        if !self.at_ident("in") {
+            return Err(self.unexpected("`in` in a `for` header"));
+        }
+        self.bump(); // `in`
+        let operand = self.parse_expr_no_struct()?;
+        let mut body = self.parse_block()?;
+        let sp = self.span_from(lo);
+        let n = self.for_ctr;
+        self.for_ctr += 1;
+        let indexed = matches!(operand.kind, ExprKind::Prefix { op: PrefixOp::Read, .. });
+        let block = if indexed {
+            self.desugar_indexed(pat, operand, body, n, sp)
+        } else {
+            let it = format!("__it{n}");
+            rewrite_breaks(&mut body, &it, n, sp);
+            self.desugar_iter(pat, operand, body, n, sp)
+        };
+        Ok(Stmt { kind: StmtKind::Expr(block), span: sp })
+    }
+
+    /// Consuming desugar (design 0009 §4.2): the operand is MOVED into `__it`,
+    /// `next(take self)` consumes it each turn, `More` restores the successor,
+    /// `Done` leaves it uninitialized; break edges were sink-moved by the caller.
+    fn desugar_iter(&self, pat: Pattern, operand: Expr, body: Block, n: usize, sp: Span) -> Expr {
+        let it = format!("__it{n}");
+        let rest = format!("__rest{n}");
+        let mut more_stmts = vec![assign_stmt(ident_expr(&it, sp), ident_expr(&rest, sp), sp)];
+        more_stmts.extend(body.stmts);
+        let more_arm = MatchArm {
+            pattern: variant_pat("IterStep", "More", vec![pat, binding_pat(&rest, sp)], sp),
+            body: block_expr(more_stmts, sp),
+            span: sp,
+        };
+        let done_arm = MatchArm {
+            pattern: variant_pat("IterStep", "Done", Vec::new(), sp),
+            body: block_expr(vec![break_stmt(sp)], sp),
+            span: sp,
+        };
+        let scrut = method_call(ident_expr(&it, sp), "next", Vec::new(), sp);
+        let matche = Expr { kind: ExprKind::Match { scrutinee: Box::new(scrut), arms: vec![more_arm, done_arm] }, span: sp };
+        let loop_body = Block { stmts: vec![Stmt { kind: StmtKind::Expr(matche), span: sp }], span: sp };
+        let loope = Expr { kind: ExprKind::Loop(loop_body), span: sp };
+        let stmts = vec![
+            Stmt { kind: StmtKind::Let { mutable: true, name: it, ty: None, init: Some(operand) }, span: sp },
+            Stmt { kind: StmtKind::Expr(loope), span: sp },
+        ];
+        block_expr(stmts, sp)
+    }
+
+    /// Borrow-copy desugar (design 0009 §4.2): a loop-local `read` borrow `__c`
+    /// held across the loop, a `usize` cursor `__i`, and `at(read self, i)`
+    /// copying each item out. No exit-edge rewrite is needed (§4.2).
+    fn desugar_indexed(&self, pat: Pattern, operand: Expr, body: Block, n: usize, sp: Span) -> Expr {
+        let c = format!("__c{n}");
+        let i = format!("__i{n}");
+        let inc = assign_stmt(
+            ident_expr(&i, sp),
+            Expr { kind: ExprKind::Binary { op: BinOp::Add, lhs: Box::new(ident_expr(&i, sp)), rhs: Box::new(Expr { kind: ExprKind::IntLit { value: 1, suffix: None }, span: sp }) }, span: sp },
+            sp,
+        );
+        let mut some_stmts = vec![inc];
+        some_stmts.extend(body.stmts);
+        let some_arm = MatchArm {
+            pattern: variant_pat("Opt", "Some", vec![pat], sp),
+            body: block_expr(some_stmts, sp),
+            span: sp,
+        };
+        let none_arm = MatchArm {
+            pattern: variant_pat("Opt", "None", Vec::new(), sp),
+            body: block_expr(vec![break_stmt(sp)], sp),
+            span: sp,
+        };
+        let scrut = method_call(ident_expr(&c, sp), "at", vec![ident_expr(&i, sp)], sp);
+        let matche = Expr { kind: ExprKind::Match { scrutinee: Box::new(scrut), arms: vec![some_arm, none_arm] }, span: sp };
+        let loop_body = Block { stmts: vec![Stmt { kind: StmtKind::Expr(matche), span: sp }], span: sp };
+        let loope = Expr { kind: ExprKind::Loop(loop_body), span: sp };
+        let usize_ty = Ty { kind: TyKind::Scalar(crate::token::ScalarTy::Usize), span: sp };
+        let stmts = vec![
+            Stmt { kind: StmtKind::Let { mutable: false, name: c, ty: None, init: Some(operand) }, span: sp },
+            Stmt { kind: StmtKind::Let { mutable: true, name: i, ty: Some(usize_ty), init: Some(Expr { kind: ExprKind::IntLit { value: 0, suffix: None }, span: sp }) }, span: sp },
+            Stmt { kind: StmtKind::Expr(loope), span: sp },
+        ];
+        block_expr(stmts, sp)
     }
 
     fn at_block_like_start(&self) -> bool {
@@ -1501,6 +1643,85 @@ fn starts_type(k: &RTok) -> bool {
             | RTok::Kw(RKw::Fn)
             | RTok::LBracket
     )
+}
+
+
+// ---------------------------------------------------------------------------
+// `for`-loop desugar helpers (design 0009 §4.2): build the loop/match AST.
+// ---------------------------------------------------------------------------
+
+fn ident_expr(name: &str, sp: Span) -> Expr {
+    Expr { kind: ExprKind::Ident(name.to_string()), span: sp }
+}
+fn block_expr(stmts: Vec<Stmt>, sp: Span) -> Expr {
+    Expr { kind: ExprKind::Block(Block { stmts, span: sp }), span: sp }
+}
+fn assign_stmt(target: Expr, value: Expr, sp: Span) -> Stmt {
+    Stmt { kind: StmtKind::Assign { target, value }, span: sp }
+}
+fn break_stmt(sp: Span) -> Stmt {
+    Stmt { kind: StmtKind::Expr(Expr { kind: ExprKind::Break, span: sp }), span: sp }
+}
+fn binding_pat(name: &str, sp: Span) -> Pattern {
+    Pattern { kind: PatKind::Binding(name.to_string()), span: sp }
+}
+fn variant_pat(enum_name: &str, variant: &str, sub: Vec<Pattern>, sp: Span) -> Pattern {
+    Pattern { kind: PatKind::Variant { enum_name: enum_name.to_string(), variant: variant.to_string(), sub }, span: sp }
+}
+fn method_call(recv: Expr, method: &str, args: Vec<Expr>, sp: Span) -> Expr {
+    let callee = Expr { kind: ExprKind::Field { base: Box::new(recv), field: method.to_string() }, span: sp };
+    Expr { kind: ExprKind::Call { callee: Box::new(callee), args }, span: sp }
+}
+
+/// Rewrite every `break` that targets THIS `for` loop into the synthesized
+/// sink-move `{ let __sinkN = __itN; break; }` (design 0009 §4.2), so the moved
+/// iterator is consumed on the break edge and post-loop init state is
+/// path-independent (E0309). Breaks inside a NESTED `loop`/`while` target their
+/// own loop and are not rewritten; the walk stops at those bodies.
+fn rewrite_breaks(block: &mut Block, it: &str, n: usize, sp: Span) {
+    for st in &mut block.stmts {
+        match &mut st.kind {
+            StmtKind::Expr(e) => rewrite_breaks_expr(e, it, n, sp),
+            StmtKind::Let { init: Some(e), .. } => rewrite_breaks_expr(e, it, n, sp),
+            StmtKind::Assign { value, .. } => rewrite_breaks_expr(value, it, n, sp),
+            _ => {}
+        }
+    }
+}
+
+fn rewrite_breaks_expr(e: &mut Expr, it: &str, n: usize, sp: Span) {
+    match &mut e.kind {
+        ExprKind::Break => {
+            let sink = format!("__sink{n}");
+            let let_sink = Stmt {
+                kind: StmtKind::Let { mutable: false, name: sink, ty: None, init: Some(ident_expr(it, sp)) },
+                span: sp,
+            };
+            let brk = Stmt { kind: StmtKind::Expr(Expr { kind: ExprKind::Break, span: sp }), span: sp };
+            e.kind = ExprKind::Block(Block { stmts: vec![let_sink, brk], span: sp });
+        }
+        // Do NOT descend into a nested loop: its breaks target itself.
+        ExprKind::Loop(_) | ExprKind::While { .. } => {}
+        ExprKind::Block(b) => rewrite_breaks(b, it, n, sp),
+        ExprKind::If { cond, then_blk, else_blk } => {
+            rewrite_breaks_expr(cond, it, n, sp);
+            rewrite_breaks(then_blk, it, n, sp);
+            if let Some(x) = else_blk {
+                rewrite_breaks_expr(x, it, n, sp);
+            }
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            rewrite_breaks_expr(scrutinee, it, n, sp);
+            for arm in arms {
+                rewrite_breaks_expr(&mut arm.body, it, n, sp);
+            }
+        }
+        ExprKind::Unsafe { body, .. } | ExprKind::Wrapping(body) | ExprKind::Saturating(body) => {
+            rewrite_breaks(body, it, n, sp);
+        }
+        ExprKind::Paren(inner) => rewrite_breaks_expr(inner, it, n, sp),
+        _ => {}
+    }
 }
 
 fn describe(k: &RTok) -> String {

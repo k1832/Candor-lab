@@ -40,3 +40,16 @@ pub fn unwrap_or[T: copy](o: Opt[T], d: T) -> T {
         Opt::None => { return d; }
     }
 }
+
+// core/iter §5.2: the corelib's headline higher-order op, made writable by the
+// E1002 completion (infer `U` from `f`'s return type; design 0009 §1.2/§5.3) —
+// NO new surface. `map` FORWARDS its `T` into `f(v)` (moves it out, never drops),
+// so 0007 §3.4 does not tax it; the `None` arm consumes the drop-inert shell.
+// A `[T: copy, U: copy]` caller is drop-inert regardless. Capture-free: state
+// travels as an explicit context value, not a hidden environment (§5.1/§5.2).
+pub fn map[T, U](o: Opt[T], f: fn(T) -> U) -> Opt[U] {
+    match o {
+        Opt::Some(v) => { return Opt::Some(f(v)); }
+        Opt::None => { return Opt::None; }
+    }
+}

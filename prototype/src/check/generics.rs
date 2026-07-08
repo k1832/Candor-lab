@@ -197,7 +197,24 @@ impl<'a> Checker<'a> {
                 smap.insert(pname.clone(), subst(arg, impl_map));
             }
         }
+        // Resolve the interface's associated type for this impl (design 0009
+        // §2.2): `Self::Item` in a method signature becomes the impl's binding.
+        if let Some((aname, aty)) = &im.assoc {
+            let mut am = impl_map.clone();
+            am.insert("Self".to_string(), self_ty.clone());
+            smap.insert(format!("Self::{aname}"), subst(aty, &am));
+        }
         smap
+    }
+
+    /// Resolve `ty::assoc` through the impl of `iface` for `ty` (design 0009
+    /// §2.2): the impl's associated-type binding substituted with its parameters.
+    pub(super) fn resolve_assoc(&self, ty: &Type, iface: &str) -> Option<Type> {
+        let (idx, impl_map) = self.resolve_impl_for(ty, iface)?;
+        let (_, aty) = self.items.impls[idx].assoc.as_ref()?;
+        let mut m = impl_map.clone();
+        m.insert("Self".to_string(), ty.clone());
+        Some(subst(aty, &m))
     }
 }
 
@@ -668,6 +685,24 @@ impl<'a> Checker<'a> {
         if sig.alloc {
             self.note_alloc(span, format!("call to `alloc` generic function `{name}` (§4.1)"));
         }
+        // Resolve any associated-type projection in the return (design 0009 §2.2):
+        // for each type parameter with a bound interface that declares an
+        // associated type, inject `T::Item` -> the concrete impl binding.
+        for (pname, bounds) in &sig.type_params {
+            let concrete = match subst_map.get(pname) {
+                Some(t) if !matches!(t, Type::Error | Type::Param(_)) => t.clone(),
+                _ => continue,
+            };
+            for b in bounds {
+                if let Some(info) = self.items.interfaces.get(b) {
+                    if let Some(aname) = &info.assoc_type {
+                        if let Some(resolved) = self.resolve_assoc(&concrete, b) {
+                            subst_map.insert(format!("{pname}::{aname}"), resolved);
+                        }
+                    }
+                }
+            }
+        }
         self.record_inst(name, targs.clone());
         if !targs.iter().any(|t| matches!(t, Type::Error)) {
             self.shapes.insert(span.start, crate::generics::Shape::Fn(name.to_string(), targs.clone()));
@@ -839,6 +874,15 @@ fn unify(decl: &Type, arg: &Type, params: &HashSet<String>, out: &mut HashMap<St
             for (d, a) in da.iter().zip(aa) {
                 unify(d, a, params, out);
             }
+        }
+        // Infer through a fn-pointer parameter's component types (design 0009
+        // §1.2 / E1002 completion): `f: fn(T) -> U` pins `U` from `f`'s return
+        // and `T` from its parameters — ordinary body-local unification.
+        (Type::FnPtr(d), Type::FnPtr(a)) if d.params.len() == a.params.len() => {
+            for ((_, dt), (_, at)) in d.params.iter().zip(&a.params) {
+                unify(dt, at, params, out);
+            }
+            unify(&d.ret, &a.ret, params, out);
         }
         (Type::Box(d), Type::Box(a))
         | (Type::BoxResult(d), Type::BoxResult(a))

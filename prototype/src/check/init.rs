@@ -46,12 +46,21 @@ pub fn analyze(
     let mut out_state: Vec<FlowState> = vec![FlowState::new(); n];
     let mut visited = vec![false; n];
     let order: Vec<BlockId> = (0..n).filter(|b| reach.contains(b)).collect();
+    // The fixpoint iterates in reverse-postorder (RPO), not block-creation order,
+    // so a block is (re)computed only after its non-back-edge predecessors are
+    // visited. Iterating in creation order let a back-edge continuation block
+    // whose only predecessor is a HIGHER-numbered block seed itself from `entry`
+    // (bottom/Uninit) on the first pass, poisoning the loop header and driving a
+    // period-2 oscillation between `Init` and `MaybeInit` that never converged
+    // (surfaced by the `for`-desugar's `loop { match { .. break } }` shape,
+    // 2026-07-08). RPO makes the forward must-analysis converge monotonically.
+    let rpo_order = rpo(cfg, &reach);
     let mut changed = true;
     let mut guard = 0;
     while changed && guard < n * 4 + 16 {
         changed = false;
         guard += 1;
-        for &b in &order {
+        for &b in &rpo_order {
             let in_b = incoming(cfg, b, entry, &out_state, &reach, &visited, None);
             let mut st = in_b;
             for a in &cfg.blocks[b].actions {
@@ -444,6 +453,35 @@ fn require_init(
         }
         St::Init => {}
     }
+}
+
+/// Reverse-postorder of the reachable CFG from the entry (design 0001 §7.4): the
+/// canonical iteration order for a forward dataflow analysis, so back-edges are
+/// the only edges that point backward and Gauss-Seidel converges without
+/// oscillation.
+fn rpo(cfg: &Cfg, reach: &BTreeSet<BlockId>) -> Vec<BlockId> {
+    let n = cfg.blocks.len();
+    let mut seen = vec![false; n];
+    let mut post: Vec<BlockId> = Vec::new();
+    // Iterative postorder DFS (avoids recursion depth limits on large bodies).
+    let mut stack: Vec<(BlockId, usize)> = vec![(cfg.entry, 0)];
+    seen[cfg.entry] = true;
+    while let Some(&mut (b, ref mut i)) = stack.last_mut() {
+        let succs = successors(&cfg.blocks[b].term);
+        if *i < succs.len() {
+            let s = succs[*i];
+            *i += 1;
+            if s < n && !seen[s] {
+                seen[s] = true;
+                stack.push((s, 0));
+            }
+        } else {
+            post.push(b);
+            stack.pop();
+        }
+    }
+    post.reverse();
+    post.into_iter().filter(|b| reach.contains(b)).collect()
 }
 
 fn reachable(cfg: &Cfg) -> BTreeSet<BlockId> {

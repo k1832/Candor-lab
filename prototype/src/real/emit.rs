@@ -257,6 +257,11 @@ impl Emitter {
             TyKind::Scalar(sc) => self.push(scalar_kw(*sc)),
             TyKind::Named(n) => self.push(n),
             TyKind::App { .. } => unreachable!("throwaway syntax has no generic types"),
+            TyKind::Proj { base, assoc } => {
+                self.push(base);
+                self.push("::");
+                self.push(assoc);
+            }
             TyKind::Slice(t) => {
                 self.push("[");
                 self.emit_type(t);

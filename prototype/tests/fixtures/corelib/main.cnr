@@ -2,12 +2,17 @@
 // `fn main` in the root `main.cnr`). It drives every module's public surface
 // end-to-end and returns a sentinel. `main` is `alloc` because it uses the std
 // allocator layer; the core layer it also calls stays on the ground floor.
-use core::opt::{Opt, is_some, is_none, unwrap_or};
+use core::opt::{Opt, is_some, is_none, unwrap_or, map};
 use core::res::{Res, decode, is_ok};
 use core::arena::{Arena, new, push, get, reset, count};
+use core::iter::{IterStep};
 use std::alloc::{Alloc};
 use std::bump::{Bump, with_window, mk_alloc};
 use std::list::{List, Popped, Grow, Cell, CellRes, push_front, pop_front, length, cell, cell_get};
+
+// a named fn threaded to `map` capture-free (design 0009 §5.2): the call site
+// the seed could not previously write (E1002).
+fn inc(x: i64) -> i64 { return x + 1; }
 
 fn main() alloc -> i64 {
     // --- core/arena: fixed inline backing, T:copy, never allocates ----------
@@ -63,8 +68,29 @@ fn main() alloc -> i64 {
         CellRes::CellOom => { return -3; }
     }
 
+    // --- core/iter over Indexed: `for` replaces the index ladder (§8) --------
+    // Ground floor (non-`alloc`): a `read` loan on `ar3` copies each element out.
+    let mut ar3: Arena[i64] = new(0);
+    let f0: bool = push(write ar3, 5);
+    let f1: bool = push(write ar3, 7);
+    let mut arsum: i64 = 0;
+    for x in read ar3 { arsum = arsum + x; }                               // 12
+
+    // --- core/iter over Iter: consuming `for` replaces hand-recursion (§8.1) --
+    // `for v in l2` MOVES `l2`; each `next` unboxes a cell -> inherits `alloc`.
+    let mut l2: List[i64] = List::Nil;
+    match push_front(read al, l2, 2) { Grow::Grown(nl) => { l2 = nl; } Grow::GrowOom => { return -4; } }
+    match push_front(read al, l2, 8) { Grow::Grown(nl) => { l2 = nl; } Grow::GrowOom => { return -4; } }
+    let mut listsum: i64 = 0;
+    for v in l2 { listsum = listsum + v; }                                 // 10
+
+    // --- core/opt::map: the higher-order op, capture-free + E1002-inferred ----
+    let mapped: Opt[i64] = map(Opt::Some(20), inc);
+    let mv: i64 = unwrap_or(mapped, 0);                                    // 21
+
     // rst (a List) drops here -> structural Box free -> alloc (main is alloc).
     return asum + conv i64 acount + conv i64 acount2
          + ob + ov + dok + ib
-         + conv i64 ln + popped_val + conv i64 rest_len + cv;
+         + conv i64 ln + popped_val + conv i64 rest_len + cv
+         + arsum + listsum + mv;
 }

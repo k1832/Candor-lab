@@ -239,7 +239,7 @@ impl Counter {
                 }
                 self.decl_rawptr(&fp.ret);
             }
-            TyKind::Scalar(_) | TyKind::Named(_) => {}
+            TyKind::Scalar(_) | TyKind::Named(_) | TyKind::Proj { .. } => {}
         }
     }
 

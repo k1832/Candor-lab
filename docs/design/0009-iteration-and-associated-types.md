@@ -2,7 +2,7 @@
 
 **Status:** draft
 **Date:** 2026-07-08
-**Prototype:** unimplemented. Stage plan §9. Builds on 0007's stage-1+2 core
+**Prototype:** implemented (generics stage 3 — §9's stages 1–3 shipped: `for`/`type`/`I::Item` parse, the associated-type member + projection, `Iter`/`Indexed` + the two desugars, the corelib port, and the E1002 completion). Stage plan §9. Builds on 0007's stage-1+2 core
 (interfaces, impls, coherence, monomorphization, generic drop hooks) and on the
 corelib seed (`prototype/tests/fixtures/corelib/`), whose measured friction is
 this round's mandate.

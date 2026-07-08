@@ -6,6 +6,9 @@
 // drop-inert (§3.3): it stays on the no-alloc ground floor even on `drop`, and
 // the §3.4 opaque-drop tax cannot bite. An out-of-range index faults through the
 // built-in array bounds check (design 0001 §5) — a fault, not a value (P7).
+use core::opt::{Opt};
+use core::iter::{Indexed};
+
 pub struct Arena[T: copy] { mem: [8]T, count: u32 }
 
 // a `copy` fill seeds the fixed backing (arrays are fully initialized, NN#5).
@@ -33,4 +36,16 @@ pub fn reset[T: copy](ar: write Arena[T]) -> unit {
 
 pub fn count[T: copy](ar: read Arena[T]) -> u32 {
     return ar.count;
+}
+
+// core/iter (design 0009 §8): the ground-floor traversal that replaces the seed's
+// hand-coded index ladder. `T: copy` lets `at` copy the element out of a `read`
+// borrow — no borrow crosses the signature, no region variable (§3.2). Non-`alloc`,
+// so `for x in read ar` stays on the no-alloc, interrupt-callable floor (§3.3).
+impl[T: copy] Indexed for Arena[T] {
+    type Item = T;
+    fn at(read self, i: usize) -> Opt[T] {
+        if i >= conv usize self.count { return Opt::None; }   // past the end -> None
+        return Opt::Some(self.mem[i]);                        // copy out; T: copy
+    }
 }

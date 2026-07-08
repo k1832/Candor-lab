@@ -89,3 +89,44 @@ One lesson per entry, one-line summary first.
   any construct that exits a function must reach the CFG as a genuine Return
   so drop checks, ensures re-emission, and move state fire. Check exit-point
   modeling FIRST when adding control flow.
+
+- **Module qualification breaks every compiler-known-name lookup by string.**
+  The stdlib seed surfaced four bugs whose shared root was the module tree
+  qualifying names (`Alloc` -> `std::alloc::Alloc`, `From` -> `core::res::From`)
+  while the interpreter/checker still matched bare strings: box/unbox field
+  offsets (F1), and the `?` From-impl/interface lookup (F2). Fix by identifying
+  compiler-known types STRUCTURALLY (Alloc = the struct whose `vt` field points
+  at the {alloc,free} fn-ptr vtable) or by BASE NAME (`rsplit("::").next()`),
+  never by a hardcoded qualified string. When adding any lang-item lookup, ask
+  first how it survives qualification. (2026-07-08)
+
+- **Niladic generic constructs need expected-type inference at three sites.**
+  A value giving no type evidence — `nil()`, `Node::Nil`, `List::nil()` — can
+  only pin its type parameter from the EXPECTED type. The checker already had
+  the `expected_ty` hint plumbed through `check_against`, but two paths dropped
+  it: a generic struct literal resolved its own args from the hint yet never
+  folded them back into the substitution map before substituting FIELD expected
+  types (F3), and a generic CALL only unified from value args, never from the
+  return type against `expected_ty` (F4). When a construct can appear with zero
+  value-argument evidence, wire the expected type into its inference and fold
+  resolved args back before any nested substitution. (2026-07-08)
+
+- **The init-analysis fixpoint must iterate in reverse-postorder, not block
+  order.** A `loop { match { arm => if c { break } } other => break }` (the
+  `for`-desugar shape) made the definite-assignment fixpoint OSCILLATE between
+  `Init` and `MaybeInit` and never converge: a back-edge continuation block whose
+  only predecessor is a HIGHER-numbered block seeded itself from `entry`
+  (bottom/Uninit) on pass 1, poisoning the loop header. Iterating the fixpoint in
+  RPO (back-edges are the only backward edges) fixed it (init.rs, 2026-07-08).
+  Any new control-flow construct that adds back-edges — test convergence, not just
+  correctness of the transfer functions.
+
+- **Reassigning a variable that was moved into the RHS call double-drops it.**
+  `lst = cons(a, v, lst)` (RHS consumes `lst`, then rebinds it) drops the OLD
+  `lst` at the reassignment even though it was already moved into `cons` — a
+  latent interpreter double-drop, masked everywhere because bump-`free` is a
+  no-op and no drop-hooked value had been reassigned-through-a-move. A `List` of
+  drop-hooked items built with `l = f(.., l)` traces each element ~n times.
+  Build with DISTINCT bindings (`l1 = f(.., l0)`) to avoid it; the bug itself is
+  a pre-existing move-tracking gap in the interpreter's assignment drop, not the
+  `for`-desugar (2026-07-08).

@@ -553,7 +553,7 @@ impl<'a> Interp<'a> {
                 alloc: fp.alloc,
                 ret: Box::new(self.resolve_ty(&fp.ret)),
             }),
-            TyKind::App { .. } => {
+            TyKind::App { .. } | TyKind::Proj { .. } => {
                 unreachable!("generic types are monomorphized before interpretation")
             }
         }

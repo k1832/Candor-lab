@@ -1862,7 +1862,36 @@ impl<'a> Checker<'a> {
             arm_bbs.push(b);
             self.cur_set(Some(b));
             self.push_scope();
-            let moves = hold == HoldMode::Owned && binds.iter().any(|bd| bd.mode == BindMode::Move);
+            // An owned-scrutinee match consumes the scrutinee (§1.6). A move
+            // binding takes ownership of the whole value; and an arm whose
+            // matched variant carries a drop-inert payload (e.g. `Opt::None`)
+            // also consumes it — the value is destructured with nothing left to
+            // drop or free, so the scrutinee does not survive to a function-exit
+            // drop. This makes a forwarding `map`'s `None` arm non-`alloc`
+            // (design 0009 §1.2): without it, the live `o` on the `None` path was
+            // conservatively flagged as a `Box`-freeing drop (E0401).
+            // An owned-scrutinee match consumes the scrutinee (§1.6). A move
+            // binding takes the whole value; and a DIVERGING arm (one that
+            // returns/breaks, never falling through to a later use) whose matched
+            // variant carries a drop-inert payload also consumes it — the value is
+            // gone with nothing to free, so it does not survive to a function-exit
+            // drop. This makes a forwarding `map`'s `None => return None` arm
+            // non-`alloc` (design 0009 §1.2) without disturbing a non-diverging
+            // match that inspects a payload-less enum and reuses it afterward
+            // (a bare-tag inspection is not a consume).
+            let variant_drop_inert = !is_copy(&sc_ty, self.items)
+                && arm_diverges(&arm.body)
+                && match &arm.pattern.kind {
+                    PatKind::Variant { variant, .. } => einfo
+                        .variants
+                        .iter()
+                        .find(|v| &v.name == variant)
+                        .map(|v| v.payload.iter().all(|t| !needs_drop(t, self.items)))
+                        .unwrap_or(false),
+                    _ => false,
+                };
+            let moves = hold == HoldMode::Owned
+                && (binds.iter().any(|bd| bd.mode == BindMode::Move) || variant_drop_inert);
             if moves {
                 if let Some(p) = sc_place.clone() {
                     let dh = self.is_drop_hooked_partial(&p);
@@ -1879,6 +1908,13 @@ impl<'a> Checker<'a> {
             }
             for bd in &binds {
                 self.add_local(&bd.name, bd.ty.clone(), bd.movable);
+                // A pattern binding introduces a FRESH local; it is an
+                // initialization, not a reassignment of a prior value. Declaring
+                // it (Uninit) before the binding assignment prevents a loop that
+                // re-enters this arm from seeing a stale `MaybeInit` (the binding
+                // of a needs-drop item each turn otherwise tripped E0309 on the
+                // reassignment-drop rule — the `for`-desugar case, 2026-07-08).
+                self.emit(&Some(Place::local(bd.name.clone())), Access::Decl, bd.span);
                 self.emit(
                     &Some(Place::local(bd.name.clone())),
                     Access::Assign {
@@ -2036,6 +2072,31 @@ impl<'a> Checker<'a> {
             self.set_term(cur, Term::Diverge);
             self.cur_set(None);
         }
+    }
+}
+
+/// Does this arm body definitely diverge (never fall through to code after the
+/// match)? A conservative syntactic check: a `return`/`break`/`continue`/`panic`,
+/// or a block ending in one, or an `if`/`match` whose every branch diverges.
+/// Used to decide whether an owned drop-inert match arm consumes the scrutinee
+/// (design 0009 §1.2 forwarding `map`).
+fn arm_diverges(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Return(_) | ExprKind::Break | ExprKind::Continue | ExprKind::Panic(_) => true,
+        ExprKind::Paren(i) => arm_diverges(i),
+        ExprKind::Block(b) => b.stmts.last().map(|s| match &s.kind {
+            StmtKind::Expr(e) => arm_diverges(e),
+            _ => false,
+        }).unwrap_or(false),
+        ExprKind::If { then_blk, else_blk, .. } => {
+            let then_div = then_blk.stmts.last().map(|s| matches!(&s.kind, StmtKind::Expr(e) if arm_diverges(e))).unwrap_or(false);
+            match else_blk {
+                Some(x) => then_div && arm_diverges(x),
+                None => false,
+            }
+        }
+        ExprKind::Match { arms, .. } => !arms.is_empty() && arms.iter().all(|a| arm_diverges(&a.body)),
+        _ => false,
     }
 }
 

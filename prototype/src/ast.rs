@@ -62,6 +62,9 @@ pub struct MethodSig {
 pub struct InterfaceDecl {
     pub name: String,
     pub type_params: Vec<TypeParam>,
+    /// The one associated type member (`type Item;`), if declared (design 0009
+    /// §2.1). At most one per interface (the §2.3 refusals kept intact).
+    pub assoc_type: Option<String>,
     pub methods: Vec<MethodSig>,
     pub span: Span,
 }
@@ -76,6 +79,9 @@ pub struct ImplDecl {
     pub iface_args: Vec<Ty>,
     /// The implementing type (`impl I for Type`).
     pub target: Ty,
+    /// The associated-type binding (`type Item = T;`), if the interface declares
+    /// an associated type (design 0009 §2.1). `(member name, bound type)`.
+    pub assoc_binding: Option<(String, Ty)>,
     pub methods: Vec<FnDecl>,
     /// The module this impl block was declared in (set by the module merge, design
     /// 0008), for the module-granularity orphan check. `None` = single-file.
@@ -220,6 +226,10 @@ pub enum TyKind {
     /// A generic type application `Name[arg, ...]` in type position (design 0007
     /// §6.1.1 use-rule): `List[i64]`, `Pair[T]`, `From[E1]`.
     App { name: String, args: Vec<Ty> },
+    /// An associated-type projection `Base::Assoc` in type position (design 0009
+    /// §2.2): `T::Item`, `Self::Item`, `C::Item`. `base` is a type-parameter name
+    /// (or `Self`); `assoc` the member name. Single-valued by coherence (§2.2).
+    Proj { base: String, assoc: String },
     /// `[N]T` fixed array; `size` is a const expression (int literal or name).
     Array { size: Box<Expr>, elem: Box<Ty> },
     Slice(Box<Ty>),

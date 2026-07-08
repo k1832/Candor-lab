@@ -21,7 +21,7 @@ use candor_proto::diag::Severity;
 use candor_proto::{check_dir, check_source_real, run_dir, run_source_real, RunResult};
 use std::path::PathBuf;
 
-const SENTINEL: i64 = 337;
+const SENTINEL: i64 = 380;
 
 fn dir(name: &str) -> PathBuf {
     PathBuf::from(format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR")))

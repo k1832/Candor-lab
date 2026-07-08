@@ -858,6 +858,25 @@ impl<'a> Checker<'a> {
                 name.clone(),
                 args.iter().map(|a| self.resolve_ty(a)).collect(),
             ),
+            TyKind::Proj { base, assoc } => {
+                // `Base::Assoc` (design 0009 §2.2): `Base` must be `Self` or a
+                // type parameter in scope carrying a bound interface that declares
+                // an associated type; otherwise the projection is unrooted.
+                let ok = base == "Self" || self.type_params.iter().any(|p| p == base);
+                if !ok {
+                    self.diags.push(
+                        Diag::error(
+                            "E1017",
+                            format!("associated-type projection `{base}::{assoc}` has no bounded base"),
+                            ty.span,
+                        )
+                        .with_note("`Base::Assoc` needs `Base` a type parameter bounded by an interface with that member (design 0009 §2.2)", None),
+                    );
+                    Type::Error
+                } else {
+                    Type::Proj(base.clone(), assoc.clone())
+                }
+            }
         }
     }
 

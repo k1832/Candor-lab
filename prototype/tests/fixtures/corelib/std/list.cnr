@@ -25,6 +25,7 @@
 // coexist: a value built, borrowed, and dropped, but never taken apart.
 // Recorded for OBL-GENERICS-ITER (mutation / iteration protocol).
 use core::opt::{Opt};
+use core::iter::{Iter, IterStep};
 use std::alloc::{Alloc};
 
 pub enum List[T] { Nil, Cons(T, Box List[T]) }
@@ -85,3 +86,18 @@ pub fn cell[T](a: read Alloc, v: T) alloc -> CellRes[T] {
 }
 
 pub fn cell_get[T: copy](c: read Cell[T]) -> T { return c.boxed.*; }
+
+// core/iter (design 0009 §8.1): `List` consumption replaces the open-coded
+// recursion. `next(take self)` generalizes the proven `pop_front` — it consumes
+// the list and returns the head alongside the shrunk tail, dodging swap/replace
+// (§3.1). `alloc`-marked because `unbox` frees the head cell (§3.3), so a `for x
+// in list` inherits `alloc`: consuming iteration is never the ground floor.
+impl[T] Iter for List[T] {
+    type Item = T;
+    fn next(take self) alloc -> IterStep[T, List[T]] {
+        match self {
+            List::Nil => { return IterStep::Done; }
+            List::Cons(x, tail) => { return IterStep::More(x, unbox(tail)); }   // pop_front, generalized
+        }
+    }
+}

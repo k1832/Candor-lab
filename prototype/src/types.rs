@@ -46,6 +46,11 @@ pub enum Type {
     /// (`Pair[T]`, `List[i64]`). Def-site checking only; monomorphization lowers
     /// each reached application to a distinct concrete `Named` instance.
     App(String, Vec<Type>),
+    /// An associated-type projection `Base::Assoc` (design 0009 §2.2). Appears
+    /// only while checking a generic body at its definition site; monomorphization
+    /// resolves it to the impl's concrete choice. Opaque like an unbounded `Param`
+    /// (movable/droppable/borrowable, and nothing else) — no bounds (§2.3).
+    Proj(String, String),
     Array(Box<Type>, ArrayLen),
     Slice(Box<Type>),
     SliceMut(Box<Type>),
@@ -95,6 +100,7 @@ impl Type {
                 let a: Vec<String> = args.iter().map(|t| t.display()).collect();
                 format!("{n}[{}]", a.join(", "))
             }
+            Type::Proj(b, a) => format!("{b}::{a}"),
             Type::Array(e, len) => match len {
                 ArrayLen::Lit(n) => format!("[{n}]{}", e.display()),
                 ArrayLen::Named(n) => format!("[{n}]{}", e.display()),
@@ -218,6 +224,20 @@ pub struct GenericDecl {
 pub fn subst(ty: &Type, map: &std::collections::HashMap<String, Type>) -> Type {
     match ty {
         Type::Param(n) => map.get(n).cloned().unwrap_or_else(|| ty.clone()),
+        // A projection resolves when the map carries its fully-keyed entry
+        // `"Base::Assoc"` (injected by method/generic-call resolution). Otherwise
+        // it stays opaque, but its BASE is substituted when it maps to another
+        // parameter — so `Self::Item` with `Self -> C` becomes `C::Item`, the
+        // form a generic body checks against (design 0009 §2.2).
+        Type::Proj(b, a) => {
+            if let Some(t) = map.get(&format!("{b}::{a}")) {
+                t.clone()
+            } else if let Some(Type::Param(nb)) = map.get(b) {
+                Type::Proj(nb.clone(), a.clone())
+            } else {
+                Type::Proj(b.clone(), a.clone())
+            }
+        }
         Type::App(n, args) => Type::App(n.clone(), args.iter().map(|a| subst(a, map)).collect()),
         Type::Array(e, l) => Type::Array(Box::new(subst(e, map)), l.clone()),
         Type::Slice(e) => Type::Slice(Box::new(subst(e, map))),
@@ -268,6 +288,8 @@ fn is_copy_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> bool {
         Type::Array(elem, _) => is_copy_rec(elem, env, stack),
         // An opaque type parameter is copy iff it carries the `copy` bound (§3.1).
         Type::Param(n) => env.param_copy(n).unwrap_or(false),
+        // A projection carries no bound (design 0009 §2.3): conservatively non-copy.
+        Type::Proj(_, _) => false,
         // A generic application is copy iff the generic is a `copy` type and every
         // substituted field/payload is copy.
         Type::App(n, args) => {
@@ -325,6 +347,8 @@ fn needs_drop_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> bool
         Type::Array(elem, _) => needs_drop_rec(elem, env, stack),
         // Conservatively needs-drop unless proven `copy` (§3.3).
         Type::Param(n) => !env.param_copy(n).unwrap_or(false),
+        // A projection is unbounded (design 0009 §2.3): conservatively needs-drop.
+        Type::Proj(_, _) => true,
         Type::App(n, args) => {
             if let Some(g) = env.lookup_generic(n) {
                 if g.has_drop {
@@ -431,6 +455,9 @@ fn box_subpaths_rec(
                 out.push(prefix.clone());
             }
         }
+        // A projection is opaque and unbounded (design 0009 §2.3): frees at its
+        // own place, exactly like a non-`copy` parameter.
+        Type::Proj(_, _) => out.push(prefix.clone()),
         Type::App(n, _) => {
             // An alloc-on-drop generic aggregate frees at its own place regardless
             // of a bare `Box` field (design 0007 §3.4, F5).
@@ -455,6 +482,8 @@ fn bears_box_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> bool 
         Type::Array(elem, _) => bears_box_rec(elem, env, stack),
         // Conservatively a `T` may be box-bearing unless proven `copy` (§3.4).
         Type::Param(n) => !env.param_copy(n).unwrap_or(false),
+        // A projection is unbounded (design 0009 §2.3): conservatively box-bearing.
+        Type::Proj(_, _) => true,
         Type::App(n, args) => {
             if let Some(g) = env.lookup_generic(n) {
                 let map: std::collections::HashMap<String, Type> =
@@ -516,6 +545,7 @@ pub fn assignable(from: &Type, to: &Type) -> bool {
         (Type::Scalar(a), Type::Scalar(b)) => a == b,
         (Type::Named(a), Type::Named(b)) => a == b,
         (Type::Param(a), Type::Param(b)) => a == b,
+        (Type::Proj(a, b), Type::Proj(c, d)) => a == c && b == d,
         (Type::App(a, aa), Type::App(b, bb)) => {
             a == b && aa.len() == bb.len() && aa.iter().zip(bb).all(|(x, y)| assignable(x, y))
         }
