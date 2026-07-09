@@ -205,3 +205,11 @@ One lesson per entry, one-line summary first.
   path reuses the SAME emitted object as the hosted one — only the runtime C file
   and link flags differ (`src/backend/freestanding_runtime.c`, object.rs
   `link_freestanding`).
+
+- **The design pipeline's first outright rejection came at design twelve
+  (concurrency), and the rework held.** The (c)-verdict pattern: the reviewer
+  constructed a race from the draft's own flagship example (Alloc copy-out
+  through a shared borrow - copy types hiding rawptr are the laundering
+  channel). The fix that held: gate borrow REFERENTS transitively including
+  through copy fields, with fn pointers as a portable leaf. Concurrency
+  reviews must always attack copy-out-from-behind-borrows first.

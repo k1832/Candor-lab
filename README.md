@@ -5,8 +5,12 @@ authorship: memory-safe, explicit where meaning lives, locally verifiable, with
 source-declared semantics and a compiler built as a conversation partner rather
 than a gatekeeper.
 
-**Status: the compilation architecture is fully realized (design 0010, stages
-A-D closed).** Candor compiles through a checked MIR to optimized native x86-64
+**Status: the design ledger is closed over the philosophy's complete first-version
+scope.** Twelve designs - memory model through structured concurrency - each
+adversarially reviewed; one rejected outright and reworked to acceptance (0012,
+whose reviewer constructed a genuine safe-code race against the draft's own
+flagship example). The compilation architecture is fully realized (design 0010,
+stages A-D closed). Candor compiles through a checked MIR to optimized native x86-64
 via Cranelift, with the fault-window reordering license enforced by an
 executable validator and the P5 invariant made empirical: four engines -
 interpreter, MIR, native, native-optimized - produce identical observable
