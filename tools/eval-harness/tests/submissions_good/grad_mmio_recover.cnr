@@ -1,0 +1,67 @@
+struct Dev {
+    st: [24]u32,
+    len: u32,
+    pos: u32,
+}
+
+fn read_status(d: write Dev) -> u32 {
+    let i: u32 = d.pos;
+    let v: u32 = d.st[conv usize i];
+    d.*.pos = i + 1u32;
+    return v;
+}
+
+fn poll_ready(d: write Dev) -> u32 {
+    let mut k: u32 = 0u32;
+    while k < 8u32 {
+        let s: u32 = read_status(d);
+        if (s & 1u32) != 0u32 {
+            return 0u32;
+        }
+        if (s & 16u32) != 0u32 {
+            return 1u32;
+        }
+        k = k + 1u32;
+    }
+    return 1u32;
+}
+
+fn do_transfer(d: write Dev) -> u32 {
+    let mut stall: u32 = 0u32;
+    while stall < 8u32 {
+        let s: u32 = read_status(d);
+        if (s & 8u32) != 0u32 {
+            return 1u32;
+        }
+        if (s & 16u32) != 0u32 {
+            return 2u32;
+        }
+        if (s & 4u32) != 0u32 {
+            return 0u32;
+        }
+        stall = stall + 1u32;
+    }
+    return 2u32;
+}
+
+fn run(d: write Dev) -> i64 {
+    let mut r: u32 = poll_ready(d);
+    if r == 1u32 {
+        r = poll_ready(d);
+        if r == 1u32 {
+            return 0i64 - 1i64;
+        }
+    }
+    let mut t: u32 = do_transfer(d);
+    if t != 0u32 {
+        let rr: u32 = poll_ready(d);
+        if rr == 1u32 {
+            return 0i64 - 1i64;
+        }
+        t = do_transfer(d);
+    }
+    if t == 0u32 {
+        return 0i64;
+    }
+    return 0i64 - 1i64;
+}

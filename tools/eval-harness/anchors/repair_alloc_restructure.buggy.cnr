@@ -1,0 +1,13 @@
+enum List { Nil, Cons(i64, Box List) }
+
+struct Ops { transform: fn(l: List) -> List }
+
+fn passthrough(l: List) -> List {
+    return List::Nil;
+}
+
+static OPS: Ops = Ops { transform: passthrough };
+
+fn main() -> i64 {
+    return 0i64;
+}

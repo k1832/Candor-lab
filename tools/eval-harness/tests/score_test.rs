@@ -47,11 +47,13 @@ fn find<'a>(r: &'a Report, id: &str) -> &'a eval_harness::TaskResult {
 #[test]
 fn task_set_composition() {
     let tasks = load_tasks(&root().join("tasks")).expect("tasks load");
-    assert_eq!(tasks.len(), 12, "seed task set is 12 tasks");
+    assert_eq!(tasks.len(), 23, "12 seed + 11 graduation tasks");
     let generate = tasks.iter().filter(|t| t.category == Category::Generate).count();
     let repair = tasks.iter().filter(|t| t.category == Category::Repair).count();
-    assert_eq!(generate, 8, "8 generation tasks");
-    assert_eq!(repair, 4, "4 repair tasks");
+    assert_eq!(generate, 16, "8 seed + 8 graduation generation tasks");
+    assert_eq!(repair, 7, "4 seed + 3 graduation repair tasks");
+    let grad = tasks.iter().filter(|t| t.id.starts_with("grad_")).count();
+    assert_eq!(grad, 8, "8 grad_* generation tasks");
 
     // Every generate task carries a run_sentinel anchor with a battery; every
     // repair task carries a diagnostic-resolved anchor and a real diagnostic.
@@ -77,8 +79,8 @@ fn task_set_composition() {
 #[test]
 fn good_submissions_all_pass() {
     let report = score("submissions_good");
-    assert_eq!(report.aggregate.total, 12);
-    assert_eq!(report.aggregate.passed, 12, "all known-good submissions pass");
+    assert_eq!(report.aggregate.total, 23);
+    assert_eq!(report.aggregate.passed, 23, "all known-good submissions pass");
     assert!((report.aggregate.first_attempt_rate - 1.0).abs() < f64::EPSILON);
     assert!(report.all_passed());
     for t in &report.tasks {
@@ -112,6 +114,25 @@ fn defective_submissions_fail_by_stage() {
     assert_eq!(mv.stage, Some(Stage::Parse));
     assert_eq!(mv.failure_code.as_deref(), Some("P0001"));
     assert!(mv.feedback_diagnostic.is_some());
+
+    // Graduation control: the OBVIOUS marker fix for repair_alloc_restructure
+    // (adding `alloc`) is rejected at the non-`alloc` fn-pointer slot -> E0402.
+    let alloc_r = find(&report, "repair_alloc_restructure");
+    assert!(!alloc_r.pass);
+    assert_eq!(alloc_r.stage, Some(Stage::Check));
+    assert_eq!(alloc_r.failure_code.as_deref(), Some("E0402"));
+
+    // Graduation control: the natural bare-`+` wrap counter compiles but FAULTS
+    // at runtime (checked overflow) -> Run stage, not WrongSentinel.
+    let wrap = find(&report, "grad_wrap_counter");
+    assert!(!wrap.pass);
+    assert_eq!(wrap.stage, Some(Stage::Run));
+
+    // Graduation control: a single-FIFO scheduler (ignores priority) trips the
+    // hidden battery's asserts -> Run fault.
+    let sched = find(&report, "grad_sched_pick");
+    assert!(!sched.pass);
+    assert_eq!(sched.stage, Some(Stage::Run));
 
     // Tasks with no submission file are Missing, not silently absent.
     let missing = find(&report, "gen_arena_push_get");
@@ -159,4 +180,29 @@ fn tasks_dir_is_discoverable() {
     // Guard against a missing tasks tree regressing to a silent empty run.
     assert!(root().join("tasks").is_dir());
     assert!(Path::new(&candor_bin()).exists() || std::env::var("CANDOR_PROTO").is_ok());
+}
+
+#[test]
+fn graduation_reference_solutions_pass() {
+    // The graduation answer key (reference solutions authored against the specs)
+    // must pass every graduation task. Seed tasks are absent here (Missing) and
+    // are asserted elsewhere; here we only require each graduation task to pass.
+    let report = score("reference_solutions");
+    let grad_ids = [
+        "grad_intrusive_container_of",
+        "grad_bump_box_compute",
+        "grad_out_divmod",
+        "grad_coalesce_run",
+        "grad_sched_pick",
+        "grad_mmio_recover",
+        "grad_xorshift",
+        "grad_wrap_counter",
+        "repair_cascade_parse_move",
+        "repair_alloc_restructure",
+        "repair_writepath_return",
+    ];
+    for id in grad_ids {
+        let t = find(&report, id);
+        assert!(t.pass, "graduation reference `{}` should pass but got {:?}", id, t.stage);
+    }
 }

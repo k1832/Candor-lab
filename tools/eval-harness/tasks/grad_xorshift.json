@@ -1,0 +1,23 @@
+{
+  "id": "grad_xorshift",
+  "category": "generate",
+  "title": "xorshift64 PRNG (basket stress driver)",
+  "statement": "From docs/basket/spec-allocator.md \u00a74.1 (xorshift64, Marsaglia). Define `fn xs_next(state: u64) -> u64` computing: `x := state; x := x ^ (x << 13); x := x ^ (x >> 7); x := x ^ (x << 17); return x`. All arithmetic is mod 2^64, so the shifts/xors run in a `wrapping {}` regime (an unwrapped `<<` that overflows would fault). Define only this function.",
+  "submission_filename": "grad_xorshift.cnr",
+  "prompt_material": {
+    "spec_pack": [
+      "docs/specpack/grammar.md",
+      "docs/specpack/semantics.md",
+      "docs/specpack/idioms.md",
+      "docs/specpack/diagnostics.md",
+      "docs/basket/spec-allocator.md"
+    ],
+    "given_program": null,
+    "given_diagnostic": null
+  },
+  "anchor": {
+    "kind": "run_sentinel",
+    "battery_file": "anchors/grad_xorshift.battery.cnr",
+    "expected_sentinel": "0"
+  }
+}

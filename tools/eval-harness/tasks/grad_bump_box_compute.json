@@ -1,0 +1,22 @@
+{
+  "id": "grad_bump_box_compute",
+  "category": "generate",
+  "title": "self-contained bump allocator + box/unbox",
+  "statement": "From docs/specpack/idioms.md #4/#5 (Box over an Alloc handle; the valve boundary). Build a self-contained bump allocator and use it to box a value. Define: `struct AllocVtable { alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8, free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit }`; `copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }`; `struct Bump { next: usize, end: usize }`; a `bump_alloc` that aligns `next` up, fails (returns `ptr_null[u8]()`) if the block would exceed `end`, else advances `next` and returns the aligned pointer; a no-op `bump_free`; a `static BUMP_VT: AllocVtable`; and `fn mk_alloc(state: write Bump) -> Alloc`. Finally define `fn compute() alloc -> i64` that creates a `Bump { next: 16777216, end: 33554432 }`, makes an `Alloc` over it, `box`es the `i64` value `1234` through it, and returns the unboxed value (return `-1` on `BoxResult::oom`). Effect markers and `unsafe` justifications must be correct.",
+  "submission_filename": "grad_bump_box_compute.cnr",
+  "prompt_material": {
+    "spec_pack": [
+      "docs/specpack/grammar.md",
+      "docs/specpack/semantics.md",
+      "docs/specpack/idioms.md",
+      "docs/specpack/diagnostics.md"
+    ],
+    "given_program": null,
+    "given_diagnostic": null
+  },
+  "anchor": {
+    "kind": "run_sentinel",
+    "battery_file": "anchors/grad_bump_box_compute.battery.cnr",
+    "expected_sentinel": "1234"
+  }
+}

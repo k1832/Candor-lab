@@ -1,0 +1,16 @@
+// Hidden acceptance battery. Authored against docs/basket/spec-allocator.md
+// §4.1 (xorshift64, Marsaglia; seed 0x2545F4914F6CDD1D). Expected outputs
+// computed independently from the spec's algorithm.
+fn main() -> i64 {
+    let s0: u64 = 2685821657736338717u64;
+    let s1: u64 = xs_next(s0);
+    let s2: u64 = xs_next(s1);
+    let s3: u64 = xs_next(s2);
+    let e0: bool = s1 == 9181757771948286951u64;
+    let e1: bool = s2 == 16460966181113277408u64;
+    let e2: bool = s3 == 3825608052996350135u64;
+    assert(e0);
+    assert(e1);
+    assert(e2);
+    return 0;
+}

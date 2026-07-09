@@ -1,0 +1,23 @@
+{
+  "id": "grad_coalesce_run",
+  "category": "generate",
+  "title": "largest coalesced free run (allocator)",
+  "statement": "From docs/basket/spec-allocator.md \u00a73.6/A22 (coalescing of adjacent free blocks). A region is carved into `n` contiguous blocks; block `i` has byte size `size[i]` and is free iff `free[i]`. When adjacent blocks are all free they coalesce into one contiguous free span whose size is the sum of their sizes. Define `struct Blocks { size: [16]usize, free: [16]bool, n: u32 }` and `fn largest_free_run(b: read Blocks) -> usize` returning the byte size of the largest run of adjacent free blocks among blocks `0 .. n` (0 if none are free). Define only these items.",
+  "submission_filename": "grad_coalesce_run.cnr",
+  "prompt_material": {
+    "spec_pack": [
+      "docs/specpack/grammar.md",
+      "docs/specpack/semantics.md",
+      "docs/specpack/idioms.md",
+      "docs/specpack/diagnostics.md",
+      "docs/basket/spec-allocator.md"
+    ],
+    "given_program": null,
+    "given_diagnostic": null
+  },
+  "anchor": {
+    "kind": "run_sentinel",
+    "battery_file": "anchors/grad_coalesce_run.battery.cnr",
+    "expected_sentinel": "0"
+  }
+}

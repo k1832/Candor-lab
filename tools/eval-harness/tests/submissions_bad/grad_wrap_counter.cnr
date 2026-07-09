@@ -1,0 +1,3 @@
+fn tick(c: u8) -> u8 {
+    return c + 1u8;
+}

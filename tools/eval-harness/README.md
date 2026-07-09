@@ -21,7 +21,7 @@ only on `serde`/`serde_json`; every correctness judgement is delegated to the
 - **`tests/`** — the runner scored against 3 known-good and 3 known-defective
   submissions (`cargo test`).
 
-## Task-set composition (12 tasks)
+## Task-set composition (23 tasks (12 seed + 11 graduation))
 
 **8 generation tasks**, derived from SMALL sub-problems of the frozen basket
 specs (`docs/basket/`), each with a `main` authored FRESH against the spec text:

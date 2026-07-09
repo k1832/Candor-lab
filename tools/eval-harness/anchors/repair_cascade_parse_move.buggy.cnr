@@ -1,0 +1,17 @@
+struct Acc { total: i64 }
+
+fn combine(a: Acc, b: Acc) -> i64 {
+    return a.total + b.total;
+}
+
+fn main() -> i64 {
+    let a: Acc = Acc { total: 3i64 };
+    let b: Acc = Acc { total: 4i64 };
+    let lo: i64 = 20i64;
+    if 0i64 < lo < 10i64 {
+        return 1i64;
+    }
+    let x: i64 = combine(a, c);
+    let y: i64 = combine(a, b);
+    return x + y;
+}

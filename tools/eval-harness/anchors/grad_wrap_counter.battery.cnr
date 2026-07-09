@@ -1,0 +1,15 @@
+// Hidden acceptance battery. Authored against docs/specpack/semantics.md:
+// default arithmetic is CHECKED (overflow faults); wrap-around requires an
+// explicit `wrapping {}` regime. 255 -> 0 is the discriminating case.
+fn main() -> i64 {
+    let w0: u8 = tick(255u8);
+    let w1: u8 = tick(0u8);
+    let w2: u8 = tick(200u8);
+    let e0: bool = w0 == 0u8;
+    let e1: bool = w1 == 1u8;
+    let e2: bool = w2 == 201u8;
+    assert(e0);
+    assert(e1);
+    assert(e2);
+    return 0;
+}

@@ -1,0 +1,9 @@
+fn xs_next(state: u64) -> u64 {
+    wrapping {
+        let mut x: u64 = state;
+        x = x ^ (x << 13u64);
+        x = x ^ (x >> 7u64);
+        x = x ^ (x << 17u64);
+        return x;
+    }
+}

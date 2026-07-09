@@ -1,0 +1,51 @@
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+}
+
+copy struct Alloc {
+    ctx: rawptr u8,
+    vt: rawptr AllocVtable,
+}
+
+struct Bump {
+    next: usize,
+    end: usize,
+}
+
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "bump owns [ctx..); the [next,end) window is reserved to this arena alone" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let mask: usize = align - 1;
+        let aligned: usize = (b.next + mask) / align * align;
+        if aligned + size > b.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {}
+
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+
+fn mk_alloc(state: write Bump) -> Alloc {
+    unsafe "the handle and its backing Bump outlive every Box this Alloc serves" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) };
+    }
+}
+
+fn compute() alloc -> i64 {
+    let mut st: Bump = Bump { next: 16777216, end: 33554432 };
+    let al: Alloc = mk_alloc(write st);
+    match box(read al, 1234i64) {
+        BoxResult::oom => {
+            return 0i64 - 1i64;
+        }
+        BoxResult::boxed(bx) => {
+            let v: i64 = bx.*;
+            return v;
+        }
+    }
+}

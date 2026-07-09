@@ -1,0 +1,16 @@
+struct Acc { total: i64 }
+
+fn accumulate(s: write Acc, v: i64, twice: bool) -> i64 {
+    s.*.total = s.total + v;
+    if twice {
+        s.*.total = s.total + v;
+        return s.total;
+    }
+    return s.total;
+}
+
+fn main() -> i64 {
+    let mut a: Acc = Acc { total: 10i64 };
+    let r: i64 = accumulate(write a, 5i64, false);
+    return r;
+}

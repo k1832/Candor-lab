@@ -1,0 +1,20 @@
+// Hidden acceptance battery. Authored against docs/basket/spec-allocator.md
+// §3.6/A22: adjacent free blocks coalesce; the largest reclaimable span is the
+// max run of adjacent free block SIZES (not a block count).
+fn main() -> i64 {
+    let mut b: Blocks = Blocks {
+        size: [100usize, 200usize, 300usize, 400usize, 500usize, 600usize, 700usize, 800usize, 900usize, 1000usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize],
+        free: [false; 16],
+        n: 10u32,
+    };
+    b.free[1] = true;
+    b.free[2] = true;
+    b.free[5] = true;
+    b.free[6] = true;
+    b.free[7] = true;
+    b.free[9] = true;
+    let got: usize = largest_free_run(read b);
+    let e0: bool = got == 2100usize;
+    assert(e0);
+    return 0;
+}

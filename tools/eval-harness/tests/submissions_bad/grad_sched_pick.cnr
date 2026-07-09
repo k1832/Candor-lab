@@ -1,0 +1,37 @@
+struct Sched {
+    q: [4][8]u32,
+    count: [4]u32,
+}
+
+fn admit(s: write Sched, task: u32, prio: u32) -> bool {
+    if prio >= 4u32 {
+        return false;
+    }
+    let p: usize = 0usize;
+    let c: u32 = s.count[p];
+    if c >= 8u32 {
+        return false;
+    }
+    s.*.q[p][conv usize c] = task;
+    s.*.count[p] = c + 1u32;
+    return true;
+}
+
+fn pick_next(s: write Sched) -> i64 {
+    let mut lvl: usize = 0usize;
+    while lvl < 4usize {
+        let c: u32 = s.count[lvl];
+        if c > 0u32 {
+            let head: u32 = s.q[lvl][0];
+            let mut j: usize = 1usize;
+            while conv u32 j < c {
+                s.*.q[lvl][j - 1usize] = s.q[lvl][j];
+                j = j + 1usize;
+            }
+            s.*.count[lvl] = c - 1u32;
+            return conv i64 head;
+        }
+        lvl = lvl + 1usize;
+    }
+    return 0i64 - 1i64;
+}

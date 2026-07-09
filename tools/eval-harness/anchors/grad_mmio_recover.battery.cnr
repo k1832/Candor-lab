@@ -1,0 +1,25 @@
+// Hidden acceptance battery. Authored against docs/basket/spec-mmio.md §3.1/§3.4/§3.5
+// recovery algorithm; STATUS scripts encode M-vectors (init-ok, M7, M9, M10, M8).
+fn main() -> i64 {
+    let mut d1: Dev = Dev { st: [2u32, 1u32, 2u32, 4u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32], len: 4u32, pos: 0u32 };
+    let mut d2: Dev = Dev { st: [2u32, 2u32, 2u32, 2u32, 2u32, 2u32, 2u32, 2u32, 2u32, 1u32, 2u32, 4u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32], len: 12u32, pos: 0u32 };
+    let mut d3: Dev = Dev { st: [2u32, 1u32, 8u32, 2u32, 1u32, 8u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32], len: 6u32, pos: 0u32 };
+    let mut d4: Dev = Dev { st: [2u32, 2u32, 2u32, 2u32, 2u32, 2u32, 2u32, 2u32, 2u32, 2u32, 2u32, 2u32, 2u32, 2u32, 2u32, 2u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32], len: 16u32, pos: 0u32 };
+    let mut d5: Dev = Dev { st: [2u32, 1u32, 2u32, 8u32, 2u32, 1u32, 2u32, 2u32, 4u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32], len: 9u32, pos: 0u32 };
+    let r_d1: i64 = run(write d1);
+    let r_d2: i64 = run(write d2);
+    let r_d3: i64 = run(write d3);
+    let r_d4: i64 = run(write d4);
+    let r_d5: i64 = run(write d5);
+    let e_d1: bool = r_d1 == 0i64;
+    let e_d2: bool = r_d2 == 0i64;
+    let e_d3: bool = r_d3 == 0i64 - 1i64;
+    let e_d4: bool = r_d4 == 0i64 - 1i64;
+    let e_d5: bool = r_d5 == 0i64;
+    assert(e_d1);
+    assert(e_d2);
+    assert(e_d3);
+    assert(e_d4);
+    assert(e_d5);
+    return 0;
+}

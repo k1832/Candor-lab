@@ -1,0 +1,23 @@
+{
+  "id": "grad_sched_pick",
+  "category": "generate",
+  "title": "strict-priority + FIFO pick_next (scheduler)",
+  "statement": "From docs/basket/spec-scheduler.md \u00a71.4/\u00a73.1-3.2 and vectors T5/T6. Implement the priority run-queues: `NPRIO = 4` strict levels 0 (highest) .. 3 (lowest); within a level, FIFO order. Define `struct Sched { q: [4][8]u32, count: [4]u32 }` (each level a FIFO of up to 8 task ids, `count[p]` its length). Define `fn admit(s: write Sched, task: u32, prio: u32) -> bool` \u2014 append `task` at the TAIL of level `prio`, returning `false` if `prio >= 4` or the level is full, else `true`. Define `fn pick_next(s: write Sched) -> i64` \u2014 remove and return (as `i64`) the HEAD task of the lowest-numbered non-empty level (strict priority, then FIFO), or `-1` if all levels are empty. Write-path derefs are explicit (`s.*.count[p]`). Define only these items.",
+  "submission_filename": "grad_sched_pick.cnr",
+  "prompt_material": {
+    "spec_pack": [
+      "docs/specpack/grammar.md",
+      "docs/specpack/semantics.md",
+      "docs/specpack/idioms.md",
+      "docs/specpack/diagnostics.md",
+      "docs/basket/spec-scheduler.md"
+    ],
+    "given_program": null,
+    "given_diagnostic": null
+  },
+  "anchor": {
+    "kind": "run_sentinel",
+    "battery_file": "anchors/grad_sched_pick.battery.cnr",
+    "expected_sentinel": "0"
+  }
+}

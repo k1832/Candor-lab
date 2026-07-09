@@ -1,0 +1,5 @@
+fn tick(c: u8) -> u8 {
+    wrapping {
+        return c + 1u8;
+    }
+}

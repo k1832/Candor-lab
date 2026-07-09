@@ -1,0 +1,27 @@
+struct Link {
+    next: rawptr Link,
+    prev: rawptr Link,
+}
+
+struct Node {
+    link: Link,
+    val: i64,
+}
+
+fn list_remove(n: rawptr Link) -> unit {
+    unsafe "n is linked; its neighbors are valid nodes of this list" {
+        let nn: Link = ptr_read(n);
+        let prev: rawptr Link = nn.prev;
+        let next: rawptr Link = nn.next;
+        let pv: Link = ptr_read(prev);
+        ptr_write(prev, Link { next: next, prev: pv.prev });
+        let nx: Link = ptr_read(next);
+        ptr_write(next, Link { next: nx.next, prev: prev });
+    }
+}
+
+fn node_of(l: rawptr Link) -> rawptr Node {
+    unsafe "l is the link field of a live Node (container_of)" {
+        return cast_ptr[Node](ptr_offset(cast_ptr[u8](l), 0 - conv isize offsetof(Node, link)));
+    }
+}

@@ -1,0 +1,22 @@
+{
+  "id": "grad_out_divmod",
+  "category": "generate",
+  "title": "quotient/remainder via out-parameters",
+  "statement": "From docs/specpack/semantics.md (`out` parameters, spec 04 \u00a76.7). Define `fn divmod(a: i64, b: i64, q: out i64, r: out i64) -> unit` that assigns the quotient `a / b` to `q` and the remainder `a - (a / b) * b` to `r`. Every `out` slot must be assigned on the return path before the function returns. Define only this function.",
+  "submission_filename": "grad_out_divmod.cnr",
+  "prompt_material": {
+    "spec_pack": [
+      "docs/specpack/grammar.md",
+      "docs/specpack/semantics.md",
+      "docs/specpack/idioms.md",
+      "docs/specpack/diagnostics.md"
+    ],
+    "given_program": null,
+    "given_diagnostic": null
+  },
+  "anchor": {
+    "kind": "run_sentinel",
+    "battery_file": "anchors/grad_out_divmod.battery.cnr",
+    "expected_sentinel": "0"
+  }
+}

@@ -1,0 +1,19 @@
+// Hidden acceptance battery. Authored against docs/specpack/semantics.md
+// `out` parameter rules (spec 04 §6.7).
+fn main() -> i64 {
+    let mut q: i64;
+    let mut r: i64;
+    divmod(17i64, 5i64, out q, out r);
+    let e0: bool = q == 3i64;
+    let e1: bool = r == 2i64;
+    assert(e0);
+    assert(e1);
+    let mut q2: i64;
+    let mut r2: i64;
+    divmod(20i64, 4i64, out q2, out r2);
+    let e2: bool = q2 == 5i64;
+    let e3: bool = r2 == 0i64;
+    assert(e2);
+    assert(e3);
+    return 0;
+}

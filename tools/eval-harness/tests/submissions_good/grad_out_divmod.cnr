@@ -1,0 +1,5 @@
+fn divmod(a: i64, b: i64, q: out i64, r: out i64) -> unit {
+    let quotient: i64 = a / b;
+    q = quotient;
+    r = a - quotient * b;
+}

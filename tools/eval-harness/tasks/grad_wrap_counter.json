@@ -1,0 +1,22 @@
+{
+  "id": "grad_wrap_counter",
+  "category": "generate",
+  "title": "wrap-around 8-bit counter (checked-overflow rule)",
+  "statement": "A free-running 8-bit hardware tick counter counts 0,1,2,...,255 and then WRAPS back to 0 on the next tick (this is the whole point of a modular counter). Define `fn tick(c: u8) -> u8` returning the counter's next value, so `tick(255)` is `0`. Note (docs/specpack/semantics.md): Candor arithmetic is CHECKED by default \u2014 a bare `c + 1` overflows and FAULTS at `255`; the modular wrap-around must be written in an explicit `wrapping {}` regime. Define only this function.",
+  "submission_filename": "grad_wrap_counter.cnr",
+  "prompt_material": {
+    "spec_pack": [
+      "docs/specpack/grammar.md",
+      "docs/specpack/semantics.md",
+      "docs/specpack/idioms.md",
+      "docs/specpack/diagnostics.md"
+    ],
+    "given_program": null,
+    "given_diagnostic": null
+  },
+  "anchor": {
+    "kind": "run_sentinel",
+    "battery_file": "anchors/grad_wrap_counter.battery.cnr",
+    "expected_sentinel": "0"
+  }
+}

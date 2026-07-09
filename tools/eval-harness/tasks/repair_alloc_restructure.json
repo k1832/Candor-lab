@@ -1,0 +1,46 @@
+{
+  "id": "repair_alloc_restructure",
+  "category": "repair",
+  "title": "repair E0401 where the obvious marker fix is wrong (E0402)",
+  "statement": "This program does not compile: `passthrough` is a non-`alloc` handler stored in a non-`alloc` fn-pointer slot (`Ops.transform`), yet it lets its `Box`-bearing `List` argument drop \u2014 freeing is allocator work (E0401). The OBVIOUS fix (adding the `alloc` effect to `passthrough`) is WRONG: an `alloc` function may not be assigned to the non-`alloc` slot (E0402). Fix it the right way \u2014 restructure `passthrough` so it does not drop the list (forward it out) and stays non-`alloc`. It must compile clean and `main` returns 0.",
+  "submission_filename": "repair_alloc_restructure.cnr",
+  "prompt_material": {
+    "spec_pack": [
+      "docs/specpack/grammar.md",
+      "docs/specpack/semantics.md",
+      "docs/specpack/idioms.md",
+      "docs/specpack/diagnostics.md"
+    ],
+    "given_program": "anchors/repair_alloc_restructure.buggy.cnr",
+    "given_diagnostic": {
+      "severity": "error",
+      "code": "E0401",
+      "message": "non-`alloc` function `passthrough` performs allocation",
+      "span": {
+        "start": 0,
+        "end": 0
+      },
+      "notes": [
+        {
+          "message": "drop of `Box`-bearing place `l` frees (\u00a76.2/\u00a76.3)",
+          "span": {
+            "start": 0,
+            "end": 0
+          }
+        },
+        {
+          "message": "add the `alloc` effect to the signature, or remove the allocation",
+          "span": {
+            "start": 87,
+            "end": 144
+          }
+        }
+      ]
+    }
+  },
+  "anchor": {
+    "kind": "diagnostic_resolved",
+    "battery_file": null,
+    "expected_sentinel": "0"
+  }
+}

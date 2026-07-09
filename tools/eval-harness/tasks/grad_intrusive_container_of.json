@@ -1,0 +1,22 @@
+{
+  "id": "grad_intrusive_container_of",
+  "category": "generate",
+  "title": "intrusive rawptr list: list_remove + container_of",
+  "statement": "From docs/specpack/idioms.md #6 (intrusive rawptr structures + container_of). Define `struct Link { next: rawptr Link, prev: rawptr Link }` and `struct Node { link: Link, val: i64 }` (the `link` is embedded, not owned separately). Then define two functions: `fn list_remove(n: rawptr Link) -> unit` \u2014 unlink node `n` from its doubly-linked list by splicing its neighbors together (`prev.next := n.next`, `next.prev := n.prev`), and `fn node_of(l: rawptr Link) -> rawptr Node` \u2014 recover the containing `Node` from a pointer to its embedded `link` field via `offsetof(Node, link)` (container_of). All raw-pointer operations belong inside `unsafe` blocks with real justifications. Define only these items.",
+  "submission_filename": "grad_intrusive_container_of.cnr",
+  "prompt_material": {
+    "spec_pack": [
+      "docs/specpack/grammar.md",
+      "docs/specpack/semantics.md",
+      "docs/specpack/idioms.md",
+      "docs/specpack/diagnostics.md"
+    ],
+    "given_program": null,
+    "given_diagnostic": null
+  },
+  "anchor": {
+    "kind": "run_sentinel",
+    "battery_file": "anchors/grad_intrusive_container_of.battery.cnr",
+    "expected_sentinel": "0"
+  }
+}

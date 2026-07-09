@@ -1,0 +1,5 @@
+// Hidden acceptance battery. Authored against docs/specpack/idioms.md #4/#5
+// (Box over an Alloc handle; the valve boundary).
+fn main() alloc -> i64 {
+    return compute();
+}

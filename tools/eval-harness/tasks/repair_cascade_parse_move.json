@@ -1,0 +1,30 @@
+{
+  "id": "repair_cascade_parse_move",
+  "category": "repair",
+  "title": "repair a phased cascade (P0006 -> E0103 -> E0301)",
+  "statement": "This program does not compile. It has more than one defect, and the compiler reports them in phases \u2014 fixing the first reveals the next. Repair ALL defects so it compiles clean and `main` returns 14 (two `combine`s of `Acc{total:3}` and `Acc{total:4}`, with the guard not taken). The reported diagnostic is only the first one; keep the observable result.",
+  "submission_filename": "repair_cascade_parse_move.cnr",
+  "prompt_material": {
+    "spec_pack": [
+      "docs/specpack/grammar.md",
+      "docs/specpack/semantics.md",
+      "docs/specpack/idioms.md",
+      "docs/specpack/diagnostics.md"
+    ],
+    "given_program": "anchors/repair_cascade_parse_move.buggy.cnr",
+    "given_diagnostic": {
+      "severity": "error",
+      "code": "P0006",
+      "message": "comparison operators are non-associative; parenthesize",
+      "span": {
+        "start": 233,
+        "end": 234
+      }
+    }
+  },
+  "anchor": {
+    "kind": "diagnostic_resolved",
+    "battery_file": null,
+    "expected_sentinel": "14"
+  }
+}

@@ -1,0 +1,28 @@
+// Hidden acceptance battery. Authored against docs/specpack/idioms.md #6
+// (intrusive rawptr + field_ptr/container_of) and run/11_2_scheduler.cnr.
+fn main() -> i64 {
+    unsafe "the three nodes live for the whole body" {
+        let mut a: Node = Node { link: Link { next: ptr_null[Link](), prev: ptr_null[Link]() }, val: 10i64 };
+        let mut b: Node = Node { link: Link { next: ptr_null[Link](), prev: ptr_null[Link]() }, val: 20i64 };
+        let mut c: Node = Node { link: Link { next: ptr_null[Link](), prev: ptr_null[Link]() }, val: 30i64 };
+        let pa: rawptr Link = addr_of_mut(a.link);
+        let pb: rawptr Link = addr_of_mut(b.link);
+        let pc: rawptr Link = addr_of_mut(c.link);
+        a.link.next = pb;
+        b.link.prev = pa;
+        b.link.next = pc;
+        c.link.prev = pb;
+        list_remove(pb);
+        let after_a: Node = ptr_read(node_of(a.link.next));
+        let before_c: Node = ptr_read(node_of(c.link.prev));
+        let e0: bool = ptr_to_addr(a.link.next) == ptr_to_addr(pc);
+        let e1: bool = ptr_to_addr(c.link.prev) == ptr_to_addr(pa);
+        let e2: bool = after_a.val == 30i64;
+        let e3: bool = before_c.val == 10i64;
+        assert(e0);
+        assert(e1);
+        assert(e2);
+        assert(e3);
+        return 0;
+    }
+}

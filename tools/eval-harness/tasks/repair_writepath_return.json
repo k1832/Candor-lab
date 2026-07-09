@@ -1,0 +1,35 @@
+{
+  "id": "repair_writepath_return",
+  "category": "repair",
+  "title": "repair a 2-error write-path + all-paths-return",
+  "statement": "This program does not compile. Fix ALL defects (the compiler surfaces a second one after the first is resolved) so it compiles clean and `main` returns 15 (`Acc{total:10}` accumulated once by 5, with `twice = false`). Keep the observable result.",
+  "submission_filename": "repair_writepath_return.cnr",
+  "prompt_material": {
+    "spec_pack": [
+      "docs/specpack/grammar.md",
+      "docs/specpack/semantics.md",
+      "docs/specpack/idioms.md",
+      "docs/specpack/diagnostics.md"
+    ],
+    "given_program": "anchors/repair_writepath_return.buggy.cnr",
+    "given_diagnostic": {
+      "severity": "error",
+      "code": "E0713",
+      "message": "a write through a borrow needs an explicit `.*` dereference",
+      "span": {
+        "start": 89,
+        "end": 90
+      },
+      "notes": [
+        {
+          "message": "read access auto-derefs a borrow, but every deref on a write target must be written `.*` (design 0006 \u00a72.4)"
+        }
+      ]
+    }
+  },
+  "anchor": {
+    "kind": "diagnostic_resolved",
+    "battery_file": null,
+    "expected_sentinel": "15"
+  }
+}

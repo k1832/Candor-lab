@@ -1,0 +1,23 @@
+{
+  "id": "grad_mmio_recover",
+  "category": "generate",
+  "title": "driver init/transfer recovery path (mmio)",
+  "statement": "From docs/basket/spec-mmio.md \u00a73.1/\u00a73.4/\u00a73.5 (the driver recovery algorithm). The device is modeled by a scripted STATUS stream: `struct Dev { st: [24]u32, len: u32, pos: u32 }`, and each STATUS read returns `st[pos]` then advances `pos`. STATUS bits: READY=0x01, BUSY=0x02, DONE=0x04, ERROR=0x08, TIMEOUT=0x10. Define: `fn read_status(d: write Dev) -> u32` (return `st[pos]`, then `pos += 1`); `fn poll_ready(d: write Dev) -> u32` \u2014 read STATUS up to MAX_POLLS=8 times, returning 0 (OK) as soon as READY is set, 1 (TIMEOUT) if TIMEOUT is set or the 8 polls are exhausted without READY; `fn do_transfer(d: write Dev) -> u32` \u2014 loop reading STATUS (bounded by a stall count of 8): return 1 (XFER_ERROR) if ERROR set, 2 (XFER_TIMEOUT) if TIMEOUT set or stall exhausted, 0 (OK) if DONE set; `fn run(d: write Dev) -> i64` implementing \u00a73.5: poll_ready for init; if it TIMEOUTs, poll_ready once more to recover and return -1 (DEV_FATAL) if that also TIMEOUTs; then do_transfer; if that is non-OK, recover (poll_ready; -1 if it TIMEOUTs) and retry do_transfer ONCE; return 0 if the (retried) transfer is OK, else -1. Exactly one retry per recovery path. Define only these items.",
+  "submission_filename": "grad_mmio_recover.cnr",
+  "prompt_material": {
+    "spec_pack": [
+      "docs/specpack/grammar.md",
+      "docs/specpack/semantics.md",
+      "docs/specpack/idioms.md",
+      "docs/specpack/diagnostics.md",
+      "docs/basket/spec-mmio.md"
+    ],
+    "given_program": null,
+    "given_diagnostic": null
+  },
+  "anchor": {
+    "kind": "run_sentinel",
+    "battery_file": "anchors/grad_mmio_recover.battery.cnr",
+    "expected_sentinel": "0"
+  }
+}

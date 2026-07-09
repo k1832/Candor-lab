@@ -1,0 +1,24 @@
+struct Blocks {
+    size: [16]usize,
+    free: [16]bool,
+    n: u32,
+}
+
+fn largest_free_run(b: read Blocks) -> usize {
+    let mut best: usize = 0usize;
+    let mut cur: usize = 0usize;
+    let mut i: u32 = 0u32;
+    while i < b.n {
+        let idx: usize = conv usize i;
+        if b.free[idx] {
+            cur = cur + b.size[idx];
+            if cur > best {
+                best = cur;
+            }
+        } else {
+            cur = 0usize;
+        }
+        i = i + 1u32;
+    }
+    return best;
+}
