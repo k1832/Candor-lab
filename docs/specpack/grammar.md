@@ -49,6 +49,10 @@ fn g(a: T, b: read T, c: write T, d: out T) -> T { ... }
 - SigTail after `)`: any order of `alloc`, `requires(Expr)`, `ensures(Expr)`. `ensures` may name `result`.
 - `alloc` is the sole tracked effect this edition (contextual keyword, effect-marker slot only).
 
+Contract clauses sit between the parameter list and the effect/return tail, in
+this order: `fn f(x: i64) requires(x > 0) ensures(result >= x) alloc -> i64`.
+
+
 ## Expressions — precedence (tightest first; NORMATIVE)
 ```
 1  postfix .* , field . , index a[i] , call f(...)      (left; .* binds tightest: s.*.f = (s.*).f)

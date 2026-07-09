@@ -1,0 +1,82 @@
+{
+  "round": 2,
+  "candor_proto": "../../prototype/target/debug/candor-proto",
+  "submission_dir": "/tmp/claude-1000/eval-round2",
+  "aggregate": {
+    "total": 12,
+    "passed": 12,
+    "first_attempt_rate": 1.0,
+    "by_category": {
+      "generate": {
+        "total": 8,
+        "passed": 8
+      },
+      "repair": {
+        "total": 4,
+        "passed": 4
+      }
+    }
+  },
+  "tasks": [
+    {
+      "id": "gen_align_up",
+      "category": "generate",
+      "pass": true
+    },
+    {
+      "id": "gen_arena_push_get",
+      "category": "generate",
+      "pass": true
+    },
+    {
+      "id": "gen_from_widen_question",
+      "category": "generate",
+      "pass": true
+    },
+    {
+      "id": "gen_min_i64",
+      "category": "generate",
+      "pass": true
+    },
+    {
+      "id": "gen_opt_checked_sub",
+      "category": "generate",
+      "pass": true
+    },
+    {
+      "id": "gen_opt_unwrap_or",
+      "category": "generate",
+      "pass": true
+    },
+    {
+      "id": "gen_res_divide",
+      "category": "generate",
+      "pass": true
+    },
+    {
+      "id": "gen_saturating_add",
+      "category": "generate",
+      "pass": true
+    },
+    {
+      "id": "repair_alloc_e0401",
+      "category": "repair",
+      "pass": true
+    },
+    {
+      "id": "repair_borrow_e0801",
+      "category": "repair",
+      "pass": true
+    },
+    {
+      "id": "repair_init_e0309",
+      "category": "repair",
+      "pass": true
+    },
+    {
+      "id": "repair_move_e0301",
+      "category": "repair",
+      "pass": true
+    }
+  ]
+}
