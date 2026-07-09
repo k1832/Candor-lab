@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use candor_proto::interp::{Fault, FaultKind};
+use candor_proto::foreign_io;
 use candor_proto::{run_source, run_source_real, RunResult};
 
 /// The comparable observable outcome of a run (oracle or compiled process).
@@ -310,4 +311,107 @@ fn gate_aot_concurrency() {
     for (i, (src, real)) in CONC.iter().enumerate() {
         assert_aot_eq_oracle_src(src, *real, &format!("conc{i}"));
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// 5. Native FFI (design 0011 §5, the AOT path): the std_io demonstrator
+//    compiled to a REAL native binary that calls REAL libc (open/read/write/
+//    close) with NO shim registry — the flat-memory `rawptr` args translated to
+//    real host pointers at the boundary. Its observable result (exit byte +
+//    stdout bytes) must equal the shim-backed interpreter run. THE milestone: a
+//    standalone Candor binary doing genuine libc I/O with no toolchain present.
+// ---------------------------------------------------------------------------
+
+fn io_guard() -> std::sync::MutexGuard<'static, ()> {
+    static G: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    G.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[test]
+fn gate_aot_native_io_real_libc() {
+    assert!(cc_available(), "cc/linker unavailable: cannot build runnable executables");
+    let _g = io_guard();
+    let dir = fixtures_dir().join("std_io");
+    let main_cnr = dir.join("main.cnr");
+    let src = std::fs::read_to_string(&main_cnr).expect("read io fixture");
+
+    // Expected observable: the shim-backed interpreter (real std::fs + captured
+    // stdout via foreign_io), rooted at the fixture dir.
+    foreign_io::reset();
+    foreign_io::set_root(&dir);
+    foreign_io::register_std_io();
+    let (exp_ret, exp_out) = match run_source_real(&src) {
+        RunResult::Ok(r) => (r.ret, foreign_io::take_stdout()),
+        _ => {
+            foreign_io::unregister_std_io();
+            panic!("shim-backed interpreter should run the io demonstrator");
+        }
+    };
+    foreign_io::unregister_std_io();
+
+    // The milestone: a linked native binary that calls real libc directly, run as
+    // a process with the fixture dir as cwd (so `open("input.txt")` resolves).
+    let out = std::env::temp_dir().join(format!("candor-aot-io-ok-{}", std::process::id()));
+    candor_proto::compile_path(&main_cnr, &out).expect("compile io demonstrator");
+    let output = std::process::Command::new(&out)
+        .current_dir(&dir)
+        .output()
+        .expect("run compiled io binary");
+    let _ = std::fs::remove_file(&out);
+
+    assert_eq!(output.status.code(), Some(exp_ret as u8 as i32), "exit byte vs shim run");
+    assert_eq!(output.stdout, exp_out, "stdout bytes vs shim run");
+    // The known observable: the uppercased fixture, 17 bytes read/written.
+    assert_eq!(exp_ret, 17);
+    assert_eq!(output.stdout, b"HELLO, CANDOR IO\n");
+}
+
+#[test]
+fn gate_aot_native_io_open_error() {
+    assert!(cc_available(), "cc/linker unavailable: cannot build runnable executables");
+    let _g = io_guard();
+    // The io module minus its demonstrator `main`, plus a `main` that opens a
+    // file that does not exist -> the `Fail` arm -> a negative exit byte.
+    let fixture = std::fs::read_to_string(fixtures_dir().join("std_io/main.cnr")).unwrap();
+    let prefix = &fixture[..fixture.find("fn main").expect("fixture has a main")];
+    let main = "fn main() -> i64 {\n\
+        let name: [9]u8 = [110u8, 111u8, 112u8, 101u8, 46u8, 116u8, 120u8, 116u8, 0u8];\n\
+        match open_read(slice_of(name)) {\n\
+            IoResult::Count(c) => { return 1i64; },\n\
+            IoResult::Fail(e) => { return conv i64 e; },\n\
+        }\n\
+    }\n";
+    let src = format!("{prefix}{main}");
+
+    let empty = std::env::temp_dir().join(format!("candor-aot-io-empty-{}", std::process::id()));
+    std::fs::create_dir_all(&empty).unwrap();
+
+    // Expected: the shim-backed interpreter, rooted at the (empty) dir -> -1.
+    foreign_io::reset();
+    foreign_io::set_root(&empty);
+    foreign_io::register_std_io();
+    let exp_ret = match run_source_real(&src) {
+        RunResult::Ok(r) => r.ret,
+        _ => {
+            foreign_io::unregister_std_io();
+            panic!("shim-backed interpreter should run the open-error program");
+        }
+    };
+    foreign_io::unregister_std_io();
+    assert!(exp_ret < 0, "open of a missing file should be the Fail arm (got {exp_ret})");
+
+    // The native binary: real libc open of a missing file -> the same error value.
+    let srcpath = empty.join("prog.cnr");
+    std::fs::write(&srcpath, &src).unwrap();
+    let out = std::env::temp_dir().join(format!("candor-aot-io-err-{}", std::process::id()));
+    candor_proto::compile_path(&srcpath, &out).expect("compile open-error program");
+    let output = std::process::Command::new(&out)
+        .current_dir(&empty)
+        .output()
+        .expect("run compiled open-error binary");
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_dir_all(&empty);
+
+    assert_eq!(output.status.code(), Some(exp_ret as u8 as i32), "error exit byte vs shim run");
 }

@@ -654,13 +654,18 @@ Each with its one-line dependency on what is fixed here:
 - **Test runner CLI/reporting** — its *engine* is §4's differential harness; its
   command surface and structured-trace reporting (P4) are a separate, dependent
   round.
-- **C-header ingestion / boundary-module FFI codegen — both directions** (P14/P17)
-  — depends on the boundary-module FFI content 0008 §4 deferred; lowers through
-  this MIR when it lands. This includes **outbound** foreign-call sites (0011 §1)
-  **and** the **inbound** C-ABI entry trampolines for boundary *exports* (0011
-  §1.5 — Candor functions made C-callable); both are native-backend emission
-  recorded here as the forward-dependency 0011 names, and an inbound fault in an
-  exported frame aborts per the root policy with no unwinding across C frames
+- **C-header ingestion / boundary-module FFI codegen.** *Outbound* foreign-call
+  sites (0011 §1/§5) are now **emitted** by the AOT (cranelift-object) backend: an
+  `extern "C"` call lowers to a Cranelift call on an IMPORTED symbol the system
+  linker binds to real libc, with the flat-memory `rawptr` args translated to real
+  host pointers (`MEM_BASE + offset`) at the call boundary and scalars narrowed to
+  their C ABI width. The std_io demonstrator compiles to a standalone ELF process
+  doing genuine libc I/O (open/read/write/close) with no shim — asserted equal to
+  the shim-backed interpreter run in `tests/aot.rs`. Freestanding forbids it (no
+  libc to bind — a compile error). Still deferred: **C-header ingestion** (P14) and
+  the **inbound** C-ABI entry trampolines for boundary *exports* (0011 §1.5 —
+  Candor fns made C-callable), the forward-dependency 0011 names; an inbound fault
+  in an exported frame aborts per the root policy with no unwinding across C frames
   (0011 §1.5).
 - **The normative spec + mechanized fault formalization** (P18/NN#20) — a sibling
   at the design tier, not this doc; its R1–R3 license *constrains* this backend

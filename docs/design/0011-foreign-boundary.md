@@ -409,10 +409,35 @@ and only the actual foreign *call* waits on 0010.
   is tested for pure Candor. Until then the shim is trusted for harness use only
   (it ships no C, above). The obligation is recorded in **both** this design and
   0010 §4 so neither side can quietly let the shim drift from the C it imitates.
-- **Real foreign calls depend on 0010 (the native backend), stated as a forward
-  dependency.** Emitting a genuine C-ABI call site is backend work; until 0010
-  lands, `no_foreign_runtime` is the honest runtime behavior of an unregistered
-  extern, and the shim covers testing.
+- **Real foreign calls in the AOT backend (0010), now live — no shim.** The
+  cranelift-object backend lowers a foreign `extern "C"` call to a Cranelift call
+  on an IMPORTED symbol (`Linkage::Import`), which the system linker binds to the
+  real libc symbol in the compiled binary (the hosted profile already links
+  libc). A standalone Candor executable therefore does genuine libc I/O with no
+  JIT, no `candor-proto`, and no shim registry. Two boundary specifics:
+  - **Extern-name -> C-symbol convention.** The edition has no `symbol` attribute,
+    and the std/io boundary names its externs `sys_*` because `read`/`write` are
+    Candor keywords (the borrow modes). The AOT backend maps an extern's declared
+    name to its C symbol by **stripping a leading `sys_`** (identity otherwise):
+    `sys_read`->`read`, `sys_write`->`write`, `sys_open`->`open`,
+    `sys_close`->`close`. This is the deliberate, documented rename in lieu of a
+    per-extern symbol attribute; a `symbol` clause is the natural later refinement.
+  - **`rawptr` -> real-pointer translation at the call boundary (critical).** A
+    compiled program's `rawptr` value is an OFFSET into the flat `MEM_BASE` region,
+    but libc needs a REAL address. So every pointer-typed foreign argument is
+    translated `host = MEM_BASE + offset` at the call site (the region is mapped at
+    the fixed `MEM_BASE`, so this is the same `base + candor_addr` arithmetic every
+    load/store already uses); scalar args are narrowed to their C ABI width (an
+    `i32` fd) and a sub-word return (`open`'s `i32`) is sign-extended back to the
+    i64 word. The gate compiles the std_io demonstrator to a real ELF process that
+    opens a fixture file, uppercases it, and writes to stdout — asserting the same
+    observable result (exit byte + stdout bytes) as the shim-backed interpreter run.
+- **Freestanding + FFI is a contradiction (stated).** The `--freestanding` profile
+  links no libc (`-nostdlib`), so an imported C symbol has nothing to bind to; a
+  foreign `extern` call under freestanding is therefore a **compile error**, not a
+  link-time surprise. For an unregistered extern under the tree-walker/MIR engines,
+  `no_foreign_runtime` remains the honest runtime behavior, and the shim covers
+  engine-equality testing.
 
 ### 6. `candor audit --boundaries`
 

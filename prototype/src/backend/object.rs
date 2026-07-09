@@ -31,11 +31,12 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use crate::interp::layout::Layout;
 use crate::interp::mem::{round_up, STATIC_BASE};
-use crate::mir::MirProgram;
+use crate::mir::{MirProgram, Rvalue, StatementKind};
 use crate::resolve::Items;
 
 use super::lower::{
-    collect_glue_types, declare_functions, define_entry, define_functions, FnTable, Shims,
+    collect_glue_types, declare_externs, declare_functions, define_entry, define_functions,
+    FnTable, Shims,
 };
 
 /// The fixed virtual address the runtime maps the flat buffer at (`MAP_FIXED`).
@@ -99,8 +100,31 @@ pub fn emit_executable_freestanding(
     consts: &HashMap<String, u64>,
     out: &Path,
 ) -> Result<(), String> {
+    // Freestanding has no libc: a foreign `extern` call has no symbol to bind, so
+    // it is a compile error here (freestanding + FFI is a contradiction; 0011 §5).
+    if program_uses_externs(prog, items) {
+        return Err(
+            "freestanding profile has no libc: a foreign `extern` call cannot be              linked (freestanding + FFI is a contradiction; design 0011 §5)"
+                .to_string(),
+        );
+    }
     let object = compile_object(prog, items, consts)?;
     link_freestanding(&object, out)
+}
+
+/// Whether any function body makes a foreign `extern` call (a `Call` whose callee
+/// resolves to a boundary extern rather than a MIR fn) — the freestanding profile
+/// rejects these (design 0011 §5).
+fn program_uses_externs(prog: &MirProgram, items: &Items) -> bool {
+    let is_extern_call = |rv: &Rvalue| matches!(rv, Rvalue::Call { func, .. } if items.externs.contains_key(func));
+    prog.fns.iter().any(|f| {
+        f.blocks.iter().any(|b| {
+            b.stmts.iter().any(|st| match &st.kind {
+                StatementKind::Assign(_, rv) | StatementKind::Store(_, rv) => is_extern_call(rv),
+                _ => false,
+            })
+        })
+    })
 }
 
 /// Lower the whole program to a relocatable ELF object (`.o` bytes) for the host.
@@ -130,6 +154,7 @@ pub fn compile_object(
     // Symbol names are prefixed so the Candor `main` never clashes with the C
     // runtime's `main`; the maps stay keyed by MIR name (calls resolve by id).
     let (func_ids, glue_ids) = declare_functions(&mut module, prog, &glue_types, "cnf_")?;
+    let extern_ids = declare_externs(&mut module, items)?;
 
     // The fn-pointer dispatch table (a data object filled with function-address
     // relocations the linker resolves).
@@ -149,6 +174,7 @@ pub fn compile_object(
         &shims,
         &func_ids,
         &glue_ids,
+        &extern_ids,
         &glue_types,
     )?;
 
@@ -186,6 +212,7 @@ pub fn compile_object(
         &shims,
         &func_ids,
         &glue_ids,
+        &extern_ids,
         entry_id,
     )?;
 

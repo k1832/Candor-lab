@@ -71,8 +71,9 @@ pub fn kind_code(k: FaultKind) -> u32 {
         FaultKind::Ensures => 6,
         FaultKind::Panic => 7,
         FaultKind::BadPointer => 8,
-        // Foreign calls are not yet lowered by the native backend (0011 §5, a
-        // 0010 forward dependency); the code exists only for match totality.
+        // The AOT backend lowers foreign calls to real libc (0011 §5), so it never
+        // raises this; it is the interpreter engines' unregistered-shim fault and
+        // the code exists here only for match totality.
         FaultKind::NoForeignRuntime => 9,
     }
 }
@@ -133,6 +134,32 @@ fn int_ty(size: u64) -> types::Type {
         1 => types::I8,
         2 => types::I16,
         4 => types::I32,
+        _ => types::I64,
+    }
+}
+
+/// The C symbol a boundary `extern` binds to (design 0011 §5, AOT path). The
+/// std/io boundary names its externs `sys_*` because `read`/`write` are Candor
+/// keywords (the borrow modes); the C symbol is the declared name with that
+/// `sys_` prefix stripped (identity for any other extern). This is the deliberate
+/// extern-name -> C-symbol convention the edition uses in lieu of a `symbol`
+/// attribute: `sys_read`->`read`, `sys_write`->`write`, `sys_open`->`open`,
+/// `sys_close`->`close`.
+pub(super) fn c_symbol_name(extern_name: &str) -> &str {
+    extern_name.strip_prefix("sys_").unwrap_or(extern_name)
+}
+
+/// The C-ABI Cranelift type for a boundary parameter/return: a pointer word is
+/// `I64`; a scalar is passed in its natural register width (<=32-bit as `I32`,
+/// else `I64`), matching the SysV C ABI for the fixed integer/pointer args a
+/// POSIX extern takes.
+fn c_abi_ty(ty: &Type) -> types::Type {
+    match ty {
+        Type::RawPtr(_) | Type::FnPtr(_) | Type::Borrow(_) | Type::BorrowMut(_) => types::I64,
+        Type::Scalar(s) => {
+            let (_, _, bits, _) = ty_range(*s);
+            if bits <= 32 { types::I32 } else { types::I64 }
+        }
         _ => types::I64,
     }
 }
@@ -199,6 +226,32 @@ pub(super) fn declare_functions<M: Module>(
     Ok((func_ids, glue_ids))
 }
 
+/// Declare every boundary `extern` as an IMPORTED C symbol (design 0011 §5, the
+/// AOT path): a foreign call resolves to a REAL libc symbol in the linked binary
+/// (the hosted profile pulls libc; the freestanding profile forbids FFI). The map
+/// is keyed by the extern's Candor name; the emitted/imported symbol name is
+/// `c_symbol_name` and the signature is the C ABI of the extern's declared type.
+pub(super) fn declare_externs<M: Module>(
+    module: &mut M,
+    items: &Items,
+) -> Result<HashMap<String, FuncId>, String> {
+    let mut ids: HashMap<String, FuncId> = HashMap::new();
+    for (name, es) in &items.externs {
+        let mut sig = module.make_signature();
+        for p in &es.params {
+            sig.params.push(AbiParam::new(c_abi_ty(&p.lowered)));
+        }
+        if !matches!(es.ret, Type::Scalar(ScalarTy::Unit)) {
+            sig.returns.push(AbiParam::new(c_abi_ty(&es.ret)));
+        }
+        let id = module
+            .declare_function(c_symbol_name(name), Linkage::Import, &sig)
+            .map_err(|e| e.to_string())?;
+        ids.insert(name.clone(), id);
+    }
+    Ok(ids)
+}
+
 /// Define every user function + drop-glue body — the shared MIR->Cranelift-IR
 /// lowering, generic over the backend `Module` (JIT or object). Identical IR is
 /// built either way; only `mem_base`/`fntable` differ (the module-plumbing delta,
@@ -216,6 +269,7 @@ pub(super) fn define_functions<M: Module>(
     shims: &Shims,
     func_ids: &HashMap<String, FuncId>,
     glue_ids: &HashMap<String, FuncId>,
+    extern_ids: &HashMap<String, FuncId>,
     glue_types: &[Type],
 ) -> Result<(), String> {
     let mut ctx = module.make_context();
@@ -247,8 +301,10 @@ pub(super) fn define_functions<M: Module>(
                 shims,
                 func_ids,
                 glue_ids,
+                extern_ids,
                 callrefs: HashMap::new(),
                 shimrefs: HashMap::new(),
+                externrefs: HashMap::new(),
                 addr: Vec::new(),
             };
             cg.lower_fn(f);
@@ -283,8 +339,10 @@ pub(super) fn define_functions<M: Module>(
                 shims,
                 func_ids,
                 glue_ids,
+                extern_ids,
                 callrefs: HashMap::new(),
                 shimrefs: HashMap::new(),
+                externrefs: HashMap::new(),
                 addr: Vec::new(),
             };
             cg.lower_glue(ty);
@@ -316,6 +374,7 @@ pub(super) fn define_entry<M: Module>(
     shims: &Shims,
     func_ids: &HashMap<String, FuncId>,
     glue_ids: &HashMap<String, FuncId>,
+    extern_ids: &HashMap<String, FuncId>,
     entry_id: FuncId,
 ) -> Result<(), String> {
     let mut ctx = module.make_context();
@@ -345,8 +404,10 @@ pub(super) fn define_entry<M: Module>(
             shims,
             func_ids,
             glue_ids,
+            extern_ids,
             callrefs: HashMap::new(),
             shimrefs: HashMap::new(),
+            externrefs: HashMap::new(),
             addr: Vec::new(),
         };
         cg.lower_entry(main_is_i64);
@@ -398,6 +459,7 @@ pub fn compile(
     let shims = Shims::declare(&mut module)?;
     let glue_types = collect_glue_types(prog, items, consts);
     let (func_ids, glue_ids) = declare_functions(&mut module, prog, &glue_types, "")?;
+    let extern_ids = declare_externs(&mut module, items)?;
     define_functions(
         &mut module,
         prog,
@@ -410,6 +472,7 @@ pub fn compile(
         &shims,
         &func_ids,
         &glue_ids,
+        &extern_ids,
         &glue_types,
     )?;
 
@@ -538,8 +601,10 @@ struct Cg<'a, 'b, M: Module> {
     shims: &'a Shims,
     func_ids: &'a HashMap<String, FuncId>,
     glue_ids: &'a HashMap<String, FuncId>,
+    extern_ids: &'a HashMap<String, FuncId>,
     callrefs: HashMap<String, FuncRef>,
     shimrefs: HashMap<&'static str, FuncRef>,
+    externrefs: HashMap<String, FuncRef>,
     /// Candor address (SSA value) of each local's slot.
     addr: Vec<Value>,
 }
@@ -571,6 +636,61 @@ impl<M: Module> Cg<'_, '_, M> {
         let r = self.module.declare_func_in_func(id, self.b.func);
         self.callrefs.insert(name.to_string(), r);
         r
+    }
+    fn externref(&mut self, name: &str) -> FuncRef {
+        if let Some(r) = self.externrefs.get(name) {
+            return *r;
+        }
+        let id = self.extern_ids[name];
+        let r = self.module.declare_func_in_func(id, self.b.func);
+        self.externrefs.insert(name.to_string(), r);
+        r
+    }
+
+    /// Lower a foreign `extern "C"` call (design 0011 §5, AOT path). Marshal each
+    /// argument per the C ABI: a `rawptr` argument is a flat-memory OFFSET, so it
+    /// is translated to the REAL host address (`MEM_BASE + offset`) that libc
+    /// needs; a scalar is narrowed to its ABI register width. The call targets the
+    /// imported C symbol; the result is canonicalized back to the i64 word.
+    fn lower_extern_call(&mut self, name: &str, args: &[Operand], mf: &MirFn) -> Value {
+        let es = self.items.externs[name].clone();
+        let mut vals: Vec<Value> = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let v = self.eval_operand(a, mf);
+            let marshalled = match es.params.get(i).map(|p| &p.lowered) {
+                // rawptr / borrow: translate the Candor offset to a real pointer.
+                Some(Type::RawPtr(_)) | Some(Type::FnPtr(_)) | Some(Type::Borrow(_))
+                | Some(Type::BorrowMut(_)) => self.host_addr(v),
+                // narrow a <=32-bit scalar to its C ABI width (e.g. `i32` fd).
+                Some(t) if c_abi_ty(t) == types::I32 => self.b.ins().ireduce(types::I32, v),
+                _ => v,
+            };
+            vals.push(marshalled);
+        }
+        let r = self.externref(name);
+        let c = self.b.ins().call(r, &vals);
+        let results = self.b.inst_results(c).to_vec();
+        if results.is_empty() {
+            // `void` return (unit extern): the MIR temp holds an ignored 0.
+            return self.iconst(0);
+        }
+        let raw = results[0];
+        // Canonicalize a sub-word C return (e.g. `i32` from `open`) to the i64 word.
+        match &es.ret {
+            Type::Scalar(s) => {
+                let (_, _, bits, signed) = ty_range(*s);
+                if bits <= 32 {
+                    if signed {
+                        self.b.ins().sextend(types::I64, raw)
+                    } else {
+                        self.b.ins().uextend(types::I64, raw)
+                    }
+                } else {
+                    raw
+                }
+            }
+            _ => raw,
+        }
     }
 
     // ---- low-level helpers ----
@@ -845,10 +965,16 @@ impl<M: Module> Cg<'_, '_, M> {
                 self.range_or_fit(x128, *to, *regime, fault.as_ref())
             }
             Rvalue::Call { func, args } => {
-                let vals: Vec<Value> = args.iter().map(|a| self.eval_operand(a, mf)).collect();
-                let r = self.callref(func);
-                let c = self.b.ins().call(r, &vals);
-                self.b.inst_results(c)[0]
+                // A foreign `extern` call (design 0011 §5) has no MIR FuncId; it is
+                // lowered to a call on the imported C symbol with C-ABI marshalling.
+                if self.extern_ids.contains_key(func) {
+                    self.lower_extern_call(func, args, mf)
+                } else {
+                    let vals: Vec<Value> = args.iter().map(|a| self.eval_operand(a, mf)).collect();
+                    let r = self.callref(func);
+                    let c = self.b.ins().call(r, &vals);
+                    self.b.inst_results(c)[0]
+                }
             }
             Rvalue::CallIndirect { func, args } => {
                 let id = self.eval_operand(func, mf);
