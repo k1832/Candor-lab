@@ -1,0 +1,9 @@
+// Program entry is `fn main` in the root `main.cnr` (design 0008). Run the whole
+// tree with `candor run 05_modules`; `candor build 05_modules` reports per-module
+// incremental actions (checked/reused) as JSON.
+use math::{cube};
+use geom::{hypot_sq};
+
+fn main() -> i64 {
+    return cube(3) + hypot_sq(3, 4);
+}

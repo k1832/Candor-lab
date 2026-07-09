@@ -262,6 +262,14 @@ fn run_run_native(path: &str) -> ExitCode {
 fn report_run(outcome: candor_proto::RunResult) -> ExitCode {
     match outcome {
         candor_proto::RunResult::Ok(run) => {
+            // trace() output is the program's observable θ; show it on the tree-walking
+            // `run` path so a newcomer sees what their program emitted, then the return
+            // value. Suppressed when CANDOR_QUIET is set (test harnesses parse bare ret).
+            if std::env::var_os("CANDOR_QUIET").is_none() {
+                for t in &run.trace {
+                    println!("trace {t}");
+                }
+            }
             println!("{}", run.ret);
             ExitCode::SUCCESS
         }

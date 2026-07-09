@@ -1,0 +1,52 @@
+// The error-handling idiom: a result-shaped enum (exactly one `ok`-marked
+// variant), `match` to consume it, and `?` to propagate the non-ok variant.
+// `?` widens a narrow error to an app error through a `From` impl.
+
+enum IoErr {
+    Eof,
+    Bad,
+}
+
+enum AppErr {
+    FromIo(IoErr),
+    Denied,
+}
+
+enum Res[T, E] {
+    ok Ok(T),
+    Err(E),
+}
+
+interface From[E] {
+    fn from(e: E) -> Self;
+}
+
+impl From[IoErr] for AppErr {
+    fn from(e: IoErr) -> Self {
+        return AppErr::FromIo(e);
+    }
+}
+
+fn read_byte(ok: bool) -> Res[i64, IoErr] {
+    if ok {
+        return Res::Ok(65);
+    }
+    return Res::Err(IoErr::Eof);
+}
+
+// `read_byte` yields `Res[_, IoErr]`; `?` widens `IoErr` -> `AppErr` via `From`.
+fn decode(ok: bool) -> Res[i64, AppErr] {
+    let b: i64 = read_byte(ok)?;
+    return Res::Ok(b + 1);
+}
+
+fn main() -> i64 {
+    match decode(true) {
+        Res::Ok(v) => {
+            return v;
+        },
+        Res::Err(e) => {
+            return -1;
+        },
+    }
+}

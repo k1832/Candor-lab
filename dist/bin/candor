@@ -1,0 +1,14 @@
+#!/bin/sh
+# candor — the 0.x preview command.
+#
+# THIS IS A SHIM. The prototype crate still builds its binary as `candor-proto`
+# (prototype/Cargo.toml: [[bin]] name = "candor-proto"). This wrapper gives you
+# the real `candor <command>` surface today by forwarding every argument to it.
+#
+# PACKAGING TODO (the real rename, done once in the distribution repo): change
+# the crate's [[bin]] name from "candor-proto" to "candor" and drop this shim.
+#
+# Resolution order for the underlying binary:
+#   1. $CANDOR_PROTO if set (an explicit path to the built binary), else
+#   2. `candor-proto` found on $PATH.
+exec "${CANDOR_PROTO:-candor-proto}" "$@"

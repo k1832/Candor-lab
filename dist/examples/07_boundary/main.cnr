@@ -1,0 +1,32 @@
+boundary
+// A boundary module: the ONLY place `extern`/`export` may appear (design 0011).
+// `candor audit` reports every extern, its trust predicates, and which wrappers
+// still propagate the `foreign` effect. Run it: `candor audit 07_boundary`.
+
+extern "C" {
+    // A trusted foreign function. The `trust` string plus its predicates are the
+    // audit surface: promises the checker cannot verify, stated for the record.
+    fn c_strlen(s: rawptr u8) -> usize
+        trust "POSIX: reads bytes to a NUL, retains nothing, no thread state" {
+            valid_nul_terminated(s),
+            no_retain(s),
+        };
+}
+
+// A safe wrapper that DISCHARGES `foreign`: the `unsafe` justification is the
+// liveness promise that lets safe callers use it without the effect.
+pub fn strlen(s: rawptr u8) -> usize {
+    unsafe "s is a live NUL-terminated view for the duration of this call" {
+        return c_strlen(s);
+    }
+}
+
+// A pure Candor function re-exported to C under a chosen symbol.
+pub fn checksum(x: usize) -> u32 {
+    return conv u32 x;
+}
+export "C" fn candor_checksum(x: usize) -> u32 = checksum;
+
+fn main() -> i64 {
+    return 0;
+}

@@ -1,0 +1,51 @@
+// A generic container plus the `for` loop. `Stack[T]` stores items inline (no
+// allocation). Implementing the `Indexed` protocol lets `for x in read s` walk
+// it: the loop read-borrows the container and copies each item out — the
+// ground-floor, allocation-free iteration form.
+
+enum Opt[T] {
+    ok Some(T),
+    None,
+}
+
+interface Indexed {
+    type Item;
+    fn at(read self, i: usize) -> Opt[Item];
+}
+
+struct Stack[T: copy] {
+    mem: [8]T,
+    count: u32,
+}
+
+fn push[T: copy](s: write Stack[T], x: T) -> bool {
+    if s.count >= 8u32 {
+        return false;
+    }
+    let i: u32 = s.count;
+    s.*.mem[conv usize i] = x;
+    s.*.count = i + 1u32;
+    return true;
+}
+
+impl[T: copy] Indexed for Stack[T] {
+    type Item = T;
+    fn at(read self, i: usize) -> Opt[T] {
+        if i >= conv usize self.count {
+            return Opt::None;
+        }
+        return Opt::Some(self.mem[i]);
+    }
+}
+
+fn main() -> i64 {
+    let mut s: Stack[i64] = Stack { mem: [0, 0, 0, 0, 0, 0, 0, 0], count: 0 };
+    let a0: bool = push(write s, 3);
+    let a1: bool = push(write s, 4);
+    let a2: bool = push(write s, 5);
+    let mut sum: i64 = 0;
+    for x in read s {
+        sum = sum + x;
+    }
+    return sum;
+}

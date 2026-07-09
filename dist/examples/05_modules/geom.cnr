@@ -1,0 +1,6 @@
+// A module that depends on a sibling: `use <module>::{items}`.
+use math::{square};
+
+pub fn hypot_sq(a: i64, b: i64) -> i64 {
+    return square(a) + square(b);
+}

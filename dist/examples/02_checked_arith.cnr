@@ -1,0 +1,25 @@
+// Arithmetic is CHECKED by default: an operation that would overflow is a fault,
+// not a silent wrap. Opt into modular arithmetic explicitly with a `wrapping`
+// block. This program demonstrates BOTH, and it FAULTS BY DESIGN on its last
+// line to show the deterministic fault model:
+//   candor run 02_checked_arith.cnr
+//     -> {"kind":"overflow",...} on stderr, exit code 2 (identically on every
+//        engine: interpreter, native JIT, and AOT binary).
+
+fn wrapping_add(a: i64, b: i64) -> i64 {
+    wrapping {
+        return a + b;
+    }
+}
+
+fn checked_add(a: i64, b: i64) -> i64 {
+    return a + b;
+}
+
+fn main() -> i64 {
+    let floor: i64 = -9223372036854775808i64;
+    let wrapped: i64 = wrapping_add(floor, -1);
+    assert(wrapped == 9223372036854775807i64);
+    // The next line overflows i64 -> a checked-arithmetic fault (by design).
+    return checked_add(9223372036854775807i64, 1);
+}

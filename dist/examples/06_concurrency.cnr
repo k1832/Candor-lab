@@ -1,0 +1,27 @@
+// Structured concurrency (design 0012). `split_mut` splits an exclusive borrow of
+// a buffer into two DISJOINT halves; a `scope` spawns a task per half. The
+// checker proves the tasks touch disjoint memory, so the writes are race-free —
+// and `scope` joins every task before it returns (no task outlives its scope).
+
+fn fill(s: write [u8], v: u8, n: usize) -> unit {
+    let mut i: usize = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        s[i] = v;
+        i = i + 1;
+    }
+}
+
+fn main() -> i64 {
+    let mut buf: [4]u8 = [0u8, 0u8, 0u8, 0u8];
+    let lo: write [u8];
+    let hi: write [u8];
+    split_mut(buf, 2, out lo, out hi);
+    scope {
+        spawn fill(write lo, 1u8, 2);
+        spawn fill(write hi, 2u8, 2);
+    }
+    return conv i64 buf[0] + conv i64 buf[1] * 10 + conv i64 buf[2] * 100 + conv i64 buf[3] * 1000;
+}
