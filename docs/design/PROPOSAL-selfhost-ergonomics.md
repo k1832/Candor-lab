@@ -335,3 +335,24 @@ evidence for it is now on the table.
 
 *This document is a PROPOSAL. It enacts nothing. It amends no obligation, design,
 or spec. Its only output is the framing above, offered to the deciding authority.*
+
+---
+
+## Deciding-authority disposition (2026-07-10)
+
+Delegated to the orchestrator with instruction to gather more evidence first.
+
+- **Candidate C (region-bearing struct fields) — HELD, not decided.** One self-hosted module is
+  thin evidence to reopen region-parameterized types (the priority order's most expensive
+  deferred feature; P11 spent its refusals avoiding exactly this surface). The philosophy's own
+  rule — a refusal reopens only when pressure cases genuinely exist — says wait. The parser slice
+  (larger, more struct-heavy, running now) is the next evidence point: it either sharpens the case
+  for B (reopen) or confirms source-threading is a tolerable essential cost (ratify A). Decision
+  deferred to after the parser slice's ergonomics land; if it then remains genuinely balanced, a
+  dedicated high-effort deliberation is warranted before any amendment.
+- **Candidates A, B, D, E (accidental / std / toolchain) — cleared to proceed as evidenced.**
+  std Vec, a std hash map, std formatting, and formatter/diagnostic polish are outward growth with
+  no Non-Negotiable cost; they ship when scheduled, gated behind the currently-running prototype
+  work to avoid source conflicts. std Vec's one open sub-question (a `realloc` vtable slot vs.
+  alloc-copy-free growth) is resolved at build time, defaulting to alloc-copy-free unless the
+  Alloc-vtable change proves cheap — it needs no authority call.
