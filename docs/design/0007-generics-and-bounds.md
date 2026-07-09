@@ -96,7 +96,7 @@ absence of pressure* — never taste.
 - **Bounds are written `[T: I]`**, conjoined with `+` (`[T: Ord + copy]`, §6.4). An
   unbounded parameter is fully **opaque**: movable, droppable, borrowable, storable,
   nothing else (§3).
-- **One built-in bound, `copy`** (§3.1): a structural capability, not an interface,
+- **Two built-in bounds, `copy` and `portable`** (§3.1; `portable` added by design 0012's spawn gate — a structural capability computed like `copy`, exported in interface artifacts per 0008 §2): structural capabilities, not interfaces,
   spelled in bound position for uniformity.
 - **Generic items:** `fn`, `struct`, `enum`, and `interface` may declare a bracketed
   type-parameter list (§6). An interface may be generic (`From[E]`, §7.1) — a type

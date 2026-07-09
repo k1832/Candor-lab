@@ -111,7 +111,7 @@ runtime-provided.) This settles ch09 §4.1–§4.2 (§4.1).
 #### 1.4 Disjoint exclusive partitioning — `split_mut`, a priced blessed primitive
 
 ```
-fn split_mut[r, T](s: write[r] [T], mid: usize) -> (write[r] [T], write[r] [T])
+fn split_mut[region r, T](s: write[r] [T], mid: usize) -> (write[r] [T], write[r] [T])
 ```
 
 It reborrows one exclusive slice as **two disjoint** exclusive slices `[0, mid)` and
@@ -136,6 +136,9 @@ Each half then crosses into a task **as an exclusive scope-length loan** (§1.2)
 a `take`. Being stipulated-disjoint, the two loans do not conflict under XOR, and each is
 the unique exclusive accessor of its bytes — siblings mutate disjoint memory, no race
 (§2.4).
+
+**Nested `split_mut`** composes: each application re-establishes its bound on its input, and
+sub-places of a stipulated-disjoint half remain disjoint from the other half (re-review F4a).
 
 ### 2. The unified spawn-crossing gate — and the guarantee it carries
 
@@ -179,6 +182,13 @@ stop at a `copy` boundary (§2.3 walks the exact laundering).
 > `portable` when `T` is, because its pointer is *unique-owning* — categorically unlike a
 > `rawptr`.
 
+> **Function pointers are a `portable` leaf** (re-review F1): a fn-pointer value carries
+> no data pointer and cannot capture (0001 §6.1); any `rawptr` in its *signature* is only
+> produced by calling it, and acting on that result is gated by `unsafe` (0001 §4.2). The
+> portability walk does **not** descend into signature types — descending would wrongly
+> reject safe vtable sharing (`AllocVtable`, `POOL_VTABLE`), which launders no live state.
+
+
 `portable` is a checker-computed predicate, not a tracked effect (NN#19 intact) and not a
 user interface (avoiding 0007 coherence for a structural property). It surfaces as a
 generic bound (`fn parmap[T: portable, …]`) and in diagnostics.
@@ -188,7 +198,7 @@ generic bound (`fn parmap[T: portable, …]`) and in diagnostics.
 see without the definition — a `[T: portable]` boundary bound, and the portability of an
 exported/opaque type, must be answerable from the interface. This design **records a
 forced update to 0007 (bounds) and 0008 (modules)**: `portable` joins `copy` in the
-properties an exported type publishes (0007 §6.1). It reserves no keyword globally (§5).
+properties an exported type publishes (the copy capability: 0007 §3.1; the exported interface artifact: 0008 §2 — which the forced 0008 update extends with a structural-properties field for opaque exported types). It reserves no keyword globally (§5).
 
 **No `Sync` analog is needed.** A `read` across a spawn whose referent is `portable` is
 safe to hand to any number of tasks: no interior mutability (0001 §4.3) means a shared
@@ -392,6 +402,11 @@ fault at the brace, whenever the brace is reached, is within the P5 bound.** The
 latency the author owns (a `cancelled` check in B's loop is the fix), not a soundness
 defect — named here, not hidden.
 
+**Arena-backed `Box` across a join** (re-review F4b): a `Box` serviced by a task-local arena is
+`portable` and crosses via a write-slot, but freeing it after the arena dies violates the
+constructor's 0001 §6.1 liveness obligation — an `unsafe`-declared trust, not a safe-code hole.
+The clean idiom returns owned value data, never arena-backed `Box`es.
+
 ### 4. The formal claim — per-edge truncation, Thm 1 applied per edge
 
 The old §4 rested on "the join is the only synchronizes-with edge a safe task has" —
@@ -568,7 +583,7 @@ nondeterminism into the differential oracle.
   fields (§2.1).
 - **`split_mut` disjointness as a loan-scan fall-out — rejected as false.** The scan is
   index-insensitive (0001 §2.2/§10); disjointness must be *stipulated* by a blessed primitive
-  over an `unsafe` body, and *priced* (§1.4).
+  over a compiler-internal construction (no user-spellable slice-from-raw-parts op exists in 0001 §4.2/§5.2 — the intrinsic is exactly the point), and *priced* (§1.4).
 - **A `Send` effect / a `Sync`-analog — rejected (NN#19, §2.2).** Thread-crossing is the
   structural `portable` plus a declared `unsafe` boundary, never an effect; no interior
   mutability (0001 §4.3) plus the referent gate leaves nothing for a Sync predicate to carve.
