@@ -54,6 +54,11 @@ use crate::types::{ItemEnv, Type};
 
 use super::runtime;
 
+/// The fixed number of marshalled i64 argument slots a `spawn` passes to
+/// `rt_spawn` (design 0012 Stage 2). Task fns cross scalar/pointer args (each a
+/// single i64); six slots covers the parallel-checker/fill shapes with headroom.
+pub(super) const MAX_SPAWN_ARGS: usize = 6;
+
 /// FaultKind -> stable numeric code passed to `rt_fault` and decoded by the driver.
 pub fn kind_code(k: FaultKind) -> u32 {
     match k {
@@ -385,6 +390,9 @@ pub fn compile(
     builder.symbol("rt_mmio_load", runtime::rt_mmio_load as *const u8);
     builder.symbol("rt_mmio_store", runtime::rt_mmio_store as *const u8);
     builder.symbol("rt_fault", runtime::rt_fault as *const u8);
+    builder.symbol("rt_scope_begin", runtime::rt_scope_begin as *const u8);
+    builder.symbol("rt_spawn", runtime::rt_spawn as *const u8);
+    builder.symbol("rt_scope_end", runtime::rt_scope_end as *const u8);
     let mut module = JITModule::new(builder);
 
     let shims = Shims::declare(&mut module)?;
@@ -436,6 +444,10 @@ pub(super) struct Shims {
     mmio_load: FuncId,
     mmio_store: FuncId,
     fault: FuncId,
+    // Structured-concurrency Stage 2 (design 0012): real thread creation + join.
+    scope_begin: FuncId,
+    spawn: FuncId,
+    scope_end: FuncId,
 }
 
 impl Shims {
@@ -488,7 +500,26 @@ impl Shims {
             .declare_function("rt_fault", Linkage::Import, &sigf)
             .map_err(|e| e.to_string())?;
 
-        Ok(Shims { stack_alloc, copy, trace, mmio_load, mmio_store, fault })
+        // rt_scope_begin() / rt_scope_end(): the join-barrier markers (no args).
+        let sig0 = module.make_signature();
+        let scope_begin = module
+            .declare_function("rt_scope_begin", Linkage::Import, &sig0)
+            .map_err(|e| e.to_string())?;
+        let scope_end = module
+            .declare_function("rt_scope_end", Linkage::Import, &sig0)
+            .map_err(|e| e.to_string())?;
+
+        // rt_spawn(faddr, argc, a0..a5): create a real OS thread running the task
+        // fn at `faddr` with `argc` marshalled i64 args (padded to MAX_SPAWN_ARGS).
+        let mut sigsp = module.make_signature();
+        for _ in 0..(2 + MAX_SPAWN_ARGS) {
+            sigsp.params.push(AbiParam::new(types::I64));
+        }
+        let spawn = module
+            .declare_function("rt_spawn", Linkage::Import, &sigsp)
+            .map_err(|e| e.to_string())?;
+
+        Ok(Shims { stack_alloc, copy, trace, mmio_load, mmio_store, fault, scope_begin, spawn, scope_end })
     }
 }
 
@@ -1057,6 +1088,33 @@ impl<M: Module> Cg<'_, '_, M> {
             }
             StatementKind::Subslice { dst, src, lo, hi, stride, span } => {
                 self.subslice_op(dst, src, lo, hi, *stride, *span, mf);
+            }
+            // Stage 2 (design 0012 §6): `spawn` becomes real thread creation, the
+            // `scope` markers push/join a frame. Args are evaluated on the PARENT
+            // thread (the marshalling) and handed to the task's thread by value.
+            StatementKind::Spawn { func, args } => {
+                let fref = self.callref(func);
+                let faddr = self.b.ins().func_addr(types::I64, fref);
+                let argc = self.iconst(args.len() as i64);
+                let mut vals = vec![faddr, argc];
+                for a in args {
+                    let v = self.eval_operand(a, mf);
+                    vals.push(v);
+                }
+                while vals.len() < 2 + MAX_SPAWN_ARGS {
+                    let z = self.iconst(0);
+                    vals.push(z);
+                }
+                let r = self.shimref("spawn", self.shims.spawn);
+                self.b.ins().call(r, &vals);
+            }
+            StatementKind::ScopeBegin => {
+                let r = self.shimref("scope_begin", self.shims.scope_begin);
+                self.b.ins().call(r, &[]);
+            }
+            StatementKind::ScopeEnd => {
+                let r = self.shimref("scope_end", self.shims.scope_end);
+                self.b.ins().call(r, &[]);
             }
         }
     }

@@ -767,11 +767,16 @@ impl<'a> Lowerer<'a> {
             // Sequential oracle (design 0012 §6): a `scope` lowers as a plain block,
             // a `spawn` as the task's call run at the spawn point.
             ExprKind::Scope(b) => {
+                // Stage 2 (design 0012 §6): emit structured markers the NATIVE
+                // backend turns into real thread creation + a join barrier; the
+                // MIR interp (sequential oracle) treats them as no-ops.
+                self.emit(StatementKind::ScopeBegin, e.span, false);
                 self.lower_block(b)?;
+                self.emit(StatementKind::ScopeEnd, e.span, false);
                 Ok(self.unit())
             }
             ExprKind::Spawn(c) => {
-                self.lower_value(c, None)?;
+                self.lower_spawn(c, e.span)?;
                 Ok(self.unit())
             }
             ExprKind::Wrapping(b) => self.lower_regime(b, Regime::Wrapping),
@@ -1700,6 +1705,25 @@ impl<'a> Lowerer<'a> {
         }
         // Indirect call through any other fn-pointer-valued expression.
         self.lower_indirect_call(callee, args, span)
+    }
+
+    /// Lower a `spawn CALLEE(args)` (design 0012 §1.1). A direct call to a known
+    /// user fn becomes a `Spawn` statement the native backend threads; anything
+    /// else (fn-pointer / method spawn) falls back to an inline call, which the
+    /// native backend then runs sequentially — an honestly-noted boundary, none of
+    /// the Stage-2 gate fixtures hit it.
+    fn lower_spawn(&mut self, call: &Expr, span: Span) -> LR<()> {
+        if let ExprKind::Call { callee, args } = &call.kind {
+            if let ExprKind::Ident(name) = &callee.kind {
+                if let Some(sig) = self.items.fns.get(name.as_str()).cloned() {
+                    let ops = self.lower_call_args(&sig, args)?;
+                    self.emit(StatementKind::Spawn { func: name.clone(), args: ops }, span, false);
+                    return Ok(());
+                }
+            }
+        }
+        self.lower_value(call, None)?;
+        Ok(())
     }
 
     fn lower_direct_call(&mut self, name: String, sig: &crate::resolve::FnSig, args: &[Expr], span: Span) -> LR<(Operand, Type)> {

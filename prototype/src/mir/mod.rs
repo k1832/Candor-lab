@@ -201,6 +201,20 @@ pub enum StatementKind {
     /// `subslice(s, lo, hi)` (design 0004): a bounds-checked slice re-header into
     /// `dst`; `lo > hi || hi > len` faults `Bounds` at `span`.
     Subslice { dst: Place, src: Place, lo: Operand, hi: Operand, stride: u64, span: Span },
+    /// `spawn CALLEE(args)` inside a `scope` (design 0012 §1.1). The SEQUENTIAL
+    /// ORACLE (tree-walker, MIR interp) runs the task inline at this point in spawn
+    /// order — valid by SC-for-DRF (§6). The NATIVE backend (design 0012 Stage 2)
+    /// instead creates a real OS thread running `func` with the marshalled `args`
+    /// and joins it at the enclosing `ScopeEnd`. `func` is a direct MIR fn name.
+    Spawn { func: String, args: Vec<Operand> },
+    /// The opening `{` of a `scope` concurrency region (design 0012 §1.1). Oracle:
+    /// a no-op. Native: push a scope frame onto the running thread's frame stack.
+    ScopeBegin,
+    /// The closing `}` / join barrier of a `scope` (design 0012 §1.1, §3.4). Oracle:
+    /// a no-op (tasks already ran inline). Native: join every task of the top scope
+    /// frame in spawn order, merge their per-task traces (deterministic θ), and
+    /// deliver the spawn-order-first fault (§3.2) at the brace.
+    ScopeEnd,
 }
 
 #[derive(Clone, Debug)]

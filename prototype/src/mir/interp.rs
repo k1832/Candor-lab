@@ -342,6 +342,19 @@ impl<'a> Engine<'a> {
                     StatementKind::Subslice { dst, src, lo, hi, stride, span } => {
                         self.subslice_op(dst, src, *lo, *hi, *stride, *span, mf, frame)?;
                     }
+                    // Stage-2 sequential oracle (design 0012 §6): a `spawn` runs the
+                    // task inline at the spawn point (spawn order); a fault propagates
+                    // immediately, which is naturally spawn-order-first (§3.2). The
+                    // `scope` markers are join-barrier no-ops for the single-threaded
+                    // oracle (every task has already run by the closing brace).
+                    StatementKind::Spawn { func, args } => {
+                        let mut vals = Vec::with_capacity(args.len());
+                        for a in args {
+                            vals.push(self.eval_operand(a, mf, frame)?);
+                        }
+                        self.call(func, &vals)?;
+                    }
+                    StatementKind::ScopeBegin | StatementKind::ScopeEnd => {}
                 }
             }
             match &block.term {

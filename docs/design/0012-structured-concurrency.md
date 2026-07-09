@@ -525,7 +525,7 @@ nondeterminism into the differential oracle.
   accepted. Pure loan/property scan; no execution nondeterminism. **This is where
   race-freedom is established** (see the honesty note below).
 
-- **Stage 2 — deterministic sequential execution.** Run each spawned task to completion in
+- **Stage 2 — deterministic sequential oracle + REAL native parallelism. [IMPLEMENTED 2026-07-09 in the prototype: the tree-walker and MIR interp stay the sequential oracle; the native Cranelift JIT engine now runs `scope`/`spawn` on REAL OS threads (`rt_spawn`/`rt_join` over `std::thread`), with per-task thread-local trace buffers merged at the join in spawn order (deterministic θ), an atomic stack-bump + thread-local fault landing (runtime-internal sync below the language, §1.3 note), and spawn-order-first fault delivery collected at the brace. The nondeterminism gate runs every native-supported fixture 50–200× (`tests/concurrency_native.rs`); `split_mut` stays checker-only (no runtime lowering on any engine), so disjoint-contended writes are shaken via distinct slots. See `tests/concurrency.rs` (checker/oracle) and `tests/concurrency_native.rs` (threaded gate).]** Run each spawned task to completion in
   spawn order on the single-threaded engine — a *sequential schedule*, which is **valid**
   because safe fork-join Candor is DRF (by the Stage-1 checker) and ships no user-
   observable nondeterministic sync (§1.3): by SC-for-DRF every schedule yields the same

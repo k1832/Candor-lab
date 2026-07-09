@@ -291,6 +291,14 @@ fn stmt_uses(kind: &StatementKind, live: &mut HashSet<LocalId>) {
             op_use(lo, live);
             op_use(hi, live);
         }
+        // A `spawn`'s marshalled args are live uses (they cross into the task);
+        // the scope markers reference no locals.
+        StatementKind::Spawn { args, .. } => {
+            for a in args {
+                op_use(a, live);
+            }
+        }
+        StatementKind::ScopeBegin | StatementKind::ScopeEnd => {}
     }
 }
 
