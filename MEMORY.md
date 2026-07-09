@@ -190,3 +190,18 @@ One lesson per entry, one-line summary first.
   at all; projected stores (`.f`/`[i]`/`deref`) keep their root live. Fault-capable
   rvalues (checked arith, `Div`/`Rem`/shift, index, checked conv) are NEVER
   DCE-eligible — their fault is a potential observable (Stage D, 2026-07-09).
+
+- **Freestanding (no-libc) linking needs the flat buffer at a fixed VA without
+  bloating the binary — a NOBITS section + `--section-start` does it.** The
+  Cranelift object bakes `MEM_BASE` (0x200000000000) as an absolute `movabs`
+  constant for every load/store, so the flat region must live at that exact VA.
+  A normal `.bss` array lands near 0x4xxxxx (wrong), and forcing a named section
+  with a zero-init array can turn PROGBITS (256 MiB on disk). The fix: declare the
+  region in inline asm as `.section ...,"aw",@nobits` + `.skip`, address it ONLY
+  through the absolute `MEM_BASE` constant (a `-no-pie` PC-relative ref to a 32 TiB
+  VA does not fit — R_X86_64_PC32 truncation), and pin it with
+  `-Wl,--section-start=.candor_flat=0x200000000000`. No mmap, no linker-script
+  file, ~9 KB binary, kernel zero-fills the LOAD segment. The freestanding AOT
+  path reuses the SAME emitted object as the hosted one — only the runtime C file
+  and link flags differ (`src/backend/freestanding_runtime.c`, object.rs
+  `link_freestanding`).
