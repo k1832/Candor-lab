@@ -117,13 +117,26 @@ resolved by 0011 §1: `char *` maps to `rawptr u8`, and "NUL-termination is a
 example). Applying the recorded-justification test: a `CStr` type would carry the
 invariant "these bytes are NUL-terminated and contain no interior NUL." That
 invariant (a) is not a *text* invariant at all — it is an FFI memory-layout
-invariant — and (b) is already expressible and *audited* as a P8 contract on
-`[u8]`/`rawptr u8` at the P17 boundary, which is where trust is meant to be
-enumerable. Minting a core/std type for it would duplicate 0011's mechanism, pull
-an FFI concern into the text vocabulary, and add a budget entry that buys nothing
-`[u8]` + contract does not already buy. **Refused; delegated to 0011.** This is
-the single sharpest budget decision, and it kills one whole arm of the Rust
-sprawl directly.
+invariant — and (b) is already expressible as a contract on `[u8]`/`rawptr u8` at
+the P17 boundary, which is where trust is meant to be enumerable. Minting a
+core/std type for it would duplicate 0011's mechanism and pull an FFI concern into
+the text vocabulary. **The type is refused; delegated to 0011.**
+
+**Honest scoping of what the delegation costs (review #1 finding 2).** The CStr
+invariant has two parts, and they belong at *different* check levels — the earlier
+draft's "buys nothing" overclaimed by routing both to trust. **NUL-termination**
+of a foreign `char *` is genuinely uncheckable (the bytes past the pointer are not
+Candor's) — correctly `assumed-proven` at the boundary. But **no-interior-NUL** of
+*Candor-owned* bytes being passed *to* C is dynamically checkable (a scan), which
+is exactly what Rust's `CStr::new` enforces at construction. That checkable half
+must ride the Candor→C wrapper as `enforced requires(no_interior_nul(s))` (0011 §3
+already places the checkable value-subset at `enforced`), **not** be lumped into
+`assumed-proven`. So the refusal of the *type* stands — no `CStr` earns minting —
+but the delegation is honest only if the checkable invariant stays `enforced`; a
+`CStr` type would have enforced no-interior-NUL by construction, and the boundary
+contract must match that, not weaken it. This is the single sharpest budget
+decision, and it kills one whole arm of the Rust sprawl — at the stated,
+not-zero, cost of keeping the checkable half `enforced` by discipline.
 
 ### 2. The core / std / boundary split
 
@@ -155,7 +168,9 @@ marked:
 - **Length is bytes.** `len(s: str) -> usize` is the **byte** length, O(1),
   identical to `len` on `[u8]`. There is no `len`-that-counts-characters. Counting
   Unicode scalar values is a separate, explicitly-named, O(n) operation
-  `char_count(s: str) -> usize` — the UTF-8 tax made visible (P4): the cheap
+  `char_count(s: str) -> usize` — the UTF-8 tax made visible (P4); **ships WITH the
+deferred `Chars` protocol (OBL-TEXT-CHARS), not in the minimal first surface**
+(review #1 finding 7). The cheap
   length is bytes, and the operation that costs a scan *says so in its name and
   its cost*.
 - **Indexing is byte-indexed.** `s[i]` yields the **byte** `u8` at `i`,
@@ -187,9 +202,19 @@ marked:
   view yielding `u32` code points, not an overload of byte iteration.
 - **Literal syntax.** `"..."` denotes a **`str`** (the migration, §Literals
   below); `b"..."` denotes a `[u8]` (new syntax, §Literals, cleared under NN#13).
-- **Building (std).** `String` grows by `push(write self, c: u32)` (append one
-  scalar value, UTF-8-encoded) and `append(write self, s: read str)` (append a
-  view); `as_str(read String) -> str` borrows the built text back as a view. This
+- **Building (std).** `String` grows by
+  `push(write self, c: u32) enforced requires(is_scalar_value(c))` — appends one
+  Unicode scalar value, UTF-8-encoded. **The `requires` is load-bearing, not
+  decorative** (review #1 finding 1): without it, `push(s, 0xD800)` (a surrogate)
+  or `push(s, 0x110000)` (out of range) would UTF-8-encode to ill-formed bytes and
+  forge a false `str` through `as_str` — breaking, at the primary builder, the one
+  invariant that is `str`'s reason to exist. This is where the char-as-`u32`
+  decision (§Rejected) pays its cost: an `enforced` P5 backstop on the single
+  `u32`→text door. A caller decoding from a P7 boundary validates there and the
+  check is then provably redundant (P8 static discharge); the backstop guarantees
+  no unvalidated integer becomes text. `append(write self, s: read str)` appends a
+  view (its bytes are already well-formed by `str`'s invariant — no check).
+  `as_str(read String) -> str` borrows the built text back as a view. This
   is the owning side of formatting; the full format machinery is a later std
   round built on `append`.
 
@@ -266,7 +291,7 @@ Consequences, each named:
   non-allocating `str` scan and make character iteration *not* interrupt-callable.
   Neither is acceptable, so char iteration is **deferred** (OBL-TEXT-CHARS) rather
   than forced into a mis-fitting protocol. It needs either 0009's deferred
-  non-`alloc` forward-iterator work (OBL-ITER-BORROW) or a small dedicated `Chars`
+  a small dedicated non-`alloc` `Chars`
   interface; that is a 0009 decision, taken when char iteration has a caller. The
   honest present answer: **bytes iterate freely; characters wait for the right
   protocol.**
