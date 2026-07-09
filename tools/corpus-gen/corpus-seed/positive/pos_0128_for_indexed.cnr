@@ -1,0 +1,21 @@
+// shape: for_indexed — for-loop over the Indexed protocol (borrows, copies items out)
+enum Opt[T] { ok Some(T), None }
+interface Indexed { type Item; fn at(read self, i: usize) -> Opt[Item]; }
+struct Arena[T: copy] { mem: [8]T, count: u32 }
+fn push[T: copy](ar: write Arena[T], x: T) -> bool {
+    if ar.*.count >= 8u32 { return false; }
+    let i: u32 = ar.*.count;
+    ar.*.mem[conv usize i] = x;
+    ar.*.count = i + 1u32;
+    return true;
+}
+impl[T: copy] Indexed for Arena[T] { type Item = T; fn at(read self, i: usize) -> Opt[T] { if i >= conv usize self.count { return Opt::None; } return Opt::Some(self.mem[i]); } }
+fn main() -> i64 {
+    let mut ar: Arena[i64] = Arena { mem: [0, 0, 0, 0, 0, 0, 0, 0], count: 0u32 };
+    let p0: bool = push(write ar, 68);
+    let p1: bool = push(write ar, 86);
+    let p2: bool = push(write ar, 221);
+    let mut s: i64 = 0;
+    for x in read ar { s = s + x; }
+    return s;
+}

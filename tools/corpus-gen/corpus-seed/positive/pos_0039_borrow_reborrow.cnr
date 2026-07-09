@@ -1,0 +1,10 @@
+// shape: borrow_reborrow — write-borrow mutation, then read-borrow observation
+struct Acc { total: i64 }
+fn bump(a: write Acc, d: i64) -> unit { a.*.total = a.total + d; }
+fn peek(a: read Acc) -> i64 { return a.total; }
+fn main() -> i64 {
+    let mut acc: Acc = Acc { total: -3 };
+    bump(write acc, -289);
+    bump(write acc, -238);
+    return peek(read acc);
+}

@@ -1,0 +1,4 @@
+// shape: neg_write_needs_deref — expect E0713 (nonce 8833)
+struct S { v: i64 }
+fn setit(s: write S) -> unit { s.v = 5; }
+fn main() -> i64 { let mut a: S = S { v: 1 }; setit(write a); return a.v; }

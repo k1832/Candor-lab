@@ -1,0 +1,3 @@
+// shape: neg_non_exhaustive_match — expect E0601 (nonce 4176)
+enum Opt[T] { ok Some(T), None }
+fn main() -> i64 { let o: Opt[i64] = Opt::Some(1); match o { Opt::Some(v) => { return v; } } }

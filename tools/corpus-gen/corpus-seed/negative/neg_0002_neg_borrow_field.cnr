@@ -1,0 +1,3 @@
+// shape: neg_borrow_field — expect E0201 (nonce 6822)
+struct Holder { r: read i64, tag: i64 }
+fn main() -> i64 { return 0; }

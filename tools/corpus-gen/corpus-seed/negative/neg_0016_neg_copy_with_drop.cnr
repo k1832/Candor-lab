@@ -1,0 +1,3 @@
+// shape: neg_copy_with_drop — expect E0202 (nonce 8907)
+copy struct Tag { id: i64 } drop(write self) { trace(self.id); }
+fn main() -> i64 { return 0; }

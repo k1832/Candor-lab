@@ -1,0 +1,7 @@
+// shape: struct_drop_trace — struct with a drop hook that traces its id
+struct R { id: i64 } drop(write self) { trace(self.id); }
+fn main() -> i64 {
+    let r: R = R { id: 295 };
+    let x: i64 = r.id;
+    return x + 966;
+}

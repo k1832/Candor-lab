@@ -1,0 +1,12 @@
+// shape: enum_match — result-shaped enum + exhaustive match
+enum Opt[T] { ok Some(T), None }
+fn pick(c: bool) -> Opt[i64] {
+    if c { return Opt::Some(132); }
+    return Opt::None;
+}
+fn main() -> i64 {
+    match pick(false) {
+        Opt::Some(v) => { return v; }
+        Opt::None => { return 171; }
+    }
+}

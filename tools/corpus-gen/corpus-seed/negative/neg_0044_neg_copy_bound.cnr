@@ -1,0 +1,4 @@
+// shape: neg_copy_bound — expect E1007 (nonce 3529)
+fn need_copy[T: copy](x: T) -> T { return x; }
+struct NoCopy { v: i64 }
+fn main() -> i64 { let a: NoCopy = NoCopy { v: 1 }; let b: NoCopy = need_copy(a); return 0; }

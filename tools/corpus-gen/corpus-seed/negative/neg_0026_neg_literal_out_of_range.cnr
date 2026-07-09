@@ -1,0 +1,2 @@
+// shape: neg_literal_out_of_range — expect E0709 (nonce 5468)
+fn main() -> i64 { let x: u8 = 484u8; return 0; }

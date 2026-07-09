@@ -1,0 +1,3 @@
+// shape: neg_unknown_variant — expect E0108 (nonce 3367)
+enum Color { Red, Green }
+fn main() -> i64 { let c: Color = Color::Blue; return 0; }

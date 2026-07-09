@@ -1,0 +1,6 @@
+// shape: arith_checked — non-wrapping i64 arithmetic; sentinel computed by the generator
+fn main() -> i64 {
+    let a: i64 = 370;
+    let b: i64 = 669;
+    return a | b;
+}

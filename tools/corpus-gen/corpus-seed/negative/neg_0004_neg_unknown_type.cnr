@@ -1,0 +1,2 @@
+// shape: neg_unknown_type — expect E0102 (nonce 1425)
+fn main() -> i64 { let x: Widget = other(); return 0; }

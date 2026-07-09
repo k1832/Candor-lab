@@ -1,0 +1,7 @@
+// shape: generic_id — generic identity, monomorphized at two i64 sites
+fn id[T](x: T) -> T { return x; }
+fn main() -> i64 {
+    let a: i64 = id(177);
+    let b: i64 = id(375);
+    return a + b;
+}

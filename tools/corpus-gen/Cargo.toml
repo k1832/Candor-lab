@@ -1,0 +1,17 @@
+[package]
+name = "corpus-gen"
+version = "0.1.0"
+edition = "2021"
+description = "Candor P19 synthetic-corpus pipeline seed: grammar-directed .cnr generation, filtered by the candor-proto toolchain (compiles + runs to a generator-predicted sentinel for positives; emits exactly one expected diagnostic for negatives). Deterministic (seeded xorshift), regenerated per edition."
+
+[[bin]]
+name = "corpus-gen"
+path = "src/main.rs"
+
+[lib]
+name = "corpus_gen"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

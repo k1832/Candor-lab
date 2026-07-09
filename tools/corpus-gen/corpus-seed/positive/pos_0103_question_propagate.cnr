@@ -1,0 +1,17 @@
+// shape: question_propagate — `?` unwraps the ok variant of a result-shaped enum
+enum Res[T, E] { ok Ok(T), Err(E) }
+enum Fail { Bad }
+fn step(c: bool) -> Res[i64, Fail] {
+    if c { return Res::Ok(-320); }
+    return Res::Err(Fail::Bad);
+}
+fn drive(c: bool) -> Res[i64, Fail] {
+    let x: i64 = step(c)?;
+    return Res::Ok(x + 9);
+}
+fn main() -> i64 {
+    match drive(true) {
+        Res::Ok(v) => { return v; }
+        Res::Err(e) => { return -1; }
+    }
+}

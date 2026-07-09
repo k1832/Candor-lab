@@ -1,0 +1,6 @@
+// shape: arith_wrapping — deliberate i64 overflow under `wrapping`; sentinel = wrapping_add
+fn main() -> i64 {
+    let mut r: i64 = 0;
+    wrapping { r = 9223372036854775807i64 + 212; }
+    return r;
+}

@@ -1,0 +1,17 @@
+// shape: arena_index — fixed [8]T arena, push/get by value (copy bound)
+struct Arena[T: copy] { mem: [8]T, count: u32 }
+fn push[T: copy](ar: write Arena[T], x: T) -> bool {
+    if ar.*.count >= 8u32 { return false; }
+    let i: u32 = ar.*.count;
+    ar.*.mem[conv usize i] = x;
+    ar.*.count = i + 1u32;
+    return true;
+}
+fn get[T: copy](ar: read Arena[T], i: u32) -> T { return ar.mem[conv usize i]; }
+fn main() -> i64 {
+    let mut ar: Arena[i64] = Arena { mem: [0, 0, 0, 0, 0, 0, 0, 0], count: 0u32 };
+    let p0: bool = push(write ar, 249);
+    let p1: bool = push(write ar, 239);
+    let p2: bool = push(write ar, 49);
+    return get(read ar, 0u32) + get(read ar, 1u32) + get(read ar, 2u32);
+}

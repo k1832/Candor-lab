@@ -1,0 +1,3 @@
+// shape: neg_wrong_arg_count — expect E0706 (nonce 7978)
+fn add(a: i64, b: i64) -> i64 { return a + b; }
+fn main() -> i64 { return add(1); }

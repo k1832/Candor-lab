@@ -1,0 +1,9 @@
+// shape: neg_use_after_move — expect E0301 (nonce 2725)
+struct S { v: i64 }
+fn consume(s: S) -> i64 { return s.v; }
+fn main() -> i64 {
+    let a: S = S { v: 1 };
+    let x: i64 = consume(a);
+    let y: i64 = consume(a);
+    return x + y;
+}

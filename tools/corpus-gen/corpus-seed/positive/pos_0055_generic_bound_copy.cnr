@@ -1,0 +1,10 @@
+// shape: generic_bound_copy — generic fn under a `copy` bound (unwrap_or)
+enum Opt[T] { ok Some(T), None }
+fn unwrap_or[T: copy](o: Opt[T], d: T) -> T {
+    match o { Opt::Some(v) => { return v; } Opt::None => { return d; } }
+}
+fn main() -> i64 {
+    let s: Opt[i64] = Opt::Some(409);
+    let n: Opt[i64] = Opt::None;
+    return unwrap_or(s, -407) + unwrap_or(n, -128);
+}

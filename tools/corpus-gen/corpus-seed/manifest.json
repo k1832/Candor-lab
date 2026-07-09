@@ -1,0 +1,4448 @@
+{
+  "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)",
+  "seed": 1,
+  "positive_count": 150,
+  "negative_count": 50,
+  "stats": [
+    {
+      "category": "positive",
+      "shape": "arith_checked",
+      "kept": 15,
+      "rejected": 0
+    },
+    {
+      "category": "positive",
+      "shape": "arith_wrapping",
+      "kept": 15,
+      "rejected": 0
+    },
+    {
+      "category": "positive",
+      "shape": "enum_match",
+      "kept": 15,
+      "rejected": 0
+    },
+    {
+      "category": "positive",
+      "shape": "question_propagate",
+      "kept": 15,
+      "rejected": 0
+    },
+    {
+      "category": "positive",
+      "shape": "generic_id",
+      "kept": 15,
+      "rejected": 0
+    },
+    {
+      "category": "positive",
+      "shape": "generic_bound_copy",
+      "kept": 15,
+      "rejected": 0
+    },
+    {
+      "category": "positive",
+      "shape": "struct_drop_trace",
+      "kept": 15,
+      "rejected": 0
+    },
+    {
+      "category": "positive",
+      "shape": "arena_index",
+      "kept": 15,
+      "rejected": 0
+    },
+    {
+      "category": "positive",
+      "shape": "for_indexed",
+      "kept": 15,
+      "rejected": 0
+    },
+    {
+      "category": "positive",
+      "shape": "borrow_reborrow",
+      "kept": 15,
+      "rejected": 0
+    },
+    {
+      "category": "negative",
+      "shape": "neg_use_after_move",
+      "kept": 4,
+      "rejected": 0
+    },
+    {
+      "category": "negative",
+      "shape": "neg_copy_with_drop",
+      "kept": 4,
+      "rejected": 0
+    },
+    {
+      "category": "negative",
+      "shape": "neg_borrow_field",
+      "kept": 4,
+      "rejected": 0
+    },
+    {
+      "category": "negative",
+      "shape": "neg_two_ok_variants",
+      "kept": 4,
+      "rejected": 0
+    },
+    {
+      "category": "negative",
+      "shape": "neg_unknown_type",
+      "kept": 4,
+      "rejected": 0
+    },
+    {
+      "category": "negative",
+      "shape": "neg_write_needs_deref",
+      "kept": 3,
+      "rejected": 0
+    },
+    {
+      "category": "negative",
+      "shape": "neg_missing_return",
+      "kept": 3,
+      "rejected": 0
+    },
+    {
+      "category": "negative",
+      "shape": "neg_wrong_arg_count",
+      "kept": 3,
+      "rejected": 0
+    },
+    {
+      "category": "negative",
+      "shape": "neg_break_outside_loop",
+      "kept": 3,
+      "rejected": 0
+    },
+    {
+      "category": "negative",
+      "shape": "neg_unknown_variant",
+      "kept": 3,
+      "rejected": 0
+    },
+    {
+      "category": "negative",
+      "shape": "neg_unknown_field",
+      "kept": 3,
+      "rejected": 0
+    },
+    {
+      "category": "negative",
+      "shape": "neg_literal_out_of_range",
+      "kept": 3,
+      "rejected": 0
+    },
+    {
+      "category": "negative",
+      "shape": "neg_non_exhaustive_match",
+      "kept": 3,
+      "rejected": 0
+    },
+    {
+      "category": "negative",
+      "shape": "neg_alloc_effect",
+      "kept": 3,
+      "rejected": 0
+    },
+    {
+      "category": "negative",
+      "shape": "neg_copy_bound",
+      "kept": 3,
+      "rejected": 0
+    }
+  ],
+  "samples": [
+    {
+      "id": "pos_0000_arith_checked",
+      "category": "positive",
+      "shape": "arith_checked",
+      "seed": 1,
+      "draw": 0,
+      "file": "positive/pos_0000_arith_checked.cnr",
+      "params": {
+        "a": 88,
+        "b": 322,
+        "op": "|"
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 346
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 346
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0001_arith_wrapping",
+      "category": "positive",
+      "shape": "arith_wrapping",
+      "seed": 1,
+      "draw": 1,
+      "file": "positive/pos_0001_arith_wrapping.cnr",
+      "params": {
+        "a": 9223372036854775807,
+        "b": 261
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -9223372036854775548
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -9223372036854775548
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0002_enum_match",
+      "category": "positive",
+      "shape": "enum_match",
+      "seed": 1,
+      "draw": 2,
+      "file": "positive/pos_0002_enum_match.cnr",
+      "params": {
+        "c": true,
+        "d": -181,
+        "v": 188
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 188
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 188
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0003_question_propagate",
+      "category": "positive",
+      "shape": "question_propagate",
+      "seed": 1,
+      "draw": 3,
+      "file": "positive/pos_0003_question_propagate.cnr",
+      "params": {
+        "k": 472,
+        "v": 214
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 686
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 686
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0004_generic_id",
+      "category": "positive",
+      "shape": "generic_id",
+      "seed": 1,
+      "draw": 4,
+      "file": "positive/pos_0004_generic_id.cnr",
+      "params": {
+        "a": -430,
+        "b": -496
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -926
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -926
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0005_generic_bound_copy",
+      "category": "positive",
+      "shape": "generic_bound_copy",
+      "seed": 1,
+      "draw": 5,
+      "file": "positive/pos_0005_generic_bound_copy.cnr",
+      "params": {
+        "d1": 137,
+        "d2": 390,
+        "v": -462
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -72
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -72
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0006_struct_drop_trace",
+      "category": "positive",
+      "shape": "struct_drop_trace",
+      "seed": 1,
+      "draw": 6,
+      "file": "positive/pos_0006_struct_drop_trace.cnr",
+      "params": {
+        "expected_trace": [
+          749
+        ],
+        "id": 749,
+        "k": 943
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 1692
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 1692
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0007_arena_index",
+      "category": "positive",
+      "shape": "arena_index",
+      "seed": 1,
+      "draw": 7,
+      "file": "positive/pos_0007_arena_index.cnr",
+      "params": {
+        "v0": 104,
+        "v1": 154,
+        "v2": 269
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 527
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 527
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0008_for_indexed",
+      "category": "positive",
+      "shape": "for_indexed",
+      "seed": 1,
+      "draw": 8,
+      "file": "positive/pos_0008_for_indexed.cnr",
+      "params": {
+        "v0": 254,
+        "v1": 84,
+        "v2": 109
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 447
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 447
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0009_borrow_reborrow",
+      "category": "positive",
+      "shape": "borrow_reborrow",
+      "seed": 1,
+      "draw": 9,
+      "file": "positive/pos_0009_borrow_reborrow.cnr",
+      "params": {
+        "d1": -55,
+        "d2": -163,
+        "t0": 239
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 21
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 21
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0010_arith_checked",
+      "category": "positive",
+      "shape": "arith_checked",
+      "seed": 1,
+      "draw": 10,
+      "file": "positive/pos_0010_arith_checked.cnr",
+      "params": {
+        "a": 288,
+        "b": 299,
+        "op": "&"
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 288
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 288
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0011_arith_wrapping",
+      "category": "positive",
+      "shape": "arith_wrapping",
+      "seed": 1,
+      "draw": 11,
+      "file": "positive/pos_0011_arith_wrapping.cnr",
+      "params": {
+        "a": 9223372036854775807,
+        "b": 494
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -9223372036854775315
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -9223372036854775315
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0012_enum_match",
+      "category": "positive",
+      "shape": "enum_match",
+      "seed": 1,
+      "draw": 12,
+      "file": "positive/pos_0012_enum_match.cnr",
+      "params": {
+        "c": true,
+        "d": 152,
+        "v": -179
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -179
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -179
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0013_question_propagate",
+      "category": "positive",
+      "shape": "question_propagate",
+      "seed": 1,
+      "draw": 13,
+      "file": "positive/pos_0013_question_propagate.cnr",
+      "params": {
+        "k": 5,
+        "v": 118
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 123
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 123
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0014_generic_id",
+      "category": "positive",
+      "shape": "generic_id",
+      "seed": 1,
+      "draw": 14,
+      "file": "positive/pos_0014_generic_id.cnr",
+      "params": {
+        "a": -478,
+        "b": -62
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -540
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -540
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0015_generic_bound_copy",
+      "category": "positive",
+      "shape": "generic_bound_copy",
+      "seed": 1,
+      "draw": 15,
+      "file": "positive/pos_0015_generic_bound_copy.cnr",
+      "params": {
+        "d1": 325,
+        "d2": -487,
+        "v": 430
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -57
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -57
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0016_struct_drop_trace",
+      "category": "positive",
+      "shape": "struct_drop_trace",
+      "seed": 1,
+      "draw": 16,
+      "file": "positive/pos_0016_struct_drop_trace.cnr",
+      "params": {
+        "expected_trace": [
+          328
+        ],
+        "id": 328,
+        "k": 866
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 1194
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 1194
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0017_arena_index",
+      "category": "positive",
+      "shape": "arena_index",
+      "seed": 1,
+      "draw": 17,
+      "file": "positive/pos_0017_arena_index.cnr",
+      "params": {
+        "v0": 90,
+        "v1": 216,
+        "v2": 157
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 463
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 463
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0018_for_indexed",
+      "category": "positive",
+      "shape": "for_indexed",
+      "seed": 1,
+      "draw": 18,
+      "file": "positive/pos_0018_for_indexed.cnr",
+      "params": {
+        "v0": 128,
+        "v1": 21,
+        "v2": 205
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 354
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 354
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0019_borrow_reborrow",
+      "category": "positive",
+      "shape": "borrow_reborrow",
+      "seed": 1,
+      "draw": 19,
+      "file": "positive/pos_0019_borrow_reborrow.cnr",
+      "params": {
+        "d1": 119,
+        "d2": 227,
+        "t0": 104
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 450
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 450
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0020_arith_checked",
+      "category": "positive",
+      "shape": "arith_checked",
+      "seed": 1,
+      "draw": 20,
+      "file": "positive/pos_0020_arith_checked.cnr",
+      "params": {
+        "a": 678,
+        "b": 444,
+        "op": "|"
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 958
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 958
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0021_arith_wrapping",
+      "category": "positive",
+      "shape": "arith_wrapping",
+      "seed": 1,
+      "draw": 21,
+      "file": "positive/pos_0021_arith_wrapping.cnr",
+      "params": {
+        "a": 9223372036854775807,
+        "b": 483
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -9223372036854775326
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -9223372036854775326
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0022_enum_match",
+      "category": "positive",
+      "shape": "enum_match",
+      "seed": 1,
+      "draw": 22,
+      "file": "positive/pos_0022_enum_match.cnr",
+      "params": {
+        "c": false,
+        "d": 171,
+        "v": 132
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 171
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 171
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0023_question_propagate",
+      "category": "positive",
+      "shape": "question_propagate",
+      "seed": 1,
+      "draw": 23,
+      "file": "positive/pos_0023_question_propagate.cnr",
+      "params": {
+        "k": 436,
+        "v": 106
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 542
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 542
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0024_generic_id",
+      "category": "positive",
+      "shape": "generic_id",
+      "seed": 1,
+      "draw": 24,
+      "file": "positive/pos_0024_generic_id.cnr",
+      "params": {
+        "a": 308,
+        "b": 203
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 511
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 511
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0025_generic_bound_copy",
+      "category": "positive",
+      "shape": "generic_bound_copy",
+      "seed": 1,
+      "draw": 25,
+      "file": "positive/pos_0025_generic_bound_copy.cnr",
+      "params": {
+        "d1": -179,
+        "d2": -462,
+        "v": 260
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -202
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -202
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0026_struct_drop_trace",
+      "category": "positive",
+      "shape": "struct_drop_trace",
+      "seed": 1,
+      "draw": 26,
+      "file": "positive/pos_0026_struct_drop_trace.cnr",
+      "params": {
+        "expected_trace": [
+          614
+        ],
+        "id": 614,
+        "k": 853
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 1467
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 1467
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0027_arena_index",
+      "category": "positive",
+      "shape": "arena_index",
+      "seed": 1,
+      "draw": 27,
+      "file": "positive/pos_0027_arena_index.cnr",
+      "params": {
+        "v0": 100,
+        "v1": 136,
+        "v2": 274
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 510
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 510
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0028_for_indexed",
+      "category": "positive",
+      "shape": "for_indexed",
+      "seed": 1,
+      "draw": 28,
+      "file": "positive/pos_0028_for_indexed.cnr",
+      "params": {
+        "v0": 244,
+        "v1": 40,
+        "v2": 45
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 329
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 329
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0029_borrow_reborrow",
+      "category": "positive",
+      "shape": "borrow_reborrow",
+      "seed": 1,
+      "draw": 29,
+      "file": "positive/pos_0029_borrow_reborrow.cnr",
+      "params": {
+        "d1": -68,
+        "d2": -192,
+        "t0": 49
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -211
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -211
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0030_arith_checked",
+      "category": "positive",
+      "shape": "arith_checked",
+      "seed": 1,
+      "draw": 30,
+      "file": "positive/pos_0030_arith_checked.cnr",
+      "params": {
+        "a": 781,
+        "b": 795,
+        "op": "^"
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 22
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 22
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0031_arith_wrapping",
+      "category": "positive",
+      "shape": "arith_wrapping",
+      "seed": 1,
+      "draw": 31,
+      "file": "positive/pos_0031_arith_wrapping.cnr",
+      "params": {
+        "a": 9223372036854775807,
+        "b": 583
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -9223372036854775226
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -9223372036854775226
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0032_enum_match",
+      "category": "positive",
+      "shape": "enum_match",
+      "seed": 1,
+      "draw": 32,
+      "file": "positive/pos_0032_enum_match.cnr",
+      "params": {
+        "c": true,
+        "d": 124,
+        "v": 35
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 35
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 35
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0033_question_propagate",
+      "category": "positive",
+      "shape": "question_propagate",
+      "seed": 1,
+      "draw": 33,
+      "file": "positive/pos_0033_question_propagate.cnr",
+      "params": {
+        "k": 400,
+        "v": 368
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 768
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 768
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0034_generic_id",
+      "category": "positive",
+      "shape": "generic_id",
+      "seed": 1,
+      "draw": 34,
+      "file": "positive/pos_0034_generic_id.cnr",
+      "params": {
+        "a": 50,
+        "b": 449
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 499
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 499
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0035_generic_bound_copy",
+      "category": "positive",
+      "shape": "generic_bound_copy",
+      "seed": 1,
+      "draw": 35,
+      "file": "positive/pos_0035_generic_bound_copy.cnr",
+      "params": {
+        "d1": -409,
+        "d2": -444,
+        "v": -128
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -572
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -572
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0036_struct_drop_trace",
+      "category": "positive",
+      "shape": "struct_drop_trace",
+      "seed": 1,
+      "draw": 36,
+      "file": "positive/pos_0036_struct_drop_trace.cnr",
+      "params": {
+        "expected_trace": [
+          680
+        ],
+        "id": 680,
+        "k": 520
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 1200
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 1200
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0037_arena_index",
+      "category": "positive",
+      "shape": "arena_index",
+      "seed": 1,
+      "draw": 37,
+      "file": "positive/pos_0037_arena_index.cnr",
+      "params": {
+        "v0": 179,
+        "v1": 266,
+        "v2": 87
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 532
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 532
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0038_for_indexed",
+      "category": "positive",
+      "shape": "for_indexed",
+      "seed": 1,
+      "draw": 38,
+      "file": "positive/pos_0038_for_indexed.cnr",
+      "params": {
+        "v0": 80,
+        "v1": 158,
+        "v2": 173
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 411
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 411
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0039_borrow_reborrow",
+      "category": "positive",
+      "shape": "borrow_reborrow",
+      "seed": 1,
+      "draw": 39,
+      "file": "positive/pos_0039_borrow_reborrow.cnr",
+      "params": {
+        "d1": -289,
+        "d2": -238,
+        "t0": -3
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -530
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -530
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0040_arith_checked",
+      "category": "positive",
+      "shape": "arith_checked",
+      "seed": 1,
+      "draw": 40,
+      "file": "positive/pos_0040_arith_checked.cnr",
+      "params": {
+        "a": 370,
+        "b": 669,
+        "op": "|"
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 1023
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 1023
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0041_arith_wrapping",
+      "category": "positive",
+      "shape": "arith_wrapping",
+      "seed": 1,
+      "draw": 41,
+      "file": "positive/pos_0041_arith_wrapping.cnr",
+      "params": {
+        "a": 9223372036854775807,
+        "b": 821
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -9223372036854774988
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -9223372036854774988
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0042_enum_match",
+      "category": "positive",
+      "shape": "enum_match",
+      "seed": 1,
+      "draw": 42,
+      "file": "positive/pos_0042_enum_match.cnr",
+      "params": {
+        "c": true,
+        "d": 500,
+        "v": 245
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 245
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 245
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0043_question_propagate",
+      "category": "positive",
+      "shape": "question_propagate",
+      "seed": 1,
+      "draw": 43,
+      "file": "positive/pos_0043_question_propagate.cnr",
+      "params": {
+        "k": 104,
+        "v": -188
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -84
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -84
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0044_generic_id",
+      "category": "positive",
+      "shape": "generic_id",
+      "seed": 1,
+      "draw": 44,
+      "file": "positive/pos_0044_generic_id.cnr",
+      "params": {
+        "a": 177,
+        "b": 375
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 552
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 552
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0045_generic_bound_copy",
+      "category": "positive",
+      "shape": "generic_bound_copy",
+      "seed": 1,
+      "draw": 45,
+      "file": "positive/pos_0045_generic_bound_copy.cnr",
+      "params": {
+        "d1": 427,
+        "d2": -388,
+        "v": -65
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -453
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -453
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0046_struct_drop_trace",
+      "category": "positive",
+      "shape": "struct_drop_trace",
+      "seed": 1,
+      "draw": 46,
+      "file": "positive/pos_0046_struct_drop_trace.cnr",
+      "params": {
+        "expected_trace": [
+          295
+        ],
+        "id": 295,
+        "k": 966
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 1261
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 1261
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0047_arena_index",
+      "category": "positive",
+      "shape": "arena_index",
+      "seed": 1,
+      "draw": 47,
+      "file": "positive/pos_0047_arena_index.cnr",
+      "params": {
+        "v0": 231,
+        "v1": 198,
+        "v2": 237
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 666
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 666
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0048_for_indexed",
+      "category": "positive",
+      "shape": "for_indexed",
+      "seed": 1,
+      "draw": 48,
+      "file": "positive/pos_0048_for_indexed.cnr",
+      "params": {
+        "v0": 10,
+        "v1": 90,
+        "v2": 121
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 221
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 221
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0049_borrow_reborrow",
+      "category": "positive",
+      "shape": "borrow_reborrow",
+      "seed": 1,
+      "draw": 49,
+      "file": "positive/pos_0049_borrow_reborrow.cnr",
+      "params": {
+        "d1": -294,
+        "d2": -44,
+        "t0": -131
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -469
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -469
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0050_arith_checked",
+      "category": "positive",
+      "shape": "arith_checked",
+      "seed": 1,
+      "draw": 50,
+      "file": "positive/pos_0050_arith_checked.cnr",
+      "params": {
+        "a": 489,
+        "b": 129,
+        "op": "|"
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 489
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 489
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0051_arith_wrapping",
+      "category": "positive",
+      "shape": "arith_wrapping",
+      "seed": 1,
+      "draw": 51,
+      "file": "positive/pos_0051_arith_wrapping.cnr",
+      "params": {
+        "a": 9223372036854775807,
+        "b": 216
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -9223372036854775593
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -9223372036854775593
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0052_enum_match",
+      "category": "positive",
+      "shape": "enum_match",
+      "seed": 1,
+      "draw": 52,
+      "file": "positive/pos_0052_enum_match.cnr",
+      "params": {
+        "c": false,
+        "d": 235,
+        "v": 447
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 235
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 235
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0053_question_propagate",
+      "category": "positive",
+      "shape": "question_propagate",
+      "seed": 1,
+      "draw": 53,
+      "file": "positive/pos_0053_question_propagate.cnr",
+      "params": {
+        "k": 276,
+        "v": 274
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 550
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 550
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0054_generic_id",
+      "category": "positive",
+      "shape": "generic_id",
+      "seed": 1,
+      "draw": 54,
+      "file": "positive/pos_0054_generic_id.cnr",
+      "params": {
+        "a": -317,
+        "b": -130
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -447
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -447
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0055_generic_bound_copy",
+      "category": "positive",
+      "shape": "generic_bound_copy",
+      "seed": 1,
+      "draw": 55,
+      "file": "positive/pos_0055_generic_bound_copy.cnr",
+      "params": {
+        "d1": -407,
+        "d2": -128,
+        "v": 409
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 281
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 281
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0056_struct_drop_trace",
+      "category": "positive",
+      "shape": "struct_drop_trace",
+      "seed": 1,
+      "draw": 56,
+      "file": "positive/pos_0056_struct_drop_trace.cnr",
+      "params": {
+        "expected_trace": [
+          4
+        ],
+        "id": 4,
+        "k": 591
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 595
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 595
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0057_arena_index",
+      "category": "positive",
+      "shape": "arena_index",
+      "seed": 1,
+      "draw": 57,
+      "file": "positive/pos_0057_arena_index.cnr",
+      "params": {
+        "v0": 251,
+        "v1": 285,
+        "v2": 246
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 782
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 782
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0058_for_indexed",
+      "category": "positive",
+      "shape": "for_indexed",
+      "seed": 1,
+      "draw": 58,
+      "file": "positive/pos_0058_for_indexed.cnr",
+      "params": {
+        "v0": 94,
+        "v1": 236,
+        "v2": 39
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 369
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 369
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0059_borrow_reborrow",
+      "category": "positive",
+      "shape": "borrow_reborrow",
+      "seed": 1,
+      "draw": 59,
+      "file": "positive/pos_0059_borrow_reborrow.cnr",
+      "params": {
+        "d1": 283,
+        "d2": 178,
+        "t0": 277
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 738
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 738
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0060_arith_checked",
+      "category": "positive",
+      "shape": "arith_checked",
+      "seed": 1,
+      "draw": 60,
+      "file": "positive/pos_0060_arith_checked.cnr",
+      "params": {
+        "a": 859,
+        "b": 647,
+        "op": "-"
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 212
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 212
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0061_arith_wrapping",
+      "category": "positive",
+      "shape": "arith_wrapping",
+      "seed": 1,
+      "draw": 61,
+      "file": "positive/pos_0061_arith_wrapping.cnr",
+      "params": {
+        "a": 9223372036854775807,
+        "b": 64
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -9223372036854775745
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -9223372036854775745
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0062_enum_match",
+      "category": "positive",
+      "shape": "enum_match",
+      "seed": 1,
+      "draw": 62,
+      "file": "positive/pos_0062_enum_match.cnr",
+      "params": {
+        "c": true,
+        "d": -113,
+        "v": 303
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 303
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 303
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0063_question_propagate",
+      "category": "positive",
+      "shape": "question_propagate",
+      "seed": 1,
+      "draw": 63,
+      "file": "positive/pos_0063_question_propagate.cnr",
+      "params": {
+        "k": 234,
+        "v": -101
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 133
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 133
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0064_generic_id",
+      "category": "positive",
+      "shape": "generic_id",
+      "seed": 1,
+      "draw": 64,
+      "file": "positive/pos_0064_generic_id.cnr",
+      "params": {
+        "a": 80,
+        "b": 373
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 453
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 453
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0065_generic_bound_copy",
+      "category": "positive",
+      "shape": "generic_bound_copy",
+      "seed": 1,
+      "draw": 65,
+      "file": "positive/pos_0065_generic_bound_copy.cnr",
+      "params": {
+        "d1": -335,
+        "d2": -275,
+        "v": 211
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -64
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -64
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0066_struct_drop_trace",
+      "category": "positive",
+      "shape": "struct_drop_trace",
+      "seed": 1,
+      "draw": 66,
+      "file": "positive/pos_0066_struct_drop_trace.cnr",
+      "params": {
+        "expected_trace": [
+          477
+        ],
+        "id": 477,
+        "k": 160
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 637
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 637
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0067_arena_index",
+      "category": "positive",
+      "shape": "arena_index",
+      "seed": 1,
+      "draw": 67,
+      "file": "positive/pos_0067_arena_index.cnr",
+      "params": {
+        "v0": 283,
+        "v1": 44,
+        "v2": 216
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 543
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 543
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0068_for_indexed",
+      "category": "positive",
+      "shape": "for_indexed",
+      "seed": 1,
+      "draw": 68,
+      "file": "positive/pos_0068_for_indexed.cnr",
+      "params": {
+        "v0": 161,
+        "v1": 144,
+        "v2": 144
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 449
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 449
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0069_borrow_reborrow",
+      "category": "positive",
+      "shape": "borrow_reborrow",
+      "seed": 1,
+      "draw": 69,
+      "file": "positive/pos_0069_borrow_reborrow.cnr",
+      "params": {
+        "d1": 258,
+        "d2": -295,
+        "t0": -160
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -197
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -197
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0070_arith_checked",
+      "category": "positive",
+      "shape": "arith_checked",
+      "seed": 1,
+      "draw": 70,
+      "file": "positive/pos_0070_arith_checked.cnr",
+      "params": {
+        "a": 19,
+        "b": 985,
+        "op": "&"
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 17
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 17
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0071_arith_wrapping",
+      "category": "positive",
+      "shape": "arith_wrapping",
+      "seed": 1,
+      "draw": 71,
+      "file": "positive/pos_0071_arith_wrapping.cnr",
+      "params": {
+        "a": 9223372036854775807,
+        "b": 475
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -9223372036854775334
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -9223372036854775334
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0072_enum_match",
+      "category": "positive",
+      "shape": "enum_match",
+      "seed": 1,
+      "draw": 72,
+      "file": "positive/pos_0072_enum_match.cnr",
+      "params": {
+        "c": true,
+        "d": -100,
+        "v": -94
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -94
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -94
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0073_question_propagate",
+      "category": "positive",
+      "shape": "question_propagate",
+      "seed": 1,
+      "draw": 73,
+      "file": "positive/pos_0073_question_propagate.cnr",
+      "params": {
+        "k": 57,
+        "v": -397
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -340
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -340
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0074_generic_id",
+      "category": "positive",
+      "shape": "generic_id",
+      "seed": 1,
+      "draw": 74,
+      "file": "positive/pos_0074_generic_id.cnr",
+      "params": {
+        "a": -43,
+        "b": -77
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -120
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -120
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0075_generic_bound_copy",
+      "category": "positive",
+      "shape": "generic_bound_copy",
+      "seed": 1,
+      "draw": 75,
+      "file": "positive/pos_0075_generic_bound_copy.cnr",
+      "params": {
+        "d1": -284,
+        "d2": 366,
+        "v": -447
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -81
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -81
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0076_struct_drop_trace",
+      "category": "positive",
+      "shape": "struct_drop_trace",
+      "seed": 1,
+      "draw": 76,
+      "file": "positive/pos_0076_struct_drop_trace.cnr",
+      "params": {
+        "expected_trace": [
+          880
+        ],
+        "id": 880,
+        "k": 591
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 1471
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 1471
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0077_arena_index",
+      "category": "positive",
+      "shape": "arena_index",
+      "seed": 1,
+      "draw": 77,
+      "file": "positive/pos_0077_arena_index.cnr",
+      "params": {
+        "v0": 102,
+        "v1": 174,
+        "v2": 55
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 331
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 331
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0078_for_indexed",
+      "category": "positive",
+      "shape": "for_indexed",
+      "seed": 1,
+      "draw": 78,
+      "file": "positive/pos_0078_for_indexed.cnr",
+      "params": {
+        "v0": 165,
+        "v1": 148,
+        "v2": 231
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 544
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 544
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0079_borrow_reborrow",
+      "category": "positive",
+      "shape": "borrow_reborrow",
+      "seed": 1,
+      "draw": 79,
+      "file": "positive/pos_0079_borrow_reborrow.cnr",
+      "params": {
+        "d1": -101,
+        "d2": 17,
+        "t0": 255
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 171
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 171
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0080_arith_checked",
+      "category": "positive",
+      "shape": "arith_checked",
+      "seed": 1,
+      "draw": 80,
+      "file": "positive/pos_0080_arith_checked.cnr",
+      "params": {
+        "a": 654,
+        "b": 367,
+        "op": "|"
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 1007
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 1007
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0081_arith_wrapping",
+      "category": "positive",
+      "shape": "arith_wrapping",
+      "seed": 1,
+      "draw": 81,
+      "file": "positive/pos_0081_arith_wrapping.cnr",
+      "params": {
+        "a": 9223372036854775807,
+        "b": 978
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -9223372036854774831
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -9223372036854774831
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0082_enum_match",
+      "category": "positive",
+      "shape": "enum_match",
+      "seed": 1,
+      "draw": 82,
+      "file": "positive/pos_0082_enum_match.cnr",
+      "params": {
+        "c": false,
+        "d": 399,
+        "v": 33
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 399
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 399
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0083_question_propagate",
+      "category": "positive",
+      "shape": "question_propagate",
+      "seed": 1,
+      "draw": 83,
+      "file": "positive/pos_0083_question_propagate.cnr",
+      "params": {
+        "k": 467,
+        "v": 138
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 605
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 605
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0084_generic_id",
+      "category": "positive",
+      "shape": "generic_id",
+      "seed": 1,
+      "draw": 84,
+      "file": "positive/pos_0084_generic_id.cnr",
+      "params": {
+        "a": 255,
+        "b": -411
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -156
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -156
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0085_generic_bound_copy",
+      "category": "positive",
+      "shape": "generic_bound_copy",
+      "seed": 1,
+      "draw": 85,
+      "file": "positive/pos_0085_generic_bound_copy.cnr",
+      "params": {
+        "d1": -325,
+        "d2": -221,
+        "v": 32
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -189
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -189
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0086_struct_drop_trace",
+      "category": "positive",
+      "shape": "struct_drop_trace",
+      "seed": 1,
+      "draw": 86,
+      "file": "positive/pos_0086_struct_drop_trace.cnr",
+      "params": {
+        "expected_trace": [
+          409
+        ],
+        "id": 409,
+        "k": 136
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 545
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 545
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0087_arena_index",
+      "category": "positive",
+      "shape": "arena_index",
+      "seed": 1,
+      "draw": 87,
+      "file": "positive/pos_0087_arena_index.cnr",
+      "params": {
+        "v0": 122,
+        "v1": 291,
+        "v2": 41
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 454
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 454
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0088_for_indexed",
+      "category": "positive",
+      "shape": "for_indexed",
+      "seed": 1,
+      "draw": 88,
+      "file": "positive/pos_0088_for_indexed.cnr",
+      "params": {
+        "v0": 158,
+        "v1": 126,
+        "v2": 232
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 516
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 516
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0089_borrow_reborrow",
+      "category": "positive",
+      "shape": "borrow_reborrow",
+      "seed": 1,
+      "draw": 89,
+      "file": "positive/pos_0089_borrow_reborrow.cnr",
+      "params": {
+        "d1": -73,
+        "d2": -21,
+        "t0": 55
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -39
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -39
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0090_arith_checked",
+      "category": "positive",
+      "shape": "arith_checked",
+      "seed": 1,
+      "draw": 90,
+      "file": "positive/pos_0090_arith_checked.cnr",
+      "params": {
+        "a": 967,
+        "b": 771,
+        "op": "|"
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 967
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 967
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0091_arith_wrapping",
+      "category": "positive",
+      "shape": "arith_wrapping",
+      "seed": 1,
+      "draw": 91,
+      "file": "positive/pos_0091_arith_wrapping.cnr",
+      "params": {
+        "a": 9223372036854775807,
+        "b": 710
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -9223372036854775099
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -9223372036854775099
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0092_enum_match",
+      "category": "positive",
+      "shape": "enum_match",
+      "seed": 1,
+      "draw": 92,
+      "file": "positive/pos_0092_enum_match.cnr",
+      "params": {
+        "c": false,
+        "d": 385,
+        "v": 303
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 385
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 385
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0093_question_propagate",
+      "category": "positive",
+      "shape": "question_propagate",
+      "seed": 1,
+      "draw": 93,
+      "file": "positive/pos_0093_question_propagate.cnr",
+      "params": {
+        "k": 344,
+        "v": -415
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -71
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -71
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0094_generic_id",
+      "category": "positive",
+      "shape": "generic_id",
+      "seed": 1,
+      "draw": 94,
+      "file": "positive/pos_0094_generic_id.cnr",
+      "params": {
+        "a": 394,
+        "b": 461
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 855
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 855
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0095_generic_bound_copy",
+      "category": "positive",
+      "shape": "generic_bound_copy",
+      "seed": 1,
+      "draw": 95,
+      "file": "positive/pos_0095_generic_bound_copy.cnr",
+      "params": {
+        "d1": 256,
+        "d2": 43,
+        "v": -302
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -259
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -259
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0096_struct_drop_trace",
+      "category": "positive",
+      "shape": "struct_drop_trace",
+      "seed": 1,
+      "draw": 96,
+      "file": "positive/pos_0096_struct_drop_trace.cnr",
+      "params": {
+        "expected_trace": [
+          23
+        ],
+        "id": 23,
+        "k": 94
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 117
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 117
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0097_arena_index",
+      "category": "positive",
+      "shape": "arena_index",
+      "seed": 1,
+      "draw": 97,
+      "file": "positive/pos_0097_arena_index.cnr",
+      "params": {
+        "v0": 291,
+        "v1": 165,
+        "v2": 14
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 470
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 470
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0098_for_indexed",
+      "category": "positive",
+      "shape": "for_indexed",
+      "seed": 1,
+      "draw": 98,
+      "file": "positive/pos_0098_for_indexed.cnr",
+      "params": {
+        "v0": 168,
+        "v1": 289,
+        "v2": 48
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 505
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 505
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0099_borrow_reborrow",
+      "category": "positive",
+      "shape": "borrow_reborrow",
+      "seed": 1,
+      "draw": 99,
+      "file": "positive/pos_0099_borrow_reborrow.cnr",
+      "params": {
+        "d1": -73,
+        "d2": 136,
+        "t0": 89
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 152
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 152
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0100_arith_checked",
+      "category": "positive",
+      "shape": "arith_checked",
+      "seed": 1,
+      "draw": 100,
+      "file": "positive/pos_0100_arith_checked.cnr",
+      "params": {
+        "a": 166,
+        "b": 597,
+        "op": "&"
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 4
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 4
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0101_arith_wrapping",
+      "category": "positive",
+      "shape": "arith_wrapping",
+      "seed": 1,
+      "draw": 101,
+      "file": "positive/pos_0101_arith_wrapping.cnr",
+      "params": {
+        "a": 9223372036854775807,
+        "b": 212
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -9223372036854775597
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -9223372036854775597
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0102_enum_match",
+      "category": "positive",
+      "shape": "enum_match",
+      "seed": 1,
+      "draw": 102,
+      "file": "positive/pos_0102_enum_match.cnr",
+      "params": {
+        "c": true,
+        "d": 73,
+        "v": -454
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -454
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -454
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0103_question_propagate",
+      "category": "positive",
+      "shape": "question_propagate",
+      "seed": 1,
+      "draw": 103,
+      "file": "positive/pos_0103_question_propagate.cnr",
+      "params": {
+        "k": 9,
+        "v": -320
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -311
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -311
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0104_generic_id",
+      "category": "positive",
+      "shape": "generic_id",
+      "seed": 1,
+      "draw": 104,
+      "file": "positive/pos_0104_generic_id.cnr",
+      "params": {
+        "a": 33,
+        "b": 15
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 48
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 48
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0105_generic_bound_copy",
+      "category": "positive",
+      "shape": "generic_bound_copy",
+      "seed": 1,
+      "draw": 105,
+      "file": "positive/pos_0105_generic_bound_copy.cnr",
+      "params": {
+        "d1": 486,
+        "d2": -375,
+        "v": 416
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 41
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 41
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0106_struct_drop_trace",
+      "category": "positive",
+      "shape": "struct_drop_trace",
+      "seed": 1,
+      "draw": 106,
+      "file": "positive/pos_0106_struct_drop_trace.cnr",
+      "params": {
+        "expected_trace": [
+          289
+        ],
+        "id": 289,
+        "k": 427
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 716
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 716
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0107_arena_index",
+      "category": "positive",
+      "shape": "arena_index",
+      "seed": 1,
+      "draw": 107,
+      "file": "positive/pos_0107_arena_index.cnr",
+      "params": {
+        "v0": 249,
+        "v1": 239,
+        "v2": 49
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 537
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 537
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0108_for_indexed",
+      "category": "positive",
+      "shape": "for_indexed",
+      "seed": 1,
+      "draw": 108,
+      "file": "positive/pos_0108_for_indexed.cnr",
+      "params": {
+        "v0": 211,
+        "v1": 27,
+        "v2": 281
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 519
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 519
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0109_borrow_reborrow",
+      "category": "positive",
+      "shape": "borrow_reborrow",
+      "seed": 1,
+      "draw": 109,
+      "file": "positive/pos_0109_borrow_reborrow.cnr",
+      "params": {
+        "d1": -201,
+        "d2": -251,
+        "t0": -55
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -507
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -507
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0110_arith_checked",
+      "category": "positive",
+      "shape": "arith_checked",
+      "seed": 1,
+      "draw": 110,
+      "file": "positive/pos_0110_arith_checked.cnr",
+      "params": {
+        "a": 189,
+        "b": 653,
+        "op": "+"
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 842
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 842
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0111_arith_wrapping",
+      "category": "positive",
+      "shape": "arith_wrapping",
+      "seed": 1,
+      "draw": 111,
+      "file": "positive/pos_0111_arith_wrapping.cnr",
+      "params": {
+        "a": 9223372036854775807,
+        "b": 371
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -9223372036854775438
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -9223372036854775438
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0112_enum_match",
+      "category": "positive",
+      "shape": "enum_match",
+      "seed": 1,
+      "draw": 112,
+      "file": "positive/pos_0112_enum_match.cnr",
+      "params": {
+        "c": true,
+        "d": -351,
+        "v": -57
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -57
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -57
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0113_question_propagate",
+      "category": "positive",
+      "shape": "question_propagate",
+      "seed": 1,
+      "draw": 113,
+      "file": "positive/pos_0113_question_propagate.cnr",
+      "params": {
+        "k": 426,
+        "v": 311
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 737
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 737
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0114_generic_id",
+      "category": "positive",
+      "shape": "generic_id",
+      "seed": 1,
+      "draw": 114,
+      "file": "positive/pos_0114_generic_id.cnr",
+      "params": {
+        "a": 166,
+        "b": 441
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 607
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 607
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0115_generic_bound_copy",
+      "category": "positive",
+      "shape": "generic_bound_copy",
+      "seed": 1,
+      "draw": 115,
+      "file": "positive/pos_0115_generic_bound_copy.cnr",
+      "params": {
+        "d1": 44,
+        "d2": 499,
+        "v": 431
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 930
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 930
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0116_struct_drop_trace",
+      "category": "positive",
+      "shape": "struct_drop_trace",
+      "seed": 1,
+      "draw": 116,
+      "file": "positive/pos_0116_struct_drop_trace.cnr",
+      "params": {
+        "expected_trace": [
+          719
+        ],
+        "id": 719,
+        "k": 64
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 783
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 783
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0117_arena_index",
+      "category": "positive",
+      "shape": "arena_index",
+      "seed": 1,
+      "draw": 117,
+      "file": "positive/pos_0117_arena_index.cnr",
+      "params": {
+        "v0": 15,
+        "v1": 93,
+        "v2": 194
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 302
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 302
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0118_for_indexed",
+      "category": "positive",
+      "shape": "for_indexed",
+      "seed": 1,
+      "draw": 118,
+      "file": "positive/pos_0118_for_indexed.cnr",
+      "params": {
+        "v0": 204,
+        "v1": 103,
+        "v2": 280
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 587
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 587
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0119_borrow_reborrow",
+      "category": "positive",
+      "shape": "borrow_reborrow",
+      "seed": 1,
+      "draw": 119,
+      "file": "positive/pos_0119_borrow_reborrow.cnr",
+      "params": {
+        "d1": -198,
+        "d2": 191,
+        "t0": 290
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 283
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 283
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0120_arith_checked",
+      "category": "positive",
+      "shape": "arith_checked",
+      "seed": 1,
+      "draw": 120,
+      "file": "positive/pos_0120_arith_checked.cnr",
+      "params": {
+        "a": 919,
+        "b": 390,
+        "op": "^"
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 529
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 529
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0121_arith_wrapping",
+      "category": "positive",
+      "shape": "arith_wrapping",
+      "seed": 1,
+      "draw": 121,
+      "file": "positive/pos_0121_arith_wrapping.cnr",
+      "params": {
+        "a": 9223372036854775807,
+        "b": 553
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -9223372036854775256
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -9223372036854775256
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0122_enum_match",
+      "category": "positive",
+      "shape": "enum_match",
+      "seed": 1,
+      "draw": 122,
+      "file": "positive/pos_0122_enum_match.cnr",
+      "params": {
+        "c": true,
+        "d": 345,
+        "v": 174
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 174
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 174
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0123_question_propagate",
+      "category": "positive",
+      "shape": "question_propagate",
+      "seed": 1,
+      "draw": 123,
+      "file": "positive/pos_0123_question_propagate.cnr",
+      "params": {
+        "k": 392,
+        "v": -91
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 301
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 301
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0124_generic_id",
+      "category": "positive",
+      "shape": "generic_id",
+      "seed": 1,
+      "draw": 124,
+      "file": "positive/pos_0124_generic_id.cnr",
+      "params": {
+        "a": -9,
+        "b": -368
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -377
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -377
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0125_generic_bound_copy",
+      "category": "positive",
+      "shape": "generic_bound_copy",
+      "seed": 1,
+      "draw": 125,
+      "file": "positive/pos_0125_generic_bound_copy.cnr",
+      "params": {
+        "d1": 93,
+        "d2": 99,
+        "v": 39
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 138
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 138
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0126_struct_drop_trace",
+      "category": "positive",
+      "shape": "struct_drop_trace",
+      "seed": 1,
+      "draw": 126,
+      "file": "positive/pos_0126_struct_drop_trace.cnr",
+      "params": {
+        "expected_trace": [
+          637
+        ],
+        "id": 637,
+        "k": 324
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 961
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 961
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0127_arena_index",
+      "category": "positive",
+      "shape": "arena_index",
+      "seed": 1,
+      "draw": 127,
+      "file": "positive/pos_0127_arena_index.cnr",
+      "params": {
+        "v0": 33,
+        "v1": 220,
+        "v2": 86
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 339
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 339
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0128_for_indexed",
+      "category": "positive",
+      "shape": "for_indexed",
+      "seed": 1,
+      "draw": 128,
+      "file": "positive/pos_0128_for_indexed.cnr",
+      "params": {
+        "v0": 68,
+        "v1": 86,
+        "v2": 221
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 375
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 375
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0129_borrow_reborrow",
+      "category": "positive",
+      "shape": "borrow_reborrow",
+      "seed": 1,
+      "draw": 129,
+      "file": "positive/pos_0129_borrow_reborrow.cnr",
+      "params": {
+        "d1": 16,
+        "d2": 96,
+        "t0": -16
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 96
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 96
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0130_arith_checked",
+      "category": "positive",
+      "shape": "arith_checked",
+      "seed": 1,
+      "draw": 130,
+      "file": "positive/pos_0130_arith_checked.cnr",
+      "params": {
+        "a": 121,
+        "b": 9,
+        "op": "+"
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 130
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 130
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0131_arith_wrapping",
+      "category": "positive",
+      "shape": "arith_wrapping",
+      "seed": 1,
+      "draw": 131,
+      "file": "positive/pos_0131_arith_wrapping.cnr",
+      "params": {
+        "a": 9223372036854775807,
+        "b": 414
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -9223372036854775395
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -9223372036854775395
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0132_enum_match",
+      "category": "positive",
+      "shape": "enum_match",
+      "seed": 1,
+      "draw": 132,
+      "file": "positive/pos_0132_enum_match.cnr",
+      "params": {
+        "c": true,
+        "d": -462,
+        "v": -250
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -250
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -250
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0133_question_propagate",
+      "category": "positive",
+      "shape": "question_propagate",
+      "seed": 1,
+      "draw": 133,
+      "file": "positive/pos_0133_question_propagate.cnr",
+      "params": {
+        "k": 294,
+        "v": 94
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 388
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 388
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0134_generic_id",
+      "category": "positive",
+      "shape": "generic_id",
+      "seed": 1,
+      "draw": 134,
+      "file": "positive/pos_0134_generic_id.cnr",
+      "params": {
+        "a": -18,
+        "b": -233
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -251
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -251
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0135_generic_bound_copy",
+      "category": "positive",
+      "shape": "generic_bound_copy",
+      "seed": 1,
+      "draw": 135,
+      "file": "positive/pos_0135_generic_bound_copy.cnr",
+      "params": {
+        "d1": -227,
+        "d2": -462,
+        "v": 192
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -270
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -270
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0136_struct_drop_trace",
+      "category": "positive",
+      "shape": "struct_drop_trace",
+      "seed": 1,
+      "draw": 136,
+      "file": "positive/pos_0136_struct_drop_trace.cnr",
+      "params": {
+        "expected_trace": [
+          822
+        ],
+        "id": 822,
+        "k": 226
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 1048
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 1048
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0137_arena_index",
+      "category": "positive",
+      "shape": "arena_index",
+      "seed": 1,
+      "draw": 137,
+      "file": "positive/pos_0137_arena_index.cnr",
+      "params": {
+        "v0": 6,
+        "v1": 8,
+        "v2": 89
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 103
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 103
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0138_for_indexed",
+      "category": "positive",
+      "shape": "for_indexed",
+      "seed": 1,
+      "draw": 138,
+      "file": "positive/pos_0138_for_indexed.cnr",
+      "params": {
+        "v0": 148,
+        "v1": 15,
+        "v2": 29
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 192
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 192
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0139_borrow_reborrow",
+      "category": "positive",
+      "shape": "borrow_reborrow",
+      "seed": 1,
+      "draw": 139,
+      "file": "positive/pos_0139_borrow_reborrow.cnr",
+      "params": {
+        "d1": -113,
+        "d2": 112,
+        "t0": -187
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -188
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -188
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0140_arith_checked",
+      "category": "positive",
+      "shape": "arith_checked",
+      "seed": 1,
+      "draw": 140,
+      "file": "positive/pos_0140_arith_checked.cnr",
+      "params": {
+        "a": 98,
+        "b": 258,
+        "op": "-"
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -160
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -160
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0141_arith_wrapping",
+      "category": "positive",
+      "shape": "arith_wrapping",
+      "seed": 1,
+      "draw": 141,
+      "file": "positive/pos_0141_arith_wrapping.cnr",
+      "params": {
+        "a": 9223372036854775807,
+        "b": 254
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -9223372036854775555
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -9223372036854775555
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0142_enum_match",
+      "category": "positive",
+      "shape": "enum_match",
+      "seed": 1,
+      "draw": 142,
+      "file": "positive/pos_0142_enum_match.cnr",
+      "params": {
+        "c": false,
+        "d": 14,
+        "v": -275
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 14
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 14
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0143_question_propagate",
+      "category": "positive",
+      "shape": "question_propagate",
+      "seed": 1,
+      "draw": 143,
+      "file": "positive/pos_0143_question_propagate.cnr",
+      "params": {
+        "k": 106,
+        "v": -303
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": -197
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": -197
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0144_generic_id",
+      "category": "positive",
+      "shape": "generic_id",
+      "seed": 1,
+      "draw": 144,
+      "file": "positive/pos_0144_generic_id.cnr",
+      "params": {
+        "a": 275,
+        "b": 222
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 497
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 497
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0145_generic_bound_copy",
+      "category": "positive",
+      "shape": "generic_bound_copy",
+      "seed": 1,
+      "draw": 145,
+      "file": "positive/pos_0145_generic_bound_copy.cnr",
+      "params": {
+        "d1": 119,
+        "d2": 105,
+        "v": 398
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 503
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 503
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0146_struct_drop_trace",
+      "category": "positive",
+      "shape": "struct_drop_trace",
+      "seed": 1,
+      "draw": 146,
+      "file": "positive/pos_0146_struct_drop_trace.cnr",
+      "params": {
+        "expected_trace": [
+          718
+        ],
+        "id": 718,
+        "k": 421
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 1139
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 1139
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0147_arena_index",
+      "category": "positive",
+      "shape": "arena_index",
+      "seed": 1,
+      "draw": 147,
+      "file": "positive/pos_0147_arena_index.cnr",
+      "params": {
+        "v0": 184,
+        "v1": 204,
+        "v2": 22
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 410
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 410
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0148_for_indexed",
+      "category": "positive",
+      "shape": "for_indexed",
+      "seed": 1,
+      "draw": 148,
+      "file": "positive/pos_0148_for_indexed.cnr",
+      "params": {
+        "v0": 287,
+        "v1": 152,
+        "v2": 261
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 700
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 700
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "pos_0149_borrow_reborrow",
+      "category": "positive",
+      "shape": "borrow_reborrow",
+      "seed": 1,
+      "draw": 149,
+      "file": "positive/pos_0149_borrow_reborrow.cnr",
+      "params": {
+        "d1": -217,
+        "d2": 286,
+        "t0": 5
+      },
+      "expected": {
+        "kind": "sentinel",
+        "value": 74
+      },
+      "observed": {
+        "check_exit": 0,
+        "run_sentinel": 74
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0000_neg_use_after_move",
+      "category": "negative",
+      "shape": "neg_use_after_move",
+      "seed": 1,
+      "draw": 0,
+      "file": "negative/neg_0000_neg_use_after_move.cnr",
+      "params": {
+        "nonce": 1131
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0301"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0301"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0001_neg_copy_with_drop",
+      "category": "negative",
+      "shape": "neg_copy_with_drop",
+      "seed": 1,
+      "draw": 1,
+      "file": "negative/neg_0001_neg_copy_with_drop.cnr",
+      "params": {
+        "nonce": 1653
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0202"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0202"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0002_neg_borrow_field",
+      "category": "negative",
+      "shape": "neg_borrow_field",
+      "seed": 1,
+      "draw": 2,
+      "file": "negative/neg_0002_neg_borrow_field.cnr",
+      "params": {
+        "nonce": 6822
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0201"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0201"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0003_neg_two_ok_variants",
+      "category": "negative",
+      "shape": "neg_two_ok_variants",
+      "seed": 1,
+      "draw": 3,
+      "file": "negative/neg_0003_neg_two_ok_variants.cnr",
+      "params": {
+        "nonce": 8841
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0109"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0109"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0004_neg_unknown_type",
+      "category": "negative",
+      "shape": "neg_unknown_type",
+      "seed": 1,
+      "draw": 4,
+      "file": "negative/neg_0004_neg_unknown_type.cnr",
+      "params": {
+        "nonce": 1425
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0102"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0102"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0005_neg_write_needs_deref",
+      "category": "negative",
+      "shape": "neg_write_needs_deref",
+      "seed": 1,
+      "draw": 5,
+      "file": "negative/neg_0005_neg_write_needs_deref.cnr",
+      "params": {
+        "nonce": 9214
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0713"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0713"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0006_neg_missing_return",
+      "category": "negative",
+      "shape": "neg_missing_return",
+      "seed": 1,
+      "draw": 6,
+      "file": "negative/neg_0006_neg_missing_return.cnr",
+      "params": {
+        "nonce": 9888
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0810"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0810"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0007_neg_wrong_arg_count",
+      "category": "negative",
+      "shape": "neg_wrong_arg_count",
+      "seed": 1,
+      "draw": 7,
+      "file": "negative/neg_0007_neg_wrong_arg_count.cnr",
+      "params": {
+        "nonce": 5212
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0706"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0706"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0008_neg_break_outside_loop",
+      "category": "negative",
+      "shape": "neg_break_outside_loop",
+      "seed": 1,
+      "draw": 8,
+      "file": "negative/neg_0008_neg_break_outside_loop.cnr",
+      "params": {
+        "nonce": 9023
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0707"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0707"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0009_neg_unknown_variant",
+      "category": "negative",
+      "shape": "neg_unknown_variant",
+      "seed": 1,
+      "draw": 9,
+      "file": "negative/neg_0009_neg_unknown_variant.cnr",
+      "params": {
+        "nonce": 6595
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0108"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0108"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0010_neg_unknown_field",
+      "category": "negative",
+      "shape": "neg_unknown_field",
+      "seed": 1,
+      "draw": 10,
+      "file": "negative/neg_0010_neg_unknown_field.cnr",
+      "params": {
+        "nonce": 9086
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0107"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0107"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0011_neg_literal_out_of_range",
+      "category": "negative",
+      "shape": "neg_literal_out_of_range",
+      "seed": 1,
+      "draw": 11,
+      "file": "negative/neg_0011_neg_literal_out_of_range.cnr",
+      "params": {
+        "lit": 463,
+        "nonce": 2260
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0709"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0709"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0012_neg_non_exhaustive_match",
+      "category": "negative",
+      "shape": "neg_non_exhaustive_match",
+      "seed": 1,
+      "draw": 12,
+      "file": "negative/neg_0012_neg_non_exhaustive_match.cnr",
+      "params": {
+        "nonce": 1876
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0601"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0601"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0013_neg_alloc_effect",
+      "category": "negative",
+      "shape": "neg_alloc_effect",
+      "seed": 1,
+      "draw": 13,
+      "file": "negative/neg_0013_neg_alloc_effect.cnr",
+      "params": {
+        "nonce": 3858
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0401"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0401"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0014_neg_copy_bound",
+      "category": "negative",
+      "shape": "neg_copy_bound",
+      "seed": 1,
+      "draw": 14,
+      "file": "negative/neg_0014_neg_copy_bound.cnr",
+      "params": {
+        "nonce": 5683
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E1007"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E1007"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0015_neg_use_after_move",
+      "category": "negative",
+      "shape": "neg_use_after_move",
+      "seed": 1,
+      "draw": 15,
+      "file": "negative/neg_0015_neg_use_after_move.cnr",
+      "params": {
+        "nonce": 9186
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0301"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0301"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0016_neg_copy_with_drop",
+      "category": "negative",
+      "shape": "neg_copy_with_drop",
+      "seed": 1,
+      "draw": 16,
+      "file": "negative/neg_0016_neg_copy_with_drop.cnr",
+      "params": {
+        "nonce": 8907
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0202"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0202"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0017_neg_borrow_field",
+      "category": "negative",
+      "shape": "neg_borrow_field",
+      "seed": 1,
+      "draw": 17,
+      "file": "negative/neg_0017_neg_borrow_field.cnr",
+      "params": {
+        "nonce": 5154
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0201"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0201"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0018_neg_two_ok_variants",
+      "category": "negative",
+      "shape": "neg_two_ok_variants",
+      "seed": 1,
+      "draw": 18,
+      "file": "negative/neg_0018_neg_two_ok_variants.cnr",
+      "params": {
+        "nonce": 1045
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0109"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0109"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0019_neg_unknown_type",
+      "category": "negative",
+      "shape": "neg_unknown_type",
+      "seed": 1,
+      "draw": 19,
+      "file": "negative/neg_0019_neg_unknown_type.cnr",
+      "params": {
+        "nonce": 3943
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0102"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0102"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0020_neg_write_needs_deref",
+      "category": "negative",
+      "shape": "neg_write_needs_deref",
+      "seed": 1,
+      "draw": 20,
+      "file": "negative/neg_0020_neg_write_needs_deref.cnr",
+      "params": {
+        "nonce": 8833
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0713"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0713"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0021_neg_missing_return",
+      "category": "negative",
+      "shape": "neg_missing_return",
+      "seed": 1,
+      "draw": 21,
+      "file": "negative/neg_0021_neg_missing_return.cnr",
+      "params": {
+        "nonce": 1883
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0810"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0810"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0022_neg_wrong_arg_count",
+      "category": "negative",
+      "shape": "neg_wrong_arg_count",
+      "seed": 1,
+      "draw": 22,
+      "file": "negative/neg_0022_neg_wrong_arg_count.cnr",
+      "params": {
+        "nonce": 8274
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0706"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0706"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0023_neg_break_outside_loop",
+      "category": "negative",
+      "shape": "neg_break_outside_loop",
+      "seed": 1,
+      "draw": 23,
+      "file": "negative/neg_0023_neg_break_outside_loop.cnr",
+      "params": {
+        "nonce": 1806
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0707"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0707"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0024_neg_unknown_variant",
+      "category": "negative",
+      "shape": "neg_unknown_variant",
+      "seed": 1,
+      "draw": 24,
+      "file": "negative/neg_0024_neg_unknown_variant.cnr",
+      "params": {
+        "nonce": 3367
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0108"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0108"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0025_neg_unknown_field",
+      "category": "negative",
+      "shape": "neg_unknown_field",
+      "seed": 1,
+      "draw": 25,
+      "file": "negative/neg_0025_neg_unknown_field.cnr",
+      "params": {
+        "nonce": 6059
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0107"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0107"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0026_neg_literal_out_of_range",
+      "category": "negative",
+      "shape": "neg_literal_out_of_range",
+      "seed": 1,
+      "draw": 26,
+      "file": "negative/neg_0026_neg_literal_out_of_range.cnr",
+      "params": {
+        "lit": 484,
+        "nonce": 5468
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0709"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0709"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0027_neg_non_exhaustive_match",
+      "category": "negative",
+      "shape": "neg_non_exhaustive_match",
+      "seed": 1,
+      "draw": 27,
+      "file": "negative/neg_0027_neg_non_exhaustive_match.cnr",
+      "params": {
+        "nonce": 4176
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0601"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0601"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0028_neg_alloc_effect",
+      "category": "negative",
+      "shape": "neg_alloc_effect",
+      "seed": 1,
+      "draw": 28,
+      "file": "negative/neg_0028_neg_alloc_effect.cnr",
+      "params": {
+        "nonce": 3002
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0401"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0401"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0029_neg_copy_bound",
+      "category": "negative",
+      "shape": "neg_copy_bound",
+      "seed": 1,
+      "draw": 29,
+      "file": "negative/neg_0029_neg_copy_bound.cnr",
+      "params": {
+        "nonce": 4565
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E1007"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E1007"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0030_neg_use_after_move",
+      "category": "negative",
+      "shape": "neg_use_after_move",
+      "seed": 1,
+      "draw": 30,
+      "file": "negative/neg_0030_neg_use_after_move.cnr",
+      "params": {
+        "nonce": 2725
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0301"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0301"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0031_neg_copy_with_drop",
+      "category": "negative",
+      "shape": "neg_copy_with_drop",
+      "seed": 1,
+      "draw": 31,
+      "file": "negative/neg_0031_neg_copy_with_drop.cnr",
+      "params": {
+        "nonce": 8381
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0202"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0202"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0032_neg_borrow_field",
+      "category": "negative",
+      "shape": "neg_borrow_field",
+      "seed": 1,
+      "draw": 32,
+      "file": "negative/neg_0032_neg_borrow_field.cnr",
+      "params": {
+        "nonce": 9617
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0201"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0201"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0033_neg_two_ok_variants",
+      "category": "negative",
+      "shape": "neg_two_ok_variants",
+      "seed": 1,
+      "draw": 33,
+      "file": "negative/neg_0033_neg_two_ok_variants.cnr",
+      "params": {
+        "nonce": 5003
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0109"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0109"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0034_neg_unknown_type",
+      "category": "negative",
+      "shape": "neg_unknown_type",
+      "seed": 1,
+      "draw": 34,
+      "file": "negative/neg_0034_neg_unknown_type.cnr",
+      "params": {
+        "nonce": 7074
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0102"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0102"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0035_neg_write_needs_deref",
+      "category": "negative",
+      "shape": "neg_write_needs_deref",
+      "seed": 1,
+      "draw": 35,
+      "file": "negative/neg_0035_neg_write_needs_deref.cnr",
+      "params": {
+        "nonce": 6540
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0713"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0713"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0036_neg_missing_return",
+      "category": "negative",
+      "shape": "neg_missing_return",
+      "seed": 1,
+      "draw": 36,
+      "file": "negative/neg_0036_neg_missing_return.cnr",
+      "params": {
+        "nonce": 9872
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0810"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0810"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0037_neg_wrong_arg_count",
+      "category": "negative",
+      "shape": "neg_wrong_arg_count",
+      "seed": 1,
+      "draw": 37,
+      "file": "negative/neg_0037_neg_wrong_arg_count.cnr",
+      "params": {
+        "nonce": 7978
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0706"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0706"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0038_neg_break_outside_loop",
+      "category": "negative",
+      "shape": "neg_break_outside_loop",
+      "seed": 1,
+      "draw": 38,
+      "file": "negative/neg_0038_neg_break_outside_loop.cnr",
+      "params": {
+        "nonce": 6665
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0707"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0707"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0039_neg_unknown_variant",
+      "category": "negative",
+      "shape": "neg_unknown_variant",
+      "seed": 1,
+      "draw": 39,
+      "file": "negative/neg_0039_neg_unknown_variant.cnr",
+      "params": {
+        "nonce": 2467
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0108"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0108"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0040_neg_unknown_field",
+      "category": "negative",
+      "shape": "neg_unknown_field",
+      "seed": 1,
+      "draw": 40,
+      "file": "negative/neg_0040_neg_unknown_field.cnr",
+      "params": {
+        "nonce": 4765
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0107"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0107"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0041_neg_literal_out_of_range",
+      "category": "negative",
+      "shape": "neg_literal_out_of_range",
+      "seed": 1,
+      "draw": 41,
+      "file": "negative/neg_0041_neg_literal_out_of_range.cnr",
+      "params": {
+        "lit": 438,
+        "nonce": 3426
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0709"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0709"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0042_neg_non_exhaustive_match",
+      "category": "negative",
+      "shape": "neg_non_exhaustive_match",
+      "seed": 1,
+      "draw": 42,
+      "file": "negative/neg_0042_neg_non_exhaustive_match.cnr",
+      "params": {
+        "nonce": 7610
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0601"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0601"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0043_neg_alloc_effect",
+      "category": "negative",
+      "shape": "neg_alloc_effect",
+      "seed": 1,
+      "draw": 43,
+      "file": "negative/neg_0043_neg_alloc_effect.cnr",
+      "params": {
+        "nonce": 3047
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0401"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0401"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0044_neg_copy_bound",
+      "category": "negative",
+      "shape": "neg_copy_bound",
+      "seed": 1,
+      "draw": 44,
+      "file": "negative/neg_0044_neg_copy_bound.cnr",
+      "params": {
+        "nonce": 3529
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E1007"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E1007"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0045_neg_use_after_move",
+      "category": "negative",
+      "shape": "neg_use_after_move",
+      "seed": 1,
+      "draw": 45,
+      "file": "negative/neg_0045_neg_use_after_move.cnr",
+      "params": {
+        "nonce": 4214
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0301"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0301"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0046_neg_copy_with_drop",
+      "category": "negative",
+      "shape": "neg_copy_with_drop",
+      "seed": 1,
+      "draw": 46,
+      "file": "negative/neg_0046_neg_copy_with_drop.cnr",
+      "params": {
+        "nonce": 9153
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0202"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0202"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0047_neg_borrow_field",
+      "category": "negative",
+      "shape": "neg_borrow_field",
+      "seed": 1,
+      "draw": 47,
+      "file": "negative/neg_0047_neg_borrow_field.cnr",
+      "params": {
+        "nonce": 8561
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0201"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0201"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0048_neg_two_ok_variants",
+      "category": "negative",
+      "shape": "neg_two_ok_variants",
+      "seed": 1,
+      "draw": 48,
+      "file": "negative/neg_0048_neg_two_ok_variants.cnr",
+      "params": {
+        "nonce": 6497
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0109"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0109"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    },
+    {
+      "id": "neg_0049_neg_unknown_type",
+      "category": "negative",
+      "shape": "neg_unknown_type",
+      "seed": 1,
+      "draw": 49,
+      "file": "negative/neg_0049_neg_unknown_type.cnr",
+      "params": {
+        "nonce": 4920
+      },
+      "expected": {
+        "kind": "diagnostic",
+        "code": "E0102"
+      },
+      "observed": {
+        "check_exit": 1,
+        "code": "E0102"
+      },
+      "toolchain_version": "candor-proto 0.1.0 (Bet 5 prototype)"
+    }
+  ]
+}
