@@ -321,13 +321,15 @@ fn run_audit(path: &str) -> ExitCode {
     }
 }
 
-/// `compile <file_or_dir> -o <prog>` — AOT-compile to a linked native executable
-/// (design 0010 §5). Lowers the same checked MIR the native engine runs, emits a
-/// relocatable object (cranelift-object), and links it with the static runtime
-/// via `cc` into a standalone ELF that needs neither the JIT nor `candor-proto`.
+/// `compile [--freestanding] <file_or_dir> -o <prog>` — AOT-compile to a linked
+/// native executable (design 0010 §5). Lowers the same checked MIR the native
+/// engine runs, emits a relocatable object (cranelift-object), and links it via
+/// `cc` into a standalone ELF. `--freestanding` links the no-libc runtime
+/// (`-nostdlib -static -no-pie`), the NN#6 proof artifact — no JIT, no libc.
 fn run_compile(rest: &[String]) -> ExitCode {
     let mut out: Option<&str> = None;
     let mut input: Option<&str> = None;
+    let mut freestanding = false;
     let mut i = 0;
     while i < rest.len() {
         match rest[i].as_str() {
@@ -341,6 +343,10 @@ fn run_compile(rest: &[String]) -> ExitCode {
                     return ExitCode::from(2);
                 }
             },
+            "--freestanding" => {
+                freestanding = true;
+                i += 1;
+            }
             other => {
                 input = Some(other);
                 i += 1;
@@ -350,11 +356,17 @@ fn run_compile(rest: &[String]) -> ExitCode {
     let (input, out) = match (input, out) {
         (Some(a), Some(b)) => (a, b),
         _ => {
-            eprintln!("usage: candor-proto compile <file_or_dir> -o <prog>");
+            eprintln!("usage: candor-proto compile [--freestanding] <file_or_dir> -o <prog>");
             return ExitCode::from(2);
         }
     };
-    match candor_proto::compile_path(std::path::Path::new(input), std::path::Path::new(out)) {
+    let (inp, outp) = (std::path::Path::new(input), std::path::Path::new(out));
+    let r = if freestanding {
+        candor_proto::compile_path_freestanding(inp, outp)
+    } else {
+        candor_proto::compile_path(inp, outp)
+    };
+    match r {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");

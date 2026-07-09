@@ -501,6 +501,27 @@ fn checked_program_for_native(path: &std::path::Path) -> Result<ast::Program, St
 /// native executable at `out`. Returns `Err` with a message on parse/check errors,
 /// out-of-subset MIR, or a backend/link failure.
 pub fn compile_path(path: &std::path::Path, out: &std::path::Path) -> Result<(), String> {
+    let (mp, items, consts) = lower_path_for_object(path)?;
+    backend::object::emit_executable(&mp, &items, &consts, out)
+}
+
+/// AOT-compile `path` into a FREESTANDING (no-libc) native executable at `out` —
+/// the NN#6 proof artifact (design 0010 §5; P7/P9). Same MIR/object as
+/// `compile_path`; the emitted ELF is `-nostdlib -static -no-pie` and depends on
+/// nothing but the kernel (`ldd`: "not a dynamic executable").
+pub fn compile_path_freestanding(
+    path: &std::path::Path,
+    out: &std::path::Path,
+) -> Result<(), String> {
+    let (mp, items, consts) = lower_path_for_object(path)?;
+    backend::object::emit_executable_freestanding(&mp, &items, &consts, out)
+}
+
+/// Shared front for both AOT profiles: check `path`, resolve, and lower the whole
+/// program to the monomorphized `MirProgram` the object backend consumes.
+fn lower_path_for_object(
+    path: &std::path::Path,
+) -> Result<(mir::MirProgram, resolve::Items, std::collections::HashMap<String, u64>), String> {
     let program = checked_program_for_native(path)?;
     let mut diags = Vec::new();
     let items = resolve::resolve_program(&program, &mut diags);
@@ -514,5 +535,5 @@ pub fn compile_path(path: &std::path::Path, out: &std::path::Path) -> Result<(),
     }
     let mp = mir::lower_checked(&program, &items)
         .map_err(|e| format!("outside the native backend subset: {}", e.0))?;
-    backend::object::emit_executable(&mp, &items, &consts, out)
+    Ok((mp, items, consts))
 }

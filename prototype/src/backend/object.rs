@@ -45,6 +45,10 @@ pub const MEM_BASE: i64 = 0x0000_2000_0000_0000;
 /// The static C runtime source, compiled by `cc` at link time.
 const RUNTIME_C: &str = include_str!("aot_runtime.c");
 
+/// The freestanding (no-libc) runtime source; linked instead of `RUNTIME_C`
+/// under `--freestanding` (design 0010 §5; P7/P9/NN#6).
+const FREESTANDING_RUNTIME_C: &str = include_str!("freestanding_runtime.c");
+
 /// Lay out static + string-literal Candor addresses with the same bump arithmetic
 /// the JIT driver (`backend::run`) uses, so the addresses `candor_entry` writes to
 /// agree with the `StaticAddr`/`StrAddr` constants the lowering bakes.
@@ -83,6 +87,20 @@ pub fn emit_executable(
 ) -> Result<(), String> {
     let object = compile_object(prog, items, consts)?;
     link(&object, out)
+}
+
+/// Emit a FREESTANDING (no-libc) native executable for `prog` at `out` — the
+/// NN#6 proof artifact. Same emitted object as `emit_executable`; the delta is
+/// the runtime (`freestanding_runtime.c`) and the link flags
+/// (`-nostdlib -static -no-pie`, the flat region pinned at `MEM_BASE`).
+pub fn emit_executable_freestanding(
+    prog: &MirProgram,
+    items: &Items,
+    consts: &HashMap<String, u64>,
+    out: &Path,
+) -> Result<(), String> {
+    let object = compile_object(prog, items, consts)?;
+    link_freestanding(&object, out)
 }
 
 /// Lower the whole program to a relocatable ELF object (`.o` bytes) for the host.
@@ -206,6 +224,51 @@ fn link(object: &[u8], out: &Path) -> Result<(), String> {
     let _ = std::fs::remove_dir_all(&tmp);
     if !status.success() {
         return Err(format!("linker (cc) failed with status {status}"));
+    }
+    Ok(())
+}
+
+/// Link the emitted object into a FREESTANDING executable: no libc, statically
+/// linked, no PIE. The flat memory region (`.candor_flat`) is pinned at the fixed
+/// VA `MEM_BASE` so the baked `MEM_BASE + candor_addr` constant resolves with no
+/// mmap; `-nostdlib` drops the C runtime and crt startup (the freestanding runtime
+/// supplies `_start`); `-static` makes it a self-contained image (`ldd`:
+/// "not a dynamic executable"). The result depends on nothing but the kernel.
+fn link_freestanding(object: &[u8], out: &Path) -> Result<(), String> {
+    let tmp = std::env::temp_dir().join(format!(
+        "candor-fs-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+    let obj_path = tmp.join("candor.o");
+    let rt_path = tmp.join("freestanding_runtime.c");
+    std::fs::write(&obj_path, object).map_err(|e| e.to_string())?;
+    std::fs::write(&rt_path, FREESTANDING_RUNTIME_C).map_err(|e| e.to_string())?;
+
+    let section_arg = format!("-Wl,--section-start=.candor_flat={:#x}", MEM_BASE);
+    let status = Command::new("cc")
+        .arg(&rt_path)
+        .arg(&obj_path)
+        .arg("-o")
+        .arg(out)
+        .arg("-ffreestanding")
+        .arg("-nostdlib")
+        .arg("-static")
+        .arg("-no-pie")
+        .arg("-fno-stack-protector")
+        .arg("-fno-pic")
+        .arg(&section_arg)
+        .arg("-Wl,-e,_start")
+        .status()
+        .map_err(|e| format!("could not invoke the system linker (cc): {e}"))?;
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    if !status.success() {
+        return Err(format!("freestanding linker (cc) failed with status {status}"));
     }
     Ok(())
 }

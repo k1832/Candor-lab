@@ -488,7 +488,30 @@ Per §8 sequencing, the arc is staged and honest about what each stage validates
   fn-pointer table emitted with `define_zeroinit` lands in `.bss`, which stores no
   bytes on disk, so its relocations were silently dropped (null slots -> a call to
   0); emitting it as real (`.data`) initialized bytes fixes it. All four in-process
-  engines stay green; the object path is non-PIC, linked `-no-pie`.
+  engines stay green; the object path is non-PIC, linked `-no-pie`. **Freestanding
+  profile (2026-07-09 — the NN#6/P9 no-mandatory-runtime proof).** `candor-proto
+  compile --freestanding <file> -o prog` links the *same* emitted object with a
+  ~170-line no-libc runtime (`src/backend/freestanding_runtime.c`) via `cc
+  -ffreestanding -nostdlib -static -no-pie`: a raw-syscall `_start` (no crt, no
+  `__libc_start_main`), the flat memory region a static **NOBITS** section pinned
+  at the fixed `MEM_BASE` VA by `--section-start` (no mmap, zero disk cost), the
+  θ-trace and fault line emitted by raw `write` syscalls, and — the minimal second
+  point on P7's fault-policy axis — a root fault handler called **directly** (NO
+  setjmp/longjmp) whose default freestanding policy is **HALT**: write the `(kind,
+  span)` fault line, `exit(2)`. *Gate* (`tests/freestanding.rs`): the
+  allocation-free CORE payload (fixed inline arena + `Opt` + checked arithmetic + a
+  non-alloc drop hook, **no `Box`, no `Alloc`**) and three fault-axis programs
+  compile freestanding and run as standalone processes with `(k, s, θ)`/exit
+  equality vs the oracle; the payload runs to its sentinel (θ `[60, 3, 12, 99]`,
+  exit 75). The **PROOF assertions** hold on the emitted ELF: `ldd` reports "not a
+  dynamic executable", `readelf` shows no `PT_INTERP` (EXEC, not DYN), `nm -u` is
+  empty, and no libc symbol name (`printf`/`malloc`/`mmap`/`pthread`/`setjmp`/…)
+  appears — the object depends on nothing but the kernel. **434 prior tests green;
+  +3 freestanding gates = 437; `cargo test`/`clippy` clean.** **Honest scope:**
+  freestanding here means **no libc, not no-kernel** — `_start` still issues Linux
+  `write`/`exit` syscalls; the true bare-metal target (no kernel, MMIO console,
+  `qemu-system`) is deferred, as is a big-stack guard (the payload is shallow; the
+  main kernel stack stands in for the hosted 512 MiB thread).
 
 - **Stage C — incremental artifacts + the two-hash tiers.** Realize 0008 §2:
   interface-artifact format, signature-hash analysis gate, codegen-hash

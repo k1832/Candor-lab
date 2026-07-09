@@ -1,0 +1,79 @@
+// Freestanding payload (NN#6 / P9): the allocation-free CORE layer only — a fixed
+// inline arena, `Opt`, checked arithmetic, and a non-alloc drop hook. NO `Box`, no
+// `Alloc`, no std. The checker proves every item here is non-`alloc`, so it runs on
+// the interrupt-callable ground floor — the payload the freestanding proof carries.
+
+enum Opt[T] {
+    ok Some(T),
+    None,
+}
+
+// A fixed-backing arena: the inline `[8]T` is the backing (no Box, never allocates).
+struct Arena[T: copy] {
+    mem: [8]T,
+    count: u32,
+}
+
+fn new_arena[T: copy](fill: T) -> Arena[T] {
+    return Arena { mem: [fill, fill, fill, fill, fill, fill, fill, fill], count: 0u32 };
+}
+
+// `ar.*.count = i + 1u32` is a DEFAULT (checked) u32 add — a fault, not UB, on wrap.
+fn push[T: copy](ar: write Arena[T], x: T) -> bool {
+    if ar.count >= 8u32 {
+        return false;
+    }
+    let i: u32 = ar.count;
+    ar.*.mem[conv usize i] = x;
+    ar.*.count = i + 1u32;
+    return true;
+}
+
+// bounds-checked index: `i >= 8` faults (design 0001 §5), a fault not a value (P7).
+fn get[T: copy](ar: read Arena[T], i: u32) -> T {
+    return ar.mem[conv usize i];
+}
+
+fn count_of[T: copy](ar: read Arena[T]) -> u32 {
+    return ar.count;
+}
+
+fn unwrap_or[T: copy](o: Opt[T], d: T) -> T {
+    match o {
+        Opt::Some(v) => {
+            return v;
+        },
+        Opt::None => {
+            return d;
+        },
+    }
+}
+
+// A non-alloc user drop hook: traces its tag when it dies (design 0007 F5 ground
+// floor — letting it die is not allocator work).
+struct Guard {
+    tag: i64,
+} drop(write self) {
+    trace(self.tag);
+}
+
+fn main() -> i64 {
+    let mut ar: Arena[i64] = new_arena(0);
+    let p0: bool = push(write ar, 10);
+    let p1: bool = push(write ar, 20);
+    let p2: bool = push(write ar, 30);
+    let s: i64 = get(read ar, 0) + get(read ar, 1) + get(read ar, 2); // 60
+    trace(s);
+    let c: u32 = count_of(read ar); // 3
+    trace(conv i64 c);
+
+    let some: Opt[i64] = Opt::Some(7);
+    let none: Opt[i64] = Opt::None;
+    let ov: i64 = unwrap_or(some, 0) + unwrap_or(none, 5); // 12
+    trace(ov);
+
+    // Guard drops at the end of `main` -> the drop hook traces 99 last.
+    let g: Guard = Guard { tag: 99 };
+
+    return s + conv i64 c + ov; // sentinel 75
+}

@@ -15,7 +15,11 @@ builds prove zero-downstream re-analysis on body edits (P20's mechanism,
 measured); the P17 boundary and audit command run; the P20 measurement
 instrument reports baselines; and candor-proto compile emits standalone
 native ELF executables (via cranelift-object + a small C runtime) that match
-the reference oracle process-for-process across the entire corpus. The language's
+the reference oracle process-for-process across the entire corpus. A
+`--freestanding` profile links that same object with **no libc** (`-nostdlib
+-static -no-pie`, the flat region a static section, a root HALT fault policy, raw
+syscalls for trace/exit) and runs the allocation-free core payload to its sentinel
+— `ldd` reports "not a dynamic executable", the NN#6 no-mandatory-runtime proof. The language's
 central bet (value-first memory model, Bet 5) was tested against a frozen,
 pre-registered kill criterion: killed as first registered, re-examined under a
 corrected successor registration (both on the public record), and **provisionally
