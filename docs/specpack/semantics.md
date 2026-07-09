@@ -162,3 +162,5 @@ actually tripped), then by topic. Codes in parentheses point to `diagnostics.md`
   (no dynamic scope across calls). Unchecked overflow exists only inside `unsafe`.
 - A non-unit function must return on all paths (E0810); indexing is always
   bounds-checked. Uninitialized reads are impossible (E0304).
+
+- **`out T` is an owned place, not a borrow**: an `out` parameter binds a caller-owned, initially-uninitialized slot; assign it directly (`p = v`), never `p.*` — `out T` is not a borrow type and takes no deref. The callee must assign on every normal-return path before returning.
