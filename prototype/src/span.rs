@@ -7,7 +7,7 @@
 use serde::Serialize;
 
 /// A half-open byte range `[start, end)` into the source text.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct Span {
     pub start: usize,
     pub end: usize,

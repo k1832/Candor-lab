@@ -43,14 +43,24 @@ enum Kind {
 }
 
 #[derive(Clone)]
-struct Export {
-    global: String,
-    is_pub: bool,
+pub struct Export {
+    pub global: String,
+    pub is_pub: bool,
     /// A function (called with args) vs a static (a plain value). Used to
     /// disambiguate a zero-argument `alias::name` — the parser cannot tell
     /// `alias::f()` from `alias::VALUE`, so a function export always lowers to a
     /// call and a static to a value reference.
-    is_fn: bool,
+    pub is_fn: bool,
+}
+
+/// The exported name tables of one module (design 0008 §2), reconstructable from
+/// a cached interface artifact so a **dirty importer** can be qualified without
+/// re-parsing this module's source. Shared by [`parse_one`]/[`qualify_one`], the
+/// Stage-C2 signature-only incremental build.
+pub struct ModuleExports {
+    pub path: Vec<String>,
+    pub type_exports: HashMap<String, Export>,
+    pub value_exports: HashMap<String, Export>,
 }
 
 struct Module {
@@ -142,35 +152,7 @@ fn assemble(dir: &Path) -> Result<Assembled, Diag> {
     for (path, file) in files {
         let src = std::fs::read_to_string(&file).map_err(|e| io_err(&file, &e.to_string()))?;
         let (program, uses, vis, boundary) = crate::real::parse_module(&src)?;
-        let mut type_exports = HashMap::new();
-        let mut value_exports = HashMap::new();
-        for (item, &is_pub) in program.items.iter().zip(vis.iter()) {
-            let (name, kind, is_fn) = match item {
-                Item::Struct(s) => (&s.name, Kind::Type, false),
-                Item::Enum(e) => (&e.name, Kind::Type, false),
-                Item::Fn(f) => (&f.name, Kind::Value, true),
-                Item::Static(s) => (&s.name, Kind::Value, false),
-                // An interface exports its name in the type namespace (design 0007);
-                // an `impl` block exports no name (its methods dispatch via the impl
-                // table, resolved after merge).
-                Item::Interface(i) => (&i.name, Kind::Type, false),
-                Item::Impl(_) => continue,
-                // Foreign-boundary items (design 0011): an extern block and an
-                // export bind C symbols, not importable Candor names in this
-                // stage — the wrapper that calls the extern lives in the same
-                // boundary file.
-                Item::Extern(_) | Item::Export(_) => continue,
-            };
-            let export = Export { global: mangle(&path, name, kind), is_pub, is_fn };
-            match kind {
-                Kind::Type => {
-                    type_exports.insert(name.clone(), export);
-                }
-                Kind::Value => {
-                    value_exports.insert(name.clone(), export);
-                }
-            }
-        }
+        let (type_exports, value_exports) = collect_exports(&path, &program, &vis);
         modules.push(Module {
             path,
             program,
@@ -345,6 +327,179 @@ pub fn build_tree_parts(dir: &Path) -> Result<TreeParts, Diag> {
         out.push(ModuleParts { path, source, boundary, items, is_pub, imports });
     }
     Ok(TreeParts { modules: out, diags })
+}
+
+/// The exported type/value name tables of a parsed module (design 0008 §2).
+/// Shared by the full assembler and the Stage-C2 incremental [`parse_one`].
+fn collect_exports(
+    path: &[String],
+    program: &Program,
+    vis: &[bool],
+) -> (HashMap<String, Export>, HashMap<String, Export>) {
+    let mut type_exports = HashMap::new();
+    let mut value_exports = HashMap::new();
+    for (item, &is_pub) in program.items.iter().zip(vis.iter()) {
+        let (name, kind, is_fn) = match item {
+            Item::Struct(s) => (&s.name, Kind::Type, false),
+            Item::Enum(e) => (&e.name, Kind::Type, false),
+            Item::Fn(f) => (&f.name, Kind::Value, true),
+            Item::Static(s) => (&s.name, Kind::Value, false),
+            Item::Interface(i) => (&i.name, Kind::Type, false),
+            Item::Impl(_) => continue,
+            Item::Extern(_) | Item::Export(_) => continue,
+        };
+        let export = Export { global: mangle(path, name, kind), is_pub, is_fn };
+        match kind {
+            Kind::Type => {
+                type_exports.insert(name.clone(), export);
+            }
+            Kind::Value => {
+                value_exports.insert(name.clone(), export);
+            }
+        }
+    }
+    (type_exports, value_exports)
+}
+
+/// Discover every `.cnr` module file under `dir` (path + file), sorted — the
+/// present-source universe of the Stage-C2 incremental build (design 0008 §2).
+pub fn discover_module_files(dir: &Path) -> Result<Vec<(Vec<String>, PathBuf)>, Diag> {
+    let mut out = Vec::new();
+    discover(dir, &[], &mut out)?;
+    Ok(out)
+}
+
+/// The parsed, still-**unqualified** parts of one module file (Stage-C2): its
+/// items, `use` decls, boundary marker, and its own export tables. A dirty
+/// module is parsed with this; [`qualify_one`] then qualifies it against its
+/// imports' [`ModuleExports`] (cached or fresh) with no other module parsed.
+pub struct ParsedOne {
+    pub items: Vec<Item>,
+    pub uses: Vec<UseDecl>,
+    pub boundary: bool,
+    /// `pub` flag parallel to `items` (the interface-surface filter, design 0008 §2).
+    pub is_pub: Vec<bool>,
+    pub exports: ModuleExports,
+}
+
+/// Parse one module's source into its unqualified parts (Stage-C2). No other
+/// module is touched — the signature-only incremental build parses exactly the
+/// modules whose own source changed.
+pub fn parse_one(path: &[String], source: &str) -> Result<ParsedOne, Diag> {
+    let (program, uses, vis, boundary) = crate::real::parse_module(source)?;
+    let (type_exports, value_exports) = collect_exports(path, &program, &vis);
+    Ok(ParsedOne {
+        items: program.items,
+        uses,
+        boundary,
+        is_pub: vis,
+        exports: ModuleExports { path: path.to_vec(), type_exports, value_exports },
+    })
+}
+
+/// Qualify a single parsed module's items to global names (Stage-C2), resolving
+/// its `use` imports against `imports` — the export tables of its imported
+/// modules, each either freshly parsed (a dirty import) or reconstructed from a
+/// cached interface artifact (a reused import). Mirrors the full assembler's
+/// per-module scope/rename/rewrite, but for one module with no whole-tree parse.
+/// Returns the qualified items and any module-layer (import/visibility) diags.
+pub fn qualify_one(
+    parsed: &ParsedOne,
+    imports: &HashMap<String, ModuleExports>,
+) -> (Vec<Item>, Vec<Diag>) {
+    let mut diags = Vec::new();
+    // Synthetic module table: index 0 is self; the rest are the imports. Only the
+    // export tables + path are consulted (by the alias-ctor rewrite and rename).
+    let mut synth: Vec<Module> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
+    synth.push(synth_module(&parsed.exports));
+    index.insert(path_str(&parsed.exports.path), 0);
+    for (mpath, me) in imports {
+        index.insert(mpath.clone(), synth.len());
+        synth.push(synth_module(me));
+    }
+
+    // Build this module's scope: own exports, then each `use` import.
+    let mut scope = Scope::default();
+    for (name, e) in &parsed.exports.type_exports {
+        scope.type_scope.insert(name.clone(), e.global.clone());
+    }
+    for (name, e) in &parsed.exports.value_exports {
+        scope.value_scope.insert(name.clone(), e.global.clone());
+    }
+    for u in &parsed.uses {
+        let target = path_str(&u.segments);
+        let &tidx = match index.get(&target) {
+            Some(t) => t,
+            None => {
+                diags.push(
+                    Diag::error("E0901", format!("unresolved import: no module `{target}`"), u.span)
+                        .with_note("a module is a `.cnr` file; `a::b` is the file `a/b.cnr`", None),
+                );
+                continue;
+            }
+        };
+        match &u.names {
+            None => {
+                let alias = u.segments.last().cloned().unwrap_or_default();
+                scope.aliases.insert(alias, tidx);
+            }
+            Some(names) => {
+                let tm = &synth[tidx];
+                for name in names {
+                    let ty = tm.type_exports.get(name);
+                    let val = tm.value_exports.get(name);
+                    if ty.is_none() && val.is_none() {
+                        diags.push(Diag::error(
+                            "E0902",
+                            format!("unresolved import: `{target}` has no item `{name}`"),
+                            u.span,
+                        ));
+                        continue;
+                    }
+                    if let Some(e) = ty {
+                        if e.is_pub {
+                            scope.type_scope.insert(name.clone(), e.global.clone());
+                        } else {
+                            diags.push(private_err(&target, name, u.span));
+                        }
+                    }
+                    if let Some(e) = val {
+                        if e.is_pub {
+                            scope.value_scope.insert(name.clone(), e.global.clone());
+                        } else {
+                            diags.push(private_err(&target, name, u.span));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Rename own declarations to global names, then rewrite bodies/types.
+    let selfmod = &synth[0];
+    let mut out = Vec::with_capacity(parsed.items.len());
+    for mut item in parsed.items.iter().cloned() {
+        rename_item(selfmod, &mut item);
+        let mut rw = Rewriter { scope: &scope, modules: &synth, diags: &mut diags };
+        rw.rewrite_item(&mut item);
+        out.push(item);
+    }
+    (out, diags)
+}
+
+/// A synthetic [`Module`] carrying only export tables + path (Stage-C2 qualify).
+fn synth_module(me: &ModuleExports) -> Module {
+    Module {
+        path: me.path.clone(),
+        program: Program { items: Vec::new() },
+        uses: Vec::new(),
+        type_exports: me.type_exports.clone(),
+        value_exports: me.value_exports.clone(),
+        source: String::new(),
+        boundary: false,
+        is_pub: Vec::new(),
+    }
 }
 
 fn private_err(module: &str, name: &str, span: Span) -> Diag {

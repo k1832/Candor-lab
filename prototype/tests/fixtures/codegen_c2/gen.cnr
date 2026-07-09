@@ -1,0 +1,5 @@
+// Two independent public generics, so a body edit to one must invalidate only
+// its own instantiations (design 0008 §2.4 — the per-instantiation codegen tier).
+pub fn id[T: copy](x: T) -> T { return x; }
+
+pub fn snd[T: copy, U: copy](a: T, b: U) -> U { return b; }

@@ -9,7 +9,7 @@ use crate::span::Span;
 
 /// Fixed-width scalar types (design 0001 §8.1). Also usable as integer-literal
 /// suffixes (integer types only).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ScalarTy {
     I8,
     I16,

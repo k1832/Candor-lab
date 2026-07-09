@@ -1,0 +1,10 @@
+use gen::{id, snd};
+
+// Reaches three monomorphized instances across two generics:
+// id[i64], id[u32], snd[u32, i64].
+fn main() -> i64 {
+    let a: i64 = id(5);
+    let b: u32 = id(7u32);
+    let c: i64 = snd(1u32, 9);
+    return a + conv i64 b + c;
+}

@@ -235,6 +235,15 @@ pub type GenericCheck = (Vec<Diag>, Vec<(String, Vec<Type>)>, std::collections::
 /// are typed by value-argument inference and bound conformance). Returns the
 /// diagnostics and the reached concrete instantiations (for monomorphization).
 pub fn check_generic_program(prog: &Program, real: bool) -> GenericCheck {
+    check_generic_program_own(prog, real, prog.items.len())
+}
+
+/// As [`check_generic_program`], but only the first `own_len` items are checked
+/// (def-site, concrete, and hook diagnostic passes); the remainder are imported
+/// signature-only stubs (design 0008 §2) whose tables/impls resolve and whose
+/// generic + `drop`-hook bodies feed instantiation, but whose bodies are never
+/// re-analyzed. The generic half of the signature-only re-check tier.
+pub fn check_generic_program_own(prog: &Program, real: bool, own_len: usize) -> GenericCheck {
     let mut diags = Vec::new();
     let mut items = resolve_program(prog, &mut diags);
     crate::generics::resolve_tables(prog, &mut items, &mut diags);
@@ -244,16 +253,17 @@ pub fn check_generic_program(prog: &Program, real: bool) -> GenericCheck {
     // its alloc-on-drop for *every* instance (design 0007 §3.4, F5); a concrete
     // hook keeps the stage-1 behavior. One monotonic fixpoint covers the mutual
     // dependencies (a hook may drop another alloc-on-drop aggregate).
-    let hooks: Vec<HookInfo> = prog
+    let hooks: Vec<(usize, HookInfo)> = prog
         .items
         .iter()
-        .filter_map(|it| match it {
-            Item::Struct(s) => s.drop_hook.as_ref().map(|b| HookInfo {
+        .enumerate()
+        .filter_map(|(i, it)| match it {
+            Item::Struct(s) => s.drop_hook.as_ref().map(|b| (i, HookInfo {
                 name: s.name.clone(),
                 type_params: s.type_params.iter().map(|p| (p.name.clone(), p.bounds.clone())).collect(),
                 block: b.clone(),
                 span: s.span,
-            }),
+            })),
             _ => None,
         })
         .collect();
@@ -262,7 +272,7 @@ pub fn check_generic_program(prog: &Program, real: bool) -> GenericCheck {
         loop {
             let snapshot = items.clone();
             let mut changed = false;
-            for h in &hooks {
+            for (_, h) in &hooks {
                 let alloc = hook_is_alloc(&snapshot, h, real);
                 if alloc {
                     if h.type_params.is_empty() {
@@ -290,7 +300,7 @@ pub fn check_generic_program(prog: &Program, real: bool) -> GenericCheck {
     let mut c = Checker { items: &items, diags, f: FnState::empty(), real, insts: Vec::new(), def_site: false, shapes: std::collections::HashMap::new(), type_params: Vec::new(), param_bounds: Vec::new(), expected_ty: None, cur_generic: None, foreign_report: Vec::new() };
 
     // --- Definition-site checks (opaque T, once per generic) ---
-    for it in &prog.items {
+    for it in &prog.items[..own_len] {
         if let Item::Fn(f) = it {
             if !f.type_params.is_empty() {
                 if let Some(sig) = c.items.generic_fns.get(&f.name).cloned() {
@@ -299,7 +309,7 @@ pub fn check_generic_program(prog: &Program, real: bool) -> GenericCheck {
             }
         }
     }
-    for it in &prog.items {
+    for it in &prog.items[..own_len] {
         if let Item::Impl(im) = it {
             c.check_impl_methods_def_site(im);
         }
@@ -308,14 +318,17 @@ pub fn check_generic_program(prog: &Program, real: bool) -> GenericCheck {
     // emitted by the final hook pass below; the alloc fixpoint ran on a snapshot).
 
     // --- Concrete code (typing generic uses, collecting instantiations) ---
-    for it in &prog.items {
+    for it in &prog.items[..own_len] {
         match it {
             Item::Fn(f) if f.type_params.is_empty() => c.check_fn(f),
             Item::Static(s) => c.check_static(s),
             _ => {}
         }
     }
-    for h in &hooks {
+    for (idx, h) in &hooks {
+        if *idx >= own_len {
+            continue;
+        }
         check_one_hook(&mut c, &items, h, real);
     }
 

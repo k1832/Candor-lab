@@ -530,6 +530,33 @@ Per §8 sequencing, the arc is staged and honest about what each stage validates
   codegen-invalidation tier is exercised via `pub` bodies generally; (iv) the
   content-addressed *per-instantiation* codegen cache and T1/T3–T5 CI timing
   (0008 §6 stage 4) remain unbuilt — this is the analysis-tier (stage 3) half.
+  **Stage C2 status (2026-07-09 — Stage C's two residuals CLOSED).** (1) The
+  signature-only re-check tier is real: the interface artifact now carries the
+  module's already-qualified, **body-stripped stub items** (a non-generic `fn`'s
+  body and a `static`'s initializer are the opaque codegen the boundary keeps;
+  generic bodies, `impl` methods, and `drop` hooks cross as the checked bodies
+  instantiation needs, 0008 §2.4), its export tables, and its DAG edges — so a
+  dirty importer is qualified and re-checked against upstream **artifacts, never
+  upstream source**. The **brutal proof** (`tests/stage_c2.rs`): after caching, an
+  upstream module's source file is **deleted** and a downstream module's body is
+  edited; the rebuild **succeeds** — the deleted upstream is reused from its
+  artifact and never re-parsed (an upstream re-parse would fail on the missing
+  file). (2) The **per-instantiation codegen cache** (`.candor-cache/codegen/`)
+  keys each monomorphized instance on **(the defining module's per-`pub`-generic
+  codegen hash, the type-argument tuple, the schema/toolchain salt)**: a
+  non-generic body edit reuses every cached instantiation of untouched generics; a
+  generic **body** edit invalidates **exactly its own** instantiations and — 0008's
+  promise — **never cascades analysis** (the importer is not re-analyzed). A
+  **differential gate** asserts stub-based per-module checking is diagnostic-
+  identical to the whole-program merge on positive **and** negative fixtures.
+  **Under-specification resolved (reported):** designs 0008/0010 name the codegen
+  key by "the **defining module's** codegen hash", which would over-invalidate
+  (one generic's edit re-emitting the whole module's instances); we record a
+  **per-generic** codegen hash *within* the module artifact and key on it, the
+  finer reading that makes "invalidates exactly its own instantiations" literally
+  true. **424 prior tests green; +6 Stage-C2 gates = 430; `cargo test`/`clippy`
+  clean.** Residual (iii) (`inline`) and the T1/T3–T5 CI timing at real-toolchain
+  scale remain the honest boundary.
 
 - **Stage D — optimization within the R1 license + P20 measurement.** Enable
   Cranelift optimization (and/or add the LLVM backend), with **every pass

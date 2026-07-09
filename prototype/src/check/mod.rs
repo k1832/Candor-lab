@@ -183,6 +183,29 @@ fn check_program_opts(prog: &Program, real: bool) -> Vec<Diag> {
     check_program_collect(prog, real).0
 }
 
+/// Re-check module `own` against its imports' signature-only interface **stubs**
+/// (design 0008 §2, §2.4) — the resolution of Stage C's residual (i). `own` are
+/// the module's own (already-qualified) items; `stubs` are the qualified stub
+/// items of its transitive imports ([`crate::build::stub::stub_item`]). Only
+/// `own`'s bodies are analyzed; the stubs contribute signatures, tables, impls,
+/// and the checked generic/drop bodies instantiation needs — never a re-analysis
+/// of an import's opaque `fn` body, and never a re-parse of its source. Returns
+/// the diagnostics **plus the reached generic instantiations** (name, type args)
+/// the codegen tier keys its per-instantiation cache on.
+pub fn check_module_stub(own: &[Item], stubs: &[Item]) -> (Vec<Diag>, Vec<(String, Vec<Type>)>) {
+    let own_len = own.len();
+    let mut items: Vec<Item> = Vec::with_capacity(own.len() + stubs.len());
+    items.extend(own.iter().cloned());
+    items.extend(stubs.iter().cloned());
+    let prog = Program { items };
+    if crate::generics::is_generic_program(&prog) {
+        let (diags, insts, _shapes) = generics::check_generic_program_own(&prog, true, own_len);
+        (diags, insts)
+    } else {
+        (check_program_collect_own(&prog, true, own_len).0, Vec::new())
+    }
+}
+
 /// As [`check_program_real`] but also returns the per-function foreign-effect
 /// report (design 0011 §2), for the `audit` command's effect-reach section.
 pub fn check_program_real_foreign(prog: &Program) -> (Vec<Diag>, Vec<ForeignFnInfo>) {
@@ -193,19 +216,33 @@ pub fn check_program_real_foreign(prog: &Program) -> (Vec<Diag>, Vec<ForeignFnIn
 }
 
 fn check_program_collect(prog: &Program, real: bool) -> (Vec<Diag>, Vec<ForeignFnInfo>) {
+    check_program_collect_own(prog, real, prog.items.len())
+}
+
+/// As [`check_program_collect`], but only the first `own_len` items are *checked*
+/// (their bodies analyzed and diagnostics emitted); the remainder are
+/// signature-only interface **stubs** of imported modules (design 0008 §2): their
+/// tables are resolved and their `drop`-hook alloc-on-drop is folded in, but
+/// their bodies are never re-analyzed — the owning module already did, once. This
+/// is the concrete (non-generic) half of the signature-only re-check tier.
+fn check_program_collect_own(prog: &Program, real: bool, own_len: usize) -> (Vec<Diag>, Vec<ForeignFnInfo>) {
     let mut diags = Vec::new();
     let mut items = resolve_program(prog, &mut diags);
 
     // Every struct's `drop` hook is checked as a synthetic
-    // `fn drop(self: write StructT) -> unit` (retest 2026-07-08, finding 4).
-    let hooks: Vec<(String, Block, Span)> = prog
+    // `fn drop(self: write StructT) -> unit` (retest 2026-07-08, finding 4). The
+    // alloc-on-drop FIXPOINT runs over ALL hooks (own + stub) — a stub type's
+    // drop effect is a signature fact the owner resolves; only the diagnostic
+    // pass below is restricted to own hooks.
+    let hooks: Vec<(usize, String, Block, Span)> = prog
         .items
         .iter()
-        .filter_map(|it| match it {
+        .enumerate()
+        .filter_map(|(i, it)| match it {
             Item::Struct(s) => s
                 .drop_hook
                 .as_ref()
-                .map(|b| (s.name.clone(), b.clone(), s.span)),
+                .map(|b| (i, s.name.clone(), b.clone(), s.span)),
             _ => None,
         })
         .collect();
@@ -219,7 +256,7 @@ fn check_program_collect(prog: &Program, real: bool) -> (Vec<Diag>, Vec<ForeignF
         loop {
             let snapshot = items.clone();
             let mut changed = false;
-            for (sname, block, span) in &hooks {
+            for (_, sname, block, span) in &hooks {
                 let mut c = Checker {
                     items: &snapshot,
                     diags: Vec::new(),
@@ -267,15 +304,18 @@ fn check_program_collect(prog: &Program, real: bool) -> (Vec<Diag>, Vec<ForeignF
         expected_ty: None,
         cur_generic: None, foreign_report: Vec::new(),
     };
-    for item in &prog.items {
+    for item in &prog.items[..own_len] {
         match item {
             Item::Fn(f) => c.check_fn(f),
             Item::Static(s) => c.check_static(s),
             _ => {}
         }
     }
-    // Real (diagnostic-emitting) pass over each hook body, with stable flags.
-    for (sname, block, span) in &hooks {
+    // Real (diagnostic-emitting) pass over each OWN hook body, with stable flags.
+    for (idx, sname, block, span) in &hooks {
+        if *idx >= own_len {
+            continue;
+        }
         let (fdecl, sig) = synth_drop_hook(sname, block, *span);
         c.check_fn_with_sig(&fdecl, &sig);
     }

@@ -13,12 +13,12 @@ use crate::token::ScalarTy;
 // Program & items
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Program {
     pub items: Vec<Item>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Item {
     Struct(StructDecl),
     Enum(EnumDecl),
@@ -47,7 +47,7 @@ pub enum Item {
 /// (only `"C"` is defined this edition). `boundary_file` is set by the parser to
 /// the file's `boundary`-preamble status, so the placement rule (E1101) survives
 /// the module merge, which flattens files into one program.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExternBlock {
     pub abi: String,
     pub boundary_file: bool,
@@ -58,7 +58,7 @@ pub struct ExternBlock {
 /// One foreign function signature inside an `extern` block. It is implicitly
 /// `foreign` (the ground source of the effect, §2) and may carry a `trust`
 /// clause discharging its preconditions (§3).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExternFn {
     pub name: String,
     pub params: Vec<Param>,
@@ -71,7 +71,7 @@ pub struct ExternFn {
 /// mandatory non-empty justification string plus zero or more predicates drawn
 /// from the closed vocabulary. Every predicate is `assumed-proven` — recorded
 /// and enumerated, never evaluated.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TrustDecl {
     pub justification: String,
     pub predicates: Vec<TrustPred>,
@@ -79,7 +79,7 @@ pub struct TrustDecl {
 }
 
 /// One trust predicate: a name from the closed set and its identifier arguments.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TrustPred {
     pub name: String,
     pub args: Vec<String>,
@@ -89,7 +89,7 @@ pub struct TrustPred {
 /// An `export "<abi>" fn <symbol>(params) -> ret = <candor_fn>;` declaration
 /// (design 0011 §1.5): the reverse direction, binding an existing `pub` Candor
 /// function to a stable C symbol under a C-mapped signature.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExportDecl {
     pub abi: String,
     pub boundary_file: bool,
@@ -102,7 +102,7 @@ pub struct ExportDecl {
 
 /// A declared type parameter with its bounds (design 0007 §1.2, §6.4). Bounds are
 /// interface names and the one built-in structural bound `copy`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TypeParam {
     pub name: String,
     /// Bound names (interface names or the literal `copy`).
@@ -111,7 +111,7 @@ pub struct TypeParam {
 }
 
 /// One method *signature* inside an `interface` (design 0007 §1.2, §4.1). No body.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MethodSig {
     pub name: String,
     /// Whether the method takes a `self` receiver (design 0007 §3.5). A method
@@ -126,7 +126,7 @@ pub struct MethodSig {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct InterfaceDecl {
     pub name: String,
     pub type_params: Vec<TypeParam>,
@@ -137,7 +137,7 @@ pub struct InterfaceDecl {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ImplDecl {
     /// Type parameters of a *generic* impl (`impl[T] I for List[T]`). Empty for a
     /// concrete impl. (Generic impls are deferred in stage 1; see generics.rs.)
@@ -162,14 +162,14 @@ pub struct ImplDecl {
 /// module path (`use a::b` -> `["a","b"]`); `names` is `Some` for a group import
 /// (`use a::b::{x, y}` -> `Some(["x","y"])`) and `None` for a namespace import
 /// (`use a::b;`, binding the module `b` as an alias).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct UseDecl {
     pub segments: Vec<String>,
     pub names: Option<Vec<String>>,
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct StructDecl {
     pub copy: bool,
     pub name: String,
@@ -181,14 +181,14 @@ pub struct StructDecl {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Field {
     pub name: String,
     pub ty: Ty,
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EnumDecl {
     pub copy: bool,
     pub name: String,
@@ -198,7 +198,7 @@ pub struct EnumDecl {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Variant {
     pub name: String,
     /// Zero or more payload types (design 0001 §8.2).
@@ -210,7 +210,7 @@ pub struct Variant {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FnDecl {
     pub name: String,
     /// Generic type parameters declared in the bracket after the name, mixed with
@@ -236,7 +236,7 @@ pub struct FnDecl {
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct StaticDecl {
     pub name: String,
     pub ty: Ty,
@@ -249,7 +249,7 @@ pub struct StaticDecl {
 // ---------------------------------------------------------------------------
 
 /// Parameter-passing mode (design 0001 §3.1). Omitted spelling parses to `Take`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ParamMode {
     Take,
     Read,
@@ -257,7 +257,7 @@ pub enum ParamMode {
     Out,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Param {
     pub name: String,
     pub mode: ParamMode,
@@ -267,14 +267,14 @@ pub struct Param {
     pub span: Span,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BorrowKind {
     Shared,    // `read`
     Exclusive, // `write`
 }
 
 /// A function return type, possibly a borrow return with a region (design §3.3).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RetTy {
     pub borrow: Option<BorrowKind>,
     pub region: Option<String>,
@@ -286,13 +286,13 @@ pub struct RetTy {
 // Types
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Ty {
     pub kind: TyKind,
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum TyKind {
     Scalar(ScalarTy),
     /// A user struct/enum name (unresolved — no symbol table). Also a bare type
@@ -319,7 +319,7 @@ pub enum TyKind {
 
 /// Non-capturing function-pointer type (design 0001 §6.1). Its type includes
 /// parameter modes *and* the `alloc` effect marker.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FnPtrTy {
     pub params: Vec<FnPtrParam>,
     pub alloc: bool,
@@ -329,7 +329,7 @@ pub struct FnPtrTy {
     pub ret: Box<Ty>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FnPtrParam {
     /// Optional decorative name (`ctx: rawptr u8`).
     pub name: Option<String>,
@@ -342,19 +342,19 @@ pub struct FnPtrParam {
 // Statements & blocks
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Stmt {
     pub kind: StmtKind,
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum StmtKind {
     Let {
         mutable: bool,
@@ -374,7 +374,7 @@ pub enum StmtKind {
 // Expressions
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum UnOp {
     Neg,
     Not,
@@ -382,7 +382,7 @@ pub enum UnOp {
     BitNot,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PrefixOp {
     Deref,
     Read,
@@ -390,7 +390,7 @@ pub enum PrefixOp {
     Clone,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BinOp {
     Add,
     Sub,
@@ -413,27 +413,27 @@ pub enum BinOp {
     Shr,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FieldInit {
     pub name: String,
     pub value: Expr,
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MatchArm {
     pub pattern: Pattern,
     pub body: Expr,
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ExprKind {
     IntLit { value: u64, suffix: Option<ScalarTy> },
     /// A negative-literal fold `-<int>` (design 0006 §2.4; spec 01 §3.4). The
@@ -524,13 +524,13 @@ pub enum ExprKind {
 // Patterns (design 0001 §8.2 / §8.2.1)
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Pattern {
     pub kind: PatKind,
     pub span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PatKind {
     /// `_` — binds nothing (grammar-level; exhaustiveness enforced by checker).
     Wildcard,

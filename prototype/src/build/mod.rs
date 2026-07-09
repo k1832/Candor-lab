@@ -32,21 +32,23 @@
 //! the gate asserts is exactly true; the residual is the upstream re-touch.
 
 pub mod canon;
+pub mod codegen;
 pub mod sha256;
+pub mod stub;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::ast::{Item, Program};
+use crate::ast::Item;
 use crate::diag::{Diag, Severity};
-use crate::modules::{self, ModuleParts};
+use crate::modules::{self, ModuleParts, TreeParts};
 
 /// The MIR-schema version. Bumping it invalidates every cached codegen artifact
 /// by construction (design 0008 §2 F3 salt; 0010 §3). The gate exercises this
 /// via [`build_dir_with_salt`].
-pub const SCHEMA_VERSION: &str = "candor-mir-schema-c1";
+pub const SCHEMA_VERSION: &str = "candor-mir-schema-c2";
 
 /// The blessed-toolchain identity that co-salts the codegen cache (0010 §3): the
 /// compiler version and the pinned backend. Same source + **same toolchain** is
@@ -67,8 +69,19 @@ pub struct Provenance {
     pub toolchain: String,
 }
 
-/// The per-module interface artifact (design 0008 §2).
+/// One exported name of a module (design 0008 §2/§3), serialized in the
+/// interface artifact so a dirty importer resolves against it without re-parsing
+/// this module's source (the Stage-C2 signature-only tier).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExportEntry {
+    pub local: String,
+    pub global: String,
+    pub is_pub: bool,
+    pub is_fn: bool,
+}
+
+/// The per-module interface artifact (design 0008 §2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Artifact {
     /// (1) the module path.
     pub module_path: String,
@@ -88,6 +101,25 @@ pub struct Artifact {
     pub signature_hash: String,
     /// (4b) the codegen hash — additionally over the bodies.
     pub codegen_hash: String,
+    /// The import module paths (edges of the DAG) — reconstructs this node when a
+    /// dirty importer must be qualified while this module's source is untouched
+    /// (or deleted): the signature-only-stub tier never re-parses upstream source.
+    pub edges: Vec<String>,
+    /// This module's exported type-namespace names (Stage-C2 qualification).
+    pub exports_types: Vec<ExportEntry>,
+    /// This module's exported value-namespace names (Stage-C2 qualification).
+    pub exports_values: Vec<ExportEntry>,
+    /// The already-qualified, body-stripped interface **stub items** (design 0008
+    /// §2.4): the signature-only context an importer re-checks against — never the
+    /// full source items. A body edit upstream does not even parse this module.
+    pub stub_items: Vec<crate::ast::Item>,
+    /// Per-`pub`-generic codegen hash (generic global name -> hash) — the
+    /// per-instantiation cache keys on this (design 0008 §2.4; see `codegen.rs`).
+    pub item_codegen_hashes: BTreeMap<String, String>,
+    /// The generic instantiations reached in this module's own check (generic
+    /// global name + mangled type-arg tuple) — persisted so the codegen tier sees
+    /// every reached instance even when this module is reused unparsed.
+    pub insts: Vec<(String, Vec<String>)>,
     pub provenance: Provenance,
 }
 
@@ -123,6 +155,8 @@ pub struct ModuleReport {
 pub struct BuildReport {
     pub cache_dir: PathBuf,
     pub modules: Vec<ModuleReport>,
+    /// The per-instantiation codegen-cache outcomes (design 0008 §2.4).
+    pub codegen: Vec<codegen::InstReport>,
     pub diags: Vec<Diag>,
 }
 
@@ -140,6 +174,16 @@ impl BuildReport {
     /// The signature hash reported for `path`, if any.
     pub fn sig_hash(&self, path: &str) -> Option<&str> {
         self.modules.iter().find(|m| m.path == path).map(|m| m.signature_hash.as_str())
+    }
+
+    /// Instantiations whose lowered form was reused from the codegen cache.
+    pub fn codegen_reused(&self) -> Vec<String> {
+        self.codegen.iter().filter(|c| c.action == Action::Reused).map(inst_label).collect()
+    }
+
+    /// Instantiations (re-)emitted this build (a codegen-cache miss).
+    pub fn codegen_emitted(&self) -> Vec<String> {
+        self.codegen.iter().filter(|c| c.action == Action::Checked).map(inst_label).collect()
     }
 
     /// True when the build produced no error-severity diagnostics.
@@ -162,9 +206,31 @@ impl BuildReport {
                 )
             })
             .collect();
+        let cg: Vec<String> = self
+            .codegen
+            .iter()
+            .map(|c| {
+                format!(
+                    "{{\"instance\":{},\"action\":\"{}\",\"key\":{}}}",
+                    json_str(&inst_label(c)),
+                    c.action.as_str(),
+                    json_str(&c.key)
+                )
+            })
+            .collect();
         let diags: Vec<String> = self.diags.iter().map(|d| d.to_json()).collect();
-        format!("{{\"modules\":[{}],\"diagnostics\":[{}]}}", mods.join(","), diags.join(","))
+        format!(
+            "{{\"modules\":[{}],\"codegen\":[{}],\"diagnostics\":[{}]}}",
+            mods.join(","),
+            cg.join(","),
+            diags.join(",")
+        )
     }
+}
+
+/// A stable `generic<arg,arg>` label for an instantiation report.
+fn inst_label(c: &codegen::InstReport) -> String {
+    format!("{}<{}>", c.generic, c.args.join(","))
 }
 
 fn json_str(s: &str) -> String {
@@ -181,86 +247,219 @@ pub fn build_dir(dir: &Path) -> Result<BuildReport, Diag> {
 /// As [`build_dir`], but with an explicit salt — the gate uses this to simulate
 /// a `SCHEMA_VERSION`/toolchain bump and assert the cache invalidates (F3).
 pub fn build_dir_with_salt(dir: &Path, salt: &str) -> Result<BuildReport, Diag> {
-    let parts = modules::build_tree_parts(dir)?;
+    use std::collections::HashMap;
     let cache_dir = dir.join(".candor-cache");
+    let cached = load_cache(&cache_dir);
 
-    // Module-layer errors (unresolved import, cycle, private, no entry) mean the
-    // DAG is not buildable; report them and emit no artifacts.
-    if parts.diags.iter().any(|d| d.severity == Severity::Error) {
-        return Ok(BuildReport { cache_dir, modules: Vec::new(), diags: parts.diags });
+    // 1. The present-source universe: read + hash every `.cnr` file (NO parse).
+    let files = modules::discover_module_files(dir)?;
+    struct Present {
+        path: Vec<String>,
+        source: String,
+        source_hash: String,
+    }
+    let mut present: BTreeMap<String, Present> = BTreeMap::new();
+    for (mp, file) in files {
+        let source = std::fs::read_to_string(&file).map_err(|e| {
+            Diag::error("E0900", format!("cannot read module `{}`: {e}", file.display()), crate::span::Span::point(0))
+        })?;
+        let source_hash = sha256::hex(source.as_bytes());
+        present.insert(path_str(&mp), Present { path: mp, source, source_hash });
     }
 
-    let mods = &parts.modules;
-    let order = topo_order(mods);
-    let cached = load_cache(&cache_dir);
+    // 2. Module-path universe = present sources ∪ cached artifacts (a reused
+    //    module's source may be absent — the brutal proof deletes it).
+    let mut universe: BTreeSet<String> = present.keys().cloned().collect();
+    for k in cached.keys() {
+        universe.insert(k.clone());
+    }
+
+    // 3. Source-cleanliness + edges. A SOURCE-DIRTY module (changed or new source)
+    //    is parsed now — it is the module whose own source changed. A SOURCE-CLEAN
+    //    module (present hash == cached hash under the same salt, OR source absent
+    //    but cached) is NOT parsed: its edges come from its artifact. This is the
+    //    signature-only tier's teeth — clean upstream source is never parsed.
+    let mut parsed: HashMap<String, modules::ParsedOne> = HashMap::new();
+    let mut source_clean: HashMap<String, bool> = HashMap::new();
+    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+    for path in &universe {
+        let pr = present.get(path);
+        let art = cached.get(path);
+        let clean = match (pr, art) {
+            (Some(pr), Some(a)) => a.schema_salt == salt && a.source_hash == pr.source_hash,
+            (None, Some(a)) => a.schema_salt == salt,
+            _ => false,
+        };
+        source_clean.insert(path.clone(), clean);
+        if clean {
+            edges.insert(path.clone(), art.unwrap().edges.clone());
+        } else if let Some(pr) = pr {
+            let po = modules::parse_one(&pr.path, &pr.source)?;
+            let mut es: Vec<String> = po.uses.iter().map(|u| u.segments.join("::")).collect();
+            es.sort();
+            es.dedup();
+            edges.insert(path.clone(), es);
+            parsed.insert(path.clone(), po);
+        } else {
+            // Absent source, no salt-matching artifact: the module is gone.
+            edges.insert(path.clone(), Vec::new());
+        }
+    }
+
+    // 4. Module-layer gate: acyclicity (design 0008 §3) + the `main` entry.
+    let mut diags: Vec<Diag> = Vec::new();
+    if let Some(cyc) = find_path_cycle(&universe, &edges) {
+        diags.push(
+            Diag::error("E0904", format!("import cycle: {}", cyc.join(" -> ")), crate::span::Span::point(0))
+                .with_note("the import graph must be an acyclic DAG (design 0008 §3)", None),
+        );
+    }
+    let has_main = present.contains_key("main") || cached.contains_key("main");
+    if !has_main {
+        diags.push(
+            Diag::error("E0905", "no root module `main.cnr` defining `fn main`", crate::span::Span::point(0))
+                .with_note("a directory program's entry is `fn main` in the root file `main.cnr`", None),
+        );
+    }
+    if diags.iter().any(|d| d.severity == Severity::Error) {
+        return Ok(BuildReport { cache_dir, modules: Vec::new(), codegen: Vec::new(), diags });
+    }
 
     std::fs::create_dir_all(&cache_dir)
         .map_err(|e| Diag::error("E0910", format!("cannot create cache dir: {e}"), crate::span::Span::point(0)))?;
 
-    let mut diags = parts.diags;
-    let mut reports: Vec<ModuleReport> = Vec::with_capacity(mods.len());
-    // module index -> its signature hash computed THIS build (imports read it).
-    let mut new_sig: Vec<Option<String>> = vec![None; mods.len()];
+    let order = topo_paths(&universe, &edges);
 
-    for &m in &order {
-        let part = &mods[m];
-        let path = path_str(&part.path);
-        let source_hash = sha256::hex(part.source.as_bytes());
-        let signatures = signatures_of(part);
-        let signature_hash = hash_signatures(&path, part.boundary, &signatures);
+    // Per-module build state, keyed by module path (topo order fills them).
+    let mut new_sig: HashMap<String, String> = HashMap::new();
+    let mut resolved_exports: HashMap<String, modules::ModuleExports> = HashMap::new();
+    let mut stub_by_path: HashMap<String, Vec<Item>> = HashMap::new();
+    let mut reports: Vec<ModuleReport> = Vec::new();
+    // Codegen-tier accumulators (design 0008 §2.4).
+    let mut insts_all: Vec<(String, Vec<String>)> = Vec::new();
+    let mut item_hashes_all: BTreeMap<String, String> = BTreeMap::new();
 
-        // The imports' current signature hashes (available: imports precede us).
-        let imports: BTreeMap<String, String> = part
-            .imports
+    for path in &order {
+        let imports = &edges[path];
+        let imports_sig: BTreeMap<String, String> = imports
             .iter()
-            .map(|&i| (path_str(&mods[i].path), new_sig[i].clone().expect("import processed before importer")))
+            .map(|i| (i.clone(), new_sig.get(i).cloned().unwrap_or_default()))
+            .collect();
+        let prior = cached.get(path);
+        let reuse = *source_clean.get(path).unwrap_or(&false)
+            && prior.is_some_and(|a| a.schema_salt == salt && a.imports == imports_sig);
+
+        if reuse {
+            let a = prior.unwrap();
+            new_sig.insert(path.clone(), a.signature_hash.clone());
+            resolved_exports.insert(path.clone(), me_from_artifact(a));
+            stub_by_path.insert(path.clone(), a.stub_items.clone());
+            insts_all.extend(a.insts.iter().cloned());
+            for (k, v) in &a.item_codegen_hashes {
+                item_hashes_all.insert(k.clone(), v.clone());
+            }
+            reports.push(ModuleReport {
+                path: path.clone(),
+                action: Action::Reused,
+                signature_hash: a.signature_hash.clone(),
+                codegen_hash: a.codegen_hash.clone(),
+            });
+            continue;
+        }
+
+        // RECHECK: qualify this module against its imports' (already-resolved)
+        // exports, then re-check it against its transitive imports' signature-only
+        // stubs — never re-parsing an upstream source.
+        let po = match parsed.get(path) {
+            Some(po) => po,
+            None => {
+                // Source-clean but an import's signature moved: parse it now (its
+                // own body is needed to re-analyze). Its source must be present.
+                let pr = present.get(path).ok_or_else(|| {
+                    Diag::error("E0906", format!("module `{path}` must re-check but its source is absent"), crate::span::Span::point(0))
+                })?;
+                let po = modules::parse_one(&pr.path, &pr.source)?;
+                parsed.entry(path.clone()).or_insert(po)
+            }
+        };
+        let import_exports: HashMap<String, modules::ModuleExports> = imports
+            .iter()
+            .filter_map(|i| resolved_exports.get(i).map(|me| (i.clone(), clone_me(me))))
+            .collect();
+        let (qitems, qdiags) = modules::qualify_one(po, &import_exports);
+        let source_hash = present.get(path).map(|p| p.source_hash.clone()).unwrap_or_default();
+        let is_pub = po.is_pub.clone();
+        let boundary = po.boundary;
+        let exports = clone_me(&po.exports);
+
+        let signatures = signatures_of_items(&qitems, &is_pub);
+        let signature_hash = hash_signatures(path, boundary, &signatures);
+
+        // Transitive stub context (imports' imports, …), from what topo built.
+        let mut stubs: Vec<Item> = Vec::new();
+        for imp in transitive_imports(path, &edges) {
+            if let Some(items) = stub_by_path.get(&imp) {
+                stubs.extend(items.iter().cloned());
+            }
+        }
+        let (mut errs, insts) = crate::check::check_module_stub(&qitems, &stubs);
+        let had_error = qdiags.iter().chain(errs.iter()).any(|d| d.severity == Severity::Error);
+        diags.extend(qdiags);
+        diags.append(&mut errs);
+
+        let codegen_bodies = bodies_of_items(&qitems, &is_pub);
+        let codegen_hash = hash_codegen(&signature_hash, &codegen_bodies);
+        let item_codegen_hashes = item_codegen_hashes_of(&qitems, &is_pub);
+        let stub_items = stub_items_of(&qitems, &is_pub);
+        let mangled_insts: Vec<(String, Vec<String>)> = insts
+            .iter()
+            .map(|(n, args)| (n.clone(), args.iter().map(crate::generics::mangle_ty).collect()))
             .collect();
 
-        let prior = cached.get(&path);
-        let reuse = prior.is_some_and(|a| {
-            a.schema_salt == salt
-                && a.source_hash == source_hash
-                && a.signature_hash == signature_hash
-                && a.imports == imports
+        new_sig.insert(path.clone(), signature_hash.clone());
+        resolved_exports.insert(path.clone(), clone_me(&exports));
+        stub_by_path.insert(path.clone(), stub_items.clone());
+        insts_all.extend(mangled_insts.iter().cloned());
+        for (k, v) in &item_codegen_hashes {
+            item_hashes_all.insert(k.clone(), v.clone());
+        }
+
+        if !had_error {
+            let (exports_types, exports_values) = export_entries(&exports);
+            let artifact = Artifact {
+                module_path: path.clone(),
+                boundary,
+                schema_salt: salt.to_string(),
+                source_hash,
+                signatures,
+                codegen_bodies,
+                imports: imports_sig,
+                signature_hash: signature_hash.clone(),
+                codegen_hash: codegen_hash.clone(),
+                edges: imports.clone(),
+                exports_types,
+                exports_values,
+                stub_items,
+                item_codegen_hashes,
+                insts: mangled_insts,
+                provenance: Provenance { toolchain: toolchain_version() },
+            };
+            write_artifact(&cache_dir, path, &artifact)?;
+        }
+        reports.push(ModuleReport {
+            path: path.clone(),
+            action: Action::Checked,
+            signature_hash,
+            codegen_hash,
         });
-
-        let (action, codegen_hash) = if reuse {
-            new_sig[m] = Some(signature_hash.clone());
-            (Action::Reused, prior.unwrap().codegen_hash.clone())
-        } else {
-            // Re-analyze this module against its imports (see the module-doc
-            // residual: imports enter as full-item upstream context).
-            let errs = check_module(mods, m);
-            let had_error = errs.iter().any(|d| d.severity == Severity::Error);
-            diags.extend(errs);
-
-            let codegen_bodies = bodies_of(part);
-            let codegen_hash = hash_codegen(&signature_hash, &codegen_bodies);
-            new_sig[m] = Some(signature_hash.clone());
-
-            if !had_error {
-                let artifact = Artifact {
-                    module_path: path.clone(),
-                    boundary: part.boundary,
-                    schema_salt: salt.to_string(),
-                    source_hash,
-                    signatures,
-                    codegen_bodies,
-                    imports,
-                    signature_hash: signature_hash.clone(),
-                    codegen_hash: codegen_hash.clone(),
-                    provenance: Provenance { toolchain: toolchain_version() },
-                };
-                write_artifact(&cache_dir, &path, &artifact)?;
-            }
-            (Action::Checked, codegen_hash)
-        };
-
-        reports.push(ModuleReport { path, action, signature_hash, codegen_hash });
     }
 
-    // Report in topological order (deterministic, imports first).
-    Ok(BuildReport { cache_dir, modules: reports, diags })
+    // 5. The per-instantiation codegen cache (design 0008 §2.4).
+    insts_all.sort();
+    insts_all.dedup();
+    let codegen = codegen::process(&cache_dir, salt, &insts_all, &item_hashes_all)?;
+
+    Ok(BuildReport { cache_dir, modules: reports, codegen, diags })
 }
 
 fn path_str(path: &[String]) -> String {
@@ -270,29 +469,118 @@ fn path_str(path: &[String]) -> String {
 /// The `pub`-item (and impl) signatures of a module, canonical and sorted so the
 /// signature hash is independent of item ordering (moving a `pub` fn is not a
 /// signature change).
-fn signatures_of(part: &ModuleParts) -> Vec<String> {
-    let mut sigs: Vec<String> = part
-        .items
+fn signatures_of_items(items: &[Item], is_pub: &[bool]) -> Vec<String> {
+    let mask = stub::crossing_mask(items, is_pub);
+    let mut sigs: Vec<String> = items
         .iter()
-        .zip(part.is_pub.iter())
-        .filter(|(item, &is_pub)| is_pub || matches!(item, Item::Impl(_)))
+        .zip(mask.iter())
+        .filter(|(_, &c)| c)
         .map(|(item, _)| canon::item_signature(item))
         .collect();
     sigs.sort();
     sigs
 }
 
-/// The canonical codegen bodies of the same items (the MIR-body proxy).
-fn bodies_of(part: &ModuleParts) -> Vec<String> {
-    let mut bodies: Vec<String> = part
-        .items
+/// The canonical codegen bodies of the interface items (the MIR-body proxy).
+fn bodies_of_items(items: &[Item], is_pub: &[bool]) -> Vec<String> {
+    let mask = stub::crossing_mask(items, is_pub);
+    let mut bodies: Vec<String> = items
         .iter()
-        .zip(part.is_pub.iter())
-        .filter(|(item, &is_pub)| is_pub || matches!(item, Item::Impl(_)))
+        .zip(mask.iter())
+        .filter(|(_, &c)| c)
         .map(|(item, _)| canon::item_body(item))
         .collect();
     bodies.sort();
     bodies
+}
+
+/// The already-qualified, body-stripped interface stub items of a module.
+fn stub_items_of(items: &[Item], is_pub: &[bool]) -> Vec<Item> {
+    let mask = stub::crossing_mask(items, is_pub);
+    items
+        .iter()
+        .zip(mask.iter())
+        .filter(|(_, &c)| c)
+        .map(|(item, _)| stub::stub_item(item))
+        .collect()
+}
+
+/// Per-`pub`-generic codegen hash (generic global name -> hash of its canonical
+/// signature+body). The per-instantiation codegen cache keys on this so a body
+/// edit invalidates exactly its own instantiations (design 0008 §2.4).
+fn item_codegen_hashes_of(items: &[Item], is_pub: &[bool]) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for (item, &p) in items.iter().zip(is_pub.iter()) {
+        if !p {
+            continue;
+        }
+        let name = match item {
+            Item::Fn(f) if !f.type_params.is_empty() => f.name.clone(),
+            Item::Struct(s) if !s.type_params.is_empty() => s.name.clone(),
+            Item::Enum(e) if !e.type_params.is_empty() => e.name.clone(),
+            _ => continue,
+        };
+        let mut buf = canon::item_signature(item);
+        buf.push('\n');
+        buf.push_str(&canon::item_body(item));
+        out.insert(name, sha256::hex(buf.as_bytes()));
+    }
+    out
+}
+
+/// Clone a [`modules::ModuleExports`] (it holds no `Clone` derive of its own).
+fn clone_me(me: &modules::ModuleExports) -> modules::ModuleExports {
+    modules::ModuleExports {
+        path: me.path.clone(),
+        type_exports: me.type_exports.clone(),
+        value_exports: me.value_exports.clone(),
+    }
+}
+
+/// Reconstruct a module's export tables from its cached artifact (Stage-C2): a
+/// dirty importer qualifies against these without re-parsing this module.
+fn me_from_artifact(a: &Artifact) -> modules::ModuleExports {
+    let path: Vec<String> = a.module_path.split("::").map(|s| s.to_string()).collect();
+    let mut type_exports = std::collections::HashMap::new();
+    let mut value_exports = std::collections::HashMap::new();
+    for e in &a.exports_types {
+        type_exports.insert(e.local.clone(), modules::Export { global: e.global.clone(), is_pub: e.is_pub, is_fn: e.is_fn });
+    }
+    for e in &a.exports_values {
+        value_exports.insert(e.local.clone(), modules::Export { global: e.global.clone(), is_pub: e.is_pub, is_fn: e.is_fn });
+    }
+    modules::ModuleExports { path, type_exports, value_exports }
+}
+
+/// Serialize a module's export tables into artifact [`ExportEntry`] lists.
+fn export_entries(me: &modules::ModuleExports) -> (Vec<ExportEntry>, Vec<ExportEntry>) {
+    let mut ty: Vec<ExportEntry> = me
+        .type_exports
+        .iter()
+        .map(|(local, e)| ExportEntry { local: local.clone(), global: e.global.clone(), is_pub: e.is_pub, is_fn: e.is_fn })
+        .collect();
+    let mut va: Vec<ExportEntry> = me
+        .value_exports
+        .iter()
+        .map(|(local, e)| ExportEntry { local: local.clone(), global: e.global.clone(), is_pub: e.is_pub, is_fn: e.is_fn })
+        .collect();
+    ty.sort_by(|a, b| a.local.cmp(&b.local));
+    va.sort_by(|a, b| a.local.cmp(&b.local));
+    (ty, va)
+}
+
+/// The transitive import closure of `path` over the edge map (paths, sorted).
+fn transitive_imports(path: &str, edges: &std::collections::HashMap<String, Vec<String>>) -> Vec<String> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut stack: Vec<String> = edges.get(path).cloned().unwrap_or_default();
+    while let Some(p) = stack.pop() {
+        if seen.insert(p.clone()) {
+            if let Some(es) = edges.get(&p) {
+                stack.extend(es.iter().cloned());
+            }
+        }
+    }
+    seen.into_iter().collect()
 }
 
 fn hash_signatures(path: &str, boundary: bool, signatures: &[String]) -> String {
@@ -318,18 +606,42 @@ fn hash_codegen(signature_hash: &str, bodies: &[String]) -> String {
     sha256::hex(buf.as_bytes())
 }
 
-/// Re-check one module against its imports. The checkable sub-program is the
-/// module plus the full items of its transitive imports (the named upstream
-/// residual — the checker takes full items, not signature-only stubs). Since the
-/// imports already checked clean, the sub-program is clean iff the module is.
-fn check_module(mods: &[ModuleParts], m: usize) -> Vec<Diag> {
+/// The transitive-import stub items for module `m` (every import, its imports,
+/// …), each projected to its interface stub ([`stub::stub_item`]) — the
+/// signature-only context the checker re-checks `m` against (design 0008 §2).
+fn transitive_stubs(mods: &[ModuleParts], m: usize) -> Vec<Item> {
     let mut needed: BTreeSet<usize> = BTreeSet::new();
-    closure(mods, m, &mut needed);
-    let mut items: Vec<Item> = Vec::new();
-    for j in needed {
-        items.extend(mods[j].items.iter().cloned());
+    for &i in &mods[m].imports {
+        closure(mods, i, &mut needed);
     }
-    crate::check::check_program_real(&Program { items })
+    needed.remove(&m);
+    let mut stubs = Vec::new();
+    for j in needed {
+        let mask = stub::crossing_mask(&mods[j].items, &mods[j].is_pub);
+        for (item, &c) in mods[j].items.iter().zip(mask.iter()) {
+            // Only the interface surface crosses (design 0008 §2).
+            if c {
+                stubs.push(stub::stub_item(item));
+            }
+        }
+    }
+    stubs
+}
+
+/// Check every module of a tree against its imports' **signature-only stubs**
+/// (design 0008 §2, §2.4), returning the union of diagnostics. This is the
+/// signature-only re-check path made whole-tree; the Stage-C2 differential gate
+/// asserts it is diagnostic-equivalent to the whole-program merge check, on
+/// positive *and* negative fixtures.
+pub fn check_tree_stubwise(parts: &TreeParts) -> Vec<Diag> {
+    let mods = &parts.modules;
+    let mut out: Vec<Diag> = parts.diags.clone();
+    for m in 0..mods.len() {
+        let stubs = transitive_stubs(mods, m);
+        let (diags, _insts) = crate::check::check_module_stub(&mods[m].items, &stubs);
+        out.extend(diags);
+    }
+    out
 }
 
 fn closure(mods: &[ModuleParts], m: usize, out: &mut BTreeSet<usize>) {
@@ -341,35 +653,74 @@ fn closure(mods: &[ModuleParts], m: usize, out: &mut BTreeSet<usize>) {
     }
 }
 
-/// A deterministic topological order (imports before importers). The DAG is
-/// acyclic by construction (design 0008 §3, checked upstream), and ties break by
-/// module index (discovery/path-sorted), so the order is reproducible.
-fn topo_order(mods: &[ModuleParts]) -> Vec<usize> {
-    let n = mods.len();
-    let mut indeg = vec![0usize; n];
-    let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (m, part) in mods.iter().enumerate() {
-        indeg[m] = part.imports.len();
-        for &i in &part.imports {
-            dependents[i].push(m);
-        }
-    }
-    let mut order = Vec::with_capacity(n);
-    let mut done = vec![false; n];
-    for _ in 0..n {
-        // pick the smallest-index ready node (deterministic).
-        let next = (0..n).find(|&x| !done[x] && indeg[x] == 0);
-        let x = match next {
-            Some(x) => x,
-            None => break, // cycle (should not happen post-check); bail.
-        };
-        done[x] = true;
-        order.push(x);
-        for &d in &dependents[x] {
-            indeg[d] -= 1;
+/// A deterministic topological order over module paths (imports before
+/// importers), ties broken by sorted path — reproducible across builds (NN#16).
+fn topo_paths(universe: &BTreeSet<String>, edges: &std::collections::HashMap<String, Vec<String>>) -> Vec<String> {
+    let nodes: Vec<String> = universe.iter().cloned().collect();
+    let mut done: BTreeSet<String> = BTreeSet::new();
+    let mut order: Vec<String> = Vec::with_capacity(nodes.len());
+    for _ in 0..nodes.len() {
+        // The smallest-path node all of whose imports are already placed.
+        let next = nodes.iter().find(|n| {
+            !done.contains(*n)
+                && edges.get(*n).map(|es| es.iter().all(|e| done.contains(e) || !universe.contains(e))).unwrap_or(true)
+        });
+        match next {
+            Some(n) => {
+                done.insert(n.clone());
+                order.push(n.clone());
+            }
+            None => break, // a cycle (already diagnosed); bail deterministically.
         }
     }
     order
+}
+
+/// Detect an import cycle over the path-keyed edge map, returning the cycle path
+/// for the P4 diagnostic (design 0008 §3).
+fn find_path_cycle(universe: &BTreeSet<String>, edges: &std::collections::HashMap<String, Vec<String>>) -> Option<Vec<String>> {
+    let mut state: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
+    let mut stack: Vec<String> = Vec::new();
+    fn dfs(
+        u: &str,
+        edges: &std::collections::HashMap<String, Vec<String>>,
+        universe: &BTreeSet<String>,
+        state: &mut std::collections::HashMap<String, u8>,
+        stack: &mut Vec<String>,
+    ) -> Option<Vec<String>> {
+        state.insert(u.to_string(), 1);
+        stack.push(u.to_string());
+        for v in edges.get(u).map(|v| v.as_slice()).unwrap_or(&[]) {
+            if !universe.contains(v) {
+                continue;
+            }
+            match state.get(v).copied().unwrap_or(0) {
+                1 => {
+                    let pos = stack.iter().position(|x| x == v).unwrap();
+                    let mut cyc = stack[pos..].to_vec();
+                    cyc.push(v.clone());
+                    return Some(cyc);
+                }
+                0 => {
+                    if let Some(c) = dfs(v, edges, universe, state, stack) {
+                        return Some(c);
+                    }
+                }
+                _ => {}
+            }
+        }
+        stack.pop();
+        state.insert(u.to_string(), 2);
+        None
+    }
+    for n in universe {
+        if state.get(n).copied().unwrap_or(0) == 0 {
+            if let Some(c) = dfs(n, edges, universe, &mut state, &mut stack) {
+                return Some(c);
+            }
+        }
+    }
+    None
 }
 
 fn cache_file(cache_dir: &Path, path: &str) -> PathBuf {
