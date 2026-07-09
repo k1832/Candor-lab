@@ -673,6 +673,20 @@ impl<'a> Interp<'a> {
         self.cur_span = e.span;
         match &e.kind {
             ExprKind::For { .. } => unreachable!("`for` is surface-only (formatter); the pipeline desugars it at parse (design 0009 §4.2)"),
+            // Structured-concurrency Stage-2 SEQUENTIAL ORACLE (design 0012 §6):
+            // a `scope` runs as a plain block, and a `spawn` runs the task to
+            // completion AT the spawn point (spawn-order schedule). By SC-for-DRF
+            // (§4.1) every schedule yields the same observable trace, so this
+            // single-threaded execution IS the v1 oracle semantics; a task fault
+            // propagates immediately, which is naturally spawn-order-first (§3.2).
+            ExprKind::Scope(b) => {
+                self.exec_block(b)?;
+                Ok(self.unit_val())
+            }
+            ExprKind::Spawn(c) => {
+                self.eval_value(c, None)?;
+                Ok(self.unit_val())
+            }
             ExprKind::Paren(i) => self.eval_value(i, expected),
             ExprKind::OutArg(i) => self.eval_value(i, expected),
             ExprKind::GenericVal { .. } => {
@@ -1664,6 +1678,16 @@ impl<'a> Interp<'a> {
             "slice_of" | "slice_of_mut" => self.bi_slice_of(args, name == "slice_of_mut")?,
             "subslice" => self.bi_subslice(args)?,
             "len" => self.bi_len(args)?,
+            // Structured-concurrency blessed primitives (design 0012 §1.4, §3.3).
+            "split_mut" => self.bi_split_mut(args)?,
+            "cancelled" => {
+                // Sequential oracle: a task always runs to completion, so a token
+                // never signals — `cancelled` is always `false` (design 0012 §3.3).
+                let _ = self.eval_value(&args[0], None)?;
+                let a = self.mem.stack_alloc(1, 1);
+                self.write_bytes(a, &[0u8])?;
+                RVal { ty: Type::bool(), addr: a, origin: Origin::None }
+            }
             "trace" => {
                 let v = self.eval_value(&args[0], Some(&Type::Scalar(ScalarTy::I64)))?;
                 let n = self.read_int(v.addr, ScalarTy::I64)?;
@@ -1806,6 +1830,42 @@ impl<'a> Interp<'a> {
         self.write_bytes(a + 8, &n.to_le_bytes())?;
         let t = if excl { Type::SliceMut(Box::new(elem)) } else { Type::Slice(Box::new(elem)) };
         Ok(RVal { ty: t, addr: a, origin: Origin::None })
+    }
+
+    /// `split_mut(parent, mid, out lo, out hi)` — the blessed disjoint partition
+    /// (design 0012 §1.4). Writes two `slice_mut` fat pointers into the caller's
+    /// `out` slots: `lo = [base, mid)` and `hi = [base + mid, total)`. The compile
+    /// -time disjointness stipulation is enforced by the checker; at run time this
+    /// is ordinary sub-slice arithmetic.
+    fn bi_split_mut(&mut self, args: &[Expr]) -> R<RVal> {
+        let (addr, ty, _pl) = self.eval_place(&args[0])?;
+        let (elem, base, total) = match &ty {
+            Type::Array(e, len) => ((**e).clone(), addr, self.lay().array_len(len)),
+            Type::SliceMut(e) | Type::Slice(e) => {
+                let ptr = self.read_u64(addr)?;
+                let ln = self.read_u64(addr + 8)?;
+                ((**e).clone(), ptr, ln)
+            }
+            _ => (Type::Error, addr, 0),
+        };
+        let midv = self.eval_value(&args[1], Some(&Type::usize()))?;
+        let mid = self.read_u64(midv.addr)?;
+        let esz = self.size_of(&elem);
+        self.write_slice_slot(&args[2], base, mid)?;
+        self.write_slice_slot(&args[3], base + mid * esz, total.saturating_sub(mid))?;
+        Ok(self.unit_val())
+    }
+
+    /// Write a `slice_mut` fat pointer `{ptr, len}` into an `out place` slot.
+    fn write_slice_slot(&mut self, outarg: &Expr, ptr: u64, len: u64) -> R<()> {
+        let inner = match &outarg.kind {
+            ExprKind::OutArg(i) => i.as_ref(),
+            _ => outarg,
+        };
+        let (slot, _ty, _pl) = self.eval_place(inner)?;
+        self.write_bytes(slot, &ptr.to_le_bytes())?;
+        self.write_bytes(slot + 8, &len.to_le_bytes())?;
+        Ok(())
     }
 
     fn bi_subslice(&mut self, args: &[Expr]) -> R<RVal> {

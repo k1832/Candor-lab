@@ -125,6 +125,17 @@ impl<'a> Checker<'a> {
                         .with_note("only a `copy` type may instantiate a `copy`-bounded parameter (§3.1)", None),
                     );
                 }
+            } else if b == "portable" {
+                if !is_portable(arg, self.items) {
+                    self.diags.push(
+                        Diag::error(
+                            "E1207",
+                            format!("type argument `{}` does not satisfy the `portable` bound", arg.display()),
+                            span,
+                        )
+                        .with_note("only a `portable` type — no `rawptr`, no borrow, transitively (design 0012 §2.2) — may instantiate a `portable`-bounded parameter", None),
+                    );
+                }
             } else if !self.type_implements(arg, b) {
                 self.diags.push(
                     Diag::error(
@@ -413,6 +424,11 @@ fn hook_is_alloc(items: &crate::resolve::Items, h: &HookInfo, real: bool) -> boo
     let (fdecl, sig, copy_view, pnames) = synth_hook(h);
     let mut view = items.clone();
     view.type_param_copy = copy_view;
+    view.type_param_portable = h
+        .type_params
+        .iter()
+        .map(|(n, b)| (n.clone(), b.iter().any(|x| x == "portable")))
+        .collect();
     let mut c = Checker {
         items: &view,
         diags: Vec::new(),
@@ -435,6 +451,11 @@ fn check_one_hook(outer: &mut Checker, items: &crate::resolve::Items, h: &HookIn
     let (fdecl, sig, copy_view, pnames) = synth_hook(h);
     let mut view = items.clone();
     view.type_param_copy = copy_view;
+    view.type_param_portable = h
+        .type_params
+        .iter()
+        .map(|(n, b)| (n.clone(), b.iter().any(|x| x == "portable")))
+        .collect();
     let mut c = Checker {
         items: &view,
         diags: std::mem::take(&mut outer.diags),
@@ -465,6 +486,11 @@ impl<'a> Checker<'a> {
             .type_params
             .iter()
             .map(|(n, bounds)| (n.clone(), bounds.iter().any(|b| b == "copy")))
+            .collect();
+        view.type_param_portable = sig
+            .type_params
+            .iter()
+            .map(|(n, bounds)| (n.clone(), bounds.iter().any(|b| b == "portable")))
             .collect();
         let concrete_sig = FnSig {
             name: sig.name.clone(),
@@ -545,6 +571,11 @@ impl<'a> Checker<'a> {
             .type_params
             .iter()
             .map(|p| (p.name.clone(), p.bounds.iter().any(|b| b == "copy")))
+            .collect();
+        view.type_param_portable = im
+            .type_params
+            .iter()
+            .map(|p| (p.name.clone(), p.bounds.iter().any(|b| b == "portable")))
             .collect();
         let tp_names: Vec<String> = im.type_params.iter().map(|p| p.name.clone()).collect();
         let param_bounds: Vec<(String, Vec<String>)> =

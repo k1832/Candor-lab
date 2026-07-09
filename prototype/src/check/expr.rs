@@ -16,6 +16,8 @@ impl<'a> Checker<'a> {
     pub(super) fn check_expr(&mut self, e: &Expr, u: Use) -> Type {
         match &e.kind {
             ExprKind::For { .. } => unreachable!("`for` is surface-only (formatter); the pipeline desugars it at parse (design 0009 §4.2)"),
+            ExprKind::Scope(b) => self.check_scope(b, e.span),
+            ExprKind::Spawn(c) => self.check_spawn(c, e.span),
             ExprKind::Ident(_)
             | ExprKind::Field { .. }
             | ExprKind::Index { .. }
@@ -1714,6 +1716,9 @@ impl<'a> Checker<'a> {
                 self.arg0(args, span, "len");
                 Type::usize()
             }
+            // Structured-concurrency blessed primitives (design 0012 §1.4, §3.3).
+            "split_mut" => self.check_split_mut(args, span),
+            "cancelled" => self.check_cancelled(args, span),
             // Prototype observability intrinsic (Stage 4): appends an i64 to the
             // interpreter's trace log so drop-order tests can observe destruction.
             "trace" => {
@@ -1746,7 +1751,7 @@ impl<'a> Checker<'a> {
         ));
     }
 
-    fn mismatch(&mut self, span: Span, name: &str, want: &str, got: &Type) {
+    pub(super) fn mismatch(&mut self, span: Span, name: &str, want: &str, got: &Type) {
         self.diags.push(Diag::error(
             "E0703",
             format!("`{name}` expects `{want}`, found `{}`", got.display()),

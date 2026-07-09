@@ -13,6 +13,7 @@ pub mod init;
 pub mod loans;
 pub mod patterns;
 
+mod concurrency;
 mod expr;
 mod generics;
 pub use generics::check_generic_program;
@@ -99,6 +100,16 @@ struct FnState {
     /// value loss is folded (allowed) rather than a compile error (design 0006
     /// §2.4). Depth counter so nested regimes restore correctly.
     regime_depth: usize,
+    /// Structured-concurrency (design 0012). Lexical `scope` nesting depth (0 =
+    /// outside any scope): a `spawn` is a checker error unless > 0 (§5).
+    scope_depth: usize,
+    /// Per-open-scope stack of synthetic scope-length-loan binding names (§1.2):
+    /// each spawn borrow re-anchors its loan to a fresh synthetic name registered
+    /// here; at the scope's closing brace a synthetic use of each keeps the loan
+    /// live to the brace (the whole-scope loan range).
+    scope_synth: Vec<Vec<String>>,
+    /// Monotonic counter minting the synthetic scope-length-loan binding names.
+    synth_ctr: usize,
 }
 
 impl FnState {
@@ -124,6 +135,9 @@ impl FnState {
             ret_region: None,
             ret_is_borrow: false,
             regime_depth: 0,
+            scope_depth: 0,
+            scope_synth: Vec::new(),
+            synth_ctr: 0,
         }
     }
 }

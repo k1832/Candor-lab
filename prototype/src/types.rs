@@ -193,6 +193,12 @@ pub trait ItemEnv {
     fn param_copy(&self, _name: &str) -> Option<bool> {
         None
     }
+    /// Is `name` a type parameter in scope carrying the `portable` bound (design
+    /// 0012 §2.2)? `None` = not a type parameter; `Some(b)` = a parameter, `b` =
+    /// has `portable`. Default `None` keeps non-generic call sites unchanged.
+    fn param_portable(&self, _name: &str) -> Option<bool> {
+        None
+    }
     /// The generic struct/enum decl for an `App` head, if generic (for field and
     /// payload substitution during def-site checking). Default `None`.
     fn lookup_generic(&self, _name: &str) -> Option<&GenericDecl> {
@@ -390,6 +396,128 @@ fn needs_drop_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> bool
             r
         }
         _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Portability (design 0012 §2.2) — the spawn-crossing structural predicate
+// ---------------------------------------------------------------------------
+
+/// Is `ty` **`portable`** (design 0012 §2.2)? A type is portable iff it
+/// transitively contains **no `rawptr`** and **no borrow** — owned value data
+/// only. The walk descends through EVERY field, including the fields of `copy`
+/// aggregates (`copy` is not a stopping condition), because a `copy` referent can
+/// be copied out from behind a shared borrow, laundering whatever it hides
+/// (§2.1/§2.3). `Box T`/`BoxResult T` are portable when `T` is (a unique-owning
+/// pointer, categorically unlike `rawptr`). A **function pointer is a portable
+/// leaf**: the walk does NOT descend into its signature — a fn-pointer carries no
+/// data pointer and cannot capture, and any `rawptr` in its signature is only
+/// produced by calling it (gated by `unsafe`), so descending would wrongly reject
+/// safe vtable sharing (§2.2, re-review F1).
+pub fn is_portable(ty: &Type, env: &dyn ItemEnv) -> bool {
+    is_portable_rec(ty, env, &mut Vec::new())
+}
+
+fn is_portable_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> bool {
+    match ty {
+        Type::Scalar(_) | Type::IntLit => true,
+        // The two non-portable leaves: a raw pointer, and any borrow/slice.
+        Type::RawPtr(_) => false,
+        Type::Borrow(_) | Type::BorrowMut(_) | Type::Slice(_) | Type::SliceMut(_) => false,
+        // A fn-pointer is a portable LEAF: do not descend into the signature.
+        Type::FnPtr(_) => true,
+        Type::Never | Type::Error => true,
+        Type::Array(elem, _) => is_portable_rec(elem, env, stack),
+        Type::Box(e) | Type::BoxResult(e) => is_portable_rec(e, env, stack),
+        // An opaque type parameter is portable iff it carries the `portable` bound.
+        Type::Param(n) => env.param_portable(n).unwrap_or(false),
+        // A projection carries no bound (design 0009 §2.3): conservatively not portable.
+        Type::Proj(_, _) => false,
+        Type::App(n, args) => {
+            if let Some(g) = env.lookup_generic(n) {
+                let map: std::collections::HashMap<String, Type> =
+                    g.params.iter().cloned().zip(args.iter().cloned()).collect();
+                let field_tys: Vec<Type> = if g.is_enum {
+                    g.variants.iter().flat_map(|(_, p, _)| p.iter().cloned()).collect()
+                } else {
+                    g.fields.iter().map(|(_, t)| t.clone()).collect()
+                };
+                field_tys.iter().all(|t| is_portable_rec(&subst(t, &map), env, stack))
+            } else {
+                false
+            }
+        }
+        Type::Named(n) => {
+            if stack.iter().any(|s| s == n) {
+                return true; // cycle guard (only reachable through a portable Box)
+            }
+            stack.push(n.clone());
+            // Descend through EVERY field/payload — `copy` is NOT a stopping
+            // condition (§2.1: the laundering channel is copy-out of a copy
+            // aggregate hiding a rawptr).
+            let r = if let Some(st) = env.lookup_struct(n) {
+                st.fields.iter().all(|(_, t)| is_portable_rec(t, env, stack))
+            } else if let Some(e) = env.lookup_enum(n) {
+                e.variants.iter().all(|v| v.payload.iter().all(|t| is_portable_rec(t, env, stack)))
+            } else {
+                false
+            };
+            stack.pop();
+            r
+        }
+    }
+}
+
+/// The first non-portable leaf type reached inside `ty` (design 0012 §2.1: the
+/// diagnostic names the offending `rawptr`/borrow, P4). `None` iff `ty` is
+/// portable. Mirrors [`is_portable`]'s walk exactly.
+pub fn non_portable_witness(ty: &Type, env: &dyn ItemEnv) -> Option<Type> {
+    non_portable_witness_rec(ty, env, &mut Vec::new())
+}
+
+fn non_portable_witness_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> Option<Type> {
+    match ty {
+        Type::Scalar(_) | Type::IntLit | Type::FnPtr(_) | Type::Never | Type::Error => None,
+        Type::RawPtr(_)
+        | Type::Borrow(_)
+        | Type::BorrowMut(_)
+        | Type::Slice(_)
+        | Type::SliceMut(_) => Some(ty.clone()),
+        Type::Array(elem, _) => non_portable_witness_rec(elem, env, stack),
+        Type::Box(e) | Type::BoxResult(e) => non_portable_witness_rec(e, env, stack),
+        Type::Param(n) => {
+            if env.param_portable(n).unwrap_or(false) { None } else { Some(ty.clone()) }
+        }
+        Type::Proj(_, _) => Some(ty.clone()),
+        Type::App(n, args) => {
+            if let Some(g) = env.lookup_generic(n) {
+                let map: std::collections::HashMap<String, Type> =
+                    g.params.iter().cloned().zip(args.iter().cloned()).collect();
+                let field_tys: Vec<Type> = if g.is_enum {
+                    g.variants.iter().flat_map(|(_, p, _)| p.iter().cloned()).collect()
+                } else {
+                    g.fields.iter().map(|(_, t)| t.clone()).collect()
+                };
+                field_tys.iter().find_map(|t| non_portable_witness_rec(&subst(t, &map), env, stack))
+            } else {
+                Some(ty.clone())
+            }
+        }
+        Type::Named(n) => {
+            if stack.iter().any(|s| s == n) {
+                return None;
+            }
+            stack.push(n.clone());
+            let r = if let Some(st) = env.lookup_struct(n) {
+                st.fields.iter().find_map(|(_, t)| non_portable_witness_rec(t, env, stack))
+            } else if let Some(e) = env.lookup_enum(n) {
+                e.variants.iter().find_map(|v| v.payload.iter().find_map(|t| non_portable_witness_rec(t, env, stack)))
+            } else {
+                Some(ty.clone())
+            };
+            stack.pop();
+            r
+        }
     }
 }
 

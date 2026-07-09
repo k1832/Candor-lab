@@ -927,6 +927,10 @@ impl Fmt<'_> {
             ExprKind::BoolLit(b) => self.push(if *b { "true" } else { "false" }),
             ExprKind::Ident(n) => self.push(n),
             ExprKind::Result => self.push("result"),
+            ExprKind::Spawn(c) => {
+                self.push("spawn ");
+                self.emit_expr(c, BP_MIN, false);
+            }
             ExprKind::Break => self.push("break"),
             ExprKind::Continue => self.push("continue"),
             ExprKind::Return(opt) => {
@@ -1206,6 +1210,10 @@ impl Fmt<'_> {
                 self.push("loop ");
                 self.emit_block(b);
             }
+            ExprKind::Scope(b) => {
+                self.push("scope ");
+                self.emit_block(b);
+            }
             ExprKind::While { cond, body } => {
                 self.push("while ");
                 self.emit_head(cond);
@@ -1294,6 +1302,7 @@ fn is_block_like(kind: &ExprKind) -> bool {
             | ExprKind::If { .. }
             | ExprKind::Match { .. }
             | ExprKind::For { .. }
+            | ExprKind::Scope(_)
             | ExprKind::Loop(_)
             | ExprKind::While { .. }
             | ExprKind::Unsafe { .. }

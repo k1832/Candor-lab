@@ -526,6 +526,16 @@ pub enum ExprKind {
     /// interpreter / MIR never see this node. It exists only so the blessed
     /// formatter can reproduce the canonical `for` spelling (NN#11).
     For { pattern: Pattern, operand: Box<Expr>, body: Block },
+
+    /// `scope { ... }` — a structured-concurrency region (design 0012 §1.1).
+    /// Block-like in statement-leading position; every task spawned inside joins
+    /// at the closing brace. Real (`.cnr`) front-end only.
+    Scope(Block),
+    /// `spawn CALLEE(ARGS);` — start one task inside a `scope` (design 0012 §1.1,
+    /// §5). The boxed expression is always an `ExprKind::Call`. Under the Stage-2
+    /// sequential oracle (design 0012 §6) the task runs to completion at the spawn
+    /// point, so execution is a plain call; only checking treats it specially.
+    Spawn(Box<Expr>),
 }
 
 // ---------------------------------------------------------------------------

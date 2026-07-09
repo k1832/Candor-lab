@@ -965,6 +965,29 @@ impl RParser {
         if self.at_ident("for") {
             return self.parse_for(lo);
         }
+        // `scope { ... }` — a concurrency region (design 0012 §1.1, §5). Contextual:
+        // `scope` is a keyword only in statement-leading position immediately
+        // followed by `{`; elsewhere an ordinary identifier.
+        if self.at_ident("scope") && matches!(self.peek_at(1), RTok::LBrace) {
+            self.bump(); // `scope`
+            let body = self.parse_block()?;
+            let e = Expr { kind: ExprKind::Scope(body), span: self.span_from(lo) };
+            return Ok(Stmt { kind: StmtKind::Expr(e), span: self.span_from(lo) });
+        }
+        // `spawn CALLEE(ARGS);` — start one task (design 0012 §1.1, §5). Contextual:
+        // `spawn` is a keyword only statement-leading and immediately followed by a
+        // callee identifier; a `spawn` outside any `scope` is a CHECKER error (§5),
+        // so the grammar stays context-free — the parser accepts it anywhere.
+        if self.at_ident("spawn") && matches!(self.peek_at(1), RTok::Ident(_)) {
+            self.bump(); // `spawn`
+            let call = self.parse_expr()?;
+            if !matches!(call.kind, ExprKind::Call { .. }) {
+                return Err(self.unexpected("a call `CALLEE(ARGS)` after `spawn`"));
+            }
+            self.expect(&RTok::Semi, "`;`")?;
+            let e = Expr { kind: ExprKind::Spawn(Box::new(call)), span: self.span_from(lo) };
+            return Ok(Stmt { kind: StmtKind::Expr(e), span: self.span_from(lo) });
+        }
         // A block-like expression in statement position terminates the statement
         // (spec 02 §5.2): no trailing `;`, and a following `(` starts a new
         // statement (never a call). Parse it directly, bypassing postfix.

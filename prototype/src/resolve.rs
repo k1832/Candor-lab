@@ -183,6 +183,9 @@ pub struct Items {
     /// The type parameters in scope at the *current* def-site check, mapping each
     /// to whether it carries the `copy` bound. Empty for concrete checking.
     pub type_param_copy: HashMap<String, bool>,
+    /// Parallel to `type_param_copy`: whether each in-scope type parameter carries
+    /// the `portable` bound (design 0012 §2.2). Empty for concrete checking.
+    pub type_param_portable: HashMap<String, bool>,
 }
 
 impl ItemEnv for Items {
@@ -194,6 +197,9 @@ impl ItemEnv for Items {
     }
     fn param_copy(&self, name: &str) -> Option<bool> {
         self.type_param_copy.get(name).copied()
+    }
+    fn param_portable(&self, name: &str) -> Option<bool> {
+        self.type_param_portable.get(name).copied()
     }
     fn lookup_generic(&self, name: &str) -> Option<&crate::types::GenericDecl> {
         self.generic_defs.get(name)
@@ -329,6 +335,21 @@ pub fn resolve_program(prog: &Program, diags: &mut Vec<Diag>) -> Items {
 
     // Phase 1: resolve field/variant/signature types.
     let mut items = Items::default();
+    // The compiler-known cooperative-cancellation token type (design 0012 §3.3,
+    // §5): an empty (hence `copy` and `portable`) nominal a task takes by
+    // `read Cancel`. Registered structurally so `cancelled(read Cancel)` and
+    // `tok: read Cancel` resolve without a user declaration.
+    type_names.insert("Cancel".to_string());
+    items.structs.insert(
+        "Cancel".to_string(),
+        crate::types::StructTy {
+            copy: true,
+            has_drop: false,
+            alloc_on_drop: false,
+            fields: Vec::new(),
+            span: crate::span::Span::point(0),
+        },
+    );
     {
         let mut r = Resolver {
             type_names: &type_names,

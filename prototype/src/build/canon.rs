@@ -405,6 +405,14 @@ impl Printer {
     fn expr(&mut self, e: &Expr) {
         match &e.kind {
             ExprKind::For { .. } => unreachable!("`for` is surface-only (formatter); the pipeline desugars it at parse (design 0009 §4.2)"),
+            ExprKind::Scope(b) => {
+                self.push("scope");
+                self.block(b);
+            }
+            ExprKind::Spawn(c) => {
+                self.push("spawn");
+                self.expr(c);
+            }
             ExprKind::IntLit { value, suffix } => {
                 self.push(&value.to_string());
                 self.suffix(suffix);

@@ -34,7 +34,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_stmt(&mut self, s: &Stmt) {
+    pub(super) fn check_stmt(&mut self, s: &Stmt) {
         match &s.kind {
             StmtKind::Let {
                 name, ty, init, ..

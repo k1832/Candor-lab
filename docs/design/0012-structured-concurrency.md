@@ -511,7 +511,7 @@ The tree-walking interpreter (0001 §7) and the MIR interpreter (0010 §5) are
 single-threaded. Staging delivers the *compile-time* guarantee first and never forces
 nondeterminism into the differential oracle.
 
-- **Stage 1 — checker rules only (the bulk).** `scope`/`spawn` parsing; the scope-length
+- **Stage 1 — checker rules only (the bulk). [IMPLEMENTED 2026-07-09 in the prototype: parse + full gate + scope-length loans + `split_mut` + sequential-oracle execution on both engines; see `tests/concurrency.rs`.]** `scope`/`spawn` parsing; the scope-length
   loan extension (§1.2); `portable` as a structural predicate beside `copy`, **computed
   transitively through `copy` fields** and published in interfaces (§2.2); **the unified
   gate** (§2.1); the XOR fall-out over gated arguments (§2.5); `split_mut` well-formedness

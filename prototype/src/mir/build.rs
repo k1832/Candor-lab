@@ -764,6 +764,16 @@ impl<'a> Lowerer<'a> {
                 self.lower_loop(b)?;
                 Ok(self.unit())
             }
+            // Sequential oracle (design 0012 §6): a `scope` lowers as a plain block,
+            // a `spawn` as the task's call run at the spawn point.
+            ExprKind::Scope(b) => {
+                self.lower_block(b)?;
+                Ok(self.unit())
+            }
+            ExprKind::Spawn(c) => {
+                self.lower_value(c, None)?;
+                Ok(self.unit())
+            }
             ExprKind::Wrapping(b) => self.lower_regime(b, Regime::Wrapping),
             ExprKind::Saturating(b) => self.lower_regime(b, Regime::Saturating),
             ExprKind::Unsafe { body, .. } => {
