@@ -13,13 +13,23 @@
 //! never a silent no-op). The registry ships no C and is for harness use only; the
 //! shim/real per-symbol differential obligation (0011 §5, 0010 §4) is recorded for
 //! when FFI enters the differential corpus.
+//!
+//! A shim receives the call's scalar arguments **and a handle to the engine's
+//! flat memory** (`crate::interp::mem::Mem`, shared by both engines). The memory
+//! handle is what lets an I/O shim honor a C pointer-and-length signature: a
+//! `write(fd, buf, n)` shim reads `n` bytes at the Candor `buf` address, a
+//! `read(fd, buf, n)` shim deposits bytes there (design 0013 std I/O layer).
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+use crate::interp::mem::Mem;
+
 /// A shim: takes the foreign call's scalar arguments (each widened to `i128`) and
-/// returns its scalar result (a word: pointer, integer, or unit-as-0).
-type ShimFn = Box<dyn Fn(&[i128]) -> i128 + Send + Sync + 'static>;
+/// a handle to the calling engine's flat memory, and returns its scalar result (a
+/// word: pointer, integer, or unit-as-0). The memory handle lets a shim dereference
+/// a Candor `rawptr` argument — the byte-buffer half of a POSIX I/O signature.
+type ShimFn = Box<dyn Fn(&[i128], &mut Mem) -> i128 + Send + Sync + 'static>;
 
 fn registry() -> &'static Mutex<HashMap<String, ShimFn>> {
     static R: OnceLock<Mutex<HashMap<String, ShimFn>>> = OnceLock::new();
@@ -27,7 +37,7 @@ fn registry() -> &'static Mutex<HashMap<String, ShimFn>> {
 }
 
 /// Register (or replace) a shim for a foreign symbol. Test/harness scope only.
-pub fn register(symbol: &str, f: impl Fn(&[i128]) -> i128 + Send + Sync + 'static) {
+pub fn register(symbol: &str, f: impl Fn(&[i128], &mut Mem) -> i128 + Send + Sync + 'static) {
     registry().lock().unwrap().insert(symbol.to_string(), Box::new(f));
 }
 
@@ -42,8 +52,9 @@ pub fn is_registered(symbol: &str) -> bool {
 }
 
 /// Dispatch a foreign call. `Some(result)` if a shim is registered for `symbol`;
-/// `None` signals the caller to raise the `no_foreign_runtime` fault.
-pub fn dispatch(symbol: &str, args: &[i128]) -> Option<i128> {
+/// `None` signals the caller to raise the `no_foreign_runtime` fault. The engine's
+/// flat memory is passed through so an I/O shim can read/write buffer bytes.
+pub fn dispatch(symbol: &str, args: &[i128], mem: &mut Mem) -> Option<i128> {
     let reg = registry().lock().unwrap();
-    reg.get(symbol).map(|f| f(args))
+    reg.get(symbol).map(|f| f(args, mem))
 }

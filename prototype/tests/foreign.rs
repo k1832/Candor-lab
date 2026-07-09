@@ -239,7 +239,7 @@ fn main() -> i64 {
 
 #[test]
 fn shim_extern_call_runs_equal_on_both_engines() {
-    candor_proto::foreign::register("shim_double", |args| args[0] * 2);
+    candor_proto::foreign::register("shim_double", |args, _mem| args[0] * 2);
 
     let tree = match run_source_real(SHIM_PROG) {
         RunResult::Ok(r) => r,

@@ -1609,7 +1609,7 @@ impl<'a> Interp<'a> {
             let sty = foreign_scalar_of(&p.lowered);
             vals.push(self.read_int(rv.addr, sty)?);
         }
-        let result = match crate::foreign::dispatch(&es.name, &vals) {
+        let result = match crate::foreign::dispatch(&es.name, &vals, &mut self.mem) {
             Some(v) => v,
             None => {
                 // Deliver at the extern declaration span so the fault is identical

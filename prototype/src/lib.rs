@@ -11,6 +11,7 @@ pub mod check;
 pub mod count;
 pub mod diag;
 pub mod foreign;
+pub mod foreign_io;
 pub mod generics;
 pub mod interp;
 pub mod lexer;

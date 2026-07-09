@@ -35,8 +35,14 @@ the recursive C-mappability check (E1102), the `foreign` effect partition with t
 §2 discharge rule (E1103; foreign calls reuse the `unsafe` valve), the closed
 trust vocabulary (E1105/E1106), and the §6 `audit` JSON are live in the prototype;
 the shim registry runs extern calls identically on the tree-walker and MIR engines,
-with the `no_foreign_runtime` fault otherwise. Real C-ABI calls and export
-trampolines remain the 0010 native-backend forward dependency.
+with the `no_foreign_runtime` fault otherwise. The shim now also receives a handle
+to the calling engine's flat memory, so a shim can dereference a `rawptr` argument
+(the buffer half of a POSIX pointer+length signature); on this a std/io boundary
+module (`sys_open`/`sys_close`/`sys_read`/`sys_write` + safe `open_read`/`read_into`/
+`write_all`/`close` wrappers) runs real, deterministic file/stdout I/O on both
+engines. Real C-ABI calls (including binding these externs to the actual libc
+`read`/`write` symbols) and export trampolines remain the 0010 native-backend
+forward dependency.
 
 ## Problem
 

@@ -531,7 +531,7 @@ impl<'a> Engine<'a> {
                 // trace matches the tree-walker exactly.
                 if let Some(es) = self.items.externs.get(func.as_str()) {
                     let sp = es.span;
-                    return match crate::foreign::dispatch(func, &vals) {
+                    return match crate::foreign::dispatch(func, &vals, &mut self.mem) {
                         Some(v) => Ok(v),
                         None => Err(Fault::new(
                             FaultKind::NoForeignRuntime,
