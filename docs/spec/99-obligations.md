@@ -366,3 +366,16 @@ Utf8Res { ok Valid(str), Invalid(usize) } destructured immediately. A genuine te
 validation-returning-a-view is always compiler-known (the current honest state), or str_from
 returns the offset and the caller re-forms the view. Design decision deferred; the prototype's
 transient-type approach is sound meanwhile. Gate: a general library str_from.
+
+## OBL-SELFHOST-ERGO (self-hosting friction, 2026-07-09)
+
+Writing a real Candor program (the self-hosted lexer) surfaced six ergonomic frictions, ranked
+by how often they bit: (1) a [u8]/str view cannot be a struct field without a region variable
+(0001 §3.4), so source is threaded through every helper instead of held in a Lexer struct - the
+biggest structural tax; (2) no growable Vec forces fixed arrays + count with a hard cap; (3) no
+owned String without an Alloc handle makes text output a manual byte-by-byte itoa; (4) no
+match-on-bytes/no map makes keyword classification a linear span_eq ladder (55 branches); (5) out
+is a hard keyword the self-lexer must dodge as an identifier; (6) write-path buf.*.f[i]= vs
+read-path buf.f deref asymmetry is error-prone. Items (1)/(3) point at the region-bearing-fields
+and text-in-core questions; (2) at a std Vec; (4) at a std map + the deferred Chars/byte-match.
+This is the P19/dogfooding signal the self-hosting arc exists to produce.
