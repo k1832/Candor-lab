@@ -262,3 +262,52 @@ fn gate_aot_full_corpus() {
     assert!(diffs.is_empty(), "AOT divergences / failures:\n{}", diffs.join("\n"));
     assert!(equal >= 30, "expected the full runnable corpus (>=30 fixtures), got {equal}");
 }
+
+
+// ---------------------------------------------------------------------------
+// 4. Structured concurrency (design 0012 Stage 2): the AOT C runtime's raw-
+//    pthread `rt_scope_begin`/`rt_spawn`/`rt_scope_end` must reproduce the
+//    oracle's observable outcome — θ merged in spawn order (deterministic),
+//    the exit byte, and spawn-order-first fault identity — as a REAL process.
+// ---------------------------------------------------------------------------
+
+const CONC: &[(&str, bool)] = &[
+    // The parallel-fill flagship: split_mut halves fed to two disjoint spawns
+    // writing through their `slice_mut`s; the merged buffer -> exit byte (2211).
+    (
+        "fn fill(s: write [u8], v: u8, n: usize) -> unit { \
+            let mut i: usize = 0; loop { if i >= n { break; } s[i] = v; i = i + 1; } } \
+         fn main() -> i64 { let mut buf: [4]u8 = [0u8, 0u8, 0u8, 0u8]; \
+            let lo: write [u8]; let hi: write [u8]; \
+            split_mut(buf, 2, out lo, out hi); \
+            scope { spawn fill(write lo, 1u8, 2); spawn fill(write hi, 2u8, 2); } \
+            return conv i64 buf[0] + conv i64 buf[1] * 10 \
+                 + conv i64 buf[2] * 100 + conv i64 buf[3] * 1000; }",
+        true,
+    ),
+    // Per-task trace projection merged in spawn order: θ == [100, 3, 4, 200]
+    // regardless of the OS-thread interleaving.
+    (
+        "fn work(o: write i64, v: i64) -> unit { trace(v); o.* = v * v; } \
+         fn main() -> i64 { let mut a: i64 = 0; let mut b: i64 = 0; trace(100); \
+            scope { spawn work(write a, 3); spawn work(write b, 4); } \
+            trace(200); return a + b; }",
+        true,
+    ),
+    // A spawned task faults (div-by-zero): the join delivers the fault on the
+    // parent thread via the fault-exit path -> exit 2 + (kind, span) on stderr.
+    (
+        "fn work(o: write i64, v: i64, d: i64) -> unit { o.* = v / d; } \
+         fn main() -> i64 { let mut a: i64 = 0; \
+            scope { spawn work(write a, 10, 0); } return a; }",
+        true,
+    ),
+];
+
+#[test]
+fn gate_aot_concurrency() {
+    assert!(cc_available(), "cc/linker unavailable: cannot build runnable executables");
+    for (i, (src, real)) in CONC.iter().enumerate() {
+        assert_aot_eq_oracle_src(src, *real, &format!("conc{i}"));
+    }
+}

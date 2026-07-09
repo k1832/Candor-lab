@@ -297,3 +297,75 @@ fn engine_equality_fault_at_join() {
          fn main() -> i64 { scope { spawn boom(); } return 0; }",
     );
 }
+
+
+// ===========================================================================
+// split_mut EXECUTION (design 0012 §1.4) — the disjoint-partition primitive
+// now RUNS on every engine (tree-walker, MIR, native), not just type-checks.
+// ===========================================================================
+
+/// The parallel-fill flagship (§2.4): `[4]u8` split into two disjoint halves,
+/// each filled by a sibling spawn writing its disjoint range; the merged buffer
+/// is asserted. Runs end-to-end on the sequential oracle and (below) natively.
+const FLAGSHIP_FILL: &str =
+    "fn fill(s: write [u8], v: u8, n: usize) -> unit { \
+        let mut i: usize = 0; loop { if i >= n { break; } s[i] = v; i = i + 1; } } \
+     fn main() -> i64 { let mut buf: [4]u8 = [0u8, 0u8, 0u8, 0u8]; \
+        let lo: write [u8]; let hi: write [u8]; \
+        split_mut(buf, 2, out lo, out hi); \
+        scope { spawn fill(write lo, 1u8, 2); spawn fill(write hi, 2u8, 2); } \
+        return conv i64 buf[0] + conv i64 buf[1] * 10 \
+             + conv i64 buf[2] * 100 + conv i64 buf[3] * 1000; }";
+
+#[test]
+fn split_mut_parallel_fill_executes() {
+    // lo=[buf0,buf1)=1, hi=[buf2,buf3)=2  ->  1 + 10 + 200 + 2000 = 2211.
+    assert_eq!(run_ret(FLAGSHIP_FILL), 2211);
+    assert_engines_equal(FLAGSHIP_FILL);
+}
+
+#[test]
+fn split_mut_bounds_fault_identity() {
+    // `mid > len` faults `bounds` at the whole split_mut call span, identically on
+    // the tree-walker and the MIR engine (kind + span, per MEMORY's fault-identity
+    // discipline).
+    let src = "fn main() -> i64 { let mut buf: [4]u8 = [0u8, 0u8, 0u8, 0u8]; \
+               let lo: write [u8]; let hi: write [u8]; \
+               split_mut(buf, 5, out lo, out hi); return 0; }";
+    let f = run_fault(src);
+    assert_eq!(f.kind, FaultKind::Bounds, "split_mut mid>len must fault bounds");
+    // tree == MIR on the (kind, span.start) identity.
+    assert_engines_equal(src);
+}
+
+#[test]
+fn split_mut_nested_executes() {
+    // Nested split (§1.4): `lo` re-split into `a`/`b`; three disjoint spawns fill
+    // [0,1), [1,2), [2,4) -> 1 + 2*10 + 3*100 + 3*1000 = 3321.
+    let src = "fn fill(s: write [u8], v: u8, n: usize) -> unit { \
+                let mut i: usize = 0; loop { if i >= n { break; } s[i] = v; i = i + 1; } } \
+               fn main() -> i64 { let mut buf: [4]u8 = [0u8, 0u8, 0u8, 0u8]; \
+                let lo: write [u8]; let hi: write [u8]; \
+                split_mut(buf, 2, out lo, out hi); \
+                let a: write [u8]; let b: write [u8]; \
+                split_mut(lo, 1, out a, out b); \
+                scope { spawn fill(write a, 1u8, 1); spawn fill(write b, 2u8, 1); \
+                        spawn fill(write hi, 3u8, 2); } \
+                return conv i64 buf[0] + conv i64 buf[1] * 10 \
+                     + conv i64 buf[2] * 100 + conv i64 buf[3] * 1000; }";
+    assert_eq!(run_ret(src), 3321);
+    assert_engines_equal(src);
+}
+
+#[test]
+fn split_mut_sequential_no_scope_executes() {
+    // split_mut is a plain reborrow with no `scope` at all: the two halves are
+    // written directly, in sequence, and both land in the parent buffer.
+    let src = "fn main() -> i64 { let mut buf: [4]u8 = [0u8, 0u8, 0u8, 0u8]; \
+               let lo: write [u8]; let hi: write [u8]; \
+               split_mut(buf, 2, out lo, out hi); \
+               lo[0] = 7u8; hi[1] = 9u8; \
+               return conv i64 buf[0] + conv i64 buf[3] * 1000; }";
+    assert_eq!(run_ret(src), 9007);
+    assert_engines_equal(src);
+}

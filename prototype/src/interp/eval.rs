@@ -1487,10 +1487,23 @@ impl<'a> Interp<'a> {
                     outs.push(pl);
                 }
                 ParamMode::Take => {
+                    // A `slice`/`slice_mut` value crossing a spawn arrives as a
+                    // `read`/`write` reborrow of a slice place (the §2.1 borrow
+                    // branch); for a slice a reborrow is the same fat pointer, so
+                    // peel the prefix and pass the value directly, WITHOUT consuming
+                    // the source (a borrow, not a move).
+                    let (a, reborrow) = match &a.kind {
+                        ExprKind::Prefix { op: PrefixOp::Read | PrefixOp::Write, expr }
+                            if matches!(p.lowered, Type::Slice(_) | Type::SliceMut(_)) =>
+                        {
+                            (expr.as_ref(), true)
+                        }
+                        _ => (a, false),
+                    };
                     let rv = self.eval_value(a, Some(&p.lowered))?;
                     let sz = self.size_of(&rv.ty);
                     let bytes = self.read_bytes(rv.addr, sz, true)?;
-                    if !is_copy(&rv.ty, self.items) {
+                    if !reborrow && !is_copy(&rv.ty, self.items) {
                         self.consume(&rv.origin);
                     }
                     caps.push(CapArg::Val(p.lowered.clone(), bytes));
@@ -1679,7 +1692,7 @@ impl<'a> Interp<'a> {
             "subslice" => self.bi_subslice(args)?,
             "len" => self.bi_len(args)?,
             // Structured-concurrency blessed primitives (design 0012 §1.4, §3.3).
-            "split_mut" => self.bi_split_mut(args)?,
+            "split_mut" => self.bi_split_mut(args, span)?,
             "cancelled" => {
                 // Sequential oracle: a task always runs to completion, so a token
                 // never signals — `cancelled` is always `false` (design 0012 §3.3).
@@ -1837,7 +1850,7 @@ impl<'a> Interp<'a> {
     /// `out` slots: `lo = [base, mid)` and `hi = [base + mid, total)`. The compile
     /// -time disjointness stipulation is enforced by the checker; at run time this
     /// is ordinary sub-slice arithmetic.
-    fn bi_split_mut(&mut self, args: &[Expr]) -> R<RVal> {
+    fn bi_split_mut(&mut self, args: &[Expr], span: Span) -> R<RVal> {
         let (addr, ty, _pl) = self.eval_place(&args[0])?;
         let (elem, base, total) = match &ty {
             Type::Array(e, len) => ((**e).clone(), addr, self.lay().array_len(len)),
@@ -1850,9 +1863,18 @@ impl<'a> Interp<'a> {
         };
         let midv = self.eval_value(&args[1], Some(&Type::usize()))?;
         let mid = self.read_u64(midv.addr)?;
-        let esz = self.size_of(&elem);
+        // `split_mut` bounds-faults when `mid > len` (design 0012 §1.4); the fault
+        // is stamped at the whole-call span so its identity matches every engine.
+        if mid > total {
+            self.cur_span = span;
+            return Err(self.fault(
+                FaultKind::Bounds,
+                format!("split_mut index {mid} out of bounds for len {total}"),
+            ));
+        }
+        let stride = round_up(self.size_of(&elem), self.align_of(&elem));
         self.write_slice_slot(&args[2], base, mid)?;
-        self.write_slice_slot(&args[3], base + mid * esz, total.saturating_sub(mid))?;
+        self.write_slice_slot(&args[3], base + mid * stride, total - mid)?;
         Ok(self.unit_val())
     }
 

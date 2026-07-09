@@ -5,8 +5,11 @@ authorship: memory-safe, explicit where meaning lives, locally verifiable, with
 source-declared semantics and a compiler built as a conversation partner rather
 than a gatekeeper.
 
-**Status: the design ledger is closed over the philosophy's complete first-version
-scope.** Twelve designs - memory model through structured concurrency - each
+**Status: the philosophy's complete first-version scope is designed, reviewed,
+and RUNNING.** Structured concurrency - the final feature - executes on real
+OS threads with compile-time race freedom (the checker's gate held against
+adversarial review; the rejected first draft's race construction is a permanent
+regression test), across all engines including standalone AOT binaries. Twelve designs - memory model through structured concurrency - each
 adversarially reviewed; one rejected outright and reworked to acceptance (0012,
 whose reviewer constructed a genuine safe-code race against the draft's own
 flagship example). The compilation architecture is fully realized (design 0010,

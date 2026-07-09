@@ -226,3 +226,57 @@ fn native_stress_many_tracers() {
     assert_eq!(oracle(src), Out::Ok(0, vec![0, 1, 2, 3, 4, 5, 6, 7]));
     gate(src, 100);
 }
+
+
+// ===========================================================================
+// split_mut PARALLEL FILL on real threads (design 0012 §1.4/§2.4)
+// ===========================================================================
+
+#[test]
+fn native_split_mut_parallel_fill() {
+    // The flagship: `[4]u8` split into disjoint halves, each filled by a sibling
+    // spawn through its disjoint `slice_mut`; native (real threads) == oracle.
+    gate(
+        "fn fill(s: write [u8], v: u8, n: usize) -> unit { \
+            let mut i: usize = 0; loop { if i >= n { break; } s[i] = v; i = i + 1; } } \
+         fn main() -> i64 { let mut buf: [4]u8 = [0u8, 0u8, 0u8, 0u8]; \
+            let lo: write [u8]; let hi: write [u8]; \
+            split_mut(buf, 2, out lo, out hi); \
+            scope { spawn fill(write lo, 1u8, 2); spawn fill(write hi, 2u8, 2); } \
+            return conv i64 buf[0] + conv i64 buf[1] * 10 \
+                 + conv i64 buf[2] * 100 + conv i64 buf[3] * 1000; }",
+        ITERS,
+    );
+}
+
+#[test]
+fn native_split_mut_nested() {
+    // Nested split feeding three disjoint sibling spawns; the two-level disjoint
+    // partition mutates disjoint memory with no race under real threads.
+    gate(
+        "fn fill(s: write [u8], v: u8, n: usize) -> unit { \
+            let mut i: usize = 0; loop { if i >= n { break; } s[i] = v; i = i + 1; } } \
+         fn main() -> i64 { let mut buf: [4]u8 = [0u8, 0u8, 0u8, 0u8]; \
+            let lo: write [u8]; let hi: write [u8]; \
+            split_mut(buf, 2, out lo, out hi); \
+            let a: write [u8]; let b: write [u8]; \
+            split_mut(lo, 1, out a, out b); \
+            scope { spawn fill(write a, 1u8, 1); spawn fill(write b, 2u8, 1); \
+                    spawn fill(write hi, 3u8, 2); } \
+            return conv i64 buf[0] + conv i64 buf[1] * 10 \
+                 + conv i64 buf[2] * 100 + conv i64 buf[3] * 1000; }",
+        ITERS,
+    );
+}
+
+#[test]
+fn native_split_mut_bounds_fault() {
+    // `mid > len` faults `bounds`; the native engine delivers the same fault
+    // identity as the oracle (kind + span), on every iteration.
+    gate(
+        "fn main() -> i64 { let mut buf: [4]u8 = [0u8, 0u8, 0u8, 0u8]; \
+           let lo: write [u8]; let hi: write [u8]; \
+           split_mut(buf, 5, out lo, out hi); return 0; }",
+        ITERS,
+    );
+}

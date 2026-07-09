@@ -1647,6 +1647,18 @@ impl<'a> Lowerer<'a> {
                 ExprKind::OutArg(inner) => inner,
                 _ => a,
             };
+            // A `slice`/`slice_mut` value crossing a spawn arrives as a `read`/`write`
+            // reborrow of a slice place (the §2.1 borrow branch); for a slice a
+            // reborrow is the same fat pointer, so peel the prefix and pass the value
+            // (a borrow, not a move — no `mark_moved`).
+            let (a, reborrow): (&Expr, bool) = match &a.kind {
+                ExprKind::Prefix { op: PrefixOp::Read | PrefixOp::Write, expr }
+                    if matches!(p.lowered, Type::Slice(_) | Type::SliceMut(_)) =>
+                {
+                    (expr.as_ref(), true)
+                }
+                _ => (a, false),
+            };
             if self.is_wordy(&p.lowered) {
                 let (op, _) = self.lower_value(a, Some(&p.lowered))?;
                 ops.push(op);
@@ -1654,7 +1666,7 @@ impl<'a> Lowerer<'a> {
                 let place = self.materialize_place(a, &p.lowered)?;
                 // A by-value (`take`) non-copy aggregate arg moves the source; prune
                 // its later drop (INV-DROP static mask).
-                if p.mode == ParamMode::Take && !is_copy(&p.lowered, self.items) {
+                if !reborrow && p.mode == ParamMode::Take && !is_copy(&p.lowered, self.items) {
                     self.mark_moved(a);
                 }
                 let id = self.emit_temp(
@@ -1668,6 +1680,104 @@ impl<'a> Lowerer<'a> {
         Ok(ops)
     }
 
+    /// Lower `split_mut(parent, mid, out lo, out hi)` (design 0012 §1.4) into
+    /// ordinary slice-header ops: build the parent's `slice_mut` header, then two
+    /// bounds-checked `subslice`s — `lo = [0, mid)` and `hi = [mid, len)` — into the
+    /// caller's out-slots. `subslice` faults `Bounds` at `span` when `mid > len`, so
+    /// the bounds identity `(bounds, call-span)` matches every engine. The
+    /// stipulated disjointness is a compile-time fact; at run time this is plain
+    /// sub-slice arithmetic, so the native backend inherits it with NO runtime hook.
+    fn lower_split_mut(&mut self, args: &[Expr], span: Span) -> LR<(Operand, Type)> {
+        if args.len() != 4 {
+            return unsupported("split_mut arity");
+        }
+        // 1. Build the parent's slice header `whole : slice_mut elem`.
+        let (apl, aty) = self.lower_place(&args[0])?;
+        let elem = match &aty {
+            Type::Array(e, _) | Type::Slice(e) | Type::SliceMut(e) => (**e).clone(),
+            _ => return unsupported("split_mut parent is not a slice/array"),
+        };
+        let whole_ty = Type::SliceMut(Box::new(elem.clone()));
+        let whole_id = self.new_local(whole_ty.clone(), None);
+        let whole = Place::local(whole_id);
+        match &aty {
+            Type::Array(el, l) => {
+                let n = self.lay().array_len(l);
+                let addr = self.emit_temp(
+                    Type::RawPtr(Box::new((**el).clone())),
+                    Rvalue::Ref(apl),
+                    span,
+                );
+                let mut f0 = whole.clone();
+                f0.proj.push(Proj::Field { offset: 0, ty: Type::Scalar(ScalarTy::U64) });
+                self.emit(StatementKind::Store(f0, Rvalue::Use(Operand::Local(addr))), span, false);
+                let mut f8 = whole.clone();
+                f8.proj.push(Proj::Field { offset: 8, ty: Type::Scalar(ScalarTy::U64) });
+                self.emit(
+                    StatementKind::Store(f8, Rvalue::Use(Operand::Const(n as i128, ScalarTy::U64))),
+                    span,
+                    false,
+                );
+            }
+            Type::Slice(_) | Type::SliceMut(_) => {
+                self.emit(
+                    StatementKind::CopyVal { dst: whole.clone(), src: apl, ty: aty.clone() },
+                    span,
+                    false,
+                );
+            }
+            _ => unreachable!(),
+        }
+        // 2. The length operand: read `whole.len` (works for both array and slice).
+        let mut lenf = whole.clone();
+        lenf.proj.push(Proj::Field { offset: 8, ty: Type::Scalar(ScalarTy::U64) });
+        let len_id = self.emit_temp(
+            Type::Scalar(ScalarTy::U64),
+            Rvalue::Load { place: lenf, ty: Type::Scalar(ScalarTy::U64) },
+            span,
+        );
+        let len_op = Operand::Local(len_id);
+        // 3. mid, and the element stride shared by both halves.
+        let (mid, _) = self.lower_value(&args[1], Some(&Type::usize()))?;
+        let stride = self.stride_of(&elem);
+        // 4. lo = subslice(whole, 0, mid) ; hi = subslice(whole, mid, len).
+        let lo_inner = match &args[2].kind {
+            ExprKind::OutArg(i) => i.as_ref(),
+            _ => &args[2],
+        };
+        let (lo_place, _) = self.lower_place(lo_inner)?;
+        self.emit(
+            StatementKind::Subslice {
+                dst: lo_place,
+                src: whole.clone(),
+                lo: Operand::Const(0, ScalarTy::U64),
+                hi: mid,
+                stride,
+                span,
+            },
+            span,
+            false,
+        );
+        let hi_inner = match &args[3].kind {
+            ExprKind::OutArg(i) => i.as_ref(),
+            _ => &args[3],
+        };
+        let (hi_place, _) = self.lower_place(hi_inner)?;
+        self.emit(
+            StatementKind::Subslice {
+                dst: hi_place,
+                src: whole,
+                lo: mid,
+                hi: len_op,
+                stride,
+                span,
+            },
+            span,
+            false,
+        );
+        Ok(self.unit())
+    }
+
     fn lower_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> LR<(Operand, Type)> {
         if let ExprKind::Ident(name) = &callee.kind {
             // Word/unit-producing builtin intrinsics (aggregate ones flow through
@@ -1676,6 +1786,9 @@ impl<'a> Lowerer<'a> {
                 let (v, _) = self.lower_value(&args[0], Some(&Type::Scalar(ScalarTy::I64)))?;
                 self.emit(StatementKind::Trace(v), span, true);
                 return Ok(self.unit());
+            }
+            if name == "split_mut" {
+                return self.lower_split_mut(args, span);
             }
             if is_builtin(name) {
                 return self.lower_builtin_value(name, args, span);
