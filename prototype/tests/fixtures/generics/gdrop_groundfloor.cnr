@@ -1,7 +1,14 @@
 // A generic struct with a non-allocating `drop` hook over a `copy` `T` stays on
 // the no-alloc ground floor: letting it die is not allocator work (design 0007 F5).
-struct Wrap[T] { inner: T, tag: i64 } drop(write self) { trace(self.tag); }
-fn sink(w: Wrap[i64]) -> i64 { return 0; }
+struct Wrap[T] {
+    inner: T,
+    tag: i64,
+} drop(write self) {
+    trace(self.tag);
+}
+fn sink(w: Wrap[i64]) -> i64 {
+    return 0;
+}
 fn main() -> i64 {
     let w: Wrap[i64] = Wrap { inner: 3, tag: 4 };
     return sink(w);

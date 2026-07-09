@@ -1,3 +1,12 @@
 // Importing a private (non-`pub`) item across the tree is rejected (E0903).
 use core::res::{Res, read_at};
-fn main() -> i64 { match read_at(true) { Res::Ok(v) => { return v; } Res::Err(e) => { return 0; } } }
+fn main() -> i64 {
+    match read_at(true) {
+        Res::Ok(v) => {
+            return v;
+        },
+        Res::Err(e) => {
+            return 0;
+        },
+    }
+}

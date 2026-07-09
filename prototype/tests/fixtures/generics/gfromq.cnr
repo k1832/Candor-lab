@@ -1,15 +1,44 @@
 // Cross-type `?` through a *generic* `From` impl over a generic error enum.
-enum IoErr { Bad }
-enum AppErr[T] { Wrap(IoErr), Extra(T) }
-enum IoRes { ok IoOk(i64), IoBad(IoErr) }
-enum AppRes { ok AppOk(i64), AppBad(AppErr[i64]) }
-interface From[E] { fn from(e: E) -> Self; }
-impl[T] From[IoErr] for AppErr[T] { fn from(e: IoErr) -> Self { return AppErr::Wrap(e); } }
-fn reader(good: bool) -> IoRes { if good { return IoRes::IoOk(55); } return IoRes::IoBad(IoErr::Bad); }
-fn app(good: bool) -> AppRes { let x: i64 = reader(good)?; return AppRes::AppOk(x); }
+enum IoErr {
+    Bad,
+}
+enum AppErr[T] {
+    Wrap(IoErr),
+    Extra(T),
+}
+enum IoRes {
+    ok IoOk(i64),
+    IoBad(IoErr),
+}
+enum AppRes {
+    ok AppOk(i64),
+    AppBad(AppErr[i64]),
+}
+interface From[E] {
+    fn from(e: E) -> Self;
+}
+impl[T] From[IoErr] for AppErr[T] {
+    fn from(e: IoErr) -> Self {
+        return AppErr::Wrap(e);
+    }
+}
+fn reader(good: bool) -> IoRes {
+    if good {
+        return IoRes::IoOk(55);
+    }
+    return IoRes::IoBad(IoErr::Bad);
+}
+fn app(good: bool) -> AppRes {
+    let x: i64 = reader(good)?;
+    return AppRes::AppOk(x);
+}
 fn main() -> i64 {
     match app(false) {
-        AppRes::AppOk(v) => { return v; }
-        AppRes::AppBad(e) => { return 7; }
+        AppRes::AppOk(v) => {
+            return v;
+        },
+        AppRes::AppBad(e) => {
+            return 7;
+        },
     }
 }

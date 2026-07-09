@@ -39,13 +39,17 @@ pub struct RParser {
     /// Recorded on every `fn`/`extern`/`export` so the placement and discharge
     /// rules of design 0011 survive the module merge.
     boundary: bool,
+    /// Formatter mode: when set, `for` loops are kept as `ExprKind::For` surface
+    /// nodes instead of being desugared (design 0009 §4.2), so the blessed
+    /// formatter can reproduce the canonical `for` spelling (NN#11).
+    preserve_for: bool,
 }
 
 type PResult<T> = Result<T, Diag>;
 
 impl RParser {
     pub fn new(tokens: Vec<RToken>) -> RParser {
-        RParser { tokens, pos: 0, last_end: 0, no_struct: false, for_ctr: 0, mod_uses: Vec::new(), mod_vis: Vec::new(), boundary: false }
+        RParser { tokens, pos: 0, last_end: 0, no_struct: false, for_ctr: 0, mod_uses: Vec::new(), mod_vis: Vec::new(), boundary: false, preserve_for: false }
     }
 
     // ----- cursor ----------------------------------------------------------
@@ -1011,6 +1015,14 @@ impl RParser {
         let operand = self.parse_expr_no_struct()?;
         let mut body = self.parse_block()?;
         let sp = self.span_from(lo);
+        if self.preserve_for {
+            // Formatter path: keep the surface `for` node (NN#11); never desugar.
+            let e = Expr {
+                kind: ExprKind::For { pattern: pat, operand: Box::new(operand), body },
+                span: sp,
+            };
+            return Ok(Stmt { kind: StmtKind::Expr(e), span: sp });
+        }
         let n = self.for_ctr;
         self.for_ctr += 1;
         let indexed = matches!(operand.kind, ExprKind::Prefix { op: PrefixOp::Read, .. });
@@ -1871,6 +1883,18 @@ pub fn parse(tokens: Vec<RToken>) -> PResult<Program> {
 /// per-item visibility flags parallel to `Program.items`.
 pub fn parse_module(tokens: Vec<RToken>) -> PResult<(Program, Vec<UseDecl>, Vec<bool>, bool)> {
     let mut p = RParser::new(tokens);
+    let prog = p.parse_program()?;
+    let boundary = p.boundary;
+    Ok((prog, p.mod_uses, p.mod_vis, boundary))
+}
+
+/// Parse a real-syntax token stream for the **formatter** (NN#11): like
+/// [`parse_module`] but keeps `for` loops as surface `ExprKind::For` nodes
+/// (design 0009 §4.2) rather than desugaring them, so the canonical `for`
+/// spelling round-trips.
+pub fn parse_format(tokens: Vec<RToken>) -> PResult<(Program, Vec<UseDecl>, Vec<bool>, bool)> {
+    let mut p = RParser::new(tokens);
+    p.preserve_for = true;
     let prog = p.parse_program()?;
     let boundary = p.boundary;
     Ok((prog, p.mod_uses, p.mod_vis, boundary))

@@ -1,11 +1,11 @@
 boundary
 extern "C" {
-    fn c_len(s: rawptr u8) foreign -> usize
+    fn c_len(s: rawptr u8) -> usize
         trust "POSIX 7: reads bytes to a NUL, retains nothing, no thread state" {
             valid_nul_terminated(s),
             no_retain(s),
         };
-    fn c_raw(p: rawptr u8) foreign -> usize;
+    fn c_raw(p: rawptr u8) -> usize;
 }
 
 pub fn safe_len(s: rawptr u8) -> usize {
@@ -20,7 +20,11 @@ pub fn thin_raw(p: rawptr u8) foreign -> usize {
     }
 }
 
-pub fn checksum(x: usize) -> u32 { return conv u32 (x); }
+pub fn checksum(x: usize) -> u32 {
+    return conv u32 x;
+}
 export "C" fn candor_checksum(x: usize) -> u32 = checksum;
 
-fn main() -> i64 { return 0; }
+fn main() -> i64 {
+    return 0;
+}

@@ -34,8 +34,9 @@ fn main() -> ExitCode {
         (Some("build"), Some(path)) => run_build(path),
         (Some("compile"), Some(_)) => run_compile(&args[2..]),
         (Some("migrate"), Some(path)) => run_migrate(path, &args[3..]),
+        (Some("fmt"), Some(path)) => run_fmt(path, &args[3..]),
         _ => {
-            eprintln!("usage: candor-proto (parse|check|run|count) <file>  |  run [--engine=mir] <file>  |  compile <file_or_dir> -o <prog>  |  migrate <file.cn> [-o <out.cnr>]  (.cnr = real syntax, .cn = throwaway)");
+            eprintln!("usage: candor-proto (parse|check|run|count) <file>  |  run [--engine=mir] <file>  |  compile <file_or_dir> -o <prog>  |  migrate <file.cn> [-o <out.cnr>]  |  fmt <file_or_dir.cnr> [--check|--stdout]  (.cnr = real syntax, .cn = throwaway)");
             ExitCode::from(2)
         }
     }
@@ -428,6 +429,98 @@ fn run_migrate(path: &str, rest: &[String]) -> ExitCode {
         Err(diag) => {
             eprintln!("{}", diag.to_json());
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// `fmt <file_or_dir> [--check|--stdout]` — the blessed canonical formatter
+/// (P16/NN#11; spec 02 §9). Formats every `.cnr` file (recursively for a
+/// directory). Default: rewrite each file in place. `--check`: write nothing and
+/// exit nonzero if any file is not already canonical (CI gate). `--stdout`: print
+/// the formatted form of a single file, writing nothing.
+fn run_fmt(path: &str, rest: &[String]) -> ExitCode {
+    let mut check = false;
+    let mut stdout = false;
+    for a in rest {
+        match a.as_str() {
+            "--check" => check = true,
+            "--stdout" => stdout = true,
+            other => {
+                eprintln!("error: unexpected argument `{other}` (use --check or --stdout)");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let root = std::path::Path::new(path);
+    let mut files = Vec::new();
+    if root.is_dir() {
+        collect_cnr(root, &mut files);
+        files.sort();
+    } else {
+        if !is_real(path) {
+            eprintln!("error: `fmt` only formats `.cnr` files");
+            return ExitCode::from(2);
+        }
+        files.push(root.to_path_buf());
+    }
+    if files.is_empty() {
+        eprintln!("error: no `.cnr` files at `{path}`");
+        return ExitCode::from(2);
+    }
+    let mut any_diff = false;
+    let mut had_error = false;
+    for f in &files {
+        let src = match std::fs::read_to_string(f) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error: cannot read `{}`: {e}", f.display());
+                had_error = true;
+                continue;
+            }
+        };
+        match candor_proto::format_source_real(&src) {
+            Ok(out) => {
+                if stdout {
+                    print!("{out}");
+                    continue;
+                }
+                if out != src {
+                    any_diff = true;
+                    if check {
+                        println!("{}", f.display());
+                    } else if let Err(e) = std::fs::write(f, &out) {
+                        eprintln!("error: cannot write `{}`: {e}", f.display());
+                        had_error = true;
+                    }
+                }
+            }
+            Err(diag) => {
+                eprintln!("{}: {}", f.display(), diag.to_json());
+                had_error = true;
+            }
+        }
+    }
+    if had_error {
+        return ExitCode::FAILURE;
+    }
+    if check && any_diff {
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+/// Recursively collect `.cnr` files under `dir`.
+fn collect_cnr(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            collect_cnr(&p, out);
+        } else if p.extension().map(|e| e == "cnr").unwrap_or(false) {
+            out.push(p);
         }
     }
 }

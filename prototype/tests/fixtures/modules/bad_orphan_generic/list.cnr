@@ -1,1 +1,4 @@
-pub struct List[T] { x: T, w: i64 }
+pub struct List[T] {
+    x: T,
+    w: i64,
+}

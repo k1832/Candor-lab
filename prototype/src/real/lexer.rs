@@ -14,11 +14,15 @@ use super::token::{real_keyword_from_str, RTok, RToken};
 pub struct RLexer<'a> {
     src: &'a [u8],
     pos: usize,
+    /// Byte spans of `//` line and `/* */` block comments, in source order.
+    /// Collected only when [`RLexer::tokenize_collecting`] is used (the
+    /// formatter); the ordinary [`RLexer::tokenize`] path leaves it empty.
+    comments: Vec<Span>,
 }
 
 impl<'a> RLexer<'a> {
     pub fn new(src: &'a str) -> RLexer<'a> {
-        RLexer { src: src.as_bytes(), pos: 0 }
+        RLexer { src: src.as_bytes(), pos: 0, comments: Vec::new() }
     }
 
     pub fn tokenize(mut self) -> Result<Vec<RToken>, Diag> {
@@ -45,12 +49,14 @@ impl<'a> RLexer<'a> {
             match self.peek() {
                 Some(b) if b.is_ascii_whitespace() => self.pos += 1,
                 Some(b'/') if self.peek2() == Some(b'/') => {
+                    let start = self.pos;
                     while let Some(b) = self.peek() {
                         if b == b'\n' {
                             break;
                         }
                         self.pos += 1;
                     }
+                    self.comments.push(Span::new(start, self.pos));
                 }
                 Some(b'/') if self.peek2() == Some(b'*') => {
                     let start = self.pos;
@@ -71,6 +77,7 @@ impl<'a> RLexer<'a> {
                             Some(_) => self.pos += 1,
                         }
                     }
+                    self.comments.push(Span::new(start, self.pos));
                 }
                 _ => return Ok(()),
             }
@@ -273,4 +280,31 @@ fn is_ident_continue(b: u8) -> bool {
 /// Convenience wrapper.
 pub fn lex(src: &str) -> Result<Vec<RToken>, Diag> {
     RLexer::new(src).tokenize()
+}
+
+impl RLexer<'_> {
+    /// Like [`RLexer::tokenize`] but also returns the byte spans of every comment
+    /// (in source order). The formatter uses this to re-attach comments the AST
+    /// does not carry (spec 02 §9; NN#11).
+    pub fn tokenize_collecting(mut self) -> Result<(Vec<RToken>, Vec<Span>), Diag> {
+        let toks = self.tokenize_inner()?;
+        Ok((toks, self.comments))
+    }
+
+    fn tokenize_inner(&mut self) -> Result<Vec<RToken>, Diag> {
+        let mut out = Vec::new();
+        loop {
+            self.skip_trivia()?;
+            if self.pos >= self.src.len() {
+                out.push(RToken { kind: RTok::Eof, span: Span::point(self.pos) });
+                return Ok(out);
+            }
+            out.push(self.next_token()?);
+        }
+    }
+}
+
+/// Lex `src`, returning both the token stream and the comment spans (formatter).
+pub fn lex_with_comments(src: &str) -> Result<(Vec<RToken>, Vec<Span>), Diag> {
+    RLexer::new(src).tokenize_collecting()
 }

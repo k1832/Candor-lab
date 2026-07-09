@@ -1,1 +1,3 @@
-pub struct Node { v: i64 }
+pub struct Node {
+    v: i64,
+}

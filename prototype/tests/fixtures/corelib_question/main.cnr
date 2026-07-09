@@ -16,9 +16,30 @@ fn cross(ok: bool) -> Res[i64, AppErr] {
 
 fn main() -> i64 {
     let mut acc: i64 = 0;
-    match same(true) { Res::Ok(v) => { acc = acc + v; } Res::Err(e) => { return -1; } }     // +43
-    match cross(true) { Res::Ok(v) => { acc = acc + v; } Res::Err(e) => { return -2; } }     // +43
+    match same(true) {
+        Res::Ok(v) => {
+            acc = acc + v; // +43
+        },
+        Res::Err(e) => {
+            return -1;
+        },
+    }
+    match cross(true) {
+        Res::Ok(v) => {
+            acc = acc + v; // +43
+        },
+        Res::Err(e) => {
+            return -2;
+        },
+    }
     // cross(false): `?` converts IoErr::Eof -> AppErr::FromIo(Eof) and early-returns.
-    match cross(false) { Res::Ok(v) => { return -3; } Res::Err(e) => { acc = acc + 100; } }  // +100
-    return acc;                                                                              // 186
+    match cross(false) {
+        Res::Ok(v) => {
+            return -3; // +100
+        },
+        Res::Err(e) => {
+            acc = acc + 100;
+        },
+    }
+    return acc; // 186
 }

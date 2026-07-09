@@ -8,23 +8,33 @@
 // -- std::alloc --------------------------------------------------------------
 struct AllocVtable {
     alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
-    free:  fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
 }
-copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+copy struct Alloc {
+    ctx: rawptr u8,
+    vt: rawptr AllocVtable,
+}
 
 // -- std::bump ---------------------------------------------------------------
-struct Bump { next: usize, end: usize }
-fn with_window(base: usize, size: usize) -> Bump { return Bump { next: base, end: base + size }; }
+struct Bump {
+    next: usize,
+    end: usize,
+}
+fn with_window(base: usize, size: usize) -> Bump {
+    return Bump { next: base, end: base + size };
+}
 fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
     unsafe "ctx points at the live Bump whose [next,end) window is reserved to this arena alone; the carved block stays inside it" {
         let b: Bump = ptr_read(cast_ptr[Bump](ctx));
         let aligned: usize = (b.next + align - 1) / align * align;
-        if aligned + size > b.end { return ptr_null[u8](); }
+        if aligned + size > b.end {
+            return ptr_null[u8]();
+        }
         ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
         return addr_to_ptr[u8](aligned);
     }
 }
-fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit { }
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {}
 static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
 fn mk_alloc(state: write Bump) -> Alloc {
     unsafe "ctx and BUMP_VT outlive every copy of this handle and every Box it serves" {
@@ -33,48 +43,223 @@ fn mk_alloc(state: write Bump) -> Alloc {
 }
 
 // -- core::opt ---------------------------------------------------------------
-enum Opt[T] { ok Some(T), None }
+enum Opt[T] {
+    ok Some(T),
+    None,
+}
 // -- core::iter (design 0009): two by-value iteration protocols + step enum ----
-enum IterStep[T, S] { ok More(T, S), Done }
-interface Iter { type Item; fn next(take self) alloc -> IterStep[Item, Self]; }
-interface Indexed { type Item; fn at(read self, i: usize) -> Opt[Item]; }
-fn is_some[T](o: read Opt[T]) -> bool { match o { Opt::Some(v) => { return true; } Opt::None => { return false; } } }
-fn is_none[T](o: read Opt[T]) -> bool { match o { Opt::Some(v) => { return false; } Opt::None => { return true; } } }
-fn unwrap_or[T: copy](o: Opt[T], d: T) -> T { match o { Opt::Some(v) => { return v; } Opt::None => { return d; } } }
-fn map[T, U](o: Opt[T], f: fn(T) -> U) -> Opt[U] { match o { Opt::Some(v) => { return Opt::Some(f(v)); } Opt::None => { return Opt::None; } } }
-fn inc(x: i64) -> i64 { return x + 1; }
+enum IterStep[T, S] {
+    ok More(T, S),
+    Done,
+}
+interface Iter {
+    type Item;
+    fn next(self) alloc -> IterStep[Item, Self];
+}
+interface Indexed {
+    type Item;
+    fn at(read self, i: usize) -> Opt[Item];
+}
+fn is_some[T](o: read Opt[T]) -> bool {
+    match o {
+        Opt::Some(v) => {
+            return true;
+        },
+        Opt::None => {
+            return false;
+        },
+    }
+}
+fn is_none[T](o: read Opt[T]) -> bool {
+    match o {
+        Opt::Some(v) => {
+            return false;
+        },
+        Opt::None => {
+            return true;
+        },
+    }
+}
+fn unwrap_or[T: copy](o: Opt[T], d: T) -> T {
+    match o {
+        Opt::Some(v) => {
+            return v;
+        },
+        Opt::None => {
+            return d;
+        },
+    }
+}
+fn map[T, U](o: Opt[T], f: fn(T) -> U) -> Opt[U] {
+    match o {
+        Opt::Some(v) => {
+            return Opt::Some(f(v));
+        },
+        Opt::None => {
+            return Opt::None;
+        },
+    }
+}
+fn inc(x: i64) -> i64 {
+    return x + 1;
+}
 
 // -- core::res (cross-type `?` via From, works single-file) -------------------
-enum Res[T, E] { ok Ok(T), Err(E) }
-enum IoErr { Eof, Bad }
-enum AppErr { FromIo(IoErr), Denied }
-interface From[E] { fn from(e: E) -> Self; }
-impl From[IoErr] for AppErr { fn from(e: IoErr) -> Self { return AppErr::FromIo(e); } }
-fn read_at(ok: bool) -> Res[i64, IoErr] { if ok { return Res::Ok(42); } return Res::Err(IoErr::Eof); }
-fn decode(ok: bool) -> Res[i64, AppErr] { let n: i64 = read_at(ok)?; return Res::Ok(n + 1); }
-fn is_ok[T, E](r: read Res[T, E]) -> bool { match r { Res::Ok(v) => { return true; } Res::Err(e) => { return false; } } }
+enum Res[T, E] {
+    ok Ok(T),
+    Err(E),
+}
+enum IoErr {
+    Eof,
+    Bad,
+}
+enum AppErr {
+    FromIo(IoErr),
+    Denied,
+}
+interface From[E] {
+    fn from(e: E) -> Self;
+}
+impl From[IoErr] for AppErr {
+    fn from(e: IoErr) -> Self {
+        return AppErr::FromIo(e);
+    }
+}
+fn read_at(ok: bool) -> Res[i64, IoErr] {
+    if ok {
+        return Res::Ok(42);
+    }
+    return Res::Err(IoErr::Eof);
+}
+fn decode(ok: bool) -> Res[i64, AppErr] {
+    let n: i64 = read_at(ok)?;
+    return Res::Ok(n + 1);
+}
+fn is_ok[T, E](r: read Res[T, E]) -> bool {
+    match r {
+        Res::Ok(v) => {
+            return true;
+        },
+        Res::Err(e) => {
+            return false;
+        },
+    }
+}
 
 // -- core::arena -------------------------------------------------------------
-struct Arena[T: copy] { mem: [8]T, count: u32 }
-fn new[T: copy](fill: T) -> Arena[T] { return Arena { mem: [fill, fill, fill, fill, fill, fill, fill, fill], count: 0u32 }; }
-fn push[T: copy](ar: write Arena[T], x: T) -> bool { if ar.*.count >= 8u32 { return false; } let i: u32 = ar.*.count; ar.*.mem[conv usize i] = x; ar.*.count = i + 1u32; return true; }
-fn get[T: copy](ar: read Arena[T], i: u32) -> T { return ar.mem[conv usize i]; }
-fn reset[T: copy](ar: write Arena[T]) -> unit { ar.*.count = 0u32; }
-fn count[T: copy](ar: read Arena[T]) -> u32 { return ar.count; }
-impl[T: copy] Indexed for Arena[T] { type Item = T; fn at(read self, i: usize) -> Opt[T] { if i >= conv usize self.count { return Opt::None; } return Opt::Some(self.mem[i]); } }
+struct Arena[T: copy] {
+    mem: [8]T,
+    count: u32,
+}
+fn new[T: copy](fill: T) -> Arena[T] {
+    return Arena { mem: [fill, fill, fill, fill, fill, fill, fill, fill], count: 0u32 };
+}
+fn push[T: copy](ar: write Arena[T], x: T) -> bool {
+    if ar.count >= 8u32 {
+        return false;
+    }
+    let i: u32 = ar.count;
+    ar.*.mem[conv usize i] = x;
+    ar.*.count = i + 1u32;
+    return true;
+}
+fn get[T: copy](ar: read Arena[T], i: u32) -> T {
+    return ar.mem[conv usize i];
+}
+fn reset[T: copy](ar: write Arena[T]) -> unit {
+    ar.*.count = 0u32;
+}
+fn count[T: copy](ar: read Arena[T]) -> u32 {
+    return ar.count;
+}
+impl[T: copy] Indexed for Arena[T] {
+    type Item = T;
+    fn at(read self, i: usize) -> Opt[T] {
+        if i >= conv usize self.count {
+            return Opt::None;
+        }
+        return Opt::Some(self.mem[i]);
+    }
+}
 
 // -- std::list ---------------------------------------------------------------
-enum List[T] { Nil, Cons(T, Box List[T]) }
-struct Popped[T] { item: Opt[T], rest: List[T] }
-enum Grow[T] { ok Grown(List[T]), GrowOom }
-fn push_front[T](a: read Alloc, l: List[T], x: T) alloc -> Grow[T] { match box(a, l) { BoxResult::oom => { return Grow::GrowOom; } BoxResult::boxed(b) => { return Grow::Grown(List::Cons(x, b)); } } }
-fn pop_front[T](l: List[T]) alloc -> Popped[T] { match l { List::Nil => { return Popped { item: Opt::None, rest: List::Nil }; } List::Cons(x, tail) => { return Popped { item: Opt::Some(x), rest: unbox(tail) }; } } }
-fn length[T](l: read List[T]) -> u32 { match l { List::Nil => { return 0u32; } List::Cons(x, tail) => { return 1u32 + length(read (tail.*.*)); } } }
-struct Cell[T] { boxed: Box T } drop(write self) { trace(0); }
-enum CellRes[T] { ok Made(Cell[T]), CellOom }
-fn cell[T](a: read Alloc, v: T) alloc -> CellRes[T] { match box(a, v) { BoxResult::oom => { return CellRes::CellOom; } BoxResult::boxed(b) => { return CellRes::Made(Cell { boxed: b }); } } }
-fn cell_get[T: copy](c: read Cell[T]) -> T { return c.boxed.*; }
-impl[T] Iter for List[T] { type Item = T; fn next(take self) alloc -> IterStep[T, List[T]] { match self { List::Nil => { return IterStep::Done; } List::Cons(x, tail) => { return IterStep::More(x, unbox(tail)); } } } }
+enum List[T] {
+    Nil,
+    Cons(T, Box List[T]),
+}
+struct Popped[T] {
+    item: Opt[T],
+    rest: List[T],
+}
+enum Grow[T] {
+    ok Grown(List[T]),
+    GrowOom,
+}
+fn push_front[T](a: read Alloc, l: List[T], x: T) alloc -> Grow[T] {
+    match box(a, l) {
+        BoxResult::oom => {
+            return Grow::GrowOom;
+        },
+        BoxResult::boxed(b) => {
+            return Grow::Grown(List::Cons(x, b));
+        },
+    }
+}
+fn pop_front[T](l: List[T]) alloc -> Popped[T] {
+    match l {
+        List::Nil => {
+            return Popped { item: Opt::None, rest: List::Nil };
+        },
+        List::Cons(x, tail) => {
+            return Popped { item: Opt::Some(x), rest: unbox(tail) };
+        },
+    }
+}
+fn length[T](l: read List[T]) -> u32 {
+    match l {
+        List::Nil => {
+            return 0u32;
+        },
+        List::Cons(x, tail) => {
+            return 1u32 + length(read tail.*.*);
+        },
+    }
+}
+struct Cell[T] {
+    boxed: Box T,
+} drop(write self) {
+    trace(0);
+}
+enum CellRes[T] {
+    ok Made(Cell[T]),
+    CellOom,
+}
+fn cell[T](a: read Alloc, v: T) alloc -> CellRes[T] {
+    match box(a, v) {
+        BoxResult::oom => {
+            return CellRes::CellOom;
+        },
+        BoxResult::boxed(b) => {
+            return CellRes::Made(Cell { boxed: b });
+        },
+    }
+}
+fn cell_get[T: copy](c: read Cell[T]) -> T {
+    return c.boxed.*;
+}
+impl[T] Iter for List[T] {
+    type Item = T;
+    fn next(self) alloc -> IterStep[T, List[T]] {
+        match self {
+            List::Nil => {
+                return IterStep::Done;
+            },
+            List::Cons(x, tail) => {
+                return IterStep::More(x, unbox(tail));
+            },
+        }
+    }
+}
 
 fn main() alloc -> i64 {
     let mut ar: Arena[i64] = new(0);
@@ -88,20 +273,54 @@ fn main() alloc -> i64 {
     let s1: Opt[i64] = Opt::Some(1);
     let n1: Opt[i64] = Opt::None;
     let mut ob: i64 = 0;
-    if is_some(read s1) { ob = ob + 10; }
-    if is_none(read n1) { ob = ob + 100; }
+    if is_some(read s1) {
+        ob = ob + 10;
+    }
+    if is_none(read n1) {
+        ob = ob + 100;
+    }
     let ov: i64 = unwrap_or(s1, 0) + unwrap_or(n1, 5);
     let mut dok: i64 = 0;
-    match decode(true) { Res::Ok(v) => { dok = v; } Res::Err(e) => { dok = -1; } }
+    match decode(true) {
+        Res::Ok(v) => {
+            dok = v;
+        },
+        Res::Err(e) => {
+            dok = -1;
+        },
+    }
     let okr: Res[i64, bool] = Res::Ok(9);
     let mut ib: i64 = 0;
-    if is_ok(read okr) { ib = 7; }
+    if is_ok(read okr) {
+        ib = 7;
+    }
     let mut bs: Bump = with_window(16777216, 1048576);
     let al: Alloc = mk_alloc(write bs);
     let mut lst: List[i64] = List::Nil;
-    match push_front(read al, lst, 3) { Grow::Grown(nl) => { lst = nl; } Grow::GrowOom => { return -2; } }
-    match push_front(read al, lst, 1) { Grow::Grown(nl) => { lst = nl; } Grow::GrowOom => { return -2; } }
-    match push_front(read al, lst, 4) { Grow::Grown(nl) => { lst = nl; } Grow::GrowOom => { return -2; } }
+    match push_front(read al, lst, 3) {
+        Grow::Grown(nl) => {
+            lst = nl;
+        },
+        Grow::GrowOom => {
+            return -2;
+        },
+    }
+    match push_front(read al, lst, 1) {
+        Grow::Grown(nl) => {
+            lst = nl;
+        },
+        Grow::GrowOom => {
+            return -2;
+        },
+    }
+    match push_front(read al, lst, 4) {
+        Grow::Grown(nl) => {
+            lst = nl;
+        },
+        Grow::GrowOom => {
+            return -2;
+        },
+    }
     let ln: u32 = length(read lst);
     let pop1: Popped[i64] = pop_front(lst);
     let it: Opt[i64] = pop1.item;
@@ -109,17 +328,42 @@ fn main() alloc -> i64 {
     let popped_val: i64 = unwrap_or(it, 0);
     let rest_len: u32 = length(read rst);
     let mut cv: i64 = 0;
-    match cell(read al, 99) { CellRes::Made(c) => { cv = cell_get(read c); } CellRes::CellOom => { return -3; } }
+    match cell(read al, 99) {
+        CellRes::Made(c) => {
+            cv = cell_get(read c);
+        },
+        CellRes::CellOom => {
+            return -3;
+        },
+    }
     let mut ar3: Arena[i64] = new(0);
     let f0: bool = push(write ar3, 5);
     let f1: bool = push(write ar3, 7);
     let mut arsum: i64 = 0;
-    for x in read ar3 { arsum = arsum + x; }
+    for x in read ar3 {
+        arsum = arsum + x;
+    }
     let mut l2: List[i64] = List::Nil;
-    match push_front(read al, l2, 2) { Grow::Grown(nl) => { l2 = nl; } Grow::GrowOom => { return -4; } }
-    match push_front(read al, l2, 8) { Grow::Grown(nl) => { l2 = nl; } Grow::GrowOom => { return -4; } }
+    match push_front(read al, l2, 2) {
+        Grow::Grown(nl) => {
+            l2 = nl;
+        },
+        Grow::GrowOom => {
+            return -4;
+        },
+    }
+    match push_front(read al, l2, 8) {
+        Grow::Grown(nl) => {
+            l2 = nl;
+        },
+        Grow::GrowOom => {
+            return -4;
+        },
+    }
     let mut listsum: i64 = 0;
-    for v in l2 { listsum = listsum + v; }
+    for v in l2 {
+        listsum = listsum + v;
+    }
     let mapped: Opt[i64] = map(Opt::Some(20), inc);
     let mv: i64 = unwrap_or(mapped, 0);
     return asum + conv i64 acount + conv i64 acount2 + ob + ov + dok + ib + conv i64 ln + popped_val + conv i64 rest_len + cv + arsum + listsum + mv;

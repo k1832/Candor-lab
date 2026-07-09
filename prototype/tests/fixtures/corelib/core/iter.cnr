@@ -15,11 +15,14 @@
 // coll` over an `Indexed` collection is the ground-floor, interrupt-callable walk.
 use core::opt::{Opt};
 
-pub enum IterStep[T, S] { ok More(T, S), Done }
+pub enum IterStep[T, S] {
+    ok More(T, S),
+    Done,
+}
 
 pub interface Iter {
     type Item;
-    fn next(take self) alloc -> IterStep[Item, Self];
+    fn next(self) alloc -> IterStep[Item, Self];
 }
 
 pub interface Indexed {

@@ -1,4 +1,11 @@
 // Naming a generic function as a value with `name::[T]` (0007 §6.2.1).
-fn dbl[T: copy](x: T) -> T { return x; }
-fn apply(f: fn(i64) -> i64, v: i64) -> i64 { return f(v); }
-fn main() -> i64 { let g: fn(i64) -> i64 = dbl::[i64]; return apply(g, 8); }
+fn dbl[T: copy](x: T) -> T {
+    return x;
+}
+fn apply(f: fn(i64) -> i64, v: i64) -> i64 {
+    return f(v);
+}
+fn main() -> i64 {
+    let g: fn(i64) -> i64 = dbl::[i64];
+    return apply(g, 8);
+}

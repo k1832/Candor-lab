@@ -287,6 +287,7 @@ impl Counter {
 
     fn expr(&mut self, e: &Expr) {
         match &e.kind {
+            ExprKind::For { .. } => unreachable!("`for` is surface-only (formatter); the pipeline desugars it at parse (design 0009 §4.2)"),
             ExprKind::IntLit { .. }
             | ExprKind::NegIntLit { .. }
             | ExprKind::StrLit(_)

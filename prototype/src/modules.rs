@@ -783,6 +783,7 @@ impl<'a> Rewriter<'a> {
             }
         }
         match &mut expr.kind {
+            ExprKind::For { .. } => unreachable!("`for` is surface-only (formatter); the pipeline desugars it at parse (design 0009 §4.2)"),
             ExprKind::Ident(n) => {
                 if !is_local(locals, n) {
                     if let Some(g) = self.scope.value_scope.get(n) {

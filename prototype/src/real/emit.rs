@@ -25,19 +25,19 @@ use crate::token::ScalarTy;
 
 // Binding powers (bigger binds tighter), mirroring spec 02 §6.1. Used to add
 // exactly the parentheses the canonical precedence makes load-bearing.
-const BP_MIN: u32 = 0;
-const BP_OR: u32 = 30;
-const BP_AND: u32 = 35;
-const BP_CMP: u32 = 40;
-const BP_BITOR: u32 = 45;
-const BP_BITXOR: u32 = 50;
-const BP_BITAND: u32 = 55;
-const BP_SHIFT: u32 = 60;
-const BP_ADD: u32 = 65;
-const BP_MUL: u32 = 70;
-const BP_PREFIX: u32 = 80;
-const BP_POSTFIX: u32 = 90;
-const BP_ATOM: u32 = 100;
+pub(crate) const BP_MIN: u32 = 0;
+pub(crate) const BP_OR: u32 = 30;
+pub(crate) const BP_AND: u32 = 35;
+pub(crate) const BP_CMP: u32 = 40;
+pub(crate) const BP_BITOR: u32 = 45;
+pub(crate) const BP_BITXOR: u32 = 50;
+pub(crate) const BP_BITAND: u32 = 55;
+pub(crate) const BP_SHIFT: u32 = 60;
+pub(crate) const BP_ADD: u32 = 65;
+pub(crate) const BP_MUL: u32 = 70;
+pub(crate) const BP_PREFIX: u32 = 80;
+pub(crate) const BP_POSTFIX: u32 = 90;
+pub(crate) const BP_ATOM: u32 = 100;
 
 /// Emit a whole program in real (`.cnr`) surface syntax.
 pub fn emit_program(p: &Program) -> String {
@@ -777,7 +777,7 @@ impl Emitter {
 // ----- helpers ------------------------------------------------------------
 
 /// Peel `Paren` layers off an expression.
-fn strip_paren(e: &Expr) -> &Expr {
+pub(crate) fn strip_paren(e: &Expr) -> &Expr {
     let mut cur = e;
     while let ExprKind::Paren(inner) = &cur.kind {
         cur = inner;
@@ -787,14 +787,14 @@ fn strip_paren(e: &Expr) -> &Expr {
 
 /// If `e` (paren-stripped) is a bare dereference `deref X`, return the dereffed
 /// operand `X`; otherwise `None`. Used for auto-deref and reborrow collapse.
-fn as_deref_inner(e: &Expr) -> Option<&Expr> {
+pub(crate) fn as_deref_inner(e: &Expr) -> Option<&Expr> {
     match &strip_paren(e).kind {
         ExprKind::Prefix { op: PrefixOp::Deref, expr } => Some(strip_paren(expr)),
         _ => None,
     }
 }
 
-fn is_block_like(kind: &ExprKind) -> bool {
+pub(crate) fn is_block_like(kind: &ExprKind) -> bool {
     matches!(
         kind,
         ExprKind::Block(_)
@@ -816,7 +816,7 @@ fn is_boxresult_ladder(arms: &[MatchArm]) -> bool {
     })
 }
 
-fn scalar_kw(sc: ScalarTy) -> &'static str {
+pub(crate) fn scalar_kw(sc: ScalarTy) -> &'static str {
     match sc {
         ScalarTy::I8 => "i8",
         ScalarTy::I16 => "i16",
@@ -833,7 +833,7 @@ fn scalar_kw(sc: ScalarTy) -> &'static str {
     }
 }
 
-fn bin_bp(op: BinOp) -> u32 {
+pub(crate) fn bin_bp(op: BinOp) -> u32 {
     match op {
         BinOp::Or => BP_OR,
         BinOp::And => BP_AND,
@@ -847,7 +847,7 @@ fn bin_bp(op: BinOp) -> u32 {
     }
 }
 
-fn bin_sym(op: BinOp) -> &'static str {
+pub(crate) fn bin_sym(op: BinOp) -> &'static str {
     match op {
         BinOp::Add => "+",
         BinOp::Sub => "-",

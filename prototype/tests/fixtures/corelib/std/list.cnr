@@ -28,22 +28,35 @@ use core::opt::{Opt};
 use core::iter::{Iter, IterStep};
 use std::alloc::{Alloc};
 
-pub enum List[T] { Nil, Cons(T, Box List[T]) }
+pub enum List[T] {
+    Nil,
+    Cons(T, Box List[T]),
+}
 
 // value-semantics: with no in-place mutation of an owned linked structure (no
 // swap; E0310 forbids moving the head out through a borrow), `pop_front`
 // consumes the list and returns the popped item alongside the shrunk rest.
-pub struct Popped[T] { item: Opt[T], rest: List[T] }
+pub struct Popped[T] {
+    item: Opt[T],
+    rest: List[T],
+}
 
 // prepend result: `Grown` is `ok`-marked; OOM is a value (design 0001 §6.2).
-pub enum Grow[T] { ok Grown(List[T]), GrowOom }
+pub enum Grow[T] {
+    ok Grown(List[T]),
+    GrowOom,
+}
 
 // `alloc`-marked because it calls `box` (unconditional, §4.1). The old list is
 // boxed WHOLE (a full move — never a partial move) and `x` is prepended.
 pub fn push_front[T](a: read Alloc, l: List[T], x: T) alloc -> Grow[T] {
     match box(a, l) {
-        BoxResult::oom => { return Grow::GrowOom; }
-        BoxResult::boxed(b) => { return Grow::Grown(List::Cons(x, b)); }
+        BoxResult::oom => {
+            return Grow::GrowOom;
+        },
+        BoxResult::boxed(b) => {
+            return Grow::Grown(List::Cons(x, b));
+        },
     }
 }
 
@@ -53,10 +66,10 @@ pub fn pop_front[T](l: List[T]) alloc -> Popped[T] {
     match l {
         List::Nil => {
             return Popped { item: Opt::None, rest: List::Nil };
-        }
+        },
         List::Cons(x, tail) => {
             return Popped { item: Opt::Some(x), rest: unbox(tail) };
-        }
+        },
     }
 }
 
@@ -65,8 +78,12 @@ pub fn pop_front[T](l: List[T]) alloc -> Popped[T] {
 // built-in slice-length intrinsic returning `usize`.)
 pub fn length[T](l: read List[T]) -> u32 {
     match l {
-        List::Nil => { return 0u32; }
-        List::Cons(x, tail) => { return 1u32 + length(read (tail.*.*)); }
+        List::Nil => {
+            return 0u32;
+        },
+        List::Cons(x, tail) => {
+            return 1u32 + length(read tail.*.*);
+        },
     }
 }
 
@@ -75,17 +92,30 @@ pub fn length[T](l: read List[T]) -> u32 {
 // bug above does not apply); the hook runs before the structural `Box` free, so
 // `Cell` is alloc-on-drop and a non-alloc consumer dropping it is E0401-taxed,
 // exactly like `List`. `Cell` is never taken apart, so the hook and E0303 coexist.
-pub struct Cell[T] { boxed: Box T } drop(write self) { trace(0); }
-pub enum CellRes[T] { ok Made(Cell[T]), CellOom }
+pub struct Cell[T] {
+    boxed: Box T,
+} drop(write self) {
+    trace(0);
+}
+pub enum CellRes[T] {
+    ok Made(Cell[T]),
+    CellOom,
+}
 
 pub fn cell[T](a: read Alloc, v: T) alloc -> CellRes[T] {
     match box(a, v) {
-        BoxResult::oom => { return CellRes::CellOom; }
-        BoxResult::boxed(b) => { return CellRes::Made(Cell { boxed: b }); }
+        BoxResult::oom => {
+            return CellRes::CellOom;
+        },
+        BoxResult::boxed(b) => {
+            return CellRes::Made(Cell { boxed: b });
+        },
     }
 }
 
-pub fn cell_get[T: copy](c: read Cell[T]) -> T { return c.boxed.*; }
+pub fn cell_get[T: copy](c: read Cell[T]) -> T {
+    return c.boxed.*;
+}
 
 // core/iter (design 0009 §8.1): `List` consumption replaces the open-coded
 // recursion. `next(take self)` generalizes the proven `pop_front` — it consumes
@@ -94,10 +124,14 @@ pub fn cell_get[T: copy](c: read Cell[T]) -> T { return c.boxed.*; }
 // in list` inherits `alloc`: consuming iteration is never the ground floor.
 impl[T] Iter for List[T] {
     type Item = T;
-    fn next(take self) alloc -> IterStep[T, List[T]] {
+    fn next(self) alloc -> IterStep[T, List[T]] {
         match self {
-            List::Nil => { return IterStep::Done; }
-            List::Cons(x, tail) => { return IterStep::More(x, unbox(tail)); }   // pop_front, generalized
+            List::Nil => {
+                return IterStep::Done;
+            },
+            List::Cons(x, tail) => {
+                return IterStep::More(x, unbox(tail)); // pop_front, generalized
+            },
         }
     }
 }

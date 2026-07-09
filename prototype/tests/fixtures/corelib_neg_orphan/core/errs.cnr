@@ -1,2 +1,6 @@
-pub enum IoErr { Eof }
-pub enum AppErr { FromIo(IoErr) }
+pub enum IoErr {
+    Eof,
+}
+pub enum AppErr {
+    FromIo(IoErr),
+}

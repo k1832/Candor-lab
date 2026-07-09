@@ -15,6 +15,7 @@
 //! pretty-printer (design 0006 §5), used by `candor-proto migrate`.
 
 pub mod emit;
+pub mod fmt;
 pub mod lexer;
 pub mod parser;
 pub mod token;

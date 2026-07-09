@@ -1,7 +1,16 @@
 // A generic struct `drop` hook runs at the static drop point of each instance; a
 // nested `Wrap[Noisy]` drops the hook then the field (design 0007 §3.4).
-struct Noisy { id: i64 } drop(write self) { trace(self.id); }
-struct Wrap[T] { inner: T, tag: i64 } drop(write self) { trace(self.tag); }
+struct Noisy {
+    id: i64,
+} drop(write self) {
+    trace(self.id);
+}
+struct Wrap[T] {
+    inner: T,
+    tag: i64,
+} drop(write self) {
+    trace(self.tag);
+}
 fn main() -> i64 {
     let w: Wrap[Noisy] = Wrap { inner: Noisy { id: 1 }, tag: 2 };
     return 0;

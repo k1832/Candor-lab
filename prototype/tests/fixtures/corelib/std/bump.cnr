@@ -6,7 +6,10 @@
 // cannot verify (design 0001 §6.1).
 use std::alloc::{Alloc, AllocVtable};
 
-pub struct Bump { next: usize, end: usize }
+pub struct Bump {
+    next: usize,
+    end: usize,
+}
 
 // the caller reserves the backing window `[base, base + size)` — a region of the
 // flat address space handed to this arena alone.
@@ -18,14 +21,16 @@ fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
     unsafe "ctx points at the live Bump whose [next, end) window is reserved to this arena alone (no other code hands out addresses from it); the carved block stays inside [next, end)" {
         let b: Bump = ptr_read(cast_ptr[Bump](ctx));
         let aligned: usize = (b.next + align - 1) / align * align;
-        if aligned + size > b.end { return ptr_null[u8](); }
+        if aligned + size > b.end {
+            return ptr_null[u8]();
+        }
         ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
         return addr_to_ptr[u8](aligned);
     }
 }
 
 // a bump arena never frees an individual block; it dies with its window.
-fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit { }
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {}
 
 static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
 

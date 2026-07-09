@@ -189,6 +189,17 @@ pub fn migrate_source(src: &str) -> Result<String, Diag> {
     Ok(real::emit::emit_program(&program))
 }
 
+// ---------------------------------------------------------------------------
+// Blessed formatter (P16 / NN#11): parse real (`.cnr`) syntax and re-print it in
+// the one canonical form, preserving comments (spec 02 §9; design 0006 §4).
+// ---------------------------------------------------------------------------
+
+/// Format a real-syntax (`.cnr`) source string into canonical form. Returns the
+/// formatted text or the parse `Diag`. Idempotent (`format(format(x)) == format(x)`).
+pub fn format_source_real(src: &str) -> Result<String, Diag> {
+    real::fmt::format_source(src)
+}
+
 
 // ---------------------------------------------------------------------------
 // Stage A — the MIR interpreter as an alternate execution engine (design 0010

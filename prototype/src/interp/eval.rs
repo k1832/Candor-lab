@@ -672,6 +672,7 @@ impl<'a> Interp<'a> {
     fn eval_value(&mut self, e: &Expr, expected: Option<&Type>) -> R<RVal> {
         self.cur_span = e.span;
         match &e.kind {
+            ExprKind::For { .. } => unreachable!("`for` is surface-only (formatter); the pipeline desugars it at parse (design 0009 §4.2)"),
             ExprKind::Paren(i) => self.eval_value(i, expected),
             ExprKind::OutArg(i) => self.eval_value(i, expected),
             ExprKind::GenericVal { .. } => {

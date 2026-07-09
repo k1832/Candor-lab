@@ -1,4 +1,6 @@
 use a::{a_val};
 use b::{b_val};
 
-fn main() -> i64 { return a_val() + b_val(); }
+fn main() -> i64 {
+    return a_val() + b_val();
+}

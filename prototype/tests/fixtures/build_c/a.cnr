@@ -1,3 +1,5 @@
 use base::{f};
 
-pub fn a_val() -> i64 { return f(10); }
+pub fn a_val() -> i64 {
+    return f(10);
+}

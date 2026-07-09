@@ -1,10 +1,26 @@
 // A bounded generic impl: the method body calls a bound method on the opaque `T`.
-interface Show { fn show(read self) -> i64; }
-interface Weighable { fn weight(read self) -> i64; }
-struct Cell { n: i64 }
-impl Show for Cell { fn show(read self) -> i64 { return self.n; } }
-struct Wrap[T] { inner: T }
-impl[T: Show] Weighable for Wrap[T] { fn weight(read self) -> i64 { return self.inner.show() + 100; } }
+interface Show {
+    fn show(read self) -> i64;
+}
+interface Weighable {
+    fn weight(read self) -> i64;
+}
+struct Cell {
+    n: i64,
+}
+impl Show for Cell {
+    fn show(read self) -> i64 {
+        return self.n;
+    }
+}
+struct Wrap[T] {
+    inner: T,
+}
+impl[T: Show] Weighable for Wrap[T] {
+    fn weight(read self) -> i64 {
+        return self.inner.show() + 100;
+    }
+}
 fn main() -> i64 {
     let w: Wrap[Cell] = Wrap { inner: Cell { n: 5 } };
     return w.weight();

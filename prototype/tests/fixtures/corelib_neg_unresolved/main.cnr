@@ -1,3 +1,5 @@
 // `unwrap_or` is not exported by `core::opt` — the import does not resolve (E0902).
 use core::opt::{Opt, unwrap_or};
-fn main() -> i64 { return 0; }
+fn main() -> i64 {
+    return 0;
+}

@@ -518,6 +518,14 @@ pub enum ExprKind {
     /// `name::[T, ...]` — a generic function named as a *value* with explicit
     /// type arguments (design 0007 §6.2.1). Only in value positions.
     GenericVal { name: String, ty_args: Vec<Ty> },
+
+    /// `for PATTERN in OPERAND { BODY }` (design 0009 §4; spec 02 §8.3).
+    /// **Surface-only:** produced *solely* by the formatter's surface parse
+    /// (`preserve_for`); the normal real-syntax pipeline desugars `for` into a
+    /// `loop`+`match` at parse time (design 0009 §4.2), so the checker /
+    /// interpreter / MIR never see this node. It exists only so the blessed
+    /// formatter can reproduce the canonical `for` spelling (NN#11).
+    For { pattern: Pattern, operand: Box<Expr>, body: Block },
 }
 
 // ---------------------------------------------------------------------------

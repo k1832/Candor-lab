@@ -1,8 +1,14 @@
 // Golden (real syntax): `?` propagation on an `ok`-marked result enum, explicit
 // `.*` writes, read auto-deref, reborrow, and `match` without `case`.
-struct Acc { total: i64, count: i64 }
+struct Acc {
+    total: i64,
+    count: i64,
+}
 
-enum Step { ok Cont(i64), Stop }
+enum Step {
+    ok Cont(i64),
+    Stop,
+}
 
 fn advance(a: write Acc, delta: i64) -> Step {
     a.*.total = a.total + delta;

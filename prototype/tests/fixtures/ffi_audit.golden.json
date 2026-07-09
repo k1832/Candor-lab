@@ -14,8 +14,8 @@
           "trust": {
             "justification": "POSIX 7: reads bytes to a NUL, retains nothing, no thread state",
             "span": {
-              "start": 74,
-              "end": 220
+              "start": 66,
+              "end": 212
             },
             "predicates": [
               {
@@ -24,8 +24,8 @@
                   "s"
                 ],
                 "span": {
-                  "start": 160,
-                  "end": 183
+                  "start": 152,
+                  "end": 175
                 }
               },
               {
@@ -34,8 +34,8 @@
                   "s"
                 ],
                 "span": {
-                  "start": 197,
-                  "end": 209
+                  "start": 189,
+                  "end": 201
                 }
               }
             ]

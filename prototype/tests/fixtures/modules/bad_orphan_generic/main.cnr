@@ -3,5 +3,11 @@
 // module (`list`) or the interface's declaration module (`shape`).
 use shape::{Weighable};
 use list::{List};
-impl[T] Weighable for List[T] { fn weight(read self) -> i64 { return self.w; } }
-fn main() -> i64 { return 0; }
+impl[T] Weighable for List[T] {
+    fn weight(read self) -> i64 {
+        return self.w;
+    }
+}
+fn main() -> i64 {
+    return 0;
+}

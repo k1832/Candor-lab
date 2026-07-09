@@ -16,19 +16,30 @@
 //       off the core ground floor.
 // A capturing closure would let a fold/map thread a transform by value; its
 // absence is the corelib's headline friction, recorded for OBL-GENERICS-ITER.
-pub enum Opt[T] { ok Some(T), None }
+pub enum Opt[T] {
+    ok Some(T),
+    None,
+}
 
 pub fn is_some[T](o: read Opt[T]) -> bool {
     match o {
-        Opt::Some(v) => { return true; }
-        Opt::None => { return false; }
+        Opt::Some(v) => {
+            return true;
+        },
+        Opt::None => {
+            return false;
+        },
     }
 }
 
 pub fn is_none[T](o: read Opt[T]) -> bool {
     match o {
-        Opt::Some(v) => { return false; }
-        Opt::None => { return true; }
+        Opt::Some(v) => {
+            return false;
+        },
+        Opt::None => {
+            return true;
+        },
     }
 }
 
@@ -36,8 +47,12 @@ pub fn is_none[T](o: read Opt[T]) -> bool {
 // by value, and `copy` makes `Opt[T]` drop-inert so this stays non-`alloc`.
 pub fn unwrap_or[T: copy](o: Opt[T], d: T) -> T {
     match o {
-        Opt::Some(v) => { return v; }
-        Opt::None => { return d; }
+        Opt::Some(v) => {
+            return v;
+        },
+        Opt::None => {
+            return d;
+        },
     }
 }
 
@@ -49,7 +64,11 @@ pub fn unwrap_or[T: copy](o: Opt[T], d: T) -> T {
 // travels as an explicit context value, not a hidden environment (§5.1/§5.2).
 pub fn map[T, U](o: Opt[T], f: fn(T) -> U) -> Opt[U] {
     match o {
-        Opt::Some(v) => { return Opt::Some(f(v)); }
-        Opt::None => { return Opt::None; }
+        Opt::Some(v) => {
+            return Opt::Some(f(v));
+        },
+        Opt::None => {
+            return Opt::None;
+        },
     }
 }

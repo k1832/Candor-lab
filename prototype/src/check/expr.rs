@@ -15,6 +15,7 @@ use super::{Checker, Use};
 impl<'a> Checker<'a> {
     pub(super) fn check_expr(&mut self, e: &Expr, u: Use) -> Type {
         match &e.kind {
+            ExprKind::For { .. } => unreachable!("`for` is surface-only (formatter); the pipeline desugars it at parse (design 0009 §4.2)"),
             ExprKind::Ident(_)
             | ExprKind::Field { .. }
             | ExprKind::Index { .. }
