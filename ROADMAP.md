@@ -39,3 +39,16 @@ ground), its largest P19 corpus, and its credibility proof — gated on std, not
 - Corpus scale-up; per-edition regeneration.
 - Self-hosted checker (after text + I/O).
 - Stability-gate proceedings (1.0) when the checklist clears.
+
+## Self-hosting arc — STARTED 2026-07-09
+
+Ruling: port onto the interpreter first (AOT extern lowering deferred; a self-hosted checker runs
+on the tree-walker, which is a validated engine). Order and gates:
+1. **Lexer + parser** (this slice): a Candor .cnr program that lexes and parses Candor source to
+   a canonical AST S-expression, gated by S-expr equality against the Rust front-end over the
+   whole corpus (the differential methodology; the Rust parser is the oracle).
+2. Type checker for the scalar+aggregate core, oracle = the Rust checker's diagnostics.
+3. The analyses (move/init, loans, effects), each oracle-gated.
+4. Generics, concurrency, text — the frontier.
+The Rust implementation remains the permanent bootstrap and oracle. Each slice is a driver: the
+Candor port reads source via the std/io module, emits its result, the harness diffs it.
