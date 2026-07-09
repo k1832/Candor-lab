@@ -924,6 +924,10 @@ impl Fmt<'_> {
                 }
             }
             ExprKind::StrLit(s) => self.emit_string(s),
+            ExprKind::BytesLit(s) => {
+                self.push("b");
+                self.emit_string(s);
+            }
             ExprKind::BoolLit(b) => self.push(if *b { "true" } else { "false" }),
             ExprKind::Ident(n) => self.push(n),
             ExprKind::Result => self.push("result"),

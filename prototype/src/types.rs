@@ -56,6 +56,12 @@ pub enum Type {
     Array(Box<Type>, ArrayLen),
     Slice(Box<Type>),
     SliceMut(Box<Type>),
+    /// `str` (design 0013): an immutable, borrowed, allocation-free view of a run
+    /// of bytes guaranteed to be well-formed UTF-8. Shaped exactly like `Slice(u8)`
+    /// (a shared pointer-and-length borrow) but a DISTINCT typed refinement — no
+    /// implicit coercion to/from `[u8]` (P2). A borrow-kind (§3.4-banned as a
+    /// field); `portable` via its `u8` referent (0012).
+    Str,
     RawPtr(Box<Type>),
     Box(Box<Type>),
     BoxResult(Box<Type>),
@@ -83,7 +89,11 @@ impl Type {
     pub fn is_borrow_kind(&self) -> bool {
         matches!(
             self,
-            Type::Slice(_) | Type::SliceMut(_) | Type::Borrow(_) | Type::BorrowMut(_)
+            Type::Slice(_)
+                | Type::SliceMut(_)
+                | Type::Str
+                | Type::Borrow(_)
+                | Type::BorrowMut(_)
         )
     }
 
@@ -108,6 +118,7 @@ impl Type {
                 ArrayLen::Named(n) => format!("[{n}]{}", e.display()),
                 ArrayLen::Unknown => format!("[_]{}", e.display()),
             },
+            Type::Str => "str".to_string(),
             Type::Slice(e) => format!("slice {}", e.display()),
             Type::SliceMut(e) => format!("slice_mut {}", e.display()),
             Type::RawPtr(e) => format!("rawptr {}", e.display()),
@@ -292,6 +303,7 @@ fn is_copy_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> bool {
         Type::RawPtr(_) => true,
         Type::Borrow(_) => true,
         Type::Slice(_) => true,
+        Type::Str => true,
         Type::FnPtr(_) => true,
         Type::Never | Type::Error => true,
         Type::BorrowMut(_) | Type::SliceMut(_) | Type::Box(_) | Type::BoxResult(_) => false,
@@ -424,6 +436,9 @@ fn is_portable_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> boo
         // The two non-portable leaves: a raw pointer, and any borrow/slice.
         Type::RawPtr(_) => false,
         Type::Borrow(_) | Type::BorrowMut(_) | Type::Slice(_) | Type::SliceMut(_) => false,
+        // `str`'s referent is a run of `u8` (portable), so a `str` shares into a
+        // scoped task exactly like any `[u8]` (design 0013 §5 / 0012 borrow branch).
+        Type::Str => true,
         // A fn-pointer is a portable LEAF: do not descend into the signature.
         Type::FnPtr(_) => true,
         Type::Never | Type::Error => true,
@@ -477,7 +492,7 @@ pub fn non_portable_witness(ty: &Type, env: &dyn ItemEnv) -> Option<Type> {
 
 fn non_portable_witness_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> Option<Type> {
     match ty {
-        Type::Scalar(_) | Type::IntLit | Type::FnPtr(_) | Type::Never | Type::Error => None,
+        Type::Scalar(_) | Type::IntLit | Type::Str | Type::FnPtr(_) | Type::Never | Type::Error => None,
         Type::RawPtr(_)
         | Type::Borrow(_)
         | Type::BorrowMut(_)
@@ -659,7 +674,7 @@ fn bears_box_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> bool 
 /// borrows too. `Box`/`rawptr` indirection is fine (they are not borrows).
 pub fn field_stores_borrow(ty: &Type) -> bool {
     match ty {
-        Type::Slice(_) | Type::SliceMut(_) | Type::Borrow(_) | Type::BorrowMut(_) => true,
+        Type::Slice(_) | Type::SliceMut(_) | Type::Str | Type::Borrow(_) | Type::BorrowMut(_) => true,
         Type::Array(elem, _) => field_stores_borrow(elem),
         _ => false,
     }
@@ -684,6 +699,7 @@ pub fn assignable(from: &Type, to: &Type) -> bool {
         (Type::Array(a, la), Type::Array(b, lb)) => {
             assignable(a, b) && (la == lb || matches!(la, ArrayLen::Unknown) || matches!(lb, ArrayLen::Unknown))
         }
+        (Type::Str, Type::Str) => true,
         (Type::Slice(a), Type::Slice(b)) => assignable(a, b),
         (Type::SliceMut(a), Type::SliceMut(b)) => assignable(a, b),
         (Type::RawPtr(a), Type::RawPtr(b)) => assignable(a, b),

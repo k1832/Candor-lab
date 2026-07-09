@@ -293,6 +293,7 @@ impl Counter {
             ExprKind::IntLit { .. }
             | ExprKind::NegIntLit { .. }
             | ExprKind::StrLit(_)
+            | ExprKind::BytesLit(_)
             | ExprKind::BoolLit(_)
             | ExprKind::Ident(_)
             | ExprKind::GenericVal { .. }

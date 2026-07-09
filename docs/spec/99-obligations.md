@@ -356,3 +356,13 @@ KEYWORD-GRAM discharged** and **OBL-MINMAX-INTRINSICS re-scoped** (open, deferre
 to the real-toolchain gate) per the entries above. The OBL-SLICE-REGION ledger
 keeps the retired prototype spelling `slice[r] T` / `slice_mut[r] T` as a
 historical record, not a live spelling.
+
+## OBL-TEXT-RESULT (found by text implementation, 2026-07-09)
+
+Design 0013's str_from must return a Result carrying a str (a borrow), but §3.4/E0201 bans a
+borrow in an enum payload. The prototype resolved it with a compiler-known transient
+Utf8Res { ok Valid(str), Invalid(usize) } destructured immediately. A genuine tension: either
+§3.4 gains a borrow-in-payload-if-immediately-consumed relaxation (analysis-heavy), or fallible
+validation-returning-a-view is always compiler-known (the current honest state), or str_from
+returns the offset and the caller re-forms the view. Design decision deferred; the prototype's
+transient-type approach is sound meanwhile. Gate: a general library str_from.

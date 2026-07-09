@@ -441,6 +441,10 @@ pub enum ExprKind {
     /// only by the real front-end, which range-checks it against its type.
     NegIntLit { value: u64, suffix: Option<ScalarTy> },
     StrLit(String),
+    /// `b"..."` — a byte-string literal (design 0013): denotes a `[u8]` view over
+    /// the raw UTF-8 bytes of the source content. The genuinely-binary escape
+    /// hatch, now that `"..."` (`StrLit`) is `str`.
+    BytesLit(String),
     BoolLit(bool),
     Ident(String),
 

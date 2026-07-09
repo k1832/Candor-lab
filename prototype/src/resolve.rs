@@ -225,6 +225,7 @@ impl<'a> Resolver<'a> {
     fn resolve_ty(&mut self, ty: &Ty) -> Type {
         match &ty.kind {
             TyKind::Scalar(s) => Type::Scalar(*s),
+            TyKind::Named(n) if n == "str" => Type::Str,
             TyKind::Named(n) => {
                 if self.type_names.contains(n) {
                     Type::Named(n.clone())
@@ -350,6 +351,55 @@ pub fn resolve_program(prog: &Program, diags: &mut Vec<Diag>) -> Items {
             span: crate::span::Span::point(0),
         },
     );
+    // The compiler-known text result type (design 0013 §4): `str_from` returns
+    // `Utf8Res::Valid(str)` or `Utf8Res::Invalid(usize)` (the byte offset of the
+    // first ill-formed sequence). It is compiler-provided, not user-declarable —
+    // its `Valid(str)` payload is a borrow, which §3.4/E0201 bans in a USER enum;
+    // the result exists precisely to hand a validated view straight back, so the
+    // borrow lives only in this transient, immediately-destructured result. This
+    // is the prototype realization of the design's `Result[str, Utf8Error]`.
+    type_names.insert("Utf8Res".to_string());
+    items.enums.insert(
+        "Utf8Res".to_string(),
+        crate::types::EnumTy {
+            copy: false,
+            variants: vec![
+                crate::types::VariantTy { name: "Valid".to_string(), payload: vec![crate::types::Type::Str] },
+                crate::types::VariantTy { name: "Invalid".to_string(), payload: vec![crate::types::Type::usize()] },
+            ],
+            ok_variant: Some("Valid".to_string()),
+            span: crate::span::Span::point(0),
+        },
+    );
+    // The std owning, growable text type (design 0013 §1.2). Compiler-known in the
+    // prototype (DECISION: the in-language form needs a growable heap buffer, but
+    // the `Alloc` vtable exposes no `realloc` and in-language UTF-8 encoding +
+    // `enforced requires` over a raw buffer is beyond the current builtin surface —
+    // so `String` is the honest compiler-known fallback the design sanctions). It is
+    // allocator-explicit: `string_new(read Alloc)` threads the handle, and growth
+    // runs through the handle's vtable. Layout: buf/len/cap + the carried allocator
+    // (ctx, vt). `has_drop` (frees `buf`) + `alloc_on_drop`; the `rawptr` fields make
+    // it non-`portable`, exactly like every allocator-bearing owned value (0012).
+    type_names.insert("String".to_string());
+    {
+        let rp = || crate::types::Type::RawPtr(Box::new(crate::types::Type::Scalar(crate::token::ScalarTy::U8)));
+        items.structs.insert(
+            "String".to_string(),
+            crate::types::StructTy {
+                copy: false,
+                has_drop: true,
+                alloc_on_drop: true,
+                fields: vec![
+                    ("buf".to_string(), rp()),
+                    ("len".to_string(), crate::types::Type::usize()),
+                    ("cap".to_string(), crate::types::Type::usize()),
+                    ("ctx".to_string(), rp()),
+                    ("vt".to_string(), rp()),
+                ],
+                span: crate::span::Span::point(0),
+            },
+        );
+    }
     {
         let mut r = Resolver {
             type_names: &type_names,

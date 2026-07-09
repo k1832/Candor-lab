@@ -85,6 +85,13 @@ impl<'a> Lexer<'a> {
         let b = self.peek().expect("caller guarantees a byte");
 
         // identifiers / keywords / scalar types
+        // `b"..."` byte-string literal (design 0013): a `b` IMMEDIATELY followed
+        // by `"` opens a byte string; a `b` followed by anything else is an
+        // identifier (one char of lookahead, NN#13).
+        if b == b'b' && self.peek2() == Some(b'"') {
+            self.pos += 1; // consume `b`
+            return self.lex_string(start, true);
+        }
         if is_ident_start(b) {
             return Ok(self.lex_ident(start));
         }
@@ -94,7 +101,7 @@ impl<'a> Lexer<'a> {
         }
         // strings
         if b == b'"' {
-            return self.lex_string(start);
+            return self.lex_string(start, false);
         }
 
         // punctuation & operators
@@ -241,7 +248,7 @@ impl<'a> Lexer<'a> {
         })
     }
 
-    fn lex_string(&mut self, start: usize) -> Result<Token, Diag> {
+    fn lex_string(&mut self, start: usize, is_bytes: bool) -> Result<Token, Diag> {
         self.pos += 1; // opening quote
         let mut buf = String::new();
         loop {
@@ -255,8 +262,9 @@ impl<'a> Lexer<'a> {
                 }
                 Some(b'"') => {
                     self.pos += 1;
+                    let kind = if is_bytes { TokKind::Bytes(buf) } else { TokKind::Str(buf) };
                     return Ok(Token {
-                        kind: TokKind::Str(buf),
+                        kind,
                         span: Span::new(start, self.pos),
                     });
                 }
@@ -281,7 +289,12 @@ impl<'a> Lexer<'a> {
                     self.pos += 1;
                 }
                 Some(b) => {
-                    buf.push(b as char);
+                    // Preserve the raw source byte so multibyte UTF-8 in a string
+                    // literal survives intact (design 0013: a `"..."` literal's bytes
+                    // ARE its UTF-8 encoding). `b as char` would re-encode each byte
+                    // as a codepoint, corrupting non-ASCII text. Escapes above only
+                    // add ASCII, so `buf` stays well-formed UTF-8.
+                    unsafe { buf.as_mut_vec().push(b); }
                     self.pos += 1;
                 }
             }

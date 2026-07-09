@@ -12,7 +12,12 @@ interop). Builds on 0006 §3.5/§8.3 (string literals produce `[u8]`; "there is 
 string type in this edition"), 0008 §5 (core/std package layering), 0009
 (`Iter`/`Indexed` iteration), 0011 §1 (C `char *` maps to `rawptr u8` +
 `valid_nul_terminated` contract), 0012 §2.2 (`portable`).
-**Prototype:** not yet implemented; §7 is the stage plan. This document
+**Prototype:** Stage 1 (`str` in core: `"..."`->`str` / `b"..."`->`[u8]` literals,
+byte `len`/index/compare, boundary-faulting `substr`, `as_bytes`, `str_from`->`Utf8Res`,
+`str_from_unchecked`, and `Indexed` byte iteration) and Stage 2 (`String` builder:
+`string_new`/`push`/`append`/`as_str`) are implemented in the checker + tree-walk
+oracle; `String` is compiler-known (§7 note), and char iteration / `char_count`
+remain deferred as OBL-TEXT-CHARS. §7 is the stage plan. This document
 discharges 0006 §7's deferral ("the text-type budget beyond `[u8]`") and spec
 §8.3 / chapter 99's standing obligation **OBL-TEXT**.
 

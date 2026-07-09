@@ -788,6 +788,25 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> Option<Type> {
         let recv_ty = self.synth_arg_type(base);
+        // Byte iteration over `str`/`[u8]` (design 0013 §3): a str/byte-slice
+        // receiver answers the ground-floor `Indexed` method `at(read self, i) ->
+        // Opt[u8]` (0009), so `for b in read s` yields `u8`. Wired directly (str is
+        // not a nominal that can host an impl); the program supplies the ground-floor
+        // `Opt` enum the `for`-desugar names.
+        if method == "at" {
+            let is_byteview = matches!(&recv_ty, crate::types::Type::Str)
+                || matches!(&recv_ty, crate::types::Type::Slice(e) if matches!(**e, crate::types::Type::Scalar(crate::token::ScalarTy::U8)));
+            if is_byteview {
+                self.check_expr(base, Use::BorrowShared);
+                if args.len() == 1 {
+                    let it = self.check_expr(&args[0], Use::Value);
+                    self.expect_integer(&it, args[0].span);
+                } else {
+                    self.diags.push(Diag::error("E0706", "method `at` expects 1 argument(s)".to_string(), span));
+                }
+                return Some(crate::types::Type::Named("Opt".to_string()));
+            }
+        }
         // The receiver's nominal / application / type-parameter identity.
         match &recv_ty {
             Type::Param(pname) => {

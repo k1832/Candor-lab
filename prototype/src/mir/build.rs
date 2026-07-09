@@ -88,6 +88,7 @@ fn build_impl_tables(program: &Program) -> ImplTables {
 fn resolve_impl_ty(ty: &Ty) -> Type {
     match &ty.kind {
         TyKind::Scalar(s) => Type::Scalar(*s),
+        TyKind::Named(n) if n == "str" => Type::Str,
         TyKind::Named(n) => Type::Named(n.clone()),
         TyKind::Box(e) => Type::Box(Box::new(resolve_impl_ty(e))),
         TyKind::BoxResult(e) => Type::BoxResult(Box::new(resolve_impl_ty(e))),
@@ -440,6 +441,7 @@ impl<'a> Lowerer<'a> {
     fn resolve_ty(&self, ty: &Ty) -> LR<Type> {
         Ok(match &ty.kind {
             TyKind::Scalar(s) => Type::Scalar(*s),
+            TyKind::Named(n) if n == "str" => Type::Str,
             TyKind::Named(n) => Type::Named(n.clone()),
             TyKind::Array { size, elem } => {
                 let len = match &size.kind {
@@ -1465,7 +1467,7 @@ impl<'a> Lowerer<'a> {
                 Ok(())
             }
             // A string literal materializes as a `[u8]` slice header (design 0001 §4.2).
-            ExprKind::StrLit(bytes) => {
+            ExprKind::StrLit(bytes) | ExprKind::BytesLit(bytes) => {
                 self.lower_str_into(bytes, dst);
                 Ok(())
             }
@@ -2391,6 +2393,7 @@ fn variant_name(k: &ExprKind) -> &'static str {
         ExprKind::Prefix { .. } => "prefix",
         ExprKind::Try(_) => "try",
         ExprKind::StrLit(_) => "string-literal",
+        ExprKind::BytesLit(_) => "byte-string-literal",
         _ => "unsupported-expr",
     }
 }

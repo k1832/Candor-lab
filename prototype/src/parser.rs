@@ -830,6 +830,10 @@ impl Parser {
                 self.bump();
                 ExprKind::StrLit(s)
             }
+            TokKind::Bytes(s) => {
+                self.bump();
+                ExprKind::BytesLit(s)
+            }
             TokKind::Kw(Kw::True) => {
                 self.bump();
                 ExprKind::BoolLit(true)

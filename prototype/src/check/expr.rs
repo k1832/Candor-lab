@@ -87,7 +87,8 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Try(inner) => self.check_try(inner, e.span),
             ExprKind::GenericVal { name, ty_args } => self.check_generic_val(name, ty_args, e.span),
-            ExprKind::StrLit(_) => Type::Slice(Box::new(Type::Scalar(ScalarTy::U8))),
+            ExprKind::StrLit(_) => Type::Str,
+            ExprKind::BytesLit(_) => Type::Slice(Box::new(Type::Scalar(ScalarTy::U8))),
             ExprKind::BoolLit(_) => Type::bool(),
             ExprKind::Unary { op, expr } => self.check_unary(*op, expr),
             ExprKind::Binary { op, lhs, rhs } => self.check_binary(*op, lhs, rhs, e.span),
@@ -312,6 +313,9 @@ impl<'a> Checker<'a> {
                 let (st, mut place) = self.autoderef(bt, bp);
                 let elem = match &st {
                     Type::Array(e, _) | Type::Slice(e) | Type::SliceMut(e) => (**e).clone(),
+                    // `str[i]` yields the byte `u8` at `i` (design 0013 §3): byte
+                    // indexing, bounds-faulting like any slice, never on encoding.
+                    Type::Str => Type::Scalar(ScalarTy::U8),
                     Type::Error => Type::Error,
                     other => {
                         self.diags.push(Diag::error(
@@ -509,7 +513,13 @@ impl<'a> Checker<'a> {
                 self.unify_int(&l, &r, span)
             }
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                self.unify_int(&l, &r, span);
+                // `str` ordering is byte-lexicographic (design 0013 §3); otherwise
+                // ordering requires integer operands.
+                if matches!(l, Type::Str) && matches!(r, Type::Str) {
+                    // ok: byte-lexicographic compare
+                } else {
+                    self.unify_int(&l, &r, span);
+                }
                 Type::bool()
             }
             BinOp::Eq | BinOp::Ne => {
@@ -896,7 +906,7 @@ impl<'a> Checker<'a> {
                 if let ExprKind::Ident(name) = &callee.kind {
                     match name.as_str() {
                         "slice_of" | "slice_of_mut" => args.first().and_then(expr_place_root),
-                        "subslice" => args.first().and_then(|a| self.borrow_provenance(a)),
+                        "subslice" | "substr" | "as_bytes" | "as_str" => args.first().and_then(|a| self.borrow_provenance(a)),
                         _ => {
                             if let Some(sig) = self.items.fns.get(name) {
                                 if matches!(sig.ret, Type::Borrow(_) | Type::BorrowMut(_)) {
@@ -1552,6 +1562,15 @@ impl<'a> Checker<'a> {
 
     // ----- builtins (spelled as ordinary calls, design 0002 §0.5) ---------
 
+    /// Does the first argument (peeling a `read`/`write` borrow) have type
+    /// `String`? Routes the overloaded builtins (`push`/`append`/`as_str`) to the
+    /// String forms, leaving same-named user functions (e.g. an Arena `push`) alone.
+    fn arg0_is_string(&mut self, args: &[Expr]) -> bool {
+        args.first()
+            .map(|a| matches!(self.synth_arg_type(a), Type::Named(n) if n == "String"))
+            .unwrap_or(false)
+    }
+
     fn check_builtin(&mut self, name: &str, args: &[Expr], span: Span) -> Option<Type> {
         let t = match name {
             "box" => {
@@ -1709,6 +1728,108 @@ impl<'a> Checker<'a> {
                     }
                 } else {
                     self.arity(span, "subslice", 3);
+                    Type::Error
+                }
+            }
+            // ----- text: `String` builder (std, design 0013 §3) --------------
+            "string_new" => {
+                // `string_new(a: read Alloc) -> String` — allocator-explicit (P9).
+                let t = self.arg0(args, span, "string_new");
+                let peeled = match &t { Type::Borrow(i) | Type::BorrowMut(i) => (**i).clone(), _ => t.clone() };
+                if !matches!(peeled, Type::Error) && !matches!(&peeled, Type::Named(n) if n == "Alloc") {
+                    self.mismatch(span, "string_new", "read Alloc", &t);
+                }
+                self.note_alloc(span, "`string_new` builds an owning String (allocates)");
+                Type::Named("String".to_string())
+            }
+            "push" if self.arg0_is_string(args) => {
+                // `push(write self: String, c: u32)` — appends one Unicode scalar,
+                // UTF-8-encoded. The `enforced requires(is_scalar_value(c))` is a
+                // runtime P5 backstop (design 0013 §3), enforced by the interpreter.
+                if args.len() == 2 {
+                    self.check_expr(&args[0], Use::Value);
+                    let c = self.check_expr(&args[1], Use::Value);
+                    self.expect_integer(&c, args[1].span);
+                } else {
+                    self.arity(span, "push", 2);
+                }
+                self.note_alloc(span, "`push` may grow the String (allocates)");
+                Type::unit()
+            }
+            "append" if self.arg0_is_string(args) => {
+                // `append(write self: String, s: read str)` — appends a view.
+                if args.len() == 2 {
+                    self.check_expr(&args[0], Use::Value);
+                    let sv = self.check_expr(&args[1], Use::Value);
+                    if !matches!(sv, Type::Str | Type::Error) {
+                        self.mismatch(span, "append", "str", &sv);
+                    }
+                } else {
+                    self.arity(span, "append", 2);
+                }
+                self.note_alloc(span, "`append` may grow the String (allocates)");
+                Type::unit()
+            }
+            "as_str" if self.arg0_is_string(args) => {
+                // `as_str(read self: String) -> str` — borrow the built text back.
+                self.arg0(args, span, "as_str");
+                Type::Str
+            }
+            // ----- text: `str` core operations (design 0013) -----------------
+            "as_bytes" => {
+                // `as_bytes(s: str) -> [u8]` is a FREE retype: the UTF-8 view IS a
+                // byte run (design 0013 §1.3). No implicit reverse (P2).
+                let t = self.arg0(args, span, "as_bytes");
+                match t {
+                    Type::Str => Type::Slice(Box::new(Type::Scalar(ScalarTy::U8))),
+                    Type::Error => Type::Error,
+                    other => {
+                        self.mismatch(span, "as_bytes", "str", &other);
+                        Type::Error
+                    }
+                }
+            }
+            "str_from" => {
+                // `str_from(b: [u8]) -> Utf8Res` validates UTF-8; on invalid input
+                // it yields the byte offset of the first bad sequence (P7 error, not
+                // a fault — design 0013 §4). `Utf8Res` is the core result-shaped enum
+                // `enum Utf8Res { ok Valid(str), Invalid(usize) }`.
+                let t = self.arg0(args, span, "str_from");
+                match t {
+                    Type::Slice(e) if matches!(*e, Type::Scalar(ScalarTy::U8)) => {}
+                    Type::Error => return Some(Type::Named("Utf8Res".to_string())),
+                    other => { self.mismatch(span, "str_from", "[u8]", &other); }
+                }
+                Type::Named("Utf8Res".to_string())
+            }
+            "str_from_unchecked" => {
+                // The unchecked construction (design 0013 §4): skips validation, so
+                // it is `unsafe` and carries a mandatory justification (P1).
+                self.require_unsafe(span, "str_from_unchecked");
+                let t = self.arg0(args, span, "str_from_unchecked");
+                match t {
+                    Type::Slice(e) if matches!(*e, Type::Scalar(ScalarTy::U8)) => Type::Str,
+                    Type::Error => Type::Error,
+                    other => { self.mismatch(span, "str_from_unchecked", "[u8]", &other); Type::Error }
+                }
+            }
+            "substr" => {
+                // `substr(s: str, a, b) -> str` — the `str` sub-view `[a, b)`, which
+                // FAULTS (P5) if `a`/`b` is not on a UTF-8 char boundary or is out of
+                // bounds (design 0013 §3). Byte-agnostic sub-runs go via `as_bytes`.
+                if args.len() == 3 {
+                    let sv = self.check_expr(&args[0], Use::Value);
+                    let lo = self.check_expr(&args[1], Use::Value);
+                    let hi = self.check_expr(&args[2], Use::Value);
+                    self.expect_integer(&lo, args[1].span);
+                    self.expect_integer(&hi, args[2].span);
+                    match sv {
+                        Type::Str => Type::Str,
+                        Type::Error => Type::Error,
+                        other => { self.mismatch(span, "substr", "str", &other); Type::Error }
+                    }
+                } else {
+                    self.arity(span, "substr", 3);
                     Type::Error
                 }
             }

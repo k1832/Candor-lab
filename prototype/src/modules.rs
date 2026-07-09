@@ -894,6 +894,7 @@ impl<'a> Rewriter<'a> {
             ExprKind::IntLit { .. }
             | ExprKind::NegIntLit { .. }
             | ExprKind::StrLit(_)
+            | ExprKind::BytesLit(_)
             | ExprKind::BoolLit(_)
             | ExprKind::Break
             | ExprKind::Continue

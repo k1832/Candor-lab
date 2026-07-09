@@ -79,7 +79,7 @@ fn eval_owned(e: Expr) alloc -> i64 {
 fn main() alloc -> i64 {
     let mut st: Bump = Bump { next: 16777216, end: 33554432 };
     let a: Alloc = mk_alloc(write st);
-    let s: slice u8 = "5+3+9";
+    let s: slice u8 = b"5+3+9";
     let mut pos: usize = 0;
     match parse_expr(read a, s, write pos) {
         case BoxResult::oom => return 0 - 1,

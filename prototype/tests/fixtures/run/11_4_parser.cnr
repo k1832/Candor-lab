@@ -95,7 +95,7 @@ fn eval_owned(e: Expr) alloc -> i64 {
 fn main() alloc -> i64 {
     let mut st: Bump = Bump { next: 16777216, end: 33554432 };
     let a: Alloc = mk_alloc(write st);
-    let s: [u8] = "5+3+9";
+    let s: [u8] = b"5+3+9";
     let mut pos: usize = 0;
     // MIGRATE: two-arm BoxResult match -> `box(a, v)?` (author-assisted, design 0006 §5)
     match parse_expr(read a, s, write pos) {

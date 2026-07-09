@@ -684,6 +684,7 @@ pub fn mangle_ty(t: &Type) -> String {
         }
         Type::Array(e, _) => format!("arr_{}", mangle_ty(e)),
         Type::Slice(e) => format!("slice_{}", mangle_ty(e)),
+        Type::Str => "str".to_string(),
         Type::SliceMut(e) => format!("slicemut_{}", mangle_ty(e)),
         Type::RawPtr(e) => format!("ptr_{}", mangle_ty(e)),
         Type::Box(e) => format!("Box_{}", mangle_ty(e)),
@@ -1123,6 +1124,7 @@ impl<'a> Monomorphizer<'a> {
     fn ast_to_type(&mut self, ty: &Ty, map: &HashMap<String, Type>) -> Type {
         match &ty.kind {
             TyKind::Scalar(s) => Type::Scalar(*s),
+            TyKind::Named(n) if n == "str" => Type::Str,
             TyKind::Named(n) => map.get(n).cloned().unwrap_or_else(|| Type::Named(n.clone())),
             TyKind::App { name, args } => {
                 let sargs: Vec<Type> = args.iter().map(|a| self.ast_to_type(a, map)).collect();

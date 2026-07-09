@@ -928,6 +928,7 @@ impl<'a> Checker<'a> {
     fn resolve_ty(&mut self, ty: &Ty) -> Type {
         match &ty.kind {
             TyKind::Scalar(s) => Type::Scalar(*s),
+            TyKind::Named(n) if n == "str" => Type::Str,
             TyKind::Named(n) => {
                 if self.type_params.iter().any(|p| p == n) {
                     Type::Param(n.clone())

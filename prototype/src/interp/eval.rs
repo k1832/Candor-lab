@@ -131,6 +131,7 @@ type ImplRec = (String, Vec<Type>, String, HashMap<String, String>);
 fn resolve_impl_ty(ty: &Ty) -> Type {
     match &ty.kind {
         TyKind::Scalar(s) => Type::Scalar(*s),
+        TyKind::Named(n) if n == "str" => Type::Str,
         TyKind::Named(n) => Type::Named(n.clone()),
         TyKind::Box(e) => Type::Box(Box::new(resolve_impl_ty(e))),
         TyKind::BoxResult(e) => Type::BoxResult(Box::new(resolve_impl_ty(e))),
@@ -546,6 +547,7 @@ impl<'a> Interp<'a> {
     fn resolve_ty(&self, ty: &Ty) -> Type {
         match &ty.kind {
             TyKind::Scalar(s) => Type::Scalar(*s),
+            TyKind::Named(n) if n == "str" => Type::Str,
             TyKind::Named(n) => Type::Named(n.clone()),
             TyKind::Array { size, elem } => {
                 let len = match &size.kind {
@@ -659,6 +661,16 @@ impl<'a> Interp<'a> {
                         pl.proj.push(Proj::Index);
                         Ok((ptr + i * stride, (**elem).clone(), pl))
                     }
+                    // `str[i]` — the byte `u8` at `i`, bounds-faulting (design 0013 §3).
+                    Type::Str => {
+                        let ptr = self.read_u64(a)?;
+                        let n = self.read_u64(a + 8)?;
+                        if i >= n {
+                            return Err(self.fault(FaultKind::Bounds, format!("index {i} out of bounds for str of len {n}")));
+                        }
+                        pl.proj.push(Proj::Index);
+                        Ok((ptr + i, Type::Scalar(ScalarTy::U8), pl))
+                    }
                     _ => Err(self.fault(FaultKind::Panic, "index of non-array")),
                 }
             }
@@ -732,12 +744,15 @@ impl<'a> Interp<'a> {
                 Ok(RVal { ty: Type::bool(), addr: a, origin: Origin::None })
             }
             ExprKind::StrLit(s) => {
-                let bytes = s.clone().into_bytes();
-                let base = self.mem.static_alloc(bytes.len() as u64, 1);
-                self.write_bytes(base, &bytes)?;
-                let a = self.mem.stack_alloc(16, 8);
-                self.write_bytes(a, &base.to_le_bytes())?;
-                self.write_bytes(a + 8, &(bytes.len() as u64).to_le_bytes())?;
+                // `"..."` is a `str` (design 0013): a validated UTF-8 view. A Rust
+                // source string is already well-formed UTF-8, so the view is built
+                // infallibly with zero runtime cost. Same fat-pointer shape as a slice.
+                let a = self.str_literal(s.as_bytes())?;
+                Ok(RVal { ty: Type::Str, addr: a, origin: Origin::None })
+            }
+            ExprKind::BytesLit(s) => {
+                // `b"..."` is a raw `[u8]` view over the literal's bytes (design 0013).
+                let a = self.str_literal(s.as_bytes())?;
                 Ok(RVal { ty: Type::Slice(Box::new(Type::Scalar(ScalarTy::U8))), addr: a, origin: Origin::None })
             }
             ExprKind::Unary { op, expr } => self.eval_unary(*op, expr, expected),
@@ -843,6 +858,17 @@ impl<'a> Interp<'a> {
 
     fn cur_ret_ty(&self) -> Type {
         self.frames.last().unwrap().ret_ty.clone()
+    }
+
+    /// Materialize a byte run into static storage and return the address of a
+    /// fresh `{ptr, len}` fat pointer on the stack. Shared by `str`/`[u8]` literals.
+    fn str_literal(&mut self, bytes: &[u8]) -> R<u64> {
+        let base = self.mem.static_alloc(bytes.len().max(1) as u64, 1);
+        self.write_bytes(base, bytes)?;
+        let a = self.mem.stack_alloc(16, 8);
+        self.write_bytes(a, &base.to_le_bytes())?;
+        self.write_bytes(a + 8, &(bytes.len() as u64).to_le_bytes())?;
+        Ok(a)
     }
 
     fn usize_val(&mut self, n: u64) -> R<RVal> {
@@ -1023,6 +1049,25 @@ impl<'a> Interp<'a> {
                     let r = self.eval_value(rhs, Some(&Type::bool()))?;
                     self.read_bytes(r.addr, 1, true)?[0] != 0
                 };
+                let a = self.mem.stack_alloc(1, 1);
+                self.write_bytes(a, &[res as u8])?;
+                Ok(RVal { ty: Type::bool(), addr: a, origin: Origin::None })
+            }
+            Eq | Ne if matches!(self.eval_ty_probe(lhs), Some(Type::Str)) => {
+                // `str` equality is byte-wise over the REFERENT run (design 0013 §3),
+                // not the fat-pointer identity.
+                let ord = self.str_byte_cmp(lhs, rhs)?;
+                let equal = ord == std::cmp::Ordering::Equal;
+                let res = if op == Eq { equal } else { !equal };
+                let a = self.mem.stack_alloc(1, 1);
+                self.write_bytes(a, &[res as u8])?;
+                Ok(RVal { ty: Type::bool(), addr: a, origin: Origin::None })
+            }
+            Lt | Le | Gt | Ge if matches!(self.eval_ty_probe(lhs), Some(Type::Str)) => {
+                // Byte-lexicographic ordering on `str` (design 0013 §3).
+                let ord = self.str_byte_cmp(lhs, rhs)?;
+                use std::cmp::Ordering::*;
+                let res = match op { Lt => ord == Less, Le => ord != Greater, Gt => ord == Greater, _ => ord != Less };
                 let a = self.mem.stack_alloc(1, 1);
                 self.write_bytes(a, &[res as u8])?;
                 Ok(RVal { ty: Type::bool(), addr: a, origin: Origin::None })
@@ -1422,6 +1467,32 @@ impl<'a> Interp<'a> {
                 return self.eval_extern_call(&es, args, span);
             }
         }
+        // Byte iteration `s.at(i)` over `str`/`[u8]` (design 0013 §3): the wired
+        // ground-floor `Indexed` method yielding `Opt[u8]`. Handled before impl
+        // dispatch (str/[u8] host no user impl).
+        if let ExprKind::Field { base, field } = &callee.kind {
+            if field == "at" {
+                let bt = self.expr_static_ty(base).map(|t| match t {
+                    Type::Borrow(e) | Type::BorrowMut(e) => *e,
+                    other => other,
+                });
+                let is_byteview = matches!(&bt, Some(Type::Str))
+                    || matches!(&bt, Some(Type::Slice(e)) if matches!(**e, Type::Scalar(ScalarTy::U8)));
+                if is_byteview {
+                    let (ptr, len) = self.read_byteview(base)?;
+                    let iv = self.eval_value(&args[0], Some(&Type::usize()))?;
+                    let i = self.read_u64(iv.addr)?;
+                    if i < len {
+                        let byte = self.read_bytes(ptr + i, 1, true)?[0];
+                        let tmp = self.mem.stack_alloc(1, 1);
+                        self.write_bytes(tmp, &[byte])?;
+                        return self.build_named_enum("Opt", "Some", &[(Type::Scalar(ScalarTy::U8), tmp)]);
+                    } else {
+                        return self.build_named_enum("Opt", "None", &[]);
+                    }
+                }
+            }
+        }
         // Interface method call `recv.m(args)` (design 0007 static dispatch): the
         // impl is chosen by the receiver's runtime nominal type.
         if let ExprKind::Field { base, field } = &callee.kind {
@@ -1691,6 +1762,26 @@ impl<'a> Interp<'a> {
             "slice_of" | "slice_of_mut" => self.bi_slice_of(args, name == "slice_of_mut")?,
             "subslice" => self.bi_subslice(args)?,
             "len" => self.bi_len(args)?,
+            "as_bytes" => {
+                // Free retype: the str's fat pointer IS the byte view (design 0013).
+                let sv = self.eval_value(&args[0], None)?;
+                let a = self.mem.stack_alloc(16, 8);
+                self.move_bytes(a, sv.addr, 16)?;
+                RVal { ty: Type::Slice(Box::new(Type::Scalar(ScalarTy::U8))), addr: a, origin: Origin::None }
+            }
+            "str_from_unchecked" => {
+                // Skip validation, retype [u8] -> str (unsafe; design 0013 §4).
+                let sv = self.eval_value(&args[0], None)?;
+                let a = self.mem.stack_alloc(16, 8);
+                self.move_bytes(a, sv.addr, 16)?;
+                RVal { ty: Type::Str, addr: a, origin: Origin::None }
+            }
+            "str_from" => self.bi_str_from(args)?,
+            "substr" => self.bi_substr(args, span)?,
+            "string_new" => self.bi_string_new(args)?,
+            "push" if self.arg0_is_string(args) => self.bi_string_push(args, span)?,
+            "append" if self.arg0_is_string(args) => self.bi_string_append(args)?,
+            "as_str" if self.arg0_is_string(args) => self.bi_string_as_str(args)?,
             // Structured-concurrency blessed primitives (design 0012 §1.4, §3.3).
             "split_mut" => self.bi_split_mut(args, span)?,
             "cancelled" => {
@@ -1915,11 +2006,251 @@ impl<'a> Interp<'a> {
     fn bi_len(&mut self, args: &[Expr]) -> R<RVal> {
         let sv = self.eval_value(&args[0], None)?;
         let n = match &sv.ty {
-            Type::Slice(_) | Type::SliceMut(_) => self.read_u64(sv.addr + 8)?,
+            Type::Slice(_) | Type::SliceMut(_) | Type::Str => self.read_u64(sv.addr + 8)?,
             Type::Array(_, len) => self.lay().array_len(len),
             _ => 0,
         };
         self.usize_val(n)
+    }
+
+    /// `str_from(b: [u8]) -> Utf8Res` (design 0013 §4): validate UTF-8, returning
+    /// `Utf8Res::Valid(str)` (the str borrows `b`) or `Utf8Res::Invalid(offset)`
+    /// carrying the byte offset of the first ill-formed sequence (P7 error value).
+    fn bi_str_from(&mut self, args: &[Expr]) -> R<RVal> {
+        let sv = self.eval_value(&args[0], None)?;
+        let ptr = self.read_u64(sv.addr)?;
+        let len = self.read_u64(sv.addr + 8)?;
+        let bytes = self.read_bytes(ptr, len, true)?;
+        match utf8_valid_up_to(&bytes) {
+            None => {
+                // Valid: the str reuses the SAME fat pointer (a validated view of b).
+                let src = sv.addr;
+                self.build_named_enum("Utf8Res", "Valid", &[(Type::Str, src)])
+            }
+            Some(off) => {
+                let tmp = self.mem.stack_alloc(8, 8);
+                self.write_bytes(tmp, &(off as u64).to_le_bytes())?;
+                self.build_named_enum("Utf8Res", "Invalid", &[(Type::usize(), tmp)])
+            }
+        }
+    }
+
+    /// `substr(s, lo, hi) -> str` (design 0013 §3): the sub-view `[lo, hi)`, which
+    /// FAULTS (P5) on an out-of-bounds OR non-UTF-8-char-boundary offset. The
+    /// boundary and bounds faults reuse `FaultKind::Bounds` (one fault family for
+    /// "this offset is not valid for this str"), distinguished by message.
+    fn bi_substr(&mut self, args: &[Expr], span: Span) -> R<RVal> {
+        let sv = self.eval_value(&args[0], None)?;
+        let ptr = self.read_u64(sv.addr)?;
+        let len = self.read_u64(sv.addr + 8)?;
+        let lo = { let v = self.eval_value(&args[1], Some(&Type::usize()))?; self.read_u64(v.addr)? };
+        let hi = { let v = self.eval_value(&args[2], Some(&Type::usize()))?; self.read_u64(v.addr)? };
+        self.cur_span = span;
+        if lo > hi || hi > len {
+            return Err(self.fault(FaultKind::Bounds, format!("substr [{lo}..{hi}) out of bounds for str of len {len}")));
+        }
+        let bytes = self.read_bytes(ptr, len, true)?;
+        if !str_is_boundary(&bytes, lo as usize) || !str_is_boundary(&bytes, hi as usize) {
+            return Err(self.fault(FaultKind::Bounds, format!("substr [{lo}..{hi}) does not fall on a UTF-8 character boundary")));
+        }
+        let a = self.mem.stack_alloc(16, 8);
+        self.write_bytes(a, &(ptr + lo).to_le_bytes())?;
+        self.write_bytes(a + 8, &(hi - lo).to_le_bytes())?;
+        Ok(RVal { ty: Type::Str, addr: a, origin: Origin::None })
+    }
+
+    /// Build a value of the program-defined `Named` enum `nominal`, variant
+    /// `variant`, copying each payload field from a source address. Used by the
+    /// compiler-known text ops that yield an in-language enum (`Utf8Res`, `Opt`).
+    fn build_named_enum(&mut self, nominal: &str, variant: &str, payloads: &[(Type, u64)]) -> R<RVal> {
+        let einfo = self
+            .lay()
+            .enum_info(&Type::Named(nominal.to_string()))
+            .ok_or_else(|| self.fault(FaultKind::Panic, format!("unknown enum `{nominal}` (define it to use this text op)")))?;
+        let idx = einfo
+            .iter()
+            .position(|(n, _)| n == variant)
+            .ok_or_else(|| self.fault(FaultKind::Panic, format!("enum `{nominal}` has no variant `{variant}`")))?;
+        let decl_payloads = einfo[idx].1.clone();
+        let ty = Type::Named(nominal.to_string());
+        let (addr, id) = self.alloc_temp(ty.clone());
+        self.write_bytes(addr, &(idx as u64).to_le_bytes())?;
+        for (i, (pty, src)) in payloads.iter().enumerate() {
+            let (_declty, off) = self.lay().payload_offset(&decl_payloads, i);
+            let sz = self.size_of(pty);
+            self.move_bytes(addr + off, *src, sz)?;
+        }
+        Ok(RVal { ty, addr, origin: Origin::Temp(id) })
+    }
+
+    /// Read the `(ptr, len)` of a `str`/`[u8]` expression, peeling a `read`/`write`
+    /// borrow (a slice/str reborrow is the same fat pointer).
+    fn read_byteview(&mut self, e: &Expr) -> R<(u64, u64)> {
+        let v = self.eval_value(e, None)?;
+        let fat = match &v.ty {
+            Type::Str | Type::Slice(_) | Type::SliceMut(_) => v.addr,
+            Type::Borrow(inner) | Type::BorrowMut(inner)
+                if matches!(**inner, Type::Str | Type::Slice(_) | Type::SliceMut(_)) =>
+            {
+                self.read_u64(v.addr)?
+            }
+            _ => v.addr,
+        };
+        let ptr = self.read_u64(fat)?;
+        let len = self.read_u64(fat + 8)?;
+        Ok((ptr, len))
+    }
+
+    /// A side-effect-free static-type probe used to route `==`/ordering to the
+    /// byte-wise `str` path (design 0013 §3).
+    fn eval_ty_probe(&self, e: &Expr) -> Option<Type> {
+        match &e.kind {
+            ExprKind::StrLit(_) => Some(Type::Str),
+            ExprKind::Paren(i) => self.eval_ty_probe(i),
+            ExprKind::Call { callee, .. }
+                if matches!(&callee.kind, ExprKind::Ident(n) if n == "substr" || n == "as_str" || n == "str_from_unchecked") =>
+            {
+                Some(Type::Str)
+            }
+            _ => self.expr_static_ty(e),
+        }
+    }
+
+    /// Byte-lexicographic comparison of two `str` operands over their referent runs.
+    fn str_byte_cmp(&mut self, lhs: &Expr, rhs: &Expr) -> R<std::cmp::Ordering> {
+        let (lp, ll) = self.read_byteview(lhs)?;
+        let (rp, rl) = self.read_byteview(rhs)?;
+        let lb = self.read_bytes(lp, ll, true)?;
+        let rb = self.read_bytes(rp, rl, true)?;
+        Ok(lb.cmp(&rb))
+    }
+
+    /// Peel a `read`/`write` borrow and report whether arg0 is a `String` place.
+    fn arg0_is_string(&self, args: &[Expr]) -> bool {
+        let Some(a) = args.first() else { return false };
+        let inner = match &a.kind {
+            ExprKind::Prefix { op: PrefixOp::Read | PrefixOp::Write, expr } => expr.as_ref(),
+            _ => a,
+        };
+        matches!(self.expr_static_ty(inner), Some(Type::Named(n)) if n == "String")
+    }
+
+    /// The base address of the `String` a `read`/`write` borrow argument names.
+    fn string_base(&mut self, e: &Expr) -> R<u64> {
+        let v = self.eval_value(e, None)?;
+        match &v.ty {
+            Type::Borrow(_) | Type::BorrowMut(_) => self.read_u64(v.addr),
+            _ => Ok(v.addr),
+        }
+    }
+
+    fn string_field_off(&self, field: &str) -> u64 {
+        self.lay().field_offset("String", field).map(|(_, o)| o).unwrap_or(0)
+    }
+
+    /// `string_new(a: read Alloc) -> String` — an empty owning buffer carrying `a`.
+    fn bi_string_new(&mut self, args: &[Expr]) -> R<RVal> {
+        let av = self.eval_value(&args[0], None)?;
+        let alloc_addr = match &av.ty {
+            Type::Borrow(_) | Type::BorrowMut(_) => self.read_u64(av.addr)?,
+            _ => av.addr,
+        };
+        let (_, ctx_off) = self.field_offset(self.alloc_struct_name(), "ctx");
+        let (_, vt_off) = self.field_offset(self.alloc_struct_name(), "vt");
+        let ctx = self.read_u64(alloc_addr + ctx_off)?;
+        let vt = self.read_u64(alloc_addr + vt_off)?;
+        let ty = Type::Named("String".to_string());
+        let (addr, id) = self.alloc_temp(ty.clone());
+        self.write_bytes(addr + self.string_field_off("buf"), &0u64.to_le_bytes())?;
+        self.write_bytes(addr + self.string_field_off("len"), &0u64.to_le_bytes())?;
+        self.write_bytes(addr + self.string_field_off("cap"), &0u64.to_le_bytes())?;
+        self.write_bytes(addr + self.string_field_off("ctx"), &ctx.to_le_bytes())?;
+        self.write_bytes(addr + self.string_field_off("vt"), &vt.to_le_bytes())?;
+        Ok(RVal { ty, addr, origin: Origin::Temp(id) })
+    }
+
+    /// Call the carried allocator's `alloc` vtable slot; returns the new pointer.
+    fn string_vt_alloc(&mut self, ctx: u64, vt: u64, size: u64) -> R<u64> {
+        let (_, alloc_off) = self.field_offset(self.alloc_vtable_name(), "alloc");
+        let afn = self.read_u64(vt + alloc_off)?;
+        self.call_scalar(afn, vec![
+            (Type::RawPtr(Box::new(Type::Scalar(ScalarTy::U8))), ctx),
+            (Type::usize(), size),
+            (Type::usize(), 1),
+        ])
+    }
+
+    /// Ensure the String at `base` has room for `need` more bytes, growing through
+    /// its carried allocator (alloc-new + copy + free-old — the vtable has no
+    /// `realloc`). Faults on OOM (prototype: `push`/`append` return no result).
+    fn string_reserve(&mut self, base: u64, need: u64) -> R<()> {
+        let buf_off = self.string_field_off("buf");
+        let len = self.read_u64(base + self.string_field_off("len"))?;
+        let cap = self.read_u64(base + self.string_field_off("cap"))?;
+        if len + need <= cap {
+            return Ok(());
+        }
+        let newcap = (len + need).max(cap * 2).max(8);
+        let ctx = self.read_u64(base + self.string_field_off("ctx"))?;
+        let vt = self.read_u64(base + self.string_field_off("vt"))?;
+        let newbuf = self.string_vt_alloc(ctx, vt, newcap)?;
+        if newbuf == 0 {
+            return Err(self.fault(FaultKind::Panic, "String allocation failed (OOM)"));
+        }
+        let oldbuf = self.read_u64(base + buf_off)?;
+        if len > 0 && oldbuf != 0 {
+            self.move_bytes(newbuf, oldbuf, len)?;
+        }
+        if oldbuf != 0 {
+            self.call_free(ctx, vt, oldbuf, cap, 1)?;
+        }
+        self.write_bytes(base + buf_off, &newbuf.to_le_bytes())?;
+        self.write_bytes(base + self.string_field_off("cap"), &newcap.to_le_bytes())?;
+        Ok(())
+    }
+
+    /// `push(write self, c: u32)` — append one UTF-8-encoded Unicode scalar. The
+    /// `enforced requires(is_scalar_value(c))` is a P5 backstop: a surrogate or
+    /// out-of-range code point FAULTS (design 0013 §3), never forging a false str.
+    fn bi_string_push(&mut self, args: &[Expr], span: Span) -> R<RVal> {
+        let base = self.string_base(&args[0])?;
+        let cv = self.eval_value(&args[1], Some(&Type::Scalar(ScalarTy::U32)))?;
+        let c = self.read_int(cv.addr, ScalarTy::U32)? as u32;
+        self.cur_span = span;
+        let enc = match utf8_encode_scalar(c) {
+            Some(e) => e,
+            None => return Err(self.fault(FaultKind::Requires, format!("push: {c:#x} is not a Unicode scalar value (is_scalar_value backstop)"))),
+        };
+        self.string_reserve(base, enc.len() as u64)?;
+        let buf = self.read_u64(base + self.string_field_off("buf"))?;
+        let len = self.read_u64(base + self.string_field_off("len"))?;
+        self.write_bytes(buf + len, &enc)?;
+        self.write_bytes(base + self.string_field_off("len"), &(len + enc.len() as u64).to_le_bytes())?;
+        Ok(self.unit_val())
+    }
+
+    /// `append(write self, s: read str)` — append a view's bytes (already valid).
+    fn bi_string_append(&mut self, args: &[Expr]) -> R<RVal> {
+        let base = self.string_base(&args[0])?;
+        let (ptr, slen) = self.read_byteview(&args[1])?;
+        let bytes = self.read_bytes(ptr, slen, true)?;
+        self.string_reserve(base, slen)?;
+        let buf = self.read_u64(base + self.string_field_off("buf"))?;
+        let len = self.read_u64(base + self.string_field_off("len"))?;
+        self.write_bytes(buf + len, &bytes)?;
+        self.write_bytes(base + self.string_field_off("len"), &(len + slen).to_le_bytes())?;
+        Ok(self.unit_val())
+    }
+
+    /// `as_str(read self) -> str` — a validated view over the built bytes.
+    fn bi_string_as_str(&mut self, args: &[Expr]) -> R<RVal> {
+        let base = self.string_base(&args[0])?;
+        let buf = self.read_u64(base + self.string_field_off("buf"))?;
+        let len = self.read_u64(base + self.string_field_off("len"))?;
+        let a = self.mem.stack_alloc(16, 8);
+        self.write_bytes(a, &buf.to_le_bytes())?;
+        self.write_bytes(a + 8, &len.to_le_bytes())?;
+        Ok(RVal { ty: Type::Str, addr: a, origin: Origin::None })
     }
 
     fn drop_and_consume(&mut self, rv: RVal) -> R<()> {
@@ -2393,6 +2724,18 @@ impl<'a> Interp<'a> {
                 Ok(())
             }
             Type::Box(inner) => self.drop_box(addr, inner),
+            // Compiler-known `String` (design 0013): free its heap buffer through
+            // the carried allocator's vtable (alloc-on-drop).
+            Type::Named(n) if n == "String" => {
+                let buf = self.read_u64(addr + self.string_field_off("buf"))?;
+                if buf != 0 {
+                    let cap = self.read_u64(addr + self.string_field_off("cap"))?;
+                    let ctx = self.read_u64(addr + self.string_field_off("ctx"))?;
+                    let vt = self.read_u64(addr + self.string_field_off("vt"))?;
+                    self.call_free(ctx, vt, buf, cap, 1)?;
+                }
+                Ok(())
+            }
             Type::Named(n) if self.items.lookup_struct(n).is_some() => {
                 let partial = mask.partially(path);
                 if !partial {
@@ -2466,4 +2809,32 @@ fn pat_matches(pat: &Pattern, vname: &str) -> bool {
         PatKind::Wildcard | PatKind::Binding(_) => true,
         PatKind::Variant { variant, .. } => variant == vname,
     }
+}
+
+/// UTF-8 validation (design 0013 §4). `None` if `bytes` is well-formed UTF-8;
+/// otherwise `Some(offset)` — the byte offset of the first ill-formed sequence.
+fn utf8_valid_up_to(bytes: &[u8]) -> Option<usize> {
+    match std::str::from_utf8(bytes) {
+        Ok(_) => None,
+        Err(e) => Some(e.valid_up_to()),
+    }
+}
+
+/// Is byte offset `i` a UTF-8 character boundary of the (already well-formed)
+/// run `bytes`? A boundary is the start of the run, its end, or any byte that is
+/// NOT a continuation byte `0x80..=0xBF` (design 0013 §3).
+fn str_is_boundary(bytes: &[u8], i: usize) -> bool {
+    i == 0 || i == bytes.len() || (i < bytes.len() && (bytes[i] & 0xC0) != 0x80)
+}
+
+/// UTF-8-encode a Unicode scalar value (design 0013 §3). Returns `None` for a
+/// non-scalar `u32` (a surrogate `0xD800..=0xDFFF` or `> 0x10FFFF`), which is the
+/// `is_scalar_value` predicate the `push` backstop enforces.
+fn utf8_encode_scalar(c: u32) -> Option<Vec<u8>> {
+    if c > 0x10FFFF || (0xD800..=0xDFFF).contains(&c) {
+        return None;
+    }
+    let ch = char::from_u32(c)?;
+    let mut buf = [0u8; 4];
+    Some(ch.encode_utf8(&mut buf).as_bytes().to_vec())
 }

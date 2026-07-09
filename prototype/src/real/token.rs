@@ -69,6 +69,7 @@ pub enum RKw {
 pub enum RTok {
     Int { value: u64, suffix: Option<ScalarTy> },
     Str(String),
+    Bytes(String),
     Ident(String),
     Scalar(ScalarTy),
     Kw(RKw),

@@ -1428,6 +1428,10 @@ impl RParser {
                 self.bump();
                 ExprKind::StrLit(s)
             }
+            RTok::Bytes(s) => {
+                self.bump();
+                ExprKind::BytesLit(s)
+            }
             RTok::Kw(RKw::True) => {
                 self.bump();
                 ExprKind::BoolLit(true)

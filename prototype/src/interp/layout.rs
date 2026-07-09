@@ -48,7 +48,7 @@ impl<'a> Layout<'a> {
             Type::Scalar(s) => Self::scalar_size(*s).max(1),
             Type::IntLit => 8,
             Type::RawPtr(_) | Type::FnPtr(_) | Type::Borrow(_) | Type::BorrowMut(_) => 8,
-            Type::Slice(_) | Type::SliceMut(_) => 8,
+            Type::Slice(_) | Type::SliceMut(_) | Type::Str => 8,
             Type::Box(_) | Type::BoxResult(_) => 8,
             Type::Array(e, _) => self.align_of(e),
             Type::Named(n) => {
@@ -70,7 +70,7 @@ impl<'a> Layout<'a> {
             Type::Scalar(s) => Self::scalar_size(*s),
             Type::IntLit => 8,
             Type::RawPtr(_) | Type::FnPtr(_) | Type::Borrow(_) | Type::BorrowMut(_) => 8,
-            Type::Slice(_) | Type::SliceMut(_) => 16,
+            Type::Slice(_) | Type::SliceMut(_) | Type::Str => 16,
             Type::Box(_) => BOX_SIZE,
             Type::BoxResult(t) => self.enum_size(&self.box_result_variants(t)),
             Type::Array(e, len) => {

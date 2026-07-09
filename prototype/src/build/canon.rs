@@ -427,6 +427,11 @@ impl Printer {
                 self.push(s);
                 self.push("\"");
             }
+            ExprKind::BytesLit(s) => {
+                self.push("b\"");
+                self.push(s);
+                self.push("\"");
+            }
             ExprKind::BoolLit(b) => self.push(if *b { "true" } else { "false" }),
             ExprKind::Ident(n) => self.push(n),
             ExprKind::Unary { op, expr } => {

@@ -113,6 +113,9 @@ pub fn c_mappable(ty: &Type, items: &Items, is_ret: bool) -> Result<(), String> 
         Type::Slice(_) | Type::SliceMut(_) => {
             Err("a slice is a 16-byte fat pointer with no C counterpart (pass `(rawptr T, usize)`)".to_string())
         }
+        Type::Str => {
+            Err("`str` is a 16-byte fat pointer with no C counterpart (pass `(rawptr u8, usize)`)".to_string())
+        }
         Type::Box(_) | Type::BoxResult(_) => {
             Err("a `Box` is a 24-byte tri-word with no C counterpart (pass its `rawptr T`)".to_string())
         }
