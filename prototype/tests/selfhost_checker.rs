@@ -31,6 +31,8 @@ const CHECKER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/checker/checker.cnr"));
 const ANALYSES_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/analyses/analyses.cnr"));
+const INTERP_SRC: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/interp/interp.cnr"));
 
 /// The code families the Candor checker covers this slice.
 const COVERED: &[&str] = &["E0102", "E0103"];
@@ -375,6 +377,60 @@ fn candor_checker_checks_parser_source_clean_via_import_resolution() {
         assert!(
             mine.is_empty(),
             "self-host checker emitted covered diagnostics on clean parser.cnr: {mine:?}"
+        );
+    });
+}
+
+/// IMPORT-RESOLUTION ISOLATION GATE (interp.cnr -- the self-hosted INTERPRETER).
+/// The self-hosted checker checks the self-hosted INTERPRETER's own source IN
+/// ISOLATION, resolving its `use lexer::{..}` / `use parser::{..}` imports itself,
+/// and emits an EMPTY covered-diagnostic (E0102/E0103) set, byte-equal to the
+/// MODULE-AWARE reference oracle over the lexer+parser+checker+interp tree.
+///
+/// interp.cnr is the largest self-host module (~3083 lines / 25736 tokens) and the
+/// SIXTH -- and final -- module to come under the name-resolution self-check,
+/// closing the checker fixpoint across every self-host module. It fits the harness
+/// arenas unchanged (25736 tokens < the 32768 token buffer / node arena).
+#[test]
+fn candor_checker_checks_interp_source_clean_via_import_resolution() {
+    on_big_stack(|| {
+        // The imports are load-bearing: without resolution interp.cnr's imported
+        // TYPES (Node, P, Buf) are unknown -> E0102, so the clean assertion below is
+        // meaningful, not a leaf-module tautology.
+        let naive = check_source_real(INTERP_SRC).expect("oracle parses interp.cnr");
+        let naive_unknown_types = naive.iter().filter(|d| d.code == "E0102").count();
+        assert!(
+            naive_unknown_types > 0,
+            "single-file check must flag the unresolved imported types (E0102)"
+        );
+
+        // Teeth: a deliberately-broken variant (a param of an unknown type) MUST be
+        // flagged E0102, so the clean assertion below cannot pass vacuously.
+        let broken = format!("{INTERP_SRC}\nfn zz_smoke(x: Nonexistent) -> unit {{ return; }}\n");
+        let broken_dump = candor_dump(&broken);
+        assert!(
+            broken_dump.contains("E0102"),
+            "negative smoke: broken interp source must be flagged E0102, got {broken_dump:?}"
+        );
+
+        // Clean: the self-host checker, resolving interp.cnr's imports itself, emits
+        // an EMPTY covered set -- byte-equal to the module-aware oracle over a tree
+        // that INCLUDES interp.cnr (so the reference resolves its imports).
+        let modules = [
+            ("lexer.cnr", LEXER_SRC),
+            ("parser.cnr", PARSER_SRC),
+            ("checker.cnr", CHECKER_SRC),
+            ("interp.cnr", INTERP_SRC),
+        ];
+        let oracle = module_oracle_dump_tree(&modules, INTERP_SRC);
+        let mine = candor_dump(INTERP_SRC);
+        assert_eq!(
+            mine, oracle,
+            "self-host checker diverged from the module-aware oracle on interp.cnr"
+        );
+        assert!(
+            mine.is_empty(),
+            "self-host checker emitted covered diagnostics on clean interp.cnr: {mine:?}"
         );
     });
 }

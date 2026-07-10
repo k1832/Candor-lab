@@ -1400,3 +1400,26 @@ READ: self-checking the interpreter is a NEAR MILESTONE, not a project. Landing 
 adding interp.cnr as another module under the existing checker + analyses fixpoint gates (same shape
 as parser.cnr's gate, with a use-after-move teeth smoke) — no arena bump, no new builtins. (Probe was
 run-and-report; no probe test committed.)
+
+### Self-check fixpoint COMPLETE — interp.cnr now self-checks (2026-07-11)
+
+The self-check probe above is now a COMMITTED gate with teeth. Two gates added, mirroring the
+existing per-module fixpoint gates (same shape as the parser.cnr/analyses.cnr gates):
+- `prototype/tests/selfhost_checker.rs::candor_checker_checks_interp_source_clean_via_import_resolution`
+  — the self-host CHECKER name-resolves interp.cnr clean (empty E0102/E0103), byte-equal to the
+  module-aware oracle over the real lexer+parser+checker+interp tree. Teeth: the naive single-file
+  check flags the unresolved imports E0102 (>0), and an injected unknown-type param fires E0102.
+- `prototype/tests/selfhost_analyses.rs::candor_analyses_check_interp_source_clean_fixpoint`
+  — the self-host ANALYSES (move/init E0301/E0304, loans E0801-4, effect E0401, exhaustiveness E0601)
+  emits an EMPTY covered set over interp.cnr, byte-equal to the module-aware oracle. Teeth: an
+  injected use-after-move fires E0301.
+
+Both pass CLEAN, oracle-matched, exactly as the probe predicted — no construct in interp.cnr fails to
+check clean. NO arena bump needed (25736 tokens < the 32768 token buffer / node arena, ~7k headroom).
+This completes the self-check fixpoint across ALL FIVE self-host modules: the lexer, parser, checker,
+analyses core, AND the interpreter that executes them all name-resolve clean under the self-host
+checker and pass the self-host move/init/loan/effect/exhaustiveness analyses — each byte-equal to the
+Rust oracle. Runtime: the interp checker gate ~46s, the interp analyses gate ~49s (debug); the
+Map-in-checker perf lever remains if these grow. All 71 interp fixtures + every prior self-check gate
+stay byte-exact; clippy clean.
+

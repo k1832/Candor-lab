@@ -39,6 +39,8 @@ const ANALYSES_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/analyses/analyses.cnr"));
 const CHECKER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/checker/checker.cnr"));
+const INTERP_SRC: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/interp/interp.cnr"));
 
 /// The code families the Candor move/init analysis covers this slice.
 const COVERED: &[&str] = &["E0301", "E0304"];
@@ -348,6 +350,44 @@ fn candor_analyses_check_parser_source_clean_fixpoint() {
         assert!(
             mine.is_empty(),
             "self-host analyses emitted diagnostics on analyses-clean parser.cnr: {mine:?}"
+        );
+    });
+}
+
+/// FIXPOINT GATE: the self-hosted ANALYSES core, run over the self-hosted
+/// INTERPRETER's own source (`interp.cnr`, the LARGEST self-host module --
+/// ~3083 lines / 25736 tokens), emits an EMPTY covered-diagnostic set across ALL
+/// its families -- byte-equal to the module-aware Rust oracle over the real
+/// lexer+parser+analyses+interp tree. This is the SIXTH -- and final -- module
+/// under the analyses self-check, closing the fixpoint: every self-host module,
+/// including the interpreter that executes them, passes its own move/init, loan,
+/// effect, and exhaustiveness analyses.
+#[test]
+fn candor_analyses_check_interp_source_clean_fixpoint() {
+    on_big_stack(|| {
+        // Teeth: a use-after-move injected into the interp source MUST fire E0301.
+        let broken = format!("{INTERP_SRC}{MOVE_SMOKE}");
+        let broken_dump = candor_dump(&broken);
+        assert!(
+            broken_dump.contains("E0301"),
+            "negative smoke: injected use-after-move must be flagged E0301, got {broken_dump:?}"
+        );
+
+        // Clean: the real interp.cnr is analyses-clean over EVERY covered family.
+        // The oracle tree INCLUDES interp.cnr so the reference checks the real
+        // module (ground truth), not just the generated main.
+        let modules = [
+            ("lexer.cnr", LEXER_SRC),
+            ("parser.cnr", PARSER_SRC),
+            ("analyses.cnr", ANALYSES_SRC),
+            ("interp.cnr", INTERP_SRC),
+        ];
+        let oracle = module_oracle_full(&modules, INTERP_SRC);
+        let mine = candor_dump(INTERP_SRC);
+        assert_eq!(mine, oracle, "self-host analyses diverged from the oracle on interp.cnr");
+        assert!(
+            mine.is_empty(),
+            "self-host analyses emitted diagnostics on analyses-clean interp.cnr: {mine:?}"
         );
     });
 }
