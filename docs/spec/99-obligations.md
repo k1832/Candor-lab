@@ -1617,3 +1617,65 @@ statics, contracts, borrow params.
   a self-host-parser span-representation gap, NOT a lowering gap — recorded, not faked.
 
 Additive: full suite 589/589 green (0 failing); new S2 gate green in isolation; clippy clean.
+
+
+---
+
+## OBL-L3-DROP-SCHEDULE — self-lowering, third slice: the MOVE/DROP schedule to explicit MIR (2026-07-11)
+
+L3 extends `selfhost/lower/lower.cnr` from drop-inert aggregates to the full drop
+schedule: it emits explicit MIR `Drop` statements with static move masks and lowers
+each struct `drop` hook to a MIR function, mirroring `src/mir/build.rs`.
+
+- MOVE TRACKING (the compile-time analog of build.rs's `moves` map + `mark_moved`):
+  a per-local list of moved field-name paths, recorded as moves are lowered — a
+  non-copy whole-aggregate copy (`let b = a;`, `p.a`), and a by-value non-copy `take`
+  argument. `collect_path` walks an Ident/Field chain to a (root local, segment) path
+  (one-level partial move suffices, matching interp.cnr's S3 subset); `reassign_reown`
+  clears overlapping rows on reassignment. Marking is gated on `!is_copy` (ported from
+  interp.cnr), so S1 scalars and S2 `copy` aggregates record nothing.
+
+- DROP EMISSION (mirrors `pop_scope_with_drops`/`emit_return_drops`/`emit_loop_exit_drops`):
+  drop-scopes track owned locals in declaration order (params scope + each block
+  scope). At scope exit, at `return`, and at `break`/`continue` (down to the loop's
+  captured scope depth), each owned, needs-drop, not-(whole-)moved local emits
+  `(stmt (drop <local> (moved <field-paths>)) 0 0 false)` in REVERSE declaration order,
+  carrying its move mask so the interp drops only the un-moved sub-paths. Borrows /
+  pointers and copy/scalar locals emit nothing (`needs_drop` ported from interp.cnr,
+  also driving each local's `drop_obligation` wire flag). Abort-no-drop is honored: the
+  fault path is unreachable, so no `Drop` is emitted on it.
+
+- DROP HOOKS AS MIR FNS (mirrors build.rs's hook lowering + `drop_hooks` registration):
+  each `struct … drop(write self) { … }` lowers to an ordinary MIR fn `<drop Name>`
+  (`self` = a drop-inert `borrowmut` local; the body reuses the L1/L2 machinery, its
+  `self.field` reads auto-deref the borrow). The fn is registered in the `drop_hooks`
+  table `(hook "Name" "<drop Name>")` and the `fn_ptrs` list; the interp calls it when
+  dropping that struct (hook FIRST, then fields reverse — the recursion lives in the
+  interp's `drop_value`, so `drop_nested` emits ONE `Drop` for the outer local).
+
+- GATE (`prototype/tests/selfhost_lower.rs`, 8 S3 fixtures added to the corpus): each
+  runs `lower.cnr` → wire → `deserialize` → `mir::interp::run` → byte-exact RET/TRACE/
+  FAULT vs `run_source_real`. PROVEN EXECUTION byte-exact on all 8 — the trace-on-drop
+  ORDER is the load-bearing signal: drop_single (one hook), drop_scope_order (reverse
+  3/2/1), drop_move_suppress (moved source not dropped), drop_partial_move (drop the
+  un-moved field b only: 1 then 2), drop_move_return (moved into return, dropped in the
+  caller: 42), drop_break (loop-exit drop: 100 then 2), drop_nested (outer hook then
+  inner-field hook, reverse: 2 then 1), drop_param (by-value struct-literal arg
+  materialized + dropped at the callee's param-scope exit: 3). All 36 prior L1+L2
+  fixtures remain byte-exact.
+
+- FINDING (extends OBL-L2-AGG-SPAN, benign): the emitted `Drop` ops, their `(moved …)`
+  masks, the `drop_hooks` table, the `fn_ptrs` order, the hook fns' locals/blocks, and
+  every local's `drop_obligation` flag are byte-identical to `serialize(mir::build …)`
+  (0 structural diffs across all 8 fixtures). The ONLY wire diffs remain the same INERT
+  span-only differences the L1/L2 field-read lowering already exhibits (the self-host
+  parser records name-only spans for `T_FIELD`/`T_INDEX` where the Rust AST carries
+  full-expression spans) — none load-bearing (no S3 fixture faults). No lowering gap.
+
+- DEFERRED: deeper-than-one-level partial moves (out of the interp's S3 subset too);
+  enum/`Box` drop glue (L4/L5b); `drop_hooks` table SORTING (build.rs sorts by struct
+  name; lower.cnr emits in item order — the interp reads the table into a HashMap, so
+  execution is order-independent, and the S3 fixtures' item order already coincides with
+  sorted order, hence 0 wire diff here).
+
+Additive: new S3 gate green in isolation (44/44 lower fixtures); clippy clean.

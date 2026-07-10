@@ -174,6 +174,17 @@ const CORPUS: &[(&str, Shape)] = &[
     ("struct_with_array.cnr", Ret),
     ("aggregate_mixed.cnr", Ret),
     ("array_bounds.cnr", Fault),
+    // S3 MOVE/DROP schedule: Drop ops + move masks + drop-hooks-as-MIR-fns. The
+    // trace-on-drop order is the load-bearing signal (reverse/LIFO, hook-then-fields,
+    // move-suppression, partial-move-remainder).
+    ("drop_single.cnr", Ret),
+    ("drop_scope_order.cnr", Ret),
+    ("drop_move_suppress.cnr", Ret),
+    ("drop_partial_move.cnr", Ret),
+    ("drop_move_return.cnr", Ret),
+    ("drop_break.cnr", Ret),
+    ("drop_nested.cnr", Ret),
+    ("drop_param.cnr", Ret),
 ];
 
 fn read_fixture(rel: &str) -> String {
@@ -213,7 +224,7 @@ fn candor_lowering_execution_equal_to_oracle_over_scalar_subset() {
         }
         assert!(rets > 0 && faults > 0, "corpus must exercise both returns and faults");
         eprintln!(
-            "selfhost lower (L1+L2): {}/{} fixtures lower -> deserialize -> interp byte-exact vs oracle ({} returns, {} faults)",
+            "selfhost lower (L1+L2+L3): {}/{} fixtures lower -> deserialize -> interp byte-exact vs oracle ({} returns, {} faults)",
             CORPUS.len(),
             CORPUS.len(),
             rets,

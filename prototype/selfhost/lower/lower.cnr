@@ -102,6 +102,20 @@ struct M {
     an: [16]i32,
     aw: [16]i32,
     na: usize,
+    sco_local: [1024]i32,
+    sco_n: usize,
+    sco_mark: [128]usize,
+    sco_depth: usize,
+    loop_depth: [64]usize,
+    mv_local: [512]i32,
+    mv_seg_start: [512]usize,
+    mv_seg_count: [512]usize,
+    mv_n: usize,
+    mv_seg_p0: [1024]usize,
+    mv_seg_p1: [1024]usize,
+    mv_seg_n: usize,
+    self_p0: usize,
+    self_p1: usize,
     err: i32,
 }
 
@@ -278,6 +292,49 @@ fn field_ty(pp: read P, src: [u8], sid: u32, fs: usize, fen: usize) -> u32 {
 }
 fn stride_of(pp: read P, src: [u8], head: u32, elem: u32) -> usize {
     return round_up_us(ty_size(pp, src, head, elem), ty_align(pp, src, head, elem));
+}
+// Drop obligation / copyability (ported from interp.cnr needs_drop/is_copy). A
+// struct NEEDS drop iff it has a hook (T_STRUCT.c != 0) or a needs-drop field; it
+// is COPY iff marked `copy`, has no hook, and every field is copy. Scalars are
+// copy/inert; arrays follow their element. Enums/box are out of the L3 subset.
+fn needs_drop_ty(pp: read P, src: [u8], head: u32, tn: u32) -> bool {
+    if tn == 0u32 { return false; }
+    if scalar_width(pp, src, tn) != 0 { return false; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_ARRAY { return needs_drop_ty(pp, src, head, nd.b); }
+    let sid: u32 = struct_id_of(pp, src, head, tn);
+    if sid != 0u32 {
+        let snode: Node = pp.nodes[conv usize sid];
+        if snode.c != 0u32 { return true; }
+        let mut cur: u32 = snode.b;
+        while cur != 0u32 {
+            let fd: Node = pp.nodes[conv usize cur];
+            if needs_drop_ty(pp, src, head, fd.a) { return true; }
+            cur = fd.nx;
+        }
+        return false;
+    }
+    return false;
+}
+fn is_copy_ty(pp: read P, src: [u8], head: u32, tn: u32) -> bool {
+    if tn == 0u32 { return true; }
+    if scalar_width(pp, src, tn) != 0 { return true; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_ARRAY { return is_copy_ty(pp, src, head, nd.b); }
+    let sid: u32 = struct_id_of(pp, src, head, tn);
+    if sid != 0u32 {
+        let snode: Node = pp.nodes[conv usize sid];
+        if snode.op == 0 { return false; }
+        if snode.c != 0u32 { return false; }
+        let mut cur: u32 = snode.b;
+        while cur != 0u32 {
+            let fd: Node = pp.nodes[conv usize cur];
+            if !is_copy_ty(pp, src, head, fd.a) { return false; }
+            cur = fd.nx;
+        }
+        return true;
+    }
+    return true;
 }
 
 // ---- pool primitives (statement / terminator wire text) ---------------------
@@ -512,6 +569,19 @@ fn new_local_ptr(m: write M, tn: u32, named: i32, p0: usize, p1: usize) -> i32 {
     m.*.loc_p1[k] = p1;
     m.*.loc_tn[k] = tn;
     m.*.loc_ptr[k] = 1;
+    m.*.loc_n = m.loc_n + 1usize;
+    return id;
+}
+// A borrow (`write self`) local: a word-sized pointer to `tn`, drop-inert.
+fn new_local_borrow(m: write M, tn: u32, named: i32, p0: usize, p1: usize) -> i32 {
+    let id: i32 = conv i32 m.loc_n;
+    let k: usize = m.loc_n;
+    m.*.loc_w[k] = 0;
+    m.*.loc_named[k] = named;
+    m.*.loc_p0[k] = p0;
+    m.*.loc_p1[k] = p1;
+    m.*.loc_tn[k] = tn;
+    m.*.loc_ptr[k] = 2;
     m.*.loc_n = m.loc_n + 1usize;
     return id;
 }
@@ -801,6 +871,7 @@ fn bind(m: write M, p0: usize, p1: usize, id: i32, w: i32, tn: u32) -> unit {
     m.*.bnd_w[k] = w;
     m.*.bnd_tn[k] = tn;
     m.*.bnd_n = k + 1usize;
+    scope_add(m, id);
     return;
 }
 // Innermost-first lookup (shadowing); returns local id or -1 and sets luk_w.
@@ -824,6 +895,178 @@ fn find_fn(pp: read P, src: [u8], head: u32, p0: usize, p1: usize) -> u32 {
         cur = nd.nx;
     }
     return 0u32;
+}
+
+// ---- drop schedule: scopes, move mask, Drop emission (mirrors build.rs) ------
+// A drop-scope records the owned locals bound in it (declaration order). Scope
+// exit / return / loop-exit drop them in REVERSE, pruned by the static move mask.
+fn scope_push(m: write M) -> unit {
+    m.*.sco_mark[m.sco_depth] = m.sco_n;
+    m.*.sco_depth = m.sco_depth + 1usize;
+    return;
+}
+fn scope_add(m: write M, id: i32) -> unit {
+    m.*.sco_local[m.sco_n] = id;
+    m.*.sco_n = m.sco_n + 1usize;
+    return;
+}
+fn scope_pop_drops(pp: read P, src: [u8], m: write M) -> unit {
+    m.*.sco_depth = m.sco_depth - 1usize;
+    let start: usize = m.sco_mark[m.sco_depth];
+    let mut i: usize = m.sco_n;
+    while i > start {
+        i = i - 1usize;
+        emit_drop(pp, src, m, m.sco_local[i]);
+    }
+    m.*.sco_n = start;
+    return;
+}
+// Every live scope, innermost-first (the `return` schedule).
+fn emit_return_drops(pp: read P, src: [u8], m: write M) -> unit {
+    let mut i: usize = m.sco_n;
+    while i > 0usize {
+        i = i - 1usize;
+        emit_drop(pp, src, m, m.sco_local[i]);
+    }
+    return;
+}
+// Scopes opened inside the innermost loop body (the `break`/`continue` schedule).
+fn emit_loop_exit_drops(pp: read P, src: [u8], m: write M, keep: usize) -> unit {
+    let start: usize = m.sco_mark[keep];
+    let mut i: usize = m.sco_n;
+    while i > start {
+        i = i - 1usize;
+        emit_drop(pp, src, m, m.sco_local[i]);
+    }
+    return;
+}
+fn whole_moved(m: write M, id: i32) -> bool {
+    let mut k: usize = 0usize;
+    while k < m.mv_n {
+        if m.mv_local[k] == id && m.mv_seg_count[k] == 0usize { return true; }
+        k = k + 1usize;
+    }
+    return false;
+}
+// Emit `(stmt (drop <id> (moved <paths>)) 0 0 false)` carrying the local's move
+// mask, so the interp drops only the still-owned sub-paths (INV-DROP).
+fn st_drop(src: [u8], m: write M, id: i32) -> unit {
+    let s: usize = m.pool_n;
+    pool_lit(m, b"(stmt (drop ");
+    pool_num(m, conv u64 id);
+    pool_lit(m, b" (moved");
+    let mut k: usize = 0usize;
+    while k < m.mv_n {
+        if m.mv_local[k] == id {
+            pool_lit(m, b" (path");
+            let mut si: usize = m.mv_seg_start[k];
+            let en: usize = si + m.mv_seg_count[k];
+            while si < en {
+                pool_byte(m, 32);
+                pool_qspan(m, src, m.mv_seg_p0[si], m.mv_seg_p1[si]);
+                si = si + 1usize;
+            }
+            pool_byte(m, 41);
+        }
+        k = k + 1usize;
+    }
+    pool_lit(m, b")) 0 0 false)");
+    chunk_end(m, s);
+    return;
+}
+// A `Drop` for a needs-drop, not-(whole-)moved owned local; borrows/pointers and
+// copy/scalar locals emit nothing. No-op on the fault path (unreachable).
+fn emit_drop(pp: read P, src: [u8], m: write M, id: i32) -> unit {
+    if m.reachable == 0 { return; }
+    if m.loc_ptr[conv usize id] != 0 { return; }
+    if !needs_drop_ty(pp, src, m.head, m.loc_tn[conv usize id]) { return; }
+    if whole_moved(m, id) { return; }
+    st_drop(src, m, id);
+    return;
+}
+// The (root local, field-name path) a place names, appending segments to the seg
+// pool; -1 for a non-trackable operand (temp, literal, index, call result).
+fn collect_path(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    if nd.tag == T_PAREN { return collect_path(pp, src, m, nd.a); }
+    if nd.tag == T_ID { return lookup(m, src, nd.p0, nd.p1); }
+    if nd.tag == T_FIELD {
+        let root: i32 = collect_path(pp, src, m, nd.a);
+        if root < 0 { return 0 - 1i32; }
+        let s: usize = m.mv_seg_n;
+        m.*.mv_seg_p0[s] = nd.p0;
+        m.*.mv_seg_p1[s] = nd.p1;
+        m.*.mv_seg_n = s + 1usize;
+        return root;
+    }
+    return 0 - 1i32;
+}
+// Record `e` as moved out (a non-copy by-value consume) so its drop is pruned.
+fn mark_moved(pp: read P, src: [u8], m: write M, i: u32) -> unit {
+    let seg_start: usize = m.mv_seg_n;
+    let root: i32 = collect_path(pp, src, m, i);
+    if root < 0 { m.*.mv_seg_n = seg_start; return; }
+    let k: usize = m.mv_n;
+    m.*.mv_local[k] = root;
+    m.*.mv_seg_start[k] = seg_start;
+    m.*.mv_seg_count[k] = m.mv_seg_n - seg_start;
+    m.*.mv_n = k + 1usize;
+    return;
+}
+fn seg_is_prefix(m: write M, src: [u8], a0: usize, ac: usize, b0: usize, bc: usize) -> bool {
+    if ac > bc { return false; }
+    let mut k: usize = 0usize;
+    while k < ac {
+        if !name_eq(src, m.mv_seg_p0[a0 + k], m.mv_seg_p1[a0 + k], m.mv_seg_p0[b0 + k], m.mv_seg_p1[b0 + k]) { return false; }
+        k = k + 1usize;
+    }
+    return true;
+}
+// A reassignment reinitializes the target place: drop the move rows that overlap
+// it (either is a prefix of the other), restoring ownership (build.rs set_owned).
+fn reassign_reown(pp: read P, src: [u8], m: write M, i: u32) -> unit {
+    let tstart: usize = m.mv_seg_n;
+    let root: i32 = collect_path(pp, src, m, i);
+    let tcount: usize = m.mv_seg_n - tstart;
+    if root >= 0 {
+        let mut w: usize = 0usize;
+        let mut r: usize = 0usize;
+        while r < m.mv_n {
+            let mut keep: bool = true;
+            if m.mv_local[r] == root {
+                let rs: usize = m.mv_seg_start[r];
+                let rc: usize = m.mv_seg_count[r];
+                if seg_is_prefix(m, src, rs, rc, tstart, tcount) { keep = false; }
+                if seg_is_prefix(m, src, tstart, tcount, rs, rc) { keep = false; }
+            }
+            if keep {
+                m.*.mv_local[w] = m.mv_local[r];
+                m.*.mv_seg_start[w] = m.mv_seg_start[r];
+                m.*.mv_seg_count[w] = m.mv_seg_count[r];
+                w = w + 1usize;
+            }
+            r = r + 1usize;
+        }
+        m.*.mv_n = w;
+    }
+    m.*.mv_seg_n = tstart;
+    return;
+}
+// Scan the source once for the bytes `self`; the hook binds `self` by these bytes
+// (lookup compares src bytes), so the hook body's `self` resolves. Same trick as
+// interp.cnr's set_self_span.
+fn set_self_span(src: [u8], m: write M) -> unit {
+    let n: usize = len(src);
+    let mut i: usize = 0usize;
+    while i + 4usize <= n {
+        if src[i] == 115u8 && src[i + 1usize] == 101u8 && src[i + 2usize] == 108u8 && src[i + 3usize] == 102u8 {
+            m.*.self_p0 = i;
+            m.*.self_p1 = i + 4usize;
+            return;
+        }
+        i = i + 1usize;
+    }
+    return;
 }
 
 // ---- lowering ---------------------------------------------------------------
@@ -906,12 +1149,14 @@ fn lower_value(pp: read P, src: [u8], m: write M, i: u32, exp_w: i32) -> i32 {
     }
     if nd.tag == T_BREAK {
         if m.loop_n == 0usize { m.*.err = 1; return 1; }
+        emit_loop_exit_drops(pp, src, m, m.loop_depth[m.loop_n - 1usize]);
         term_goto(m, m.loop_brk[m.loop_n - 1usize]);
         set_res_const(m, 0u64, 0, 0);
         return 0;
     }
     if nd.tag == T_CONTINUE {
         if m.loop_n == 0usize { m.*.err = 1; return 1; }
+        emit_loop_exit_drops(pp, src, m, m.loop_depth[m.loop_n - 1usize]);
         term_goto(m, m.loop_cont[m.loop_n - 1usize]);
         set_res_const(m, 0u64, 0, 0);
         return 0;
@@ -1144,6 +1389,7 @@ fn lower_while(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
     switch_to(m, body_bb);
     m.*.loop_cont[m.loop_n] = head;
     m.*.loop_brk[m.loop_n] = exit;
+    m.*.loop_depth[m.loop_n] = m.sco_depth;
     m.*.loop_n = m.loop_n + 1usize;
     let s1: i32 = lower_block(pp, src, m, nd.b);
     m.*.loop_n = m.loop_n - 1usize;
@@ -1161,6 +1407,7 @@ fn lower_loop(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
     switch_to(m, body_bb);
     m.*.loop_cont[m.loop_n] = body_bb;
     m.*.loop_brk[m.loop_n] = exit;
+    m.*.loop_depth[m.loop_n] = m.sco_depth;
     m.*.loop_n = m.loop_n + 1usize;
     let s1: i32 = lower_block(pp, src, m, nd.a);
     m.*.loop_n = m.loop_n - 1usize;
@@ -1228,6 +1475,11 @@ fn emit_projs(pp: read P, src: [u8], m: write M, i: u32) -> unit {
         if id < 0 { m.*.err = 1; }
         m.*.plc_local = id;
         m.*.plc_tn = m.luk_tn;
+        if id >= 0 && m.loc_ptr[conv usize id] == 2 {
+            pool_lit(m, b" (deref ");
+            pool_ty(m, pp, src, m.luk_tn);
+            pool_byte(m, 41);
+        }
         return;
     }
     if nd.tag == T_FIELD {
@@ -1441,6 +1693,9 @@ fn lower_call_agg(pp: read P, src: [u8], m: write M, i: u32, root: i32, tn: u32)
 // A whole-aggregate value read from a place (`let q = p;`): byte-copy dst <- src.
 fn lower_agg_copy(pp: read P, src: [u8], m: write M, i: u32, root: i32, tn: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
+    if !is_copy_ty(pp, src, m.head, tn) {
+        mark_moved(pp, src, m, i);
+    }
     if m.reachable != 0 {
         let s: usize = m.pool_n;
         pool_lit(m, b"(stmt (copyval ");
@@ -1487,6 +1742,14 @@ fn lower_into(pp: read P, src: [u8], m: write M, e: u32, root: i32, tn: u32) -> 
 // Lower each argument to an operand in m.ak/av/an/aw (m.na of them): a word-sized
 // argument is its value; a by-value aggregate argument is passed as the ADDRESS of
 // its place (a `(ref ...)` into a rawptr temp), matching build.rs's call ABI.
+// A place-shaped expression (can be addressed directly); else a value that must be
+// materialized into a temp before its address is taken (build.rs materialize_place).
+fn is_place_expr(pp: read P, i: u32) -> bool {
+    let nd: Node = pp.nodes[conv usize i];
+    if nd.tag == T_PAREN { return is_place_expr(pp, nd.a); }
+    if nd.tag == T_ID || nd.tag == T_FIELD || nd.tag == T_INDEX { return true; }
+    return false;
+}
 fn lower_args(pp: read P, src: [u8], m: write M, fnnd: Node, arg_head: u32) -> i32 {
     m.*.na = 0usize;
     let mut argc: u32 = arg_head;
@@ -1504,6 +1767,17 @@ fn lower_args(pp: read P, src: [u8], m: write M, fnnd: Node, arg_head: u32) -> i
             m.*.aw[k] = m.res_w;
             m.*.na = k + 1usize;
         } else {
+            let placeish: bool = is_place_expr(pp, argc);
+            let mut tmp: i32 = 0 - 1i32;
+            if !placeish {
+                tmp = new_local_tn(m, ptn, 0, 0, 0);
+                m.*.dbuf_n = 0usize;
+                let sc2: i32 = lower_into(pp, src, m, argc, tmp, ptn);
+                if sc2 != 0 { return sc2; }
+            }
+            if !is_copy_ty(pp, src, m.head, ptn) {
+                mark_moved(pp, src, m, argc);
+            }
             let rt: i32 = new_local_ptr(m, ptn, 0, 0, 0);
             if m.reachable != 0 {
                 let an2: Node = pp.nodes[conv usize argc];
@@ -1511,7 +1785,13 @@ fn lower_args(pp: read P, src: [u8], m: write M, fnnd: Node, arg_head: u32) -> i
                 pool_lit(m, b"(stmt (assign ");
                 pool_num(m, conv u64 rt);
                 pool_lit(m, b" (ref ");
-                render_place_read(pp, src, m, argc);
+                if placeish {
+                    render_place_read(pp, src, m, argc);
+                } else {
+                    pool_lit(m, b"(place ");
+                    pool_num(m, conv u64 tmp);
+                    pool_lit(m, b" (proj))");
+                }
                 pool_lit(m, b")) ");
                 pool_num(m, conv u64 an2.p0);
                 pool_byte(m, 32);
@@ -1561,6 +1841,7 @@ fn lower_return(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
         let sc: i32 = lower_into(pp, src, m, nd.a, 0, m.ret_tn);
         if sc != 0 { return sc; }
     }
+    emit_return_drops(pp, src, m);
     term_return(m);
     return 0;
 }
@@ -1598,22 +1879,26 @@ fn lower_stmt(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
         let ttn: u32 = resolve_place_tn(pp, src, m, nd.a);
         build_dbuf_place(pp, src, m, nd.a);
         let root: i32 = m.plc_local;
-        return lower_into(pp, src, m, nd.b, root, ttn);
+        let sc: i32 = lower_into(pp, src, m, nd.b, root, ttn);
+        reassign_reown(pp, src, m, nd.a);
+        return sc;
     }
     // expression statement (trace, if/while/loop, return, ...)
     return lower_value(pp, src, m, i, 0 - 1i32);
 }
 
 fn lower_block(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
+    scope_push(m);
     let bsave: usize = m.bnd_n;
     let nd: Node = pp.nodes[conv usize i];
     let mut cur: u32 = nd.a;
     while cur != 0u32 {
         if m.reachable == 0 { break; }
         let sc: i32 = lower_stmt(pp, src, m, cur);
-        if sc != 0 { m.*.bnd_n = bsave; return sc; }
+        if sc != 0 { scope_pop_drops(pp, src, m); m.*.bnd_n = bsave; return sc; }
         cur = pp.nodes[conv usize cur].nx;
     }
+    scope_pop_drops(pp, src, m);
     m.*.bnd_n = bsave;
     return 0;
 }
@@ -1633,6 +1918,10 @@ fn reset_fn(m: write M) -> unit {
     m.*.dbuf_n = 0usize;
     m.*.fn_entry = 0;
     m.*.fn_np = 0;
+    m.*.sco_n = 0usize;
+    m.*.sco_depth = 0usize;
+    m.*.mv_n = 0usize;
+    m.*.mv_seg_n = 0usize;
     return;
 }
 
@@ -1647,6 +1936,7 @@ fn lower_fn(pp: read P, src: [u8], m: write M, fnid: u32) -> i32 {
     if retw != 0 { let _r: i32 = new_local(m, retw, 0, 0, 0); }
     else if retn != 0u32 { let _r: i32 = new_local_tn(m, retn, 0, 0, 0); }
     else { let _r: i32 = new_local(m, 0, 0, 0, 0); }
+    scope_push(m);
     let mut pc: u32 = nd.c;
     let mut np: i32 = 0;
     while pc != 0u32 {
@@ -1665,7 +1955,31 @@ fn lower_fn(pp: read P, src: [u8], m: write M, fnid: u32) -> i32 {
     let entry: i32 = new_block(m);
     m.*.fn_entry = entry;
     switch_to(m, entry);
-    return lower_block(pp, src, m, nd.d);
+    let sc: i32 = lower_block(pp, src, m, nd.d);
+    if sc != 0 { scope_pop_drops(pp, src, m); return sc; }
+    if m.reachable != 0 { term_return(m); }
+    scope_pop_drops(pp, src, m);
+    return 0;
+}
+// Lower a struct `drop` hook to a MIR fn `<drop Name>(write self)` — `self` is a
+// drop-inert borrow, so field reads deref it and the param scope drops nothing.
+fn lower_hook(pp: read P, src: [u8], m: write M, sid: u32) -> i32 {
+    m.*.ret_w = 0;
+    m.*.ret_tn = 0u32;
+    let _r: i32 = new_local(m, 0, 0, 0, 0);
+    let selfid: i32 = new_local_borrow(m, sid, 1, m.self_p0, m.self_p1);
+    m.*.fn_np = 1;
+    scope_push(m);
+    bind(m, m.self_p0, m.self_p1, selfid, 0, sid);
+    let snode: Node = pp.nodes[conv usize sid];
+    let entry: i32 = new_block(m);
+    m.*.fn_entry = entry;
+    switch_to(m, entry);
+    let sc: i32 = lower_block(pp, src, m, snode.c);
+    if sc != 0 { scope_pop_drops(pp, src, m); return sc; }
+    if m.reachable != 0 { term_return(m); }
+    scope_pop_drops(pp, src, m);
+    return 0;
 }
 
 // ---- emission (trace sink) --------------------------------------------------
@@ -1738,16 +2052,33 @@ fn emit_block(m: write M, b: usize) -> unit {
     emit_byte(41);
     return;
 }
-fn emit_fn(m: write M, pp: read P, src: [u8], name_p0: usize, name_p1: usize) -> unit {
+// The synthesized hook name `"<drop Name>"` (name = the struct's name span).
+fn emit_hook_ref(src: [u8], p0: usize, p1: usize) -> unit {
+    emit_byte(34);
+    emit_lit(b"<drop ");
+    emit_bytes(src, p0, p1);
+    emit_byte(62);
+    emit_byte(34);
+    return;
+}
+fn emit_fn(m: write M, pp: read P, src: [u8], name_p0: usize, name_p1: usize, is_hook: i32) -> unit {
     emit_lit(b"(fn ");
-    emit_qspan(src, name_p0, name_p1);
+    if is_hook != 0 {
+        emit_hook_ref(src, name_p0, name_p1);
+    } else {
+        emit_qspan(src, name_p0, name_p1);
+    }
     emit_byte(32);
     emit_num(conv u64 m.fn_np);
     emit_lit(b" (none) (locals");
     let mut i: usize = 0usize;
     while i < m.loc_n {
         emit_lit(b" (local ");
-        if m.loc_ptr[i] != 0 {
+        if m.loc_ptr[i] == 2 {
+            emit_lit(b"(borrowmut ");
+            emit_ty(pp, src, m.loc_tn[i]);
+            emit_byte(41);
+        } else if m.loc_ptr[i] != 0 {
             emit_lit(b"(rawptr ");
             emit_ty(pp, src, m.loc_tn[i]);
             emit_byte(41);
@@ -1766,7 +2097,11 @@ fn emit_fn(m: write M, pp: read P, src: [u8], name_p0: usize, name_p1: usize) ->
         } else {
             emit_lit(b"(none)");
         }
-        emit_lit(b" false)");
+        let mut dob: i32 = 0;
+        if m.loc_ptr[i] == 0 {
+            if needs_drop_ty(pp, src, m.head, m.loc_tn[i]) { dob = 1; }
+        }
+        if dob != 0 { emit_lit(b" true)"); } else { emit_lit(b" false)"); }
         i = i + 1usize;
     }
     emit_lit(b") (blocks");
@@ -1864,10 +2199,36 @@ pub fn lower_dump(src: [u8], buf: read Buf) -> unit {
         an: [0; 16],
         aw: [0; 16],
         na: 0usize,
+        sco_local: [0; 1024],
+        sco_n: 0usize,
+        sco_mark: [0usize; 128],
+        sco_depth: 0usize,
+        loop_depth: [0usize; 64],
+        mv_local: [0; 512],
+        mv_seg_start: [0usize; 512],
+        mv_seg_count: [0usize; 512],
+        mv_n: 0usize,
+        mv_seg_p0: [0usize; 1024],
+        mv_seg_p1: [0usize; 1024],
+        mv_seg_n: 0usize,
+        self_p0: 0usize,
+        self_p1: 0usize,
         err: 0,
     };
-    collect_fnptrs(read p, src, write m);
+    set_self_span(src, write m);
     emit_lit(b"(mir (fns");
+    // Drop-hook fns first (item order), then user fns -- matching build.rs.
+    let mut ch: u32 = head;
+    while ch != 0u32 {
+        let cn: Node = p.nodes[conv usize ch];
+        if cn.tag == T_STRUCT && cn.c != 0u32 {
+            reset_fn(write m);
+            let _sh: i32 = lower_hook(read p, src, write m, ch);
+            emit_byte(32);
+            emit_fn(write m, read p, src, cn.p0, cn.p1, 1);
+        }
+        ch = cn.nx;
+    }
     let mut cur: u32 = head;
     while cur != 0u32 {
         let nd: Node = p.nodes[conv usize cur];
@@ -1875,16 +2236,35 @@ pub fn lower_dump(src: [u8], buf: read Buf) -> unit {
             reset_fn(write m);
             let _sc: i32 = lower_fn(read p, src, write m, cur);
             emit_byte(32);
-            emit_fn(write m, read p, src, nd.p0, nd.p1);
+            emit_fn(write m, read p, src, nd.p0, nd.p1, 0);
         }
         cur = nd.nx;
     }
-    emit_lit(b") (drop_hooks) (fn_ptrs");
-    let mut fi: usize = 0usize;
-    while fi < m.fp_n {
-        emit_byte(32);
-        emit_qspan(src, m.fp_p0[fi], m.fp_p1[fi]);
-        fi = fi + 1usize;
+    emit_lit(b") (drop_hooks");
+    let mut dh: u32 = head;
+    while dh != 0u32 {
+        let dn: Node = p.nodes[conv usize dh];
+        if dn.tag == T_STRUCT && dn.c != 0u32 {
+            emit_lit(b" (hook ");
+            emit_qspan(src, dn.p0, dn.p1);
+            emit_byte(32);
+            emit_hook_ref(src, dn.p0, dn.p1);
+            emit_byte(41);
+        }
+        dh = dn.nx;
+    }
+    emit_lit(b") (fn_ptrs");
+    let mut fp: u32 = head;
+    while fp != 0u32 {
+        let f2: Node = p.nodes[conv usize fp];
+        if f2.tag == T_STRUCT && f2.c != 0u32 {
+            emit_byte(32);
+            emit_hook_ref(src, f2.p0, f2.p1);
+        } else if f2.tag == T_FN {
+            emit_byte(32);
+            emit_qspan(src, f2.p0, f2.p1);
+        }
+        fp = f2.nx;
     }
     emit_lit(b") (statics))");
     emit_nl();
