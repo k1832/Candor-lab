@@ -104,3 +104,40 @@ imports not alias paths; no `pub use` re-exports) — that friction is valuable 
 99-obligations.md. Serialized: touches `selfhost/` + every oracle harness, so it runs SOLO,
 after the Map enabler and outside any compiler-crate agent's window. Slot: after step 1 (Map)
 lands, before the step-3 coverage slices — a split, better-navigable source eases those.
+
+## Self-interpreting — sliced plan of record (2026-07-10)
+
+The next self-hosting tier: a tree-walking interpreter written in Candor
+(`selfhost/interp/interp.cnr`) that EXECUTES Candor programs, oracle-matched
+(byte-exact `Run{ret,trace}` + fault identity) against the Rust `src/interp/`.
+Built in slices; each is solo/serial (writes the crate). Scoped by two read-only
+design passes (S3 drop semantics; blockers A/B/C).
+
+- **S1 DONE** — scalar interp (ints/bool, control flow, arithmetic+faults, calls,
+  recursion). Overflow without i128 via wrapping-then-decide. 24 fixtures.
+- **S2 DONE** — flat byte-memory model + structs/arrays. Value model converged onto
+  addressed memory (S1 fixtures still byte-exact). 36 fixtures.
+- **S3** — move/drop schedule + trace-on-drop. DOABLE BEFORE HEAP: the drop trace
+  comes from a user `drop(write self)` hook calling `trace`, no Box needed. Reverse/
+  LIFO order, hook-then-fields, move-suppresses-drop, fault aborts without dropping.
+  Recomputes ownership during the walk (not from analyses). Extends the type table
+  with is_copy/needs_drop + struct->drophook lookup. 8 fixtures to author.
+- **S4** — match/enums (RESEQUENCED before Box: every Box systems fixture matches
+  BoxResult). Tag@0/payload@8.
+- **S5** — Box/BoxResult + allocator ABI ({ptr,ctx,vt}=24, structural Alloc discovery).
+- **S6** — rawptr/fnptr/MMIO + pointer intrinsics + the dense [N]u8 Mem (blocker C,
+  ~80 lines, 4-8 MiB, no paging — corpus max address is 3 MiB).
+  **MILESTONE: after S6 all five systems-corpus programs run** (11_1..11_5
+  allocator/scheduler/mmio/parser/arena) — the non-generic, non-container corpus.
+- **S7** — slices/str + std Vec/Map/String (fat pointers=16, Vec/Map=40).
+- **S8** — the monomorphizer (blocker B, ~700-900 lines). Gates ONLY the generic
+  library tail; the systems corpus is monomorphic, so B is descopable indefinitely.
+- **S9** — conv/contracts + whole-corpus close-out.
+
+**Blocker verdicts (design memo):** A (type/layout table) is the TALLEST POLE —
+the self-host checker does no type inference, so A must BUILD annotation-directed
+type synthesis (`ty_of`), ~1000 lines grown incrementally across S2-S7, with no
+oracle to differentially test against. B (monomorphizer) is late and optional.
+C (address space) is nearly free (dense arena, no paging). ~6 slices / ~3500-4500
+lines of Candor remain to the whole corpus; the systems-corpus milestone (S6) is
+much nearer.
