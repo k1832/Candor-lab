@@ -1838,6 +1838,8 @@ impl<'a> Interp<'a> {
             }
             "str_from" => self.bi_str_from(args)?,
             "substr" => self.bi_substr(args, span)?,
+            "char_at" => self.bi_char_at(args, span)?,
+            "char_count" => self.bi_char_count(args)?,
             "string_new" => self.bi_string_new(args)?,
             "push" if self.arg0_is_string(args) => self.bi_string_push(args, span)?,
             "append" if self.arg0_is_string(args) => self.bi_string_append(args)?,
@@ -2131,6 +2133,66 @@ impl<'a> Interp<'a> {
         self.write_bytes(a, &(ptr + lo).to_le_bytes())?;
         self.write_bytes(a + 8, &(hi - lo).to_le_bytes())?;
         Ok(RVal { ty: Type::Str, addr: a, origin: Origin::None })
+    }
+
+    /// `char_at(s: str, pos: usize) -> CharStep` (OBL-TEXT-CHARS value-gear
+    /// decoder): decode the UTF-8 scalar at byte offset `pos`, returning
+    /// `{ cp, next }` — the code point and the position just past it, both OWNED
+    /// (no borrow, no alloc, no iterator struct). Since `str` GUARANTEES
+    /// well-formed UTF-8 (design 0013 §4), a valid `str` with `pos` on a boundary
+    /// and `pos < len` always decodes. DEFENSIVE behavior on a non-boundary /
+    /// ill-formed / truncated `pos` is a FAULT (P5) — the same `Bounds` family as
+    /// `substr`'s boundary fault, because decoding valid text off a boundary is a
+    /// bug, not a routine P7 error. A false `str` forged via `str_from_unchecked`
+    /// yields wrong values here, never UB (0013 §4). `pos == len` also faults:
+    /// there is no scalar to decode at the end.
+    fn bi_char_at(&mut self, args: &[Expr], span: Span) -> R<RVal> {
+        let sv = self.eval_value(&args[0], None)?;
+        let ptr = self.read_u64(sv.addr)?;
+        let len = self.read_u64(sv.addr + 8)?;
+        let pos = { let v = self.eval_value(&args[1], Some(&Type::usize()))?; self.read_u64(v.addr)? };
+        self.cur_span = span;
+        if pos >= len {
+            return Err(self.fault(FaultKind::Bounds, format!("char_at pos {pos} out of bounds for str of len {len}")));
+        }
+        let bytes = self.read_bytes(ptr, len, true)?;
+        match utf8_decode_at(&bytes, pos as usize) {
+            Some((cp, next)) => {
+                let ty = Type::Named("CharStep".to_string());
+                let (addr, id) = self.alloc_temp(ty.clone());
+                let (_, cp_off) = self.field_offset("CharStep", "cp");
+                let (_, next_off) = self.field_offset("CharStep", "next");
+                self.write_bytes(addr + cp_off, &cp.to_le_bytes())?;
+                self.write_bytes(addr + next_off, &(next as u64).to_le_bytes())?;
+                Ok(RVal { ty, addr, origin: Origin::Temp(id) })
+            }
+            None => Err(self.fault(
+                FaultKind::Bounds,
+                format!("char_at pos {pos} does not fall on a UTF-8 character boundary"),
+            )),
+        }
+    }
+
+    /// `char_count(s: str) -> usize` (design 0013 §3): the O(n) Unicode-scalar
+    /// count — decode-and-advance to the end, counting. The deferred op landing
+    /// with the char protocol. Cannot fault on a valid (well-formed) `str`.
+    fn bi_char_count(&mut self, args: &[Expr]) -> R<RVal> {
+        let sv = self.eval_value(&args[0], None)?;
+        let ptr = self.read_u64(sv.addr)?;
+        let len = self.read_u64(sv.addr + 8)?;
+        let bytes = self.read_bytes(ptr, len, true)?;
+        let mut pos = 0usize;
+        let mut n = 0u64;
+        while pos < bytes.len() {
+            match utf8_decode_at(&bytes, pos) {
+                Some((_, next)) => {
+                    pos = next;
+                    n += 1;
+                }
+                None => return Err(self.fault(FaultKind::Bounds, format!("char_count: ill-formed UTF-8 at byte {pos}"))),
+            }
+        }
+        self.usize_val(n)
     }
 
     /// Build a value of the program-defined `Named` enum `nominal`, variant
@@ -3094,6 +3156,34 @@ fn utf8_valid_up_to(bytes: &[u8]) -> Option<usize> {
 fn str_is_boundary(bytes: &[u8], i: usize) -> bool {
     i == 0 || i == bytes.len() || (i < bytes.len() && (bytes[i] & 0xC0) != 0x80)
 }
+/// Decode the UTF-8 scalar at byte offset `pos` in the (well-formed-by-contract)
+/// run `bytes`, returning `(code_point, next_pos)`. Returns `None` when `pos` is
+/// a continuation byte (mid-character), the lead byte is invalid, or the sequence
+/// is truncated — none of which occur in a valid `str` (design 0013 §4); the
+/// caller (`char_at`/`char_count`) turns `None` into a P5 fault.
+fn utf8_decode_at(bytes: &[u8], pos: usize) -> Option<(u32, usize)> {
+    let b0 = *bytes.get(pos)?;
+    let (extra, mut cp) = if b0 < 0x80 {
+        return Some((b0 as u32, pos + 1));
+    } else if b0 >> 5 == 0b110 {
+        (1usize, (b0 & 0x1F) as u32)
+    } else if b0 >> 4 == 0b1110 {
+        (2usize, (b0 & 0x0F) as u32)
+    } else if b0 >> 3 == 0b11110 {
+        (3usize, (b0 & 0x07) as u32)
+    } else {
+        return None;
+    };
+    for k in 1..=extra {
+        let b = *bytes.get(pos + k)?;
+        if b & 0xC0 != 0x80 {
+            return None;
+        }
+        cp = (cp << 6) | (b & 0x3F) as u32;
+    }
+    Some((cp, pos + 1 + extra))
+}
+
 
 /// UTF-8-encode a Unicode scalar value (design 0013 §3). Returns `None` for a
 /// non-scalar `u32` (a surrogate `0xD800..=0xDFFF` or `> 0x10FFFF`), which is the

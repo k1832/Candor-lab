@@ -1912,6 +1912,41 @@ impl<'a> Checker<'a> {
                     Type::Error
                 }
             }
+            "char_at" => {
+                // `char_at(s: str, pos: usize) -> CharStep` (OBL-TEXT-CHARS value-
+                // gear decoder): decode the UTF-8 scalar at `pos`, returning its
+                // code point and the next byte position — all owned, no borrow, no
+                // alloc. FAULTS (P5) at runtime on a non-boundary/ill-formed `pos`.
+                if args.len() == 2 {
+                    let sv = self.check_expr(&args[0], Use::Value);
+                    let p = self.check_expr(&args[1], Use::Value);
+                    self.expect_integer(&p, args[1].span);
+                    match sv {
+                        Type::Str => Type::Named("CharStep".to_string()),
+                        Type::Error => Type::Error,
+                        other => {
+                            self.mismatch(span, "char_at", "str", &other);
+                            Type::Error
+                        }
+                    }
+                } else {
+                    self.arity(span, "char_at", 2);
+                    Type::Error
+                }
+            }
+            "char_count" => {
+                // `char_count(s: str) -> usize` (design 0013 §3): the O(n) Unicode-
+                // scalar count (decode-and-advance to the end) — the UTF-8 tax made
+                // visible in the name (P4). Ships WITH the char protocol.
+                let t = self.arg0(args, span, "char_count");
+                match t {
+                    Type::Str | Type::Error => {}
+                    other => {
+                        self.mismatch(span, "char_count", "str", &other);
+                    }
+                }
+                Type::usize()
+            }
             "len" => {
                 self.arg0(args, span, "len");
                 Type::usize()

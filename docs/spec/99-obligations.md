@@ -555,3 +555,17 @@ lifetime: the loop's read loan spans the body, so mutation-during-iteration is E
 machinery. for write x (mutating yield) extends the same compact-default argument and is future
 work, still region-free. Prototype: RefIndexed wired for Vec; a user impl should typecheck via
 the compact default (not yet exercised end-to-end).
+
+## OBL-TEXT-CHARS — DISCHARGED via the value-gear path, 2026-07-10
+
+The second candidate-C consequence, also discharged region-free-and-C-free (the ruling's bet pays
+off a SECOND time). char_at(s: str, pos: usize) -> CharStep{cp: u32, next: usize} is a value-gear
+decoder: a compiler-known copy struct of owned values, no iterator struct, no borrow field, no
+alloc marker - the position threads through step.next exactly as the self-hosted lexer threads its
+scan cursor. char_count(s) -> usize (O(n)) ships with it, discharging 0013's deferred op. No
+for-sugar (P6: the primitive + while is the honest minimal surface; a Chars value earns no slot).
+Ill-formed UTF-8 or pos==len faults (Bounds family) - a valid str never hits it (0013 §4
+guarantee); a str_from_unchecked forgery yields wrong values, never UB. Tree-walk oracle only
+(str ops are oracle-only per the text stage). Both features candidate C would have unlocked
+(borrowed iteration, char iteration) are now proven buildable WITHOUT region-parameterized types -
+the ruling vindicated constructively, twice.

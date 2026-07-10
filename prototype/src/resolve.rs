@@ -371,6 +371,25 @@ pub fn resolve_program(prog: &Program, diags: &mut Vec<Diag>) -> Items {
             span: crate::span::Span::point(0),
         },
     );
+    // The compiler-known char-decode result (OBL-TEXT-CHARS value-gear decoder):
+    // `char_at(s, pos)` returns `CharStep { cp: u32, next: usize }` — the decoded
+    // Unicode scalar and the next byte position, both OWNED values (no borrow), so
+    // it needs no region machinery and is a plain copy struct. A `for`/`while` over
+    // chars threads `next` exactly as the lexer threads its scan cursor (0013 §4).
+    type_names.insert("CharStep".to_string());
+    items.structs.insert(
+        "CharStep".to_string(),
+        crate::types::StructTy {
+            copy: true,
+            has_drop: false,
+            alloc_on_drop: false,
+            fields: vec![
+                ("cp".to_string(), crate::types::Type::Scalar(crate::token::ScalarTy::U32)),
+                ("next".to_string(), crate::types::Type::usize()),
+            ],
+            span: crate::span::Span::point(0),
+        },
+    );
     // The std owning, growable text type (design 0013 §1.2). Compiler-known in the
     // prototype (DECISION: the in-language form needs a growable heap buffer, but
     // the `Alloc` vtable exposes no `realloc` and in-language UTF-8 encoding +

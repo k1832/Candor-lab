@@ -298,4 +298,137 @@ fn string_is_not_portable_across_spawn() {
     assert!(!errors(&src).is_empty(), "String should be rejected as non-portable across spawn");
 }
 
+// ---- char_at: value-gear UTF-8 decoder (OBL-TEXT-CHARS) ---------------------
 
+#[test]
+fn char_at_decodes_ascii() {
+    // 'a' == U+0061 == 97, one byte, next == 1.
+    let src = "fn main() -> i64 {\n\
+                 let s: str = \"abc\";\n\
+                 let step: CharStep = char_at(s, 0);\n\
+                 if step.next == 1 { return conv i64 step.cp; }\n\
+                 return -1;\n\
+               }";
+    assert_eq!(run_ret(src), 97);
+}
+
+#[test]
+fn char_at_decodes_two_byte() {
+    // "héllo": the `é` (U+00E9 == 233) starts at byte 1 and is 2 bytes, next == 3.
+    let src = "fn main() -> i64 {\n\
+                 let s: str = \"héllo\";\n\
+                 let step: CharStep = char_at(s, 1);\n\
+                 if step.next == 3 { return conv i64 step.cp; }\n\
+                 return -1;\n\
+               }";
+    assert_eq!(run_ret(src), 233);
+}
+
+#[test]
+fn char_at_decodes_three_byte() {
+    // '€' == U+20AC == 8364, three bytes, next == 3.
+    let src = "fn main() -> i64 {\n\
+                 let s: str = \"€\";\n\
+                 let step: CharStep = char_at(s, 0);\n\
+                 if step.next == 3 { return conv i64 step.cp; }\n\
+                 return -1;\n\
+               }";
+    assert_eq!(run_ret(src), 8364);
+}
+
+#[test]
+fn char_at_decodes_four_byte_emoji() {
+    // '😀' == U+1F600 == 128512, four bytes, next == 4.
+    let src = "fn main() -> i64 {\n\
+                 let s: str = \"😀\";\n\
+                 let step: CharStep = char_at(s, 0);\n\
+                 if step.next == 4 { return conv i64 step.cp; }\n\
+                 return -1;\n\
+               }";
+    assert_eq!(run_ret(src), 128512);
+}
+
+#[test]
+fn char_at_mid_char_faults() {
+    // Byte 2 falls inside the 2-byte `é` of "héllo" — a continuation byte, not a
+    // char boundary. The value-gear decoder FAULTS (P5), like `substr`.
+    let src = "fn main() -> i64 {\n\
+                 let s: str = \"héllo\";\n\
+                 let step: CharStep = char_at(s, 2);\n\
+                 return conv i64 step.cp;\n\
+               }";
+    assert_eq!(run_fault(src), FaultKind::Bounds);
+}
+
+#[test]
+fn char_at_at_end_faults() {
+    // `pos == len` has no scalar to decode — an out-of-bounds fault.
+    let src = "fn main() -> i64 {\n\
+                 let s: str = \"a\";\n\
+                 let step: CharStep = char_at(s, 1);\n\
+                 return conv i64 step.cp;\n\
+               }";
+    assert_eq!(run_fault(src), FaultKind::Bounds);
+}
+
+// ---- char_count: the O(n) scalar count -------------------------------------
+
+#[test]
+fn char_count_mixed_string() {
+    // "héllo€": h é l l o € = 6 scalars, but 1+2+1+1+1+3 = 9 bytes.
+    let src = "fn main() -> i64 {\n\
+                 let s: str = \"héllo€\";\n\
+                 return conv i64 char_count(s);\n\
+               }";
+    assert_eq!(run_ret(src), 6);
+}
+
+#[test]
+fn char_count_byte_len_differ() {
+    // char_count is scalars (6); len is bytes (9). The UTF-8 tax, made visible.
+    let src = "fn main() -> i64 {\n\
+                 let s: str = \"héllo€\";\n\
+                 return conv i64 (len(s) - char_count(s));\n\
+               }";
+    assert_eq!(run_ret(src), 3);
+}
+
+#[test]
+fn char_count_empty_is_zero() {
+    assert_eq!(run_ret("fn main() -> i64 { return conv i64 char_count(\"\"); }"), 0);
+}
+
+#[test]
+fn char_count_single_char() {
+    assert_eq!(run_ret("fn main() -> i64 { return conv i64 char_count(\"€\"); }"), 1);
+}
+
+// ---- the decoder-threading idiom: iterate all chars, exact sequence ---------
+
+#[test]
+fn iterate_all_chars_exact_sequence() {
+    // Thread the byte position through char_at exactly as the lexer threads its
+    // scan cursor (the value-gear idiom; no iterator struct, no borrow). Assert
+    // the exact code-point sequence of "héllo€".
+    let src = "fn main() -> i64 {\n\
+                 let s: str = \"héllo€\";\n\
+                 let expected: [6]i64 = [104, 233, 108, 108, 111, 8364];\n\
+                 let mut pos: usize = 0;\n\
+                 let mut i: usize = 0;\n\
+                 while pos < len(s) {\n\
+                   let step: CharStep = char_at(s, pos);\n\
+                   if conv i64 step.cp != expected[i] { return -1; }\n\
+                   pos = step.next;\n\
+                   i = i + 1;\n\
+                 }\n\
+                 if i == 6 { return 1; }\n\
+                 return 0;\n\
+               }";
+    assert_eq!(run_ret(src), 1);
+}
+
+#[test]
+fn char_at_where_bytes_expected_rejected() {
+    // `char_at` takes a `str`, not `[u8]` — no coercion (P2).
+    assert!(!errors("fn main() -> i64 { let b: [u8] = b\"hi\"; let s: CharStep = char_at(b, 0); return 0; }").is_empty());
+}
