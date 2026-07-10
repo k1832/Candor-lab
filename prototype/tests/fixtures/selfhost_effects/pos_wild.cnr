@@ -1,0 +1,8 @@
+// Exhaustive via a wildcard arm (the catch-all path): no E0601.
+enum Color { Red, Green, Blue }
+fn classify(c: read Color) -> i64 {
+    match c {
+        Color::Red => { return 0i64; },
+        _ => { return 9i64; },
+    }
+}

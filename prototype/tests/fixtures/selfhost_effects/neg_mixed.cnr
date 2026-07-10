@@ -1,0 +1,14 @@
+// Both families in one program: E0401 (non-alloc calls alloc) + E0601 (missing Green).
+enum Color { Red, Green, Blue }
+fn helper() alloc -> i64 {
+    return 1i64;
+}
+fn f() -> i64 {
+    return helper();
+}
+fn g(c: read Color) -> i64 {
+    match c {
+        Color::Red => { return 0i64; },
+        Color::Blue => { return 2i64; },
+    }
+}

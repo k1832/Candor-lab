@@ -1,0 +1,7 @@
+// A non-`alloc` function that CALLS an `alloc`-marked function: E0401 at the call.
+fn helper() alloc -> i64 {
+    return 7i64;
+}
+fn caller() -> i64 {
+    return helper();
+}

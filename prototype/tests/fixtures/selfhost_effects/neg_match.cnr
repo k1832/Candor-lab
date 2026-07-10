@@ -1,0 +1,8 @@
+// A non-exhaustive match on an enum (missing `Blue`): E0601 at the match expr.
+enum Color { Red, Green, Blue }
+fn classify(c: read Color) -> i64 {
+    match c {
+        Color::Red => { return 0i64; },
+        Color::Green => { return 1i64; },
+    }
+}

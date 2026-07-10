@@ -1,0 +1,6 @@
+// A non-`alloc` function that `clone`s an owned box-bearing value: E0401.
+struct Node { v: i64, next: Box Node }
+fn dup(n: Node) -> i64 {
+    let m: Node = clone n;
+    return m.v + n.v;
+}

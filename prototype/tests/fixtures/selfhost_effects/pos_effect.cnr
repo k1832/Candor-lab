@@ -1,0 +1,16 @@
+// Effect-clean and exhaustive: non-`alloc` functions that allocate nothing and a
+// fully covered match on an enum. No E0401/E0601 from either checker.
+enum Color { Red, Green, Blue }
+fn pure_add(x: i64, y: i64) -> i64 {
+    return x + y;
+}
+fn calls_pure() -> i64 {
+    return pure_add(2i64, 3i64);
+}
+fn classify(c: read Color) -> i64 {
+    match c {
+        Color::Red => { return 0i64; },
+        Color::Green => { return 1i64; },
+        Color::Blue => { return 2i64; },
+    }
+}

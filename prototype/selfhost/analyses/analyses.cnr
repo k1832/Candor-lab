@@ -105,6 +105,14 @@ struct A {
     ln_root: Vec[i64],     // per in-scope loan: borrowed place's ROOT local id
     ln_kind: Vec[i64],     // per in-scope loan: 0 = shared, 1 = exclusive
     loan_n: usize,         // live-loan FRONTIER (restored at each block exit)
+    loc_ty: [256]u32,      // per-local: DECLARED type node (0 = unknown) — for
+                           // effect box-bearing + match enum resolution (slice 6)
+    fn_p0: [128]usize,     // fn table: name-span start (built in a pre-pass)
+    fn_p1: [128]usize,     // fn table: name-span end
+    fn_alloc: [128]i32,    // fn table: 1 = the signature carries the `alloc` marker
+    fn_n: usize,           // fn table entry count
+    cur_alloc: i32,        // 1 if the fn currently being walked is `alloc`-marked
+    eff_hit: i32,          // 1 once E0401 has been emitted for the current fn
 }
 
 // ---- small helpers ----------------------------------------------------------
@@ -152,6 +160,7 @@ fn loc_push(a: write A, s: usize, e: usize, cp: i32, st0: i32) -> unit {
     a.*.loc_p1[i] = e;
     a.*.loc_copy[i] = cp;
     a.*.st[i] = st0;
+    a.*.loc_ty[i] = 0u32;
     a.*.loc_n = i + 1usize;
     return;
 }
@@ -493,6 +502,20 @@ fn chk_expr(pp: read P, src: [u8], a: write A, i: u32) alloc -> unit {
             borrow_expr(pp, src, a, nd.a, 0);
         } else if nd.op == PF_WRITE {
             borrow_expr(pp, src, a, nd.a, 1);
+        } else if nd.op == PF_CLONE {
+            // clone = read-through PLUS (EFFECT) an alloc if the cloned value is
+            // box-bearing (types.rs `bears_box`); span = the clone expr.
+            borrow_place(pp, src, a, nd.a);
+            let r: u32 = root_of(pp, nd.a);
+            if r != 0u32 {
+                let rn: Node = pp.nodes[conv usize r];
+                let id: i32 = lookup_local(a, src, rn.p0, rn.p1);
+                if id >= 0 {
+                    if ty_box_bearing(pp, src, a.head, a.loc_ty[conv usize id], 0) == 1 {
+                        eff_note(a, nd.p0, nd.p1);
+                    }
+                }
+            }
         } else {
             borrow_place(pp, src, a, nd.a);
         }
@@ -534,6 +557,11 @@ fn chk_expr(pp: read P, src: [u8], a: write A, i: u32) alloc -> unit {
             let sub: Node = pp.nodes[conv usize cur];
             chk_expr(pp, src, a, cur);
             cur = sub.nx;
+        }
+        // EFFECT (E0401): a call to an `alloc`-marked fn / box / unbox (post-
+        // order, matching the oracle's note after checking the arguments).
+        if callee_is_alloc(pp, src, a, nd.a) == 1 {
+            eff_note(a, nd.p0, nd.p1);
         }
         return;
     }
@@ -682,6 +710,7 @@ fn chk_if(pp: read P, src: [u8], a: write A, i: u32) alloc -> unit {
 // arm flows from the same in-state; non-diverging arms are joined.
 fn chk_match(pp: read P, src: [u8], a: write A, i: u32) alloc -> unit {
     let nd: Node = pp.nodes[conv usize i];
+    match_exhaustive(pp, src, a, i);
     borrow_place(pp, src, a, nd.a);
     let base: usize = a.loc_n;
     let snap: [256]i32 = a.st;
@@ -775,6 +804,7 @@ fn chk_stmt(pp: read P, src: [u8], a: write A, i: u32) alloc -> unit {
             st0 = 1;
         }
         loc_push(a, nd.p0, nd.p1, cp, st0);
+        a.*.loc_ty[a.loc_n - 1usize] = nd.a;
         record_loan(pp, src, a, nd.b);
         return;
     }
@@ -814,8 +844,233 @@ fn chk_block(pp: read P, src: [u8], a: write A, head: u32) alloc -> unit {
     return;
 }
 
+// ---- EFFECT (alloc-partition) analysis, E0401 (effects.rs the oracle) --------
+// The one tracked effect is allocation (spec 08). A fn's effect is READ off its
+// signature's `alloc` marker (parser records it in T_FN.op: 1 = alloc, 2 =
+// foreign, 3 = both). In a NON-`alloc` fn body, the FIRST allocating operation
+// is E0401 (the oracle records only the first site, `AllocEffect::note`). The
+// allocating operations covered here (matchable spans the arena now carries):
+//   * a CALL to an `alloc`-marked fn, or the `box`/`unbox` builtins  (call span)
+//   * `clone` of a BOX-BEARING value                                 (clone span)
+// DEFERRED (span-lean / machinery): the implicit drop of a Box-owning param or
+// local at scope exit (oracle span = the synthetic block join_span the arena
+// does not carry — the effect analog of slice 4's E0302/E0309), and E0402
+// (alloc fn into a non-alloc fn-ptr slot — needs fn-ptr-TYPE tracking).
+
+// Build the per-fn `alloc` lookup: name span + marker, over the item list. This
+// aggregates INTO the state `A` (fixed arrays), so no extra threaded view is
+// needed — the walk signature stays (read P, [u8] src, write A): THREE views.
+fn build_fn_table(pp: read P, a: write A) -> unit {
+    a.*.fn_n = 0usize;
+    let mut cur: u32 = a.head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_FN {
+            let i: usize = a.fn_n;
+            if i < 128usize {
+                a.*.fn_p0[i] = nd.p0;
+                a.*.fn_p1[i] = nd.p1;
+                let mut al: i32 = 0;
+                if nd.op == 1 || nd.op == 3 {
+                    al = 1;
+                }
+                a.*.fn_alloc[i] = al;
+                a.*.fn_n = i + 1usize;
+            }
+        }
+        cur = nd.nx;
+    }
+    return;
+}
+
+// A CALL is allocating iff its callee names an `alloc`-marked fn or the `box`/
+// `unbox` builtins (both unconditionally allocate/free — expr.rs §6.3).
+fn callee_is_alloc(pp: read P, src: [u8], a: write A, callee: u32) -> i32 {
+    if callee == 0u32 {
+        return 0;
+    }
+    let cn: Node = pp.nodes[conv usize callee];
+    if cn.tag != T_ID {
+        return 0;
+    }
+    if span_eq(src, cn.p0, cn.p1, b"box") {
+        return 1;
+    }
+    if span_eq(src, cn.p0, cn.p1, b"unbox") {
+        return 1;
+    }
+    let mut i: usize = 0usize;
+    while i < a.fn_n {
+        if a.fn_alloc[i] == 1 {
+            if name_eq(src, cn.p0, cn.p1, a.fn_p0[i], a.fn_p1[i]) {
+                return 1;
+            }
+        }
+        i = i + 1usize;
+    }
+    return 0;
+}
+
+// Is a type node BOX-BEARING (transitively contains a `Box`/`BoxResult`)? Mirrors
+// types.rs `bears_box` for the fixture subset (Box/BoxResult, arrays, and
+// struct/enum fields/payloads); a borrow/slice of a box is NOT box-bearing (the
+// box is not owned). The APPROXIMATION vs the oracle: generic `Vec[T]`/`String`
+// (App types the oracle also treats box-bearing) and unbounded projections are
+// NOT flagged here — the fixtures use explicit `Box`/box-owning aggregates.
+fn ty_box_bearing(pp: read P, src: [u8], head: u32, ty: u32, depth: i32) -> i32 {
+    if ty == 0u32 {
+        return 0;
+    }
+    if depth > 24 {
+        return 0;
+    }
+    let nd: Node = pp.nodes[conv usize ty];
+    let tg: i32 = nd.tag;
+    if tg == T_BOX || tg == T_BOXRESULT {
+        return 1;
+    }
+    if tg == T_ARRAY {
+        return ty_box_bearing(pp, src, head, nd.a, depth + 1);
+    }
+    if tg == T_NAMED {
+        let d: u32 = find_decl(pp, head, src, nd.p0, nd.p1);
+        if d == 0u32 {
+            return 0;
+        }
+        let dn: Node = pp.nodes[conv usize d];
+        if dn.tag == T_STRUCT {
+            let mut f: u32 = dn.b;
+            while f != 0u32 {
+                let fnn: Node = pp.nodes[conv usize f];
+                if ty_box_bearing(pp, src, head, fnn.a, depth + 1) == 1 {
+                    return 1;
+                }
+                f = fnn.nx;
+            }
+            return 0;
+        }
+        if dn.tag == T_ENUM {
+            let mut v: u32 = dn.b;
+            while v != 0u32 {
+                let vn: Node = pp.nodes[conv usize v];
+                let mut py: u32 = vn.a;
+                while py != 0u32 {
+                    let pn: Node = pp.nodes[conv usize py];
+                    if ty_box_bearing(pp, src, head, py, depth + 1) == 1 {
+                        return 1;
+                    }
+                    py = pn.nx;
+                }
+                v = vn.nx;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+// Record the FIRST allocating operation in a non-`alloc` fn (E0401), once.
+fn eff_note(a: write A, s: usize, e: usize) alloc -> unit {
+    if a.cur_alloc == 0 {
+        if a.eff_hit == 0 {
+            push_diag(a, 401, s, e);
+            a.*.eff_hit = 1;
+        }
+    }
+    return;
+}
+
+// ---- MATCH EXHAUSTIVENESS, E0601 (patterns.rs `check_exhaustive` the oracle) -
+// For a match whose scrutinee resolves to an enum, a wildcard/binding arm makes
+// it exhaustive; otherwise every enum variant must be named by some arm, else
+// E0601 (span = the whole match expr, which the parser now records on T_MATCH).
+// The scrutinee enum is resolved from the scrutinee LOCAL's declared type
+// (`loc_ty`), peeling borrows/box (patterns.rs `resolve_enum`). Scalar/bool
+// scrutinees do NOT resolve to an enum here -> no E0601 (the oracle instead
+// raises E0603 "not an enum", which is OUT of this slice's covered set: matching
+// a scalar is an error, not a coverage obligation — reported in the gate).
+fn match_exhaustive(pp: read P, src: [u8], a: write A, i: u32) alloc -> unit {
+    let nd: Node = pp.nodes[conv usize i];
+    let sc: u32 = nd.a;
+    if sc == 0u32 {
+        return;
+    }
+    let scn: Node = pp.nodes[conv usize sc];
+    if scn.tag != T_ID {
+        return;
+    }
+    let id: i32 = lookup_local(a, src, scn.p0, scn.p1);
+    if id < 0 {
+        return;
+    }
+    let mut ty: u32 = a.loc_ty[conv usize id];
+    loop {
+        if ty == 0u32 {
+            return;
+        }
+        let tn: Node = pp.nodes[conv usize ty];
+        if tn.tag == T_BORROW || tn.tag == T_BORROWMUT || tn.tag == T_BOX || tn.tag == T_BOXRESULT {
+            ty = tn.a;
+        } else {
+            break;
+        }
+    }
+    let tn: Node = pp.nodes[conv usize ty];
+    if tn.tag != T_NAMED {
+        return;
+    }
+    let d: u32 = find_decl(pp, a.head, src, tn.p0, tn.p1);
+    if d == 0u32 {
+        return;
+    }
+    let dn: Node = pp.nodes[conv usize d];
+    if dn.tag != T_ENUM {
+        return;
+    }
+    // A wildcard / whole-value binding arm is a catch-all: exhaustive.
+    let mut arm: u32 = nd.b;
+    while arm != 0u32 {
+        let an: Node = pp.nodes[conv usize arm];
+        if an.a != 0u32 {
+            let pn: Node = pp.nodes[conv usize an.a];
+            if pn.tag == T_WILD || pn.tag == T_BIND {
+                return;
+            }
+        }
+        arm = an.nx;
+    }
+    // Every enum variant must be named by some arm's variant pattern.
+    let mut v: u32 = dn.b;
+    while v != 0u32 {
+        let vn: Node = pp.nodes[conv usize v];
+        let mut covered: i32 = 0;
+        let mut arm2: u32 = nd.b;
+        while arm2 != 0u32 {
+            let an2: Node = pp.nodes[conv usize arm2];
+            if an2.a != 0u32 {
+                let pn2: Node = pp.nodes[conv usize an2.a];
+                if pn2.tag == T_PVARIANT {
+                    let nmn: Node = pp.nodes[conv usize pn2.a];
+                    if name_eq(src, vn.p0, vn.p1, nmn.p0, nmn.p1) {
+                        covered = 1;
+                    }
+                }
+            }
+            arm2 = an2.nx;
+        }
+        if covered == 0 {
+            push_diag(a, 601, nd.p0, nd.p1);
+            return;
+        }
+        v = vn.nx;
+    }
+    return;
+}
+
 // ---- item pass --------------------------------------------------------------
 fn analyze_items(pp: read P, src: [u8], a: write A) alloc -> unit {
+    build_fn_table(pp, a);
     let mut cur: u32 = a.head;
     while cur != 0u32 {
         let nd: Node = pp.nodes[conv usize cur];
@@ -823,6 +1078,12 @@ fn analyze_items(pp: read P, src: [u8], a: write A) alloc -> unit {
             a.*.loc_n = 0usize;
             a.*.loan_n = 0usize;
             a.*.diverged = 0;
+            a.*.eff_hit = 0;
+            let mut cal: i32 = 0;
+            if nd.op == 1 || nd.op == 3 {
+                cal = 1;
+            }
+            a.*.cur_alloc = cal;
             let mut pcur: u32 = nd.c;
             while pcur != 0u32 {
                 let pm: Node = pp.nodes[conv usize pcur];
@@ -833,6 +1094,7 @@ fn analyze_items(pp: read P, src: [u8], a: write A) alloc -> unit {
                     st0 = 0;
                 }
                 loc_push(a, pm.p0, pm.p1, cp, st0);
+                a.*.loc_ty[a.loc_n - 1usize] = pm.a;
                 pcur = pm.nx;
             }
             chk_expr(pp, src, a, nd.d);
@@ -931,6 +1193,13 @@ fn analyze_dump(src: [u8], buf: read Buf) alloc -> unit {
         ln_root: vec_new(read al),
         ln_kind: vec_new(read al),
         loan_n: 0usize,
+        loc_ty: [0u32; 256],
+        fn_p0: [0usize; 128],
+        fn_p1: [0usize; 128],
+        fn_alloc: [0; 128],
+        fn_n: 0usize,
+        cur_alloc: 0,
+        eff_hit: 0,
     };
     analyze_items(read p, src, write a);
     sort_diags(write a);
