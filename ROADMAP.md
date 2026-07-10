@@ -52,3 +52,24 @@ on the tree-walker, which is a validated engine). Order and gates:
 4. Generics, concurrency, text — the frontier.
 The Rust implementation remains the permanent bootstrap and oracle. Each slice is a driver: the
 Candor port reads source via the std/io module, emits its result, the harness diffs it.
+
+## Self-hosting target RULED: SELF-CHECKING, 2026-07-10
+
+Deciding authority chose the self-checking tier: the Candor-written checker checks its own
+source, oracle-matched, culminating in the fixpoint gate — run checker.cnr / analyses.cnr on the
+self-host .cnr compiler source and assert the diagnostic set equals the Rust oracle's.
+Self-interpreting and true native bootstrap are named as the horizon, NOT targeted now (they need
+the str/collection runtime and a backend ported to Candor — prototype-stretching).
+
+**Honesty boundary:** the self-hosted compiler MAY depend on a small set of compiler-known
+primitives (Vec, str, Alloc, CharStep) — the runtime/language split every real language has
+(cf. Rust core intrinsics), not cheating. Self-checking does not require them in-language.
+
+**Path (targeted enablers pulled by demand, not a speculative std suite):**
+1. A std hash map / symbol table — name resolution (item tables, scopes, the keyword ladder) is
+   the checker's hot path, currently a linear scan; every remaining slice consumes it.
+2. Richer AST spans in the self-host parser — the REAL blocker: the span-lean arena defers
+   composite-span diagnostics (E0302/E0309/E0803/E0809); fuller spans unblock matching the oracle
+   on all codes.
+3. Extend self-host checker coverage to the feature set the self-host SOURCE uses (only that).
+4. The fixpoint gate: the self-host checker checks the self-host source, oracle-matched.
