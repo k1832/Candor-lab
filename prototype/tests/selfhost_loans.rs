@@ -5,19 +5,23 @@
 //! canonical diagnostic dump (one `E08XX START END` line per diagnostic, sorted
 //! by (code,start,end)) is asserted byte-equal to the Rust oracle's diagnostics
 //! for the SAME source, FILTERED to the loan families the Candor analysis covers
-//! (E0801 conflicting borrow, E0802 move-while-borrowed, E0804 read-while-
-//! exclusively-borrowed) and rendered in the identical canonical schema.
+//! (E0801 conflicting borrow, E0802 move-while-borrowed, E0803 write-while-
+//! borrowed, E0804 read-while-exclusively-borrowed) and rendered in the identical
+//! canonical schema.
 //!
 //! COVERAGE / BOUNDARY (reported honestly).
 //!  * MATCHED (code + span) against the oracle's `loans.rs` XOR conflict scan:
-//!    E0801, E0802, E0804 — all three carry the ACCESS site's BARE-IDENTIFIER
-//!    span (the borrowed/moved/read place), which the span-lean slice-2 arena
-//!    stores verbatim in the `T_ID` node, exactly like slice 4's E0301/E0304.
+//!    E0801, E0802, E0804 carry the ACCESS site's BARE-IDENTIFIER span (the
+//!    borrowed/moved/read place), which the span-lean slice-2 arena stores
+//!    verbatim in the `T_ID` node, exactly like slice 4's E0301/E0304. E0803
+//!    (write-while-borrowed) carries the whole assignment STATEMENT span, which
+//!    the parser now populates into the `T_ASSIGN` node's existing `p0/p1` pair
+//!    (leftmost-token-start .. semicolon-end); the span-free S-expr dump is
+//!    unchanged. A write conflicts with a live loan of EITHER kind.
 //!  * OUT OF SUBSET on the span-lean boundary (the loan analog of slice 4's
-//!    E0302/E0309): E0803 (write-while-borrowed) whose oracle span is the whole
-//!    assignment STATEMENT (the arena carries no statement span), and E0809
-//!    (write-through-shared) which is a TYPE-level check in `expr.rs` with a
-//!    composite prefix/statement span AND needs per-binding borrow-TYPE tracking.
+//!    E0302/E0309): E0809 (write-through-shared) — its oracle span is this same
+//!    whole-statement span (now carried), but emitting it needs per-binding
+//!    borrow-TYPE tracking this slice does not perform, so it stays deferred.
 //!  * LIVENESS: a RESTRICTED-LEXICAL approximation — a loan is in scope from its
 //!    `let` to the end of its enclosing block. This is CONSERVATIVE vs the
 //!    oracle's backward NLL-lite liveness (live to the binding's last use), so
@@ -47,7 +51,7 @@ const ANALYSES_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/analyses/analyses.cnr"));
 
 /// The loan families the Candor analysis matches against the oracle this slice.
-const COVERED: &[&str] = &["E0801", "E0802", "E0804"];
+const COVERED: &[&str] = &["E0801", "E0802", "E0803", "E0804"];
 
 fn oracle_dump(src: &str) -> String {
     let diags = check_source_real(src).expect("oracle parses the fixture");
@@ -121,6 +125,9 @@ const CORPUS: &[(&str, usize)] = &[
     ("tests/fixtures/selfhost_loans/neg_read_excl.cnr", 1),
     // negative — E0801 + E0802 (twice, one per live loan) in one program
     ("tests/fixtures/selfhost_loans/neg_mixed.cnr", 3),
+    // negative — E0803 write-while-borrowed (excl loan, then shared loan)
+    ("tests/fixtures/selfhost_loans/neg_write_excl.cnr", 1),
+    ("tests/fixtures/selfhost_loans/neg_write_shared.cnr", 1),
 ];
 
 fn read_fixture(rel: &str) -> String {
@@ -154,7 +161,7 @@ fn candor_loan_diagnostics_equal_to_oracle_over_corpus() {
         }
         assert_eq!(passed, CORPUS.len());
         eprintln!(
-            "selfhost loans: XOR loan diagnostic PARITY (E0801/E0802/E0804) on {}/{} fixtures, {} covered diagnostics matched",
+            "selfhost loans: XOR loan diagnostic PARITY (E0801/E0802/E0803/E0804) on {}/{} fixtures, {} covered diagnostics matched",
             passed,
             CORPUS.len(),
             total_diags

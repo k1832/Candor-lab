@@ -29,15 +29,18 @@
 //   E0801  conflicting borrow (XOR)        (span = the conflicting borrow's place)
 //   E0802  move of a borrowed place        (span = the moved place)
 //   E0804  read of an exclusively-borrowed place (span = the read place)
-// ALL attach to a BARE-IDENTIFIER access, whose span the span-lean slice-2 arena
-// carries verbatim in the `T_ID` node's `p0/p1`, so they match the oracle span
-// exactly. OUT OF SUBSET on the SAME span-lean boundary (a whole-statement or
-// synthetic-block span the arena does not carry): the move-JOIN codes E0302
-// (join_span) / E0309 (scope-exit span), and the loan codes E0803 (write-while-
-// borrowed; span = the whole assignment STATEMENT) and E0809 (write-through-
-// shared; a TYPE-level check in expr.rs, composite prefix/statement span, and it
-// needs per-binding borrow-TYPE tracking the span-lean arena does not seed). The
-// dataflow JOIN is still computed (E0301/E0304 correct across if/match branches).
+//   E0803  write to a borrowed place       (span = the whole assignment STATEMENT)
+// E0801/E0802/E0804 attach to a BARE-IDENTIFIER access, whose span the span-lean
+// slice-2 arena carries verbatim in the `T_ID` node's `p0/p1`. E0803 attaches to
+// the whole assignment statement, whose span the parser now populates into the
+// `T_ASSIGN` node's `p0/p1` (leftmost-token-start .. semicolon-end) — the same
+// existing per-node span pair, previously left zero on this structural node; the
+// span-free S-expr dump is unchanged. OUT OF SUBSET on the SAME span-lean
+// boundary: the move-JOIN codes E0302 (join_span) / E0309 (scope-exit span), and
+// E0809 (write-through-shared): E0809's oracle span is this same whole-statement
+// span (now carried), but emitting it needs per-binding borrow-TYPE tracking this
+// slice does not perform, so it stays deferred. The dataflow JOIN is still
+// computed (E0301/E0304 correct across if/match branches).
 //
 // LOAN MODEL. A loan = (borrowed place's ROOT local, kind shared/excl) recorded
 // only when a borrow value LANDS in a `let` binding (the oracle's Binding anchor;
@@ -205,12 +208,13 @@ fn loan_push(a: write A, root: i32, kind: i32) alloc -> unit {
 }
 
 // The XOR conflict check at an access point (loans.rs `conflict_scan`/`judge`).
-// acc: 0 = read (shared), 1 = move (exclusive), 3 = shared borrow, 4 = exclusive
-// borrow. Overlap is ROOT-granularity (same root local — the slice-4 boundary).
-// Emits ONE diagnostic per conflicting in-scope loan, exactly as the oracle
-// emits one per (access, loan) pair. E0803 (write-while-borrowed) is NOT emitted
-// here: its oracle span is the whole assignment STATEMENT the span-lean arena
-// does not carry (the loan analog of slice 4's E0302/E0309).
+// acc: 0 = read (shared), 1 = move (exclusive), 2 = write (assignment target),
+// 3 = shared borrow, 4 = exclusive borrow. Overlap is ROOT-granularity (same root
+// local — the slice-4 boundary). Emits ONE diagnostic per conflicting in-scope
+// loan, exactly as the oracle emits one per (access, loan) pair. E0803
+// (write-while-borrowed) fires on a WRITE (acc == 2) against any loan kind; its
+// oracle span is the whole assignment STATEMENT, now carried on the T_ASSIGN
+// node's p0/p1 (populated by the parser; the S-expr dump does not render it).
 fn loan_check(a: write A, root: i32, acc: i32, s: usize, e: usize) alloc -> unit {
     let n: usize = a.loan_n;
     let mut i: usize = 0usize;
@@ -220,6 +224,8 @@ fn loan_check(a: write A, root: i32, acc: i32, s: usize, e: usize) alloc -> unit
         if lr == root {
             if acc == 1 {
                 push_diag(a, 802, s, e);
+            } else if acc == 2 {
+                push_diag(a, 803, s, e);
             } else if acc == 4 {
                 push_diag(a, 801, s, e);
             } else if acc == 3 {
@@ -831,6 +837,7 @@ fn chk_stmt(pp: read P, src: [u8], a: write A, i: u32) alloc -> unit {
             let rn: Node = pp.nodes[conv usize r];
             let id: i32 = lookup_local(a, src, rn.p0, rn.p1);
             if id >= 0 {
+                loan_check(a, id, 2, nd.p0, nd.p1);
                 a.*.st[conv usize id] = 1;
             }
         }

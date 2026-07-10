@@ -1,0 +1,11 @@
+// E0803: writing to a place while it is SHARED-borrowed (a write conflicts with
+// any live loan, shared or exclusive — unlike E0804, which needs an excl loan).
+struct S { v: i64 }
+fn keep(r: read S) -> unit { return; }
+fn f() -> unit {
+    let mut x: S = S { v: 0 };
+    let a = read x;
+    x = S { v: 1 };
+    keep(a);
+    return;
+}

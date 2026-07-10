@@ -540,6 +540,47 @@ arena by concatenation; folding all state into one `A` so branch snapshots are a
 and reading the `copy` property directly off the parser's `T_STRUCT/T_ENUM` `op` flag + type nodes
 (the `is_copy` recursion) so move-vs-copy classification needs no separate type-resolution pass.
 
+### Slice 5 addendum — composite-span enrichment (step 3 of self-checking self-hosting, 2026-07-10)
+
+Revisiting the "span-lean arena" boundary (slice-4 addendum #2, slice-5 loans boundary) with the
+goal of retaining the sub-spans the deferred composite-span families need. KEY CORRECTION to the
+earlier GATE framing: the `Node` already carries a general `(p0, p1)` usize span pair per node — the
+STRUCTURAL nodes (`T_ASSIGN`, `T_IF`, `T_BLOCK`, `T_LOOP`, `T_WHILE`) simply left it ZERO, and the
+S-expr dump renders `p0/p1` only for name/literal content, never for these nodes. So enriching a
+structural node's span is a POPULATE, not a widen: no field added, the `[2048]Node` cap and `u32`
+edges are untouched, and the parser AST-S-expr and token dumps stay byte-exact (verified:
+selfhost_parser green).
+
+Family-by-family, the honest split (the blocker for the still-deferred three is ANALYSIS capability,
+not span retention):
+
+* **E0803 (write-while-borrowed) — DISCHARGED, oracle-matched.** Oracle span = the whole assignment
+  STATEMENT = `span_from(lo)` = (leftmost-token-start .. semicolon-end); the parser now populates
+  exactly this into `T_ASSIGN.p0/p1`. The existing loan machinery already tracks the in-scope loan
+  set, so `chk_stmt`'s assignment arm adds a WRITE loan-check (`acc == 2`) on the LHS root that emits
+  E0803 against a live loan of EITHER kind (unlike E0804, which needs an exclusive loan). Matched
+  byte-exact (code + span) vs the oracle on 2 new fixtures (`neg_write_excl`, `neg_write_shared`),
+  1 diagnostic each; the selfhost_loans COVERED set now includes E0803.
+
+* **E0809 (write-through-shared) — span ENABLED, analysis DEFERRED.** Its oracle span is the SAME
+  whole-statement span, now carried on `T_ASSIGN.p0/p1` for free. But emitting it requires deciding
+  whether the LHS deref-path peels a SHARED (`read`) borrow — per-binding borrow-TYPE tracking this
+  slice's root-granularity loan model does not perform. Span retained (capability exists); emission
+  deferred until the loan model tracks each binding's borrow kind/type.
+
+* **E0302 (move-join disagreement) — DEFERRED (analysis).** Oracle span = the enclosing `if`/`match`/
+  `loop` construct's `join_span` = the whole-construct span, populatable into `T_IF/T_LOOP/T_WHILE`
+  `p0/p1` (T_MATCH already carries it) via the same existing pair. NOT populated here: the blocker is
+  emission, not span — the analysis computes the dataflow JOIN but does not compare per-place
+  branch-end states and emit the disagreement diagnostic. Populating the span with no consumer would
+  be speculative dead code, so it is left for the slice that adds join-disagreement emission.
+
+* **E0309 (needs-drop maybe-init at a drop point) — DEFERRED (analysis).** Oracle span = the
+  enclosing block span (`b.span`), populatable into `T_BLOCK.p0/p1`. Blocker is analysis, not span:
+  the slice tracks no needs-drop/`drop`-hook type property and models no scope-exit drop points, so
+  the MaybeInit-at-drop condition is never computed. Deferred until the analysis gains drop-point
+  modeling.
+
 ## OBL-ITER-BORROW — DISCHARGED via the region-free path, 2026-07-10
 
 The candidate-C ruling re-routed this to its region-free branch; that branch WORKED, vindicating

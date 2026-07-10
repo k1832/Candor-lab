@@ -1607,8 +1607,11 @@ fn parse_stmt(p: write P, src: [u8], buf: read Buf) -> u32 {
     if ck(p, buf) == 25 {
         adv(p, buf);
         let val: u32 = parse_expr(p, src, buf);
+        let sc: Tok = tok_at(buf, p.pos);
         expect(p, buf, 19);
         let mut nd: Node = nnew(T_ASSIGN);
+        nd.p0 = t.start;
+        nd.p1 = sc.end;
         nd.a = e;
         nd.b = val;
         return push_node(p, nd);

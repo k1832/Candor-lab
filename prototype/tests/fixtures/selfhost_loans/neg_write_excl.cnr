@@ -1,0 +1,11 @@
+// E0803: writing to a place while it is exclusively borrowed. The loan `a` is
+// used at `keep(a)` after the write, so lexical == NLL liveness here.
+struct S { v: i64 }
+fn keep(r: read S) -> unit { return; }
+fn f() -> unit {
+    let mut x: S = S { v: 0 };
+    let a = write x;
+    x = S { v: 1 };
+    keep(a);
+    return;
+}
