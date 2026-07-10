@@ -83,6 +83,19 @@ struct E {
     fault_p1: usize,
     cur_p0: usize,
     cur_p1: usize,
+    loc_owns: [1024]u8,
+    mv_local: [512]usize,
+    mv_field: [512]i32,
+    mv_n: usize,
+    tmp_addr: [256]usize,
+    tmp_ty: [256]u32,
+    tmp_live: [256]u8,
+    tmp_n: usize,
+    cur_org: i32,
+    cur_org_a: usize,
+    cur_org_b: i32,
+    self_p0: usize,
+    self_p1: usize,
 }
 
 // ---- bit-pattern reinterpretation via wrapping conv (no transmute needed) ----
@@ -223,13 +236,14 @@ fn find_local(src: [u8], e: write E, s: usize, en: usize) -> usize {
     }
     return e.loc_n;
 }
-fn loc_push(e: write E, s: usize, en: usize, addr: usize, w: i32, ty: u32) -> unit {
+fn loc_push(e: write E, s: usize, en: usize, addr: usize, w: i32, ty: u32, owns: i32) -> unit {
     let i: usize = e.loc_n;
     e.*.loc_p0[i] = s;
     e.*.loc_p1[i] = en;
     e.*.loc_addr[i] = addr;
     e.*.loc_w[i] = w;
     e.*.loc_ty[i] = ty;
+    e.*.loc_owns[i] = conv u8 owns;
     e.*.loc_n = i + 1usize;
     return;
 }
@@ -438,6 +452,257 @@ fn ty_is_agg(pp: read P, src: [u8], e: write E, tn: u32) -> bool {
     if tn == 0u32 { return false; }
     if scalar_width(pp, src, tn) != 0 { return false; }
     return ty_size(pp, src, e, tn) > 0usize;
+}
+
+// ---- copyability + drop obligation (ported from src/types.rs is_copy/needs_drop) ----
+// A struct is `copy` iff it carries the `copy` marker (T_STRUCT.op), declares no
+// drop hook (T_STRUCT.c == 0), and every field is copy. Scalars/arrays-of-copy are
+// copy. A struct NEEDS drop iff it has a hook or transitively holds a needs-drop
+// field. These gate every S3 addition, so S1/S2 (scalars + `copy` aggregates) are
+// drop-inert and unchanged.
+fn is_copy(pp: read P, src: [u8], e: write E, tn: u32) -> bool {
+    if tn == 0u32 { return true; }
+    if scalar_width(pp, src, tn) != 0 { return true; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_ARRAY { return is_copy(pp, src, e, nd.b); }
+    let sid: u32 = struct_of_ty(pp, src, e, tn);
+    if sid == 0u32 { return true; }
+    let snode: Node = pp.nodes[conv usize sid];
+    if snode.op == 0 { return false; }
+    if snode.c != 0u32 { return false; }
+    let mut cur: u32 = snode.b;
+    while cur != 0u32 {
+        let fd: Node = pp.nodes[conv usize cur];
+        if !is_copy(pp, src, e, fd.a) { return false; }
+        cur = fd.nx;
+    }
+    return true;
+}
+fn needs_drop(pp: read P, src: [u8], e: write E, tn: u32) -> bool {
+    if tn == 0u32 { return false; }
+    if scalar_width(pp, src, tn) != 0 { return false; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_ARRAY { return needs_drop(pp, src, e, nd.b); }
+    let sid: u32 = struct_of_ty(pp, src, e, tn);
+    if sid == 0u32 { return false; }
+    let snode: Node = pp.nodes[conv usize sid];
+    if snode.c != 0u32 { return true; }
+    let mut cur: u32 = snode.b;
+    while cur != 0u32 {
+        let fd: Node = pp.nodes[conv usize cur];
+        if needs_drop(pp, src, e, fd.a) { return true; }
+        cur = fd.nx;
+    }
+    return false;
+}
+// Declared-order 0-based position of field [fs,fen) in struct sid.
+fn field_index(pp: read P, src: [u8], sid: u32, fs: usize, fen: usize) -> i32 {
+    let snode: Node = pp.nodes[conv usize sid];
+    let mut cur: u32 = snode.b;
+    let mut k: i32 = 0;
+    while cur != 0u32 {
+        let fd: Node = pp.nodes[conv usize cur];
+        if name_eq(src, fs, fen, fd.p0, fd.p1) { return k; }
+        k = k + 1i32;
+        cur = fd.nx;
+    }
+    return 0 - 1i32;
+}
+
+// ---- move-mask side table (whole-value + ONE-LEVEL partial move) -------------
+// Each row records a moved sub-path of a local: mv_field == -1 marks the whole
+// local moved, mv_field >= 0 marks that field index moved. `consume` at a move-out
+// site pushes a row; scope/frame exit consults it to suppress the source's drop.
+fn mv_push(e: write E, li: usize, fi: i32) -> unit {
+    let k: usize = e.mv_n;
+    e.*.mv_local[k] = li;
+    e.*.mv_field[k] = fi;
+    e.*.mv_n = k + 1usize;
+    return;
+}
+fn whole_moved(e: write E, li: usize) -> bool {
+    let mut i: usize = 0usize;
+    while i < e.mv_n {
+        if e.mv_local[i] == li && e.mv_field[i] == 0 - 1i32 { return true; }
+        i = i + 1usize;
+    }
+    return false;
+}
+fn partially_moved(e: write E, li: usize) -> bool {
+    let mut i: usize = 0usize;
+    while i < e.mv_n {
+        if e.mv_local[i] == li && e.mv_field[i] >= 0i32 { return true; }
+        i = i + 1usize;
+    }
+    return false;
+}
+fn field_moved(e: write E, li: usize, fi: i32) -> bool {
+    let mut i: usize = 0usize;
+    while i < e.mv_n {
+        if e.mv_local[i] == li {
+            if e.mv_field[i] == 0 - 1i32 || e.mv_field[i] == fi { return true; }
+        }
+        i = i + 1usize;
+    }
+    return false;
+}
+// Re-own local `li` wholesale (reassignment): drop all its moved rows.
+fn set_owned_whole(e: write E, li: usize) -> unit {
+    let mut w: usize = 0usize;
+    let mut r: usize = 0usize;
+    while r < e.mv_n {
+        if e.mv_local[r] != li {
+            e.*.mv_local[w] = e.mv_local[r];
+            e.*.mv_field[w] = e.mv_field[r];
+            w = w + 1usize;
+        }
+        r = r + 1usize;
+    }
+    e.*.mv_n = w;
+    return;
+}
+// Discard mask rows for locals at or above `base` (scope/frame exit reuses those
+// local indices; stale rows would corrupt a later local reusing the slot).
+fn clear_locals_from(e: write E, base: usize) -> unit {
+    let mut w: usize = 0usize;
+    let mut r: usize = 0usize;
+    while r < e.mv_n {
+        if e.mv_local[r] < base {
+            e.*.mv_local[w] = e.mv_local[r];
+            e.*.mv_field[w] = e.mv_field[r];
+            w = w + 1usize;
+        }
+        r = r + 1usize;
+    }
+    e.*.mv_n = w;
+    return;
+}
+
+// ---- temps (non-copy values materialized during a statement) -----------------
+// Only NON-copy aggregates register a temp; a copy aggregate creates none, so the
+// S2 corpus produces no temps. A temp consumed by a move is killed (live = 0) and
+// not dropped; a live temp is dropped at statement end (drop_stmt_temps).
+fn reg_temp(e: write E, addr: usize, ty: u32) -> usize {
+    let i: usize = e.tmp_n;
+    e.*.tmp_addr[i] = addr;
+    e.*.tmp_ty[i] = ty;
+    e.*.tmp_live[i] = 1u8;
+    e.*.tmp_n = i + 1usize;
+    return i;
+}
+// Apply a recorded move-out: org 1 kills a temp; 2 marks the whole local moved;
+// 3 marks one field of the local moved.
+fn do_consume(e: write E, org: i32, a: usize, b: i32) -> unit {
+    if org == 1 {
+        e.*.tmp_live[a] = 0u8;
+    } else if org == 2 {
+        mv_push(e, a, 0 - 1i32);
+    } else if org == 3 {
+        mv_push(e, a, b);
+    }
+    return;
+}
+
+// ---- the trace-producing drop core -------------------------------------------
+// run_drop_hook binds `self` to the value's address (a borrow: owns = 0, so it is
+// not itself dropped) and executes the struct's drop-hook block, exactly like the
+// oracle's run_drop_hook -- so `trace(self.id)` inside the hook fires the observable
+// drop trace. cur_base/loc_n/stack_bump are saved and restored like a call frame.
+fn run_drop_hook(pp: read P, src: [u8], e: write E, hook: u32, addr: usize, sid: u32) -> i32 {
+    let saved_base: usize = e.cur_base;
+    let base: usize = e.loc_n;
+    let base_bump: usize = e.stack_bump;
+    e.*.cur_base = base;
+    loc_push(e, e.self_p0, e.self_p1, addr, 0, sid, 0);
+    let st: i32 = exec_block(pp, src, e, hook);
+    clear_locals_from(e, base);
+    e.*.loc_n = base;
+    e.*.stack_bump = base_bump;
+    e.*.cur_base = saved_base;
+    return st;
+}
+// Drop a struct's fields in REVERSE declared order, skipping moved fields; `li` is
+// the owning local's index (for the mask) or -1 when there is no mask (a temp or a
+// nested sub-value, which the one-level model never tracks as partially moved).
+fn drop_fields_rev(pp: read P, src: [u8], e: write E, addr: usize, sid: u32, li: i64) -> i32 {
+    let snode: Node = pp.nodes[conv usize sid];
+    let mut foff: [64]usize = [0usize; 64];
+    let mut ftyp: [64]u32 = [0u32; 64];
+    let mut n: usize = 0usize;
+    let mut off: usize = 0usize;
+    let mut cur: u32 = snode.b;
+    while cur != 0u32 {
+        let fd: Node = pp.nodes[conv usize cur];
+        let a: usize = ty_align(pp, src, e, fd.a);
+        off = round_up_us(off, a);
+        foff[n] = off;
+        ftyp[n] = fd.a;
+        off = off + ty_size(pp, src, e, fd.a);
+        n = n + 1usize;
+        cur = fd.nx;
+    }
+    let mut k: usize = n;
+    while k > 0usize {
+        k = k - 1usize;
+        let mut skip: bool = false;
+        if li >= 0i64 {
+            if field_moved(e, conv usize li, conv i32 k) { skip = true; }
+        }
+        if !skip {
+            let sc: i32 = drop_value(pp, src, e, addr + foff[k], ftyp[k], 0 - 1i64);
+            if sc != 0 { return sc; }
+        }
+    }
+    return 0;
+}
+// Drop the value of type `tn` at `addr` (universal LIFO order). A struct runs its
+// hook FIRST (whole value), unless partially moved, THEN drops fields reverse; an
+// array drops elements reverse; scalars/copy are inert. `li` carries the mask.
+fn drop_value(pp: read P, src: [u8], e: write E, addr: usize, tn: u32, li: i64) -> i32 {
+    let sid: u32 = struct_of_ty(pp, src, e, tn);
+    if sid != 0u32 {
+        let mut partial: bool = false;
+        if li >= 0i64 { partial = partially_moved(e, conv usize li); }
+        if !partial {
+            let snode: Node = pp.nodes[conv usize sid];
+            if snode.c != 0u32 {
+                let sc: i32 = run_drop_hook(pp, src, e, snode.c, addr, sid);
+                if sc != 0 { return sc; }
+            }
+        }
+        return drop_fields_rev(pp, src, e, addr, sid, li);
+    }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_ARRAY {
+        let n: usize = array_len_of(pp, nd.a);
+        let elem: u32 = nd.b;
+        let esz: usize = ty_size(pp, src, e, elem);
+        let eal: usize = ty_align(pp, src, e, elem);
+        let stride: usize = round_up_us(esz, eal);
+        let mut k: usize = n;
+        while k > 0usize {
+            k = k - 1usize;
+            let sc: i32 = drop_value(pp, src, e, addr + k * stride, elem, 0 - 1i64);
+            if sc != 0 { return sc; }
+        }
+        return 0;
+    }
+    return 0;
+}
+// Scan the source once for a "self" span; run_drop_hook binds `self` by matching
+// these bytes (find_local compares src bytes), so the hook body's `self` resolves.
+fn set_self_span(src: [u8], e: write E) -> unit {
+    let n: usize = len(src);
+    let mut i: usize = 0usize;
+    while i + 4usize <= n {
+        if src[i] == 115u8 && src[i + 1usize] == 101u8 && src[i + 2usize] == 108u8 && src[i + 3usize] == 102u8 {
+            e.*.self_p0 = i;
+            e.*.self_p1 = i + 4usize;
+            return;
+        }
+        i = i + 1usize;
+    }
+    return;
 }
 
 // ---- comparisons -------------------------------------------------------------
@@ -697,9 +962,15 @@ fn eval_struct_lit(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
             } else {
                 let sc: i32 = eval_expr(pp, src, e, fin.a, 0 - 1i32);
                 if sc != 0 { return sc; }
+                let forg: i32 = e.cur_org;
+                let foa: usize = e.cur_org_a;
+                let fob: i32 = e.cur_org_b;
                 let sa: usize = conv usize e.cur_val;
                 let fsz: usize = ty_size(pp, src, e, fty);
                 mem_copy(e, addr + off, sa, fsz);
+                if !is_copy(pp, src, e, fty) {
+                    do_consume(e, forg, foa, fob);
+                }
             }
         }
         off = off + ty_size(pp, src, e, fty);
@@ -708,6 +979,12 @@ fn eval_struct_lit(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     e.*.cur_val = conv i64 addr;
     e.*.cur_w = 0;
     e.*.cur_ty = sid;
+    e.*.cur_org = 0;
+    if !is_copy(pp, src, e, sid) {
+        let ti: usize = reg_temp(e, addr, sid);
+        e.*.cur_org = 1;
+        e.*.cur_org_a = ti;
+    }
     return 0;
 }
 fn eval_array_rep(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
@@ -799,6 +1076,7 @@ fn eval_expr(pp: read P, src: [u8], e: write E, i: u32, exp_w: i32) -> i32 {
     let tg: i32 = nd.tag;
     e.*.cur_p0 = nd.p0;
     e.*.cur_p1 = nd.p1;
+    e.*.cur_org = 0;
     if tg == T_INT {
         let w: i32 = lit_width(nd.suf, exp_w);
         e.*.cur_val = to_i64b(nd.ival);
@@ -829,13 +1107,31 @@ fn eval_expr(pp: read P, src: [u8], e: write E, i: u32, exp_w: i32) -> i32 {
             e.*.cur_val = conv i64 e.loc_addr[idx];
             e.*.cur_w = 0;
             e.*.cur_ty = e.loc_ty[idx];
+            if !is_copy(pp, src, e, e.loc_ty[idx]) {
+                e.*.cur_org = 2;
+                e.*.cur_org_a = idx;
+            }
         }
         return 0;
     }
     if tg == T_FIELD || tg == T_INDEX {
         let sc: i32 = eval_place(pp, src, e, i);
         if sc != 0 { return sc; }
-        return load_place(e);
+        let lr: i32 = load_place(e);
+        if lr != 0 { return lr; }
+        // A non-copy field read off a direct local is a ONE-LEVEL partial move.
+        if tg == T_FIELD && e.cur_w == 0 && !is_copy(pp, src, e, e.cur_ty) {
+            let bnode: Node = pp.nodes[conv usize nd.a];
+            if bnode.tag == T_ID {
+                let bli: usize = find_local(src, e, bnode.p0, bnode.p1);
+                let bsid: u32 = struct_of_ty(pp, src, e, e.loc_ty[bli]);
+                let bfi: i32 = field_index(pp, src, bsid, nd.p0, nd.p1);
+                e.*.cur_org = 3;
+                e.*.cur_org_a = bli;
+                e.*.cur_org_b = bfi;
+            }
+        }
+        return 0;
     }
     if tg == T_STRUCTLIT {
         return eval_struct_lit(pp, src, e, i);
@@ -900,9 +1196,15 @@ fn eval_expr(pp: read P, src: [u8], e: write E, i: u32, exp_w: i32) -> i32 {
             if ty_is_agg(pp, src, e, rty) {
                 let sc: i32 = eval_expr(pp, src, e, nd.a, 0 - 1i32);
                 if sc != 0 { return sc; }
+                let rorg: i32 = e.cur_org;
+                let roa: usize = e.cur_org_a;
+                let rob: i32 = e.cur_org_b;
                 let sa: usize = conv usize e.cur_val;
                 let sz: usize = ty_size(pp, src, e, rty);
                 mem_copy(e, e.cur_result_addr, sa, sz);
+                if !is_copy(pp, src, e, rty) {
+                    do_consume(e, rorg, roa, rob);
+                }
             } else {
                 let sc: i32 = eval_expr(pp, src, e, nd.a, e.cur_retw);
                 if sc != 0 { return sc; }
@@ -1069,6 +1371,7 @@ fn eval_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
         e.*.trace_out[k] = e.cur_val;
         e.*.trace_n = k + 1usize;
         e.*.cur_val = 0i64; e.*.cur_w = 0;
+        e.*.cur_org = 0;
         return 0;
     }
     let fnid: u32 = find_fn(pp, src, e, callee.p0, callee.p1);
@@ -1102,6 +1405,10 @@ fn eval_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
             if sc != 0 { return sc; }
             aw[k] = 0;
             aa[k] = conv usize e.cur_val;
+            // A by-value non-copy aggregate argument is moved into the param slot.
+            if !is_copy(pp, src, e, ptype) {
+                do_consume(e, e.cur_org, e.cur_org_a, e.cur_org_b);
+            }
         }
         k = k + 1usize;
         cur = an.nx;
@@ -1114,7 +1421,15 @@ fn eval_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
         j = j + 1usize;
     }
     e.*.arg_n = k;
-    return call_fn(pp, src, e, fnid);
+    let cs: i32 = call_fn(pp, src, e, fnid);
+    if cs != 0 { return cs; }
+    e.*.cur_org = 0;
+    if e.cur_w == 0 && !is_copy(pp, src, e, e.cur_ty) {
+        let ti: usize = reg_temp(e, conv usize e.cur_val, e.cur_ty);
+        e.*.cur_org = 1;
+        e.*.cur_org_a = ti;
+    }
+    return 0;
 }
 
 // Run a function to completion. Arguments live in E.arg_* on entry. An aggregate
@@ -1157,7 +1472,7 @@ fn call_fn(pp: read P, src: [u8], e: write E, fnid: u32) -> i32 {
             let sa: usize = e.arg_addr[k];
             mem_copy(e, paddr, sa, psz);
         }
-        loc_push(e, pm.p0, pm.p1, paddr, pw, ptype);
+        loc_push(e, pm.p0, pm.p1, paddr, pw, ptype, 1);
         k = k + 1usize;
         pcur = pm.nx;
     }
@@ -1180,6 +1495,26 @@ fn call_fn(pp: read P, src: [u8], e: write E, fnid: u32) -> i32 {
         }
         rc = 0;
     }
+    if st != 1 {
+        let dsv: i64 = e.cur_val;
+        let dsw: i32 = e.cur_w;
+        let dsty: u32 = e.cur_ty;
+        let mut di: usize = e.loc_n;
+        while di > base {
+            di = di - 1usize;
+            if e.loc_owns[di] != 0u8 {
+                let pty: u32 = e.loc_ty[di];
+                if needs_drop(pp, src, e, pty) && !whole_moved(e, di) {
+                    let dc: i32 = drop_value(pp, src, e, e.loc_addr[di], pty, conv i64 di);
+                    if dc != 0 { rc = 1; }
+                }
+            }
+        }
+        e.*.cur_val = dsv;
+        e.*.cur_w = dsw;
+        e.*.cur_ty = dsty;
+    }
+    clear_locals_from(e, base);
     e.*.loc_n = base;
     e.*.stack_bump = base_bump;
     e.*.cur_base = saved_base;
@@ -1189,7 +1524,33 @@ fn call_fn(pp: read P, src: [u8], e: write E, fnid: u32) -> i32 {
     return rc;
 }
 
+// A statement's non-copy temps are dropped in reverse creation order at its end
+// (drop_stmt_temps), UNLESS a fault aborted it (abort semantics: no drops).
 fn exec_stmt(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
+    let tmp_base: usize = e.tmp_n;
+    let st: i32 = exec_stmt_inner(pp, src, e, i);
+    if st == 1 { return st; }
+    let sv: i64 = e.cur_val;
+    let sw: i32 = e.cur_w;
+    let sty: u32 = e.cur_ty;
+    let mut fault: i32 = 0;
+    let mut k: usize = e.tmp_n;
+    while k > tmp_base {
+        k = k - 1usize;
+        if e.tmp_live[k] != 0u8 {
+            let dc: i32 = drop_value(pp, src, e, e.tmp_addr[k], e.tmp_ty[k], 0 - 1i64);
+            if dc != 0 { fault = 1; }
+        }
+    }
+    e.*.tmp_n = tmp_base;
+    e.*.cur_val = sv;
+    e.*.cur_w = sw;
+    e.*.cur_ty = sty;
+    if fault != 0 { return 1; }
+    return st;
+}
+
+fn exec_stmt_inner(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
     if nd.tag == T_LET {
         let tynode: u32 = nd.a;
@@ -1206,11 +1567,17 @@ fn exec_stmt(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
             } else {
                 let sc: i32 = eval_expr(pp, src, e, nd.b, 0 - 1i32);
                 if sc != 0 { return sc; }
+                let lorg: i32 = e.cur_org;
+                let loa: usize = e.cur_org_a;
+                let lob: i32 = e.cur_org_b;
                 let sa: usize = conv usize e.cur_val;
                 mem_copy(e, addr, sa, size);
+                if !is_copy(pp, src, e, tynode) {
+                    do_consume(e, lorg, loa, lob);
+                }
             }
         }
-        loc_push(e, nd.p0, nd.p1, addr, w, tynode);
+        loc_push(e, nd.p0, nd.p1, addr, w, tynode, 1);
         return 0;
     }
     if nd.tag == T_ASSIGN {
@@ -1226,9 +1593,29 @@ fn exec_stmt(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
         } else {
             let sc2: i32 = eval_expr(pp, src, e, nd.b, 0 - 1i32);
             if sc2 != 0 { return sc2; }
-            let sz: usize = ty_size(pp, src, e, dty);
+            let aorg: i32 = e.cur_org;
+            let aoa: usize = e.cur_org_a;
+            let aob: i32 = e.cur_org_b;
             let sa: usize = conv usize e.cur_val;
+            let sz: usize = ty_size(pp, src, e, dty);
+            // A drop-bearing owned direct-local target drops its OLD value first
+            // (after the RHS, honoring the RHS's move state), then re-owns.
+            let tnode: Node = pp.nodes[conv usize nd.a];
+            let mut tli: usize = 0usize;
+            let mut has_li: bool = false;
+            if tnode.tag == T_ID && !is_copy(pp, src, e, dty) {
+                tli = find_local(src, e, tnode.p0, tnode.p1);
+                has_li = true;
+                if e.loc_owns[tli] != 0u8 && needs_drop(pp, src, e, dty) && !whole_moved(e, tli) {
+                    let dc: i32 = drop_value(pp, src, e, dst, dty, conv i64 tli);
+                    if dc != 0 { return 1; }
+                }
+            }
             mem_copy(e, dst, sa, sz);
+            if !is_copy(pp, src, e, dty) {
+                do_consume(e, aorg, aoa, aob);
+            }
+            if has_li { set_owned_whole(e, tli); }
         }
         return 0;
     }
@@ -1247,6 +1634,26 @@ fn exec_block(pp: read P, src: [u8], e: write E, blk: u32) -> i32 {
         if st != 0 { break; }
         cur = sn.nx;
     }
+    if st != 1 {
+        let sv: i64 = e.cur_val;
+        let sw: i32 = e.cur_w;
+        let sty: u32 = e.cur_ty;
+        let mut i: usize = e.loc_n;
+        while i > base {
+            i = i - 1usize;
+            if e.loc_owns[i] != 0u8 {
+                let ty: u32 = e.loc_ty[i];
+                if needs_drop(pp, src, e, ty) && !whole_moved(e, i) {
+                    let dc: i32 = drop_value(pp, src, e, e.loc_addr[i], ty, conv i64 i);
+                    if dc != 0 { st = 1; }
+                }
+            }
+        }
+        e.*.cur_val = sv;
+        e.*.cur_w = sw;
+        e.*.cur_ty = sty;
+    }
+    clear_locals_from(e, base);
     e.*.loc_n = base;
     e.*.stack_bump = base_bump;
     return st;
@@ -1302,7 +1709,21 @@ pub fn interp_dump(src: [u8], buf: read Buf) -> unit {
         fault_p1: 0usize,
         cur_p0: 0usize,
         cur_p1: 0usize,
+        loc_owns: [0u8; 1024],
+        mv_local: [0usize; 512],
+        mv_field: [0; 512],
+        mv_n: 0usize,
+        tmp_addr: [0usize; 256],
+        tmp_ty: [0u32; 256],
+        tmp_live: [0u8; 256],
+        tmp_n: 0usize,
+        cur_org: 0,
+        cur_org_a: 0usize,
+        cur_org_b: 0,
+        self_p0: 0usize,
+        self_p1: 0usize,
     };
+    set_self_span(src, write e);
     let mainid: u32 = find_main(read p, src, write e);
     let mut ret: i64 = 0i64;
     if mainid != 0u32 {

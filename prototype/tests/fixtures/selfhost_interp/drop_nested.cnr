@@ -1,0 +1,6 @@
+struct Inner { v: i64 } drop(write self) { trace(self.v); }
+struct Outer { inner: Inner, w: i64 } drop(write self) { trace(self.w); }
+fn main() -> i64 {
+    let o: Outer = Outer { inner: Inner { v: 1i64 }, w: 2i64 };
+    return 0i64;
+}

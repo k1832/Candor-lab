@@ -1,0 +1,7 @@
+struct Noisy { id: i64 } drop(write self) { trace(self.id); }
+struct Pair { a: Noisy, b: Noisy }
+fn main() -> i64 {
+    let p: Pair = Pair { a: Noisy { id: 1i64 }, b: Noisy { id: 2i64 } };
+    let x: Noisy = p.a;
+    return 0i64;
+}

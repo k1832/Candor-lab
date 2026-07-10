@@ -1,0 +1,6 @@
+struct Noisy { id: i64 } drop(write self) { trace(self.id); }
+fn sink(n: Noisy) -> i64 { return 9i64; }
+fn main() -> i64 {
+    let r: i64 = sink(Noisy { id: 3i64 });
+    return r;
+}

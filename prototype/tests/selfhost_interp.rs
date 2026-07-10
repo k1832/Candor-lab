@@ -148,6 +148,15 @@ const CORPUS: &[(&str, Shape)] = &[
     ("struct_with_array.cnr", Ret),
     ("aggregate_mixed.cnr", Ret),
     ("array_bounds.cnr", Fault),
+    // ---- S3: MOVE/DROP schedule with trace-on-drop ----
+    ("drop_single.cnr", Ret),
+    ("drop_scope_order.cnr", Ret),
+    ("drop_move_suppress.cnr", Ret),
+    ("drop_partial_move.cnr", Ret),
+    ("drop_move_return.cnr", Ret),
+    ("drop_break.cnr", Ret),
+    ("drop_nested.cnr", Ret),
+    ("drop_param.cnr", Ret),
 ];
 
 fn read_fixture(rel: &str) -> String {

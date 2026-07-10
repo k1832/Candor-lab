@@ -1,0 +1,7 @@
+struct Noisy { id: i64 } drop(write self) { trace(self.id); }
+fn mk(n: Noisy) -> Noisy { return n; }
+fn main() -> i64 {
+    let a: Noisy = Noisy { id: 42i64 };
+    let b: Noisy = mk(a);
+    return 0i64;
+}

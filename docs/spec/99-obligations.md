@@ -1011,3 +1011,68 @@ scalars), so there is NO drop obligation to model — `trace` output is purely e
 calls, never a drop side-effect. The move/drop schedule (and trace-on-drop) is S3. Also deferred:
 named/`static` array lengths, `conv`, borrows/`read`/`write` params, and field/index off a bare call
 result (`make().f`) — S2 fixtures assign to a local first. interp.cnr remains NOT self-checked.
+
+### S3 — MOVE/DROP schedule with trace-on-drop in the self-interpreter (third slice, 2026-07-10)
+
+The self-interpreter (`prototype/selfhost/interp/interp.cnr`) gains the MOVE/DROP SCHEDULE —
+the observable-trace crux of the language — reproducing the Rust reference (`src/interp/eval.rs`)
+byte-exact on drop-bearing programs. Same gate (`prototype/tests/selfhost_interp.rs`, EXECUTION
+equality vs `run_source_real`): the corpus grows from 36 to 44 fixtures (42 returns, 2 faults) —
+the 8 new S3 fixtures cover single drop, reverse-order scope drops, move-suppresses-drop, a
+one-level partial move (drop the un-moved field only), move-out via return (drop in the caller,
+not at callee exit), a break-path drop, nested-aggregate order (outer hook then inner-field hook,
+reverse), and by-value param drop at the callee's param-scope exit. Confined to interp.cnr — NO
+parser change; the drop-hook block was already parsed into `T_STRUCT.c` and the `copy` marker into
+`T_STRUCT.op` by slice 2's parser. All 36 prior interp fixtures and every lexer/parser/checker/
+analyses/loans/effects self-check gate stay byte-exact (585 suite green, 0 failing; clippy clean).
+
+STATIC-FACT DROP SCHEDULE COLLECTED DURING THE WALK (mirrors mod.rs:36-45). No runtime drop flags:
+the interpreter recomputes ownership as it walks (it does NOT read the analyses' move facts) and
+drops exactly the statically-owned places at each scope/stmt/param-scope exit in §1.5 reverse/LIFO
+order. Machinery added to `E`: a per-local `loc_owns` flag (true on `let`/owned param, false on the
+hook's borrowed `self`); a flat move-mask side table (`mv_local`/`mv_field`, field = -1 = whole
+local moved) covering whole-value suppression and ONE-LEVEL partial move; and a non-copy temp stack
+(`tmp_*`) for values materialized mid-statement. `is_copy`/`needs_drop` are ported from
+`src/types.rs` (a struct is `copy` iff its `T_STRUCT.op` marker is set, it has no hook, and every
+field is copy; it NEEDS drop iff it has a hook or transitively holds a needs-drop field). EVERY S3
+addition is gated behind `!is_copy` / `needs_drop`, so S1's scalars and S2's `copy` aggregates are
+drop-inert and produce byte-identical output — the faithfulness invariant across all 36 prior
+fixtures.
+
+TRACE-ON-DROP FIRES AS AN ORDINARY SELF-HOST PROGRAM (mirrors run_drop_hook eval.rs:3421-3438).
+`drop_value` walks the type: a struct runs its hook FIRST (whole value) unless partially moved,
+THEN drops fields in reverse declared order skipping moved fields; an array drops elements reverse;
+scalars/copy are inert. `run_drop_hook` saves/restores `cur_base`/`loc_n`/`stack_bump` like a call
+frame and binds `self` DIRECTLY to the value's address (`loc_addr = addr`, `loc_ty = the T_STRUCT
+node`, `owns = false`) — simpler than the oracle's pointer indirection because interp.cnr already
+carries aggregates by address — so `trace(self.id)` inside the hook resolves through the existing
+field-read path and appends to the same `trace_out` sink, getting nested-hook trace order right.
+Since interp.cnr is not self-checked it cannot spell the reserved `self` as a binding via source;
+`self`'s name span is found by scanning `src` once for the `s e l f` bytes (a hook program always
+contains it), and `find_local`'s byte-comparison matches the hook body's `self` tokens against it.
+
+CONSUME-COMPLETENESS + ABORT-NO-DROP (the two easiest regressions, both honored). Move suppression
+is a `consume` at EVERY move-out site of the S3 subset, recorded via a `cur_org` register the value
+producer sets (temp / whole-place / one-level field-place): let-init-from-a-place, assignment RHS
+(which also drops the OLD target value first, after the RHS, honoring its mask — preventing a
+double free when the RHS moved the target out), struct-literal field init, by-value aggregate
+argument, and the return operand (do_return moves into the result slot then consumes its origin, so
+unwinding scopes and the param-scope see it moved and skip it). A MISSING consume double-drops; the
+subset is covered exhaustively (`?` and deeper-than-one-level partials are out of subset — the
+oracle's remaining consume sites at 1278/1289/1351/1946/1983 are match/enum/`?` paths this slice
+does not reach). Abort semantics (eval.rs:3183): a `Ctl::Fault` returns from `exec_block`/
+`exec_stmt`/`call_fn` WITHOUT running scope/temp/param drops (`if st != 1` guards every drop loop);
+only Break/Continue/Return/normal fall through to the drop. Block/statement VALUES are preserved by
+saving/restoring the `cur_val`/`cur_w`/`cur_ty` registers around each drop loop (a no-op for S1/S2).
+
+RESTRICTIONS / DEFERRED (OBL-SELFHOST-INTERP-DROP). (1) ONE-LEVEL PARTIAL MOVE only: the move-mask
+side table records a moved field by index on its direct-local root, so `a.f` moved out is handled,
+but a deeper `a.f.g` partial move is not tracked (it would need a path-vector mask like the oracle's
+`MoveMask`); deferred until a fixture needs it. (2) Non-copy ARRAYS are not drop-tracked as temps
+(array literals carry no element type in `cur_ty`), so an array-of-drop-values materialized as a
+bare temp would leak its drop — out of the S3 subset (fixtures use struct aggregates). (3) Borrow
+(`read`/`write`) params are assumed by-value-owned (`owns = 1`); a `read Noisy` param would be
+wrongly dropped — out of subset (all S3 params are by-value). (4) Field/index REASSIGNMENT drops
+its old value only for direct-local (`T_ID`) targets, matching the oracle's `place_is_local_direct`
+gate for the tested cases; a `x.f = ...` old-value drop is best-effort. interp.cnr remains NOT
+self-checked.

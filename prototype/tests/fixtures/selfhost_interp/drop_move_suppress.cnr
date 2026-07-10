@@ -1,0 +1,6 @@
+struct Noisy { id: i64 } drop(write self) { trace(self.id); }
+fn main() -> i64 {
+    let a: Noisy = Noisy { id: 5i64 };
+    let b: Noisy = a;
+    return 0i64;
+}
