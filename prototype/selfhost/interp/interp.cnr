@@ -27,7 +27,7 @@
 // `interp.cnr` is NOT self-checked in this slice, so it uses the full language.
 
 use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl, decoded_len};
-use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_SC, T_RET, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_STRUCT, T_NAMED, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_VARIANT, T_ENUMCTOR, T_MATCH, T_ARM, T_PVARIANT, T_WILD, T_BIND, T_NAME, T_STATIC, T_RAWPTR, T_FNPTR, T_UNSAFE, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_BOX, T_BOXRESULT, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_CONV, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT, T_BYTES, T_STR, T_PARAM};
+use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_SC, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_STRUCT, T_NAMED, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_VARIANT, T_ENUMCTOR, T_MATCH, T_PVARIANT, T_WILD, T_BIND, T_STATIC, T_RAWPTR, T_FNPTR, T_UNSAFE, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_BOX, T_BOXRESULT, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_CONV, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT, T_BYTES, T_STR, T_PARAM};
 
 // ---- fault kind codes (shared with the Rust harness) ------------------------
 static FK_OVERFLOW: i32 = 0;
@@ -560,7 +560,19 @@ fn bump_alloc(e: write E, size: usize, align: usize) -> usize {
 fn xlate(e: write E, addr: usize) -> usize {
     let page: usize = addr >> 12usize;
     let off: usize = addr & 4095usize;
+    // Capacity guard (defensive for S7's Vec/Map): an address >= 32 MiB overruns
+    // `pagedir`, and exhausting the 128-frame `pages` pool overruns `pages` -- both
+    // silent OOB today. Signal a Bounds fault (the nearest oracle bad-address kind)
+    // instead. The corpus stays in bounds, so no fixture output changes.
+    if page >= 8192usize {
+        set_fault(e, FK_BOUNDS, e.cur_p0, e.cur_p1);
+        return 0usize;
+    }
     if e.pagedir[page] < 0i32 {
+        if e.page_bump >= 128usize {
+            set_fault(e, FK_BOUNDS, e.cur_p0, e.cur_p1);
+            return 0usize;
+        }
         let slot: usize = e.page_bump;
         e.*.page_bump = slot + 1usize;
         e.*.pagedir[page] = conv i32 slot;
@@ -1493,10 +1505,11 @@ fn eval_place(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
             e.*.plc_ty = e.static_ty[si];
             return 0;
         }
-        e.*.plc_addr = e.loc_addr[idx];
-        e.*.plc_w = e.loc_w[idx];
-        e.*.plc_ty = e.loc_ty[idx];
-        return 0;
+        // Neither a local nor a static: an unresolved name is an internal
+        // invariant violation (analysis rejects it upstream), so fault explicitly
+        // rather than re-reading `loc_addr[loc_n]`, the out-of-frame sentinel slot.
+        set_fault(e, FK_PANIC, nd.p0, nd.p1);
+        return 1;
     }
     if tg == T_FIELD {
         let sc: i32 = eval_place(pp, src, e, nd.a);
@@ -1844,27 +1857,7 @@ fn eval_match(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     }
     let mut bs: i32 = eval_expr(pp, src, e, armnd.b, 0 - 1i32);
     if bs != 1 {
-        let sv: i64 = e.cur_val;
-        let sw: i32 = e.cur_w;
-        let sty: u32 = e.cur_ty;
-        let srv: i64 = e.ret_val;
-        let srw: i32 = e.ret_w;
-        let mut di: usize = e.loc_n;
-        while di > base {
-            di = di - 1usize;
-            if e.loc_owns[di] != 0u8 {
-                let ty: u32 = e.loc_ty[di];
-                if needs_drop(pp, src, e, ty) && !whole_moved(e, di) {
-                    let dc: i32 = drop_value(pp, src, e, e.loc_addr[di], ty, conv i64 di);
-                    if dc != 0 { bs = 1; }
-                }
-            }
-        }
-        e.*.cur_val = sv;
-        e.*.cur_w = sw;
-        e.*.cur_ty = sty;
-        e.*.ret_val = srv;
-        e.*.ret_w = srw;
+        if drop_owned_locals_from(pp, src, e, base) != 0 { bs = 1; }
     }
     clear_locals_from(e, base);
     e.*.loc_n = base;
@@ -2688,6 +2681,38 @@ fn eval_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
 // return is delivered through a caller-owned `ret_slot` reserved BELOW the frame's
 // reset point (so it survives the stack_bump reset); a scalar return rides the
 // ret_val register. Returns 0 (normal, result in E.cur_val) or 1 (fault).
+// Drop the owned, not-moved locals in `[base, loc_n)` in reverse -- the shared
+// exit path for a block, call, and match frame. The five value registers
+// (cur_val/cur_w/cur_ty and ret_val/ret_w) are saved across the loop and
+// restored after: a `free` invoked mid-drop runs arbitrary interp code that
+// clobbers the shared return registers (the S5b register-trap), so the save MUST
+// wrap every owned-locals drop. Keeping it in one place stops a future drop
+// caller from silently reintroducing that bug. Returns 1 if any drop faulted.
+fn drop_owned_locals_from(pp: read P, src: [u8], e: write E, base: usize) -> i32 {
+    let sv: i64 = e.cur_val;
+    let sw: i32 = e.cur_w;
+    let sty: u32 = e.cur_ty;
+    let srv: i64 = e.ret_val;
+    let srw: i32 = e.ret_w;
+    let mut fault: i32 = 0;
+    let mut i: usize = e.loc_n;
+    while i > base {
+        i = i - 1usize;
+        if e.loc_owns[i] != 0u8 {
+            let ty: u32 = e.loc_ty[i];
+            if needs_drop(pp, src, e, ty) && !whole_moved(e, i) {
+                let dc: i32 = drop_value(pp, src, e, e.loc_addr[i], ty, conv i64 i);
+                if dc != 0 { fault = 1; }
+            }
+        }
+    }
+    e.*.cur_val = sv;
+    e.*.cur_w = sw;
+    e.*.cur_ty = sty;
+    e.*.ret_val = srv;
+    e.*.ret_w = srw;
+    return fault;
+}
 fn call_fn(pp: read P, src: [u8], e: write E, fnid: u32) -> i32 {
     let fnd: Node = pp.nodes[conv usize fnid];
     let rtynode: u32 = fn_ret_tynode(pp, fnid);
@@ -2748,27 +2773,7 @@ fn call_fn(pp: read P, src: [u8], e: write E, fnid: u32) -> i32 {
         rc = 0;
     }
     if st != 1 {
-        let dsv: i64 = e.cur_val;
-        let dsw: i32 = e.cur_w;
-        let dsty: u32 = e.cur_ty;
-        let drv: i64 = e.ret_val;
-        let drw: i32 = e.ret_w;
-        let mut di: usize = e.loc_n;
-        while di > base {
-            di = di - 1usize;
-            if e.loc_owns[di] != 0u8 {
-                let pty: u32 = e.loc_ty[di];
-                if needs_drop(pp, src, e, pty) && !whole_moved(e, di) {
-                    let dc: i32 = drop_value(pp, src, e, e.loc_addr[di], pty, conv i64 di);
-                    if dc != 0 { rc = 1; }
-                }
-            }
-        }
-        e.*.cur_val = dsv;
-        e.*.cur_w = dsw;
-        e.*.cur_ty = dsty;
-        e.*.ret_val = drv;
-        e.*.ret_w = drw;
+        if drop_owned_locals_from(pp, src, e, base) != 0 { rc = 1; }
     }
     clear_locals_from(e, base);
     e.*.loc_n = base;
@@ -2896,27 +2901,7 @@ fn exec_block(pp: read P, src: [u8], e: write E, blk: u32) -> i32 {
         cur = sn.nx;
     }
     if st != 1 {
-        let sv: i64 = e.cur_val;
-        let sw: i32 = e.cur_w;
-        let sty: u32 = e.cur_ty;
-        let srv: i64 = e.ret_val;
-        let srw: i32 = e.ret_w;
-        let mut i: usize = e.loc_n;
-        while i > base {
-            i = i - 1usize;
-            if e.loc_owns[i] != 0u8 {
-                let ty: u32 = e.loc_ty[i];
-                if needs_drop(pp, src, e, ty) && !whole_moved(e, i) {
-                    let dc: i32 = drop_value(pp, src, e, e.loc_addr[i], ty, conv i64 i);
-                    if dc != 0 { st = 1; }
-                }
-            }
-        }
-        e.*.cur_val = sv;
-        e.*.cur_w = sw;
-        e.*.cur_ty = sty;
-        e.*.ret_val = srv;
-        e.*.ret_w = srw;
+        if drop_owned_locals_from(pp, src, e, base) != 0 { st = 1; }
     }
     clear_locals_from(e, base);
     e.*.loc_n = base;

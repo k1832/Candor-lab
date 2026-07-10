@@ -1356,3 +1356,47 @@ by 11_5's ~96 KiB arena build + the recursive drop of 4096 copy `Node`s, and 11_
 eval); correctness landed, cost noted. The self-hosted interpreter now executes Candor's full
 systems-programming surface — allocators, intrusive lists, MMIO, an arena, and a recursive-descent
 parser — matching the reference engine byte-for-byte. interp.cnr remains NOT self-checked.
+
+### interp.cnr consolidation + self-check probe (2026-07-11)
+
+CONSOLIDATION (output-invariant; all 71 interp fixtures + every self-check gate + the whole suite
+byte-exact, clippy clean). Four review-specified cleanups to `prototype/selfhost/interp/interp.cnr`:
+- The identical drop-owned-locals loop — save the five value registers, drop owned not-moved locals
+  `[base, loc_n)` in reverse, restore the registers — was hand-copied in `exec_block`, `call_fn`, and
+  `eval_match`. Factored into `fn drop_owned_locals_from(pp, src, e, base) -> i32` (returns 1 if a
+  drop faulted); all three sites now call it. The `ret_val`/`ret_w` half of that save IS the S5b
+  register-trap fix (a `free` run mid-drop clobbers the shared return register); it now lives in ONE
+  place, so a future S7 drop caller can't silently reintroduce the bug. `exec_stmt`'s temp-drop keeps
+  its own save/restore: its loop iterates the temp table (`tmp_live/tmp_addr/tmp_ty` over
+  `[tmp_base, tmp_n)`, killing live temps), a structurally different loop from the owned-locals
+  reverse drop, and the only shareable part (the 5-register save) would need a carrier struct /
+  multi-value return that adds more machinery than the duplication it removes.
+- Removed three dead `use parser` imports (`T_RET`, `T_ARM`, `T_NAME`) — each appeared only in the
+  `use` list, never referenced.
+- `eval_place`'s `T_ID` fallthrough (after a local-miss AND static-miss) re-read `loc_addr[loc_n]`,
+  the out-of-frame sentinel slot — a silent wrong answer. Now faults explicitly (`FK_PANIC`): an
+  unresolved name is an internal invariant violation. Unreached by the corpus.
+- `xlate` (paged translate) gained a capacity guard: an address ≥ 32 MiB overran `pagedir:[8192]i32`
+  and exhausting the 128-frame `pages` pool overran `pages:[524288]u8`, both silent OOB. Now signals
+  a `FK_BOUNDS` fault (the nearest oracle bad-address kind) on `page >= 8192` or pool exhaustion.
+  Defensive for S7's Vec/Map; the corpus stays in bounds, so no fixture output changes.
+
+SELF-CHECK PROBE — the "NOT self-checked (uses `unsafe` and the raw-pointer intrinsics)" blocker
+above is STALE. interp.cnr's OWN code uses no `unsafe`, no raw-ptr intrinsic calls, no `self`, no
+generics/Map/Vec; its heavy constructs (`wrapping{}`, `conv`) are already self-checked in
+parser/analyses.cnr. Running interp.cnr through the SAME machinery that gates the other modules:
+- EMBED: the self-host lexer produces 25736 tokens (< the 32768 buffer, ~7k headroom) and the parse
+  fits the 32768-node arena with no fault — NO arena bump needed.
+- CHECKER (name-res, E0102/E0103): the self-host checker resolves interp.cnr's `use lexer::{..}` /
+  `use parser::{..}` imports itself and emits ZERO E0102/E0103, byte-equal to the module-aware oracle
+  over lexer+parser+checker+interp (also 0). The naive single-file oracle (no import resolution)
+  flags 202 E0102 + 222 E0103, so the imports are load-bearing and really resolved.
+- ANALYSES (move/init/loans/effects/exhaustiveness): the self-host analyses emits ZERO covered
+  diagnostics (E0301/E0304/E0401/E0601/E0801-4), byte-equal to the module-aware oracle (0). The
+  predicted E0302 partial-move-at-join false-positive class does NOT surface — E0302/E0309 are
+  out-of-subset for the analyses core, and the FULL Rust oracle already accepts interp.cnr (it
+  compiles and runs under the execution gate).
+READ: self-checking the interpreter is a NEAR MILESTONE, not a project. Landing it is essentially
+adding interp.cnr as another module under the existing checker + analyses fixpoint gates (same shape
+as parser.cnr's gate, with a use-after-move teeth smoke) — no arena bump, no new builtins. (Probe was
+run-and-report; no probe test committed.)
