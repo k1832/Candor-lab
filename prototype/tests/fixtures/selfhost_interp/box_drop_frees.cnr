@@ -1,0 +1,37 @@
+// S5b: the acceptance signal for alloc-on-drop ordering. A drop-hooked `Noisy`
+// is boxed and the `BoxResult` is left to drop at scope exit: the enum-drop
+// routes to the boxed `Box`, whose drop FIRST drops the pointee (hook trace 7)
+// and THEN frees the storage (tracing free 999). Order MUST be hook-then-free.
+struct AllocVtable {
+    alloc: fn(rawptr u8, usize, usize) -> rawptr u8,
+    free: fn(rawptr u8, rawptr u8, usize, usize) -> unit,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize }
+
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live Bump whose [next,end) window is this arena's alone" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let aligned: usize = (b.next + align - 1usize) / align * align;
+        if aligned + size > b.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    trace(999i64);
+    return;
+}
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+struct Noisy { id: i64 } drop(write self) { trace(self.id); }
+
+fn main() alloc -> i64 {
+    let mut st: Bump = Bump { next: 8192usize, end: 16384usize };
+    unsafe "box a value and let the Box free it on drop" {
+        let al: Alloc = Alloc { ctx: cast_ptr[u8](addr_of_mut(st)), vt: addr_of(BUMP_VT) };
+        let br: BoxResult Noisy = box(al, Noisy { id: 7i64 });
+    }
+    return 0i64;
+}

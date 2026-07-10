@@ -1,0 +1,47 @@
+// S5b: `unbox` moves the pointee out of the Box, FREES the box storage through
+// the carried vtable, and CONSUMES the box (no later drop-of-box). A tracing
+// `free` (999) makes the free observable; the moved-out `Noisy` is dropped only
+// once, at the end of its new owner's scope. Trace order asserts move-out + free
+// happen inside `unbox`, then the moved value's own drop fires at return.
+struct AllocVtable {
+    alloc: fn(rawptr u8, usize, usize) -> rawptr u8,
+    free: fn(rawptr u8, rawptr u8, usize, usize) -> unit,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize }
+
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live Bump whose [next,end) window is this arena's alone" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let aligned: usize = (b.next + align - 1usize) / align * align;
+        if aligned + size > b.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    trace(999i64);
+    return;
+}
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+struct Noisy { id: i64 } drop(write self) { trace(self.id); }
+
+fn main() alloc -> i64 {
+    let mut st: Bump = Bump { next: 8192usize, end: 16384usize };
+    unsafe "drive box/unbox through the vtable ABI over an arena-internal window" {
+        let al: Alloc = Alloc { ctx: cast_ptr[u8](addr_of_mut(st)), vt: addr_of(BUMP_VT) };
+        let br: BoxResult Noisy = box(al, Noisy { id: 7i64 });
+        match br {
+            BoxResult::boxed(bx) => {
+                let n: Noisy = unbox(bx);
+                trace(n.id);
+                return 0i64;
+            },
+            BoxResult::oom => {
+                return 0 - 1i64;
+            },
+        }
+    }
+}

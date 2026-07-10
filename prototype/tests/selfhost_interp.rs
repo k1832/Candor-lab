@@ -170,6 +170,13 @@ const CORPUS: &[(&str, Shape)] = &[
     ("ptr_roundtrip.cnr", Ret),
     ("cast_ptr_read.cnr", Ret),
     ("alloc_abi.cnr", Ret),
+    // ---- S5b: BOX / BoxResult / unbox / Box-deref + alloc-on-drop ----
+    ("box_unbox_scalar.cnr", Ret),
+    ("box_struct.cnr", Ret),
+    ("unbox_path.cnr", Ret),
+    ("boxresult_oom.cnr", Ret),
+    ("box_drop_frees.cnr", Ret),
+    ("nested_box.cnr", Ret),
 ];
 
 fn read_fixture(rel: &str) -> String {

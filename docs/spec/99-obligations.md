@@ -1189,3 +1189,60 @@ Box-deref/alloc-on-drop. Absolute addresses differ from the oracle (16384-byte S
 oracle's 256 MiB space; DENSE/high-address memory is S6), but only VALUES are observable so dumps
 stay byte-exact. interp.cnr remains NOT self-checked (it uses the full language, incl. `unsafe` and
 the raw-pointer intrinsics).
+
+### S5b — BOX / BoxResult / unbox / Box-deref + alloc-on-drop in the self-interpreter (fifth slice, part b, 2026-07-11)
+
+The self-interpreter (`prototype/selfhost/interp/interp.cnr`) gains THE HEAP on top of S5a's
+allocator-ABI foundation: `box`/`unbox`, the compiler-known `BoxResult` enum, `.*` Box-deref
+(and field/index auto-deref THROUGH a Box), and alloc-on-drop. Same gate
+(`prototype/tests/selfhost_interp.rs`, EXECUTION equality vs `run_source_real`): the corpus grows
+from 54 to 60 fixtures (all returns). Confined to interp.cnr — NO parser change (the parser already
+emits `T_BOX`/`T_BOXRESULT` type nodes, `box`/`unbox` as `T_CALL` builtins, and `.*` as
+`T_PREFIX`/`PF_DEREF`). All 54 prior interp fixtures and every lexer/parser/checker/analyses/loans/
+effects self-check gate stay byte-exact (585 suite green, 0 failing; clippy clean).
+
+LAYOUT (mirrors src/interp/layout.rs). `Box T` = `{ptr@0, ctx@8, vt@16}`, size 24, align 8;
+`BoxResult T` = the 2-variant enum `{boxed(Box T), oom}`, size 32 (round_up(8 + 24, 8)), align 8,
+tag@0, the Box payload @8. `ty_size`/`ty_align` return 24/8 and 32/8 for `T_BOX`/`T_BOXRESULT`;
+`is_copy` is false and `needs_drop` is true for both (wired into S3's schedule and S4's enum
+machinery).
+
+SYNTHETIC BoxResult ENUM (the reuse mechanism). The parser never emits enum/variant nodes for
+`BoxResult T`, so at STARTUP (`synth_boxresults`, where `write P` is available) we APPEND, for every
+`T_BOXRESULT` annotation node, a `{boxed(Box T), oom}` shape: a `T_BOX` payload node, two
+`T_VARIANT` nodes (their name spans point at the `boxed`/`oom` BYTES scanned from the source, so a
+`match` pattern name compares equal), and a `T_ENUM`, linked back through the `T_BOXRESULT` node's
+`.c`. `enum_of_ty` routes a `T_BOXRESULT` to this synthetic enum — so `match`, enum-size and
+enum-drop (`eval_match`/`drop_variant_rev`) reuse the S4 machinery UNCHANGED; only `T_BOX` needs new
+handling (a `drop_box` arm, is_copy/needs_drop/size/align cases).
+
+box(alloc, v) (mirrors src/interp/eval.rs bi_box). Reads `ctx`/`vt` from the Alloc handle (arg0,
+`field_off_lit` name-agnostic off `alloc_sid`), sizes `v` (arg1), reads the `alloc` fn-ptr out of
+the vtable and INDIRECT-CALLs `alloc(ctx,size,align)` via `call_fn`. On null → OOM: drop+consume `v`,
+tag 1; else MOVE `v` into the heap slot and build the Box {ptr,ctx,vt} in the boxed payload (tag 0).
+The result's `T_BOXRESULT` node rides a new `cur_exp_ty` register set by the enclosing `let` (the
+same node the synthetic enum is linked from) — so a fixture must let-bind the box result with an
+explicit `BoxResult T` annotation (which also dodges the E0302 partial-move-at-join the checker
+raises on a fall-through `match`). unbox(box) reads the Box, MOVES the pointee bytes into a fresh
+slot, FREES the storage (`call_free`), and CONSUMES the box origin (frees AND consumes). `.*` deref
+is a `T_PREFIX`/`PF_DEREF` place: read ptr@0 and become a read-through PLACE of the inner type (does
+NOT free); `peel_box_place` auto-derefs field/index bases through Box layers.
+
+ALLOC-ON-DROP + THE SHARED-RETURN-REGISTER TRAP. `drop_box` (dispatched from `drop_value` for a
+`T_BOX`) drops the pointee FIRST (recursive inner-type drop — a Box of a Box recurses) THEN frees
+through the vtable — pointee-then-free order is load-bearing. Because `free` is a real INDIRECT call
+executed DURING a drop, it clobbers the self-interp's shared `ret_val`/`ret_w` registers with the
+freed fn's unit return; a `return v` inside a `match` arm whose Box drops on the way out lost `v`.
+Fix: save/restore `ret_val`/`ret_w` (alongside `cur_val`/`cur_w`/`cur_ty`) around EVERY drop loop
+(`eval_match`, `exec_block`, `call_fn`, `exec_stmt` temps) — any drop that can invoke `free` after a
+`return`. Fixtures: `box_unbox_scalar` (box+match+`.*`-read), `box_struct` (24-byte Box + field
+auto-deref `bx.x` and `bx.*.y`), `unbox_path` (move-out + tracing free + consume ordering),
+`boxresult_oom` (zero-headroom window forces the oom arm; the un-boxed value is dropped+consumed),
+`box_drop_frees` (the acceptance signal: hook-then-free order on Box drop), `nested_box`
+(`Box (Box T)` — recursive `drop_box`, boxed-payload-is-Box).
+
+The self-interpreter now executes S1 scalars + S2 structs/arrays + S3 move/drop + S4 enums/match +
+S5 the heap. The systems corpus is now gated ONLY on S6 (DENSE high-address memory model) plus the
+`offsetof`/`ptr_offset`/`ptr_to_addr` intrinsics — the last self-interp gap before the systems
+programs run. interp.cnr remains NOT self-checked (it uses the full language, incl. `unsafe` and the
+raw-pointer intrinsics).

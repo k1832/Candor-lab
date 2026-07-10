@@ -365,3 +365,29 @@ One lesson per entry, one-line summary first.
   to it), mirroring the oracle's `Interp::new`, NOT the checker (which only uses
   Alloc as its own prelude, no predicate) — this is the S5b box seam.
   (self-interp S5a, 2026-07-11). See [[self-host-analyses]].
+
+- **Self-interp S5b (the heap): synthesize `BoxResult` as a real enum at startup
+  to REUSE match/drop, and save/restore the return register around every drop
+  loop because alloc-on-drop's `free` is a nested call.** Two load-bearing points
+  for the box slice: (1) The parser emits no enum/variant nodes for `BoxResult T`,
+  so at startup (where `write P` is in hand) APPEND, per `T_BOXRESULT` annotation
+  node, a `{boxed(Box T), oom}` shape — a `T_BOX` payload node, two `T_VARIANT`
+  nodes whose name spans point at the `boxed`/`oom` BYTES scanned from source (so a
+  pattern name compares equal via `name_eq`), and a `T_ENUM`, linked back through
+  the `T_BOXRESULT` node's spare `.c` field. Route `enum_of_ty(T_BOXRESULT) -> .c`
+  and the entire S4 `match`/`drop_variant_rev`/enum-size machinery works UNCHANGED;
+  only `T_BOX` needs new arms (drop_box + is_copy/needs_drop/size/align). Box's own
+  result type node rides a new `cur_exp_ty` register set by the enclosing `let`, so
+  box results must be let-bound with an explicit `BoxResult T` annotation (which
+  also dodges the E0302 partial-move-at-join a fall-through `match` raises). (2)
+  ALLOC-ON-DROP HAZARD: `drop_box` frees through the vtable via a real INDIRECT
+  `call_fn`, executed DURING a drop; that nested call overwrites the self-interp's
+  SHARED `ret_val`/`ret_w` registers with the freed fn's unit return. A `return v`
+  inside a `match` arm whose Box frees on the way out silently returned 0 (the
+  `.*`-read was correct — only the return register was clobbered). Fix: save/restore
+  `ret_val`/`ret_w` alongside `cur_val`/`cur_w`/`cur_ty` around EVERY drop loop
+  (`eval_match`, `exec_block`, `call_fn`, `exec_stmt` temps). Any interpreter with a
+  register-based return and alloc-on-drop has this seam — a drop that runs a
+  function after a `return` must not leak into the pending return value. Drop order
+  is pointee-then-free, and it recurses (Box of a Box). (self-interp S5b,
+  2026-07-11). See [[self-host-analyses]].

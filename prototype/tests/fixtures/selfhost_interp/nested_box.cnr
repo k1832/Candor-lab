@@ -1,0 +1,53 @@
+// S5b: a Box whose pointee is itself a Box (`Box (Box Noisy)`). Dropping the
+// outer Box recurses: drop the pointee (the inner Box) -> drop ITS pointee (the
+// `Noisy`, hook 7) then free the inner storage (999), then free the outer
+// storage (999). Verifies recursive drop_box and that a BoxResult's boxed
+// payload is itself a Box.
+struct AllocVtable {
+    alloc: fn(rawptr u8, usize, usize) -> rawptr u8,
+    free: fn(rawptr u8, rawptr u8, usize, usize) -> unit,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize }
+
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live Bump whose [next,end) window is this arena's alone" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let aligned: usize = (b.next + align - 1usize) / align * align;
+        if aligned + size > b.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    trace(999i64);
+    return;
+}
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+struct Noisy { id: i64 } drop(write self) { trace(self.id); }
+
+fn main() alloc -> i64 {
+    let mut st: Bump = Bump { next: 8192usize, end: 16384usize };
+    unsafe "box a Box, then let the nested Boxes free bottom-up on drop" {
+        let al: Alloc = Alloc { ctx: cast_ptr[u8](addr_of_mut(st)), vt: addr_of(BUMP_VT) };
+        let inner_br: BoxResult Noisy = box(al, Noisy { id: 7i64 });
+        match inner_br {
+            BoxResult::oom => {
+                return 0 - 1i64;
+            },
+            BoxResult::boxed(inner_bx) => {
+                let outer_br: BoxResult Box Noisy = box(al, inner_bx);
+                match outer_br {
+                    BoxResult::oom => {
+                        return 0 - 2i64;
+                    },
+                    BoxResult::boxed(outer_bx) => {
+                        return 0i64;
+                    },
+                }
+            },
+        }
+    }
+}

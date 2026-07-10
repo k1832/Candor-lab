@@ -27,7 +27,7 @@
 // `interp.cnr` is NOT self-checked in this slice, so it uses the full language.
 
 use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl};
-use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_SC, T_RET, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_STRUCT, T_NAMED, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_VARIANT, T_ENUMCTOR, T_MATCH, T_ARM, T_PVARIANT, T_WILD, T_BIND, T_NAME, T_STATIC, T_RAWPTR, T_FNPTR, T_UNSAFE, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL};
+use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_SC, T_RET, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_STRUCT, T_NAMED, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_VARIANT, T_ENUMCTOR, T_MATCH, T_ARM, T_PVARIANT, T_WILD, T_BIND, T_NAME, T_STATIC, T_RAWPTR, T_FNPTR, T_UNSAFE, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_BOX, T_BOXRESULT, T_PREFIX, PF_DEREF};
 
 // ---- fault kind codes (shared with the Rust harness) ------------------------
 static FK_OVERFLOW: i32 = 0;
@@ -105,6 +105,7 @@ struct E {
     static_n: usize,
     alloc_vt_sid: u32,
     alloc_sid: u32,
+    cur_exp_ty: u32,
 }
 
 // ---- bit-pattern reinterpretation via wrapping conv (no transmute needed) ----
@@ -197,6 +198,68 @@ fn name_eq(src: [u8], a0: usize, a1: usize, b0: usize, b1: usize) -> bool {
         i = i + 1usize;
     }
     return true;
+}
+
+// ---- synthetic Box/BoxResult enum shape (startup, mirrors the oracle's
+// compiler-known `BoxResult` enum). The parser never emits enum/variant nodes for
+// `BoxResult T`, so at startup we append, for every `T_BOXRESULT` annotation node,
+// a matching `{ boxed(Box T), oom }` enum: a `T_BOX` payload node, two `T_VARIANT`
+// nodes (spans point at the `boxed`/`oom` bytes in the source so a `match` pattern
+// name compares equal), and a `T_ENUM` linked back through the `T_BOXRESULT` node's
+// `.c`. `enum_of_ty` then routes a `T_BOXRESULT` to this synthetic enum, so match,
+// enum-size and enum-drop all reuse the S4 machinery unchanged.
+fn inode(p: write P, nd: Node) -> u32 {
+    let i: u32 = p.n;
+    p.*.nodes[conv usize i] = nd;
+    p.*.n = i + 1u32;
+    return i;
+}
+fn find_needle(src: [u8], needle: [u8]) -> usize {
+    let n: usize = len(src);
+    let m: usize = len(needle);
+    let mut i: usize = 0usize;
+    while i + m <= n {
+        let mut j: usize = 0usize;
+        let mut ok: bool = true;
+        while j < m {
+            if src[i + j] != needle[j] { ok = false; break; }
+            j = j + 1usize;
+        }
+        if ok { return i; }
+        i = i + 1usize;
+    }
+    return n;
+}
+fn synth_boxresults(p: write P, src: [u8]) -> unit {
+    let boxed0: usize = find_needle(src, b"boxed");
+    let oom0: usize = find_needle(src, b"oom");
+    let n0: u32 = p.n;
+    let mut i: u32 = 1u32;
+    while i < n0 {
+        let nd: Node = p.nodes[conv usize i];
+        if nd.tag == T_BOXRESULT {
+            let mut bn: Node = nnew(T_BOX);
+            bn.a = nd.a;
+            let boxid: u32 = inode(p, bn);
+            let mut vo: Node = nnew(T_VARIANT);
+            vo.p0 = oom0;
+            vo.p1 = oom0 + 3usize;
+            let oomid: u32 = inode(p, vo);
+            let mut vb: Node = nnew(T_VARIANT);
+            vb.p0 = boxed0;
+            vb.p1 = boxed0 + 5usize;
+            vb.a = boxid;
+            vb.nx = oomid;
+            let boxedid: u32 = inode(p, vb);
+            let mut en: Node = nnew(T_ENUM);
+            en.op = 0;
+            en.b = boxedid;
+            let enid: u32 = inode(p, en);
+            p.*.nodes[conv usize i].c = enid;
+        }
+        i = i + 1u32;
+    }
+    return;
 }
 
 // ---- item + local resolution -------------------------------------------------
@@ -463,6 +526,7 @@ fn struct_of_ty(pp: read P, src: [u8], e: write E, tn: u32) -> u32 {
 fn enum_of_ty(pp: read P, src: [u8], e: write E, tn: u32) -> u32 {
     if tn == 0u32 { return 0u32; }
     let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_BOXRESULT { return nd.c; }
     if nd.tag == T_ENUM { return tn; }
     if (nd.tag == T_NAMED || nd.tag == T_SC) {
         if sc_width(src, nd.p0, nd.p1) != 0 { return 0u32; }
@@ -491,6 +555,8 @@ fn ty_size(pp: read P, src: [u8], e: write E, tn: u32) -> usize {
     if nd.tag == T_STRUCT { return struct_size(pp, src, e, tn); }
     if nd.tag == T_ENUM { return enum_size(pp, src, e, tn); }
     if nd.tag == T_RAWPTR || nd.tag == T_FNPTR { return 8usize; }
+    if nd.tag == T_BOX { return 24usize; }
+    if nd.tag == T_BOXRESULT { return 32usize; }
     if nd.tag == T_ARRAY {
         let n: usize = array_len_of(pp, nd.a);
         let esz: usize = ty_size(pp, src, e, nd.b);
@@ -514,6 +580,7 @@ fn ty_align(pp: read P, src: [u8], e: write E, tn: u32) -> usize {
     if nd.tag == T_STRUCT { return struct_align(pp, src, e, tn); }
     if nd.tag == T_ENUM { return 8usize; }
     if nd.tag == T_RAWPTR || nd.tag == T_FNPTR { return 8usize; }
+    if nd.tag == T_BOX || nd.tag == T_BOXRESULT { return 8usize; }
     if nd.tag == T_ARRAY { return ty_align(pp, src, e, nd.b); }
     return 1usize;
 }
@@ -561,6 +628,22 @@ fn field_off(pp: read P, src: [u8], e: write E, sid: u32, fs: usize, fen: usize)
     }
     return 0usize;
 }
+// Byte offset of the field named by a byte-string LITERAL within struct `sid`
+// (name-agnostic ABI resolution: box/unbox find `ctx`/`vt`/`alloc`/`free` here).
+fn field_off_lit(pp: read P, src: [u8], e: write E, sid: u32, name: [u8]) -> usize {
+    let snode: Node = pp.nodes[conv usize sid];
+    let mut off: usize = 0usize;
+    let mut cur: u32 = snode.b;
+    while cur != 0u32 {
+        let fd: Node = pp.nodes[conv usize cur];
+        let a: usize = ty_align(pp, src, e, fd.a);
+        off = round_up_us(off, a);
+        if span_eq(src, fd.p0, fd.p1, name) { return off; }
+        off = off + ty_size(pp, src, e, fd.a);
+        cur = fd.nx;
+    }
+    return 0usize;
+}
 // Type node of field [fs,fen) within struct `sid`.
 fn field_ty(pp: read P, src: [u8], sid: u32, fs: usize, fen: usize) -> u32 {
     let snode: Node = pp.nodes[conv usize sid];
@@ -589,6 +672,7 @@ fn is_copy(pp: read P, src: [u8], e: write E, tn: u32) -> bool {
     if tn == 0u32 { return true; }
     if scalar_width(pp, src, tn) != 0 { return true; }
     let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_BOX || nd.tag == T_BOXRESULT { return false; }
     if nd.tag == T_ARRAY { return is_copy(pp, src, e, nd.b); }
     let sid: u32 = struct_of_ty(pp, src, e, tn);
     if sid != 0u32 {
@@ -626,6 +710,7 @@ fn needs_drop(pp: read P, src: [u8], e: write E, tn: u32) -> bool {
     if tn == 0u32 { return false; }
     if scalar_width(pp, src, tn) != 0 { return false; }
     let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_BOX || nd.tag == T_BOXRESULT { return true; }
     if nd.tag == T_ARRAY { return needs_drop(pp, src, e, nd.b); }
     let sid: u32 = struct_of_ty(pp, src, e, tn);
     if sid != 0u32 {
@@ -966,6 +1051,9 @@ fn drop_value(pp: read P, src: [u8], e: write E, addr: usize, tn: u32, li: i64) 
         return drop_variant_rev(pp, src, e, addr, vid, li);
     }
     let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_BOX {
+        return drop_box(pp, src, e, addr, nd.a);
+    }
     if nd.tag == T_ARRAY {
         let n: usize = array_len_of(pp, nd.a);
         let elem: u32 = nd.b;
@@ -981,6 +1069,46 @@ fn drop_value(pp: read P, src: [u8], e: write E, addr: usize, tn: u32, li: i64) 
         return 0;
     }
     return 0;
+}
+// The alloc-on-drop core for a `Box T` at `addr` (fields ptr@0, ctx@8, vt@16).
+// If the pointer is live, the pointee is dropped FIRST (recursive inner-type drop
+// -- a `Box` of a `Box` recurses), THEN the storage is freed through the carried
+// vtable. Order is load-bearing: pointee-then-free (mirrors src/interp/eval.rs
+// drop_box). A null pointer (a moved-out box) drops nothing.
+fn drop_box(pp: read P, src: [u8], e: write E, addr: usize, inner: u32) -> i32 {
+    let ptr: usize = conv usize to_u64(mem_load(e, addr, W_USIZE));
+    let ctx: i64 = mem_load(e, addr + 8usize, W_USIZE);
+    let vt: i64 = mem_load(e, addr + 16usize, W_USIZE);
+    if ptr != 0usize {
+        let sc: i32 = drop_value(pp, src, e, ptr, inner, 0 - 1i64);
+        if sc != 0 { return sc; }
+        let size: usize = ty_size(pp, src, e, inner);
+        let align: usize = ty_align(pp, src, e, inner);
+        return call_free(pp, src, e, ctx, vt, ptr, size, align);
+    }
+    return 0;
+}
+// Indirect free: read the `free` fn-ptr out of the vtable and call
+// `free(ctx, ptr, size, align)` (all 8-byte scalars). Reuses `call_fn`, the same
+// path S5a used for indirect `alloc` calls.
+fn call_free(pp: read P, src: [u8], e: write E, ctx: i64, vt: i64, ptr: usize, size: usize, align: usize) -> i32 {
+    let free_off: usize = field_off_lit(pp, src, e, e.alloc_vt_sid, b"free");
+    let vt_addr: usize = conv usize to_u64(vt);
+    let ffn: u32 = conv u32 to_u64(mem_load(e, vt_addr + free_off, W_USIZE));
+    e.*.arg_val[0] = ctx;
+    e.*.arg_w[0] = W_USIZE;
+    e.*.arg_addr[0] = 0usize;
+    e.*.arg_val[1] = conv i64 ptr;
+    e.*.arg_w[1] = W_USIZE;
+    e.*.arg_addr[1] = 0usize;
+    e.*.arg_val[2] = conv i64 size;
+    e.*.arg_w[2] = W_USIZE;
+    e.*.arg_addr[2] = 0usize;
+    e.*.arg_val[3] = conv i64 align;
+    e.*.arg_w[3] = W_USIZE;
+    e.*.arg_addr[3] = 0usize;
+    e.*.arg_n = 4usize;
+    return call_fn(pp, src, e, ffn);
 }
 // Scan the source once for a "self" span; run_drop_hook binds `self` by matching
 // these bytes (find_local compares src bytes), so the hook body's `self` resolves.
@@ -1148,6 +1276,21 @@ fn shift_op(op: i32, a: i64, amt: i64, w: i32, e: write E, p0: usize, p1: usize)
 // has plc_w in 1..11; an aggregate place has plc_w == 0 and plc_ty its type node.
 // The running cur_span is threaded so the Bounds fault reports the base array's
 // span, exactly like eval.rs's eval_place.
+// Auto-deref the current place through any `Box` layers (a field/index access on
+// a `Box T` reads THROUGH the box, mirroring the oracle's `peel_place`). Each
+// layer reads the pointer at the place and re-bases on the pointee.
+fn peel_box_place(pp: read P, e: write E) -> unit {
+    loop {
+        let bnode: Node = pp.nodes[conv usize e.plc_ty];
+        if bnode.tag == T_BOX {
+            let ptr: i64 = mem_load(e, e.plc_addr, W_USIZE);
+            e.*.plc_addr = conv usize to_u64(ptr);
+            e.*.plc_ty = bnode.a;
+        } else {
+            return;
+        }
+    }
+}
 fn eval_place(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
     e.*.cur_p0 = nd.p0;
@@ -1155,6 +1298,19 @@ fn eval_place(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let tg: i32 = nd.tag;
     if tg == T_PAREN {
         return eval_place(pp, src, e, nd.a);
+    }
+    if tg == T_PREFIX {
+        if nd.op == PF_DEREF {
+            let sc: i32 = eval_place(pp, src, e, nd.a);
+            if sc != 0 { return sc; }
+            let bnode: Node = pp.nodes[conv usize e.plc_ty];
+            let inner: u32 = bnode.a;
+            let ptr: i64 = mem_load(e, e.plc_addr, W_USIZE);
+            e.*.plc_addr = conv usize to_u64(ptr);
+            e.*.plc_ty = inner;
+            e.*.plc_w = scalar_width(pp, src, inner);
+            return 0;
+        }
     }
     if tg == T_ID {
         let idx: usize = find_local(src, e, nd.p0, nd.p1);
@@ -1179,6 +1335,7 @@ fn eval_place(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     if tg == T_FIELD {
         let sc: i32 = eval_place(pp, src, e, nd.a);
         if sc != 0 { return sc; }
+        peel_box_place(pp, e);
         let base_addr: usize = e.plc_addr;
         let base_ty: u32 = e.plc_ty;
         let sid: u32 = struct_of_ty(pp, src, e, base_ty);
@@ -1195,6 +1352,7 @@ fn eval_place(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
         let iv: u64 = to_u64(e.cur_val);
         let sc2: i32 = eval_place(pp, src, e, nd.a);
         if sc2 != 0 { return sc2; }
+        peel_box_place(pp, e);
         let base_addr: usize = e.plc_addr;
         let arr_ty: u32 = e.plc_ty;
         let arrnd: Node = pp.nodes[conv usize arr_ty];
@@ -1504,6 +1662,8 @@ fn eval_match(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
         let sv: i64 = e.cur_val;
         let sw: i32 = e.cur_w;
         let sty: u32 = e.cur_ty;
+        let srv: i64 = e.ret_val;
+        let srw: i32 = e.ret_w;
         let mut di: usize = e.loc_n;
         while di > base {
             di = di - 1usize;
@@ -1518,6 +1678,8 @@ fn eval_match(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
         e.*.cur_val = sv;
         e.*.cur_w = sw;
         e.*.cur_ty = sty;
+        e.*.ret_val = srv;
+        e.*.ret_w = srw;
     }
     clear_locals_from(e, base);
     e.*.loc_n = base;
@@ -1601,6 +1763,13 @@ fn eval_expr(pp: read P, src: [u8], e: write E, i: u32, exp_w: i32) -> i32 {
         e.*.cur_val = 0i64;
         e.*.cur_w = 0;
         return 0;
+    }
+    if tg == T_PREFIX {
+        if nd.op == PF_DEREF {
+            let sc: i32 = eval_place(pp, src, e, i);
+            if sc != 0 { return sc; }
+            return load_place(e);
+        }
     }
     if tg == T_FIELD || tg == T_INDEX {
         let sc: i32 = eval_place(pp, src, e, i);
@@ -1882,6 +2051,138 @@ fn fn_ret_tynode(pp: read P, fnid: u32) -> u32 {
     return rt.a;
 }
 
+// `box(alloc, v)` (mirrors src/interp/eval.rs bi_box). Reads `ctx`/`vt` from the
+// Alloc handle (arg0), sizes `v` (arg1), reads the `alloc` fn-ptr out of the
+// vtable and INDIRECT-CALLs `alloc(ctx, size, align)`. On null it takes the OOM
+// arm -- drop+consume `v`, tag = 1 (oom); otherwise it MOVES `v` into the heap
+// slot and builds the `Box` {ptr, ctx, vt} inside the boxed payload (tag = 0).
+// The result type node (a `T_BOXRESULT`) rides `cur_exp_ty`, set by the enclosing
+// `let` -- the same node the synthetic enum is linked from.
+fn bi_box(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let rty: u32 = e.cur_exp_ty;
+    let a0: u32 = nd.b;
+    let a0nd: Node = pp.nodes[conv usize a0];
+    let a1: u32 = a0nd.nx;
+    let sc0: i32 = eval_expr(pp, src, e, a0, 0 - 1i32);
+    if sc0 != 0 { return sc0; }
+    let alloc_addr: usize = conv usize e.cur_val;
+    let ctx_off: usize = field_off_lit(pp, src, e, e.alloc_sid, b"ctx");
+    let vt_off: usize = field_off_lit(pp, src, e, e.alloc_sid, b"vt");
+    let ctx: i64 = mem_load(e, alloc_addr + ctx_off, W_USIZE);
+    let vt: i64 = mem_load(e, alloc_addr + vt_off, W_USIZE);
+    let vt_addr: usize = conv usize to_u64(vt);
+    let scv: i32 = eval_expr(pp, src, e, a1, 0 - 1i32);
+    if scv != 0 { return scv; }
+    let vw: i32 = e.cur_w;
+    let vty: u32 = e.cur_ty;
+    let vval: i64 = e.cur_val;
+    let vorg: i32 = e.cur_org;
+    let voa: usize = e.cur_org_a;
+    let vob: i32 = e.cur_org_b;
+    let mut vsz: usize = 0usize;
+    let mut val: usize = 1usize;
+    let mut vcopy: bool = true;
+    if vw != 0 {
+        vsz = w_size(vw);
+        val = w_size(vw);
+    } else {
+        vsz = ty_size(pp, src, e, vty);
+        val = ty_align(pp, src, e, vty);
+        vcopy = is_copy(pp, src, e, vty);
+    }
+    let alloc_off: usize = field_off_lit(pp, src, e, e.alloc_vt_sid, b"alloc");
+    let afn: u32 = conv u32 to_u64(mem_load(e, vt_addr + alloc_off, W_USIZE));
+    e.*.arg_val[0] = ctx;
+    e.*.arg_w[0] = W_USIZE;
+    e.*.arg_addr[0] = 0usize;
+    e.*.arg_val[1] = conv i64 vsz;
+    e.*.arg_w[1] = W_USIZE;
+    e.*.arg_addr[1] = 0usize;
+    e.*.arg_val[2] = conv i64 val;
+    e.*.arg_w[2] = W_USIZE;
+    e.*.arg_addr[2] = 0usize;
+    e.*.arg_n = 3usize;
+    let cs: i32 = call_fn(pp, src, e, afn);
+    if cs != 0 { return cs; }
+    let ret: usize = conv usize to_u64(e.cur_val);
+    let braddr: usize = bump_alloc(e, 32usize, 8usize);
+    zero_slot(e, braddr, 32usize);
+    if ret == 0usize {
+        if vw == 0 {
+            let dc: i32 = drop_value(pp, src, e, conv usize vval, vty, 0 - 1i64);
+            if dc != 0 { return dc; }
+            if !vcopy { do_consume(e, vorg, voa, vob); }
+        }
+        mem_store(e, braddr, 1i64, W_USIZE);
+    } else {
+        if vw != 0 {
+            mem_store(e, ret, vval, vw);
+        } else {
+            mem_copy(e, ret, conv usize vval, vsz);
+            if !vcopy { do_consume(e, vorg, voa, vob); }
+        }
+        mem_store(e, braddr, 0i64, W_USIZE);
+        mem_store(e, braddr + 8usize, conv i64 ret, W_USIZE);
+        mem_store(e, braddr + 16usize, ctx, W_USIZE);
+        mem_store(e, braddr + 24usize, vt, W_USIZE);
+    }
+    e.*.cur_val = conv i64 braddr;
+    e.*.cur_w = 0;
+    e.*.cur_ty = rty;
+    e.*.cur_org = 0;
+    let ti: usize = reg_temp(e, braddr, rty);
+    e.*.cur_org = 1;
+    e.*.cur_org_a = ti;
+    return 0;
+}
+// `unbox(box)` (mirrors src/interp/eval.rs bi_unbox). Reads the Box (ptr@0,
+// ctx@8, vt@16), MOVES the pointee bytes out into a fresh slot, FREES the box
+// storage through the vtable, and CONSUMES the box origin (so its later drop is
+// suppressed -- unbox frees AND consumes). Yields the inner value.
+fn bi_unbox(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let a0: u32 = nd.b;
+    let sc: i32 = eval_expr(pp, src, e, a0, 0 - 1i32);
+    if sc != 0 { return sc; }
+    let bxaddr: usize = conv usize e.cur_val;
+    let bxty: u32 = e.cur_ty;
+    let borg: i32 = e.cur_org;
+    let boa: usize = e.cur_org_a;
+    let bob: i32 = e.cur_org_b;
+    let bnode: Node = pp.nodes[conv usize bxty];
+    let inner: u32 = bnode.a;
+    let ptr: usize = conv usize to_u64(mem_load(e, bxaddr, W_USIZE));
+    let ctx: i64 = mem_load(e, bxaddr + 8usize, W_USIZE);
+    let vt: i64 = mem_load(e, bxaddr + 16usize, W_USIZE);
+    let size: usize = ty_size(pp, src, e, inner);
+    let align: usize = ty_align(pp, src, e, inner);
+    let slot: usize = bump_alloc(e, size, align);
+    zero_slot(e, slot, size);
+    mem_copy(e, slot, ptr, size);
+    let fc: i32 = call_free(pp, src, e, ctx, vt, ptr, size, align);
+    if fc != 0 { return fc; }
+    do_consume(e, borg, boa, bob);
+    let iw: i32 = scalar_width(pp, src, inner);
+    if iw != 0 {
+        e.*.cur_val = mem_load(e, slot, iw);
+        e.*.cur_w = iw;
+        e.*.cur_ty = inner;
+        e.*.cur_org = 0;
+    } else {
+        e.*.cur_val = conv i64 slot;
+        e.*.cur_w = 0;
+        e.*.cur_ty = inner;
+        e.*.cur_org = 0;
+        if !is_copy(pp, src, e, inner) {
+            let ti: usize = reg_temp(e, slot, inner);
+            e.*.cur_org = 1;
+            e.*.cur_org_a = ti;
+        }
+    }
+    return 0;
+}
+
 fn eval_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
     let callee: Node = pp.nodes[conv usize nd.a];
@@ -1966,6 +2267,12 @@ fn eval_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
         e.*.cur_w = W_BOOL;
         e.*.cur_org = 0;
         return 0;
+    }
+    if span_eq(src, callee.p0, callee.p1, b"box") {
+        return bi_box(pp, src, e, i);
+    }
+    if span_eq(src, callee.p0, callee.p1, b"unbox") {
+        return bi_unbox(pp, src, e, i);
     }
     // Direct call (a declared fn) or, when the name is not a fn, an INDIRECT call
     // through a fn-ptr value: evaluate the callee expression -- which yields the
@@ -2100,6 +2407,8 @@ fn call_fn(pp: read P, src: [u8], e: write E, fnid: u32) -> i32 {
         let dsv: i64 = e.cur_val;
         let dsw: i32 = e.cur_w;
         let dsty: u32 = e.cur_ty;
+        let drv: i64 = e.ret_val;
+        let drw: i32 = e.ret_w;
         let mut di: usize = e.loc_n;
         while di > base {
             di = di - 1usize;
@@ -2114,6 +2423,8 @@ fn call_fn(pp: read P, src: [u8], e: write E, fnid: u32) -> i32 {
         e.*.cur_val = dsv;
         e.*.cur_w = dsw;
         e.*.cur_ty = dsty;
+        e.*.ret_val = drv;
+        e.*.ret_w = drw;
     }
     clear_locals_from(e, base);
     e.*.loc_n = base;
@@ -2134,6 +2445,8 @@ fn exec_stmt(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let sv: i64 = e.cur_val;
     let sw: i32 = e.cur_w;
     let sty: u32 = e.cur_ty;
+    let srv: i64 = e.ret_val;
+    let srw: i32 = e.ret_w;
     let mut fault: i32 = 0;
     let mut k: usize = e.tmp_n;
     while k > tmp_base {
@@ -2147,6 +2460,8 @@ fn exec_stmt(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     e.*.cur_val = sv;
     e.*.cur_w = sw;
     e.*.cur_ty = sty;
+    e.*.ret_val = srv;
+    e.*.ret_w = srw;
     if fault != 0 { return 1; }
     return st;
 }
@@ -2166,6 +2481,7 @@ fn exec_stmt_inner(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
                 if sc != 0 { return sc; }
                 mem_store(e, addr, e.cur_val, w);
             } else {
+                e.*.cur_exp_ty = tynode;
                 let sc: i32 = eval_expr(pp, src, e, nd.b, 0 - 1i32);
                 if sc != 0 { return sc; }
                 let lorg: i32 = e.cur_org;
@@ -2239,6 +2555,8 @@ fn exec_block(pp: read P, src: [u8], e: write E, blk: u32) -> i32 {
         let sv: i64 = e.cur_val;
         let sw: i32 = e.cur_w;
         let sty: u32 = e.cur_ty;
+        let srv: i64 = e.ret_val;
+        let srw: i32 = e.ret_w;
         let mut i: usize = e.loc_n;
         while i > base {
             i = i - 1usize;
@@ -2253,6 +2571,8 @@ fn exec_block(pp: read P, src: [u8], e: write E, blk: u32) -> i32 {
         e.*.cur_val = sv;
         e.*.cur_w = sw;
         e.*.cur_ty = sty;
+        e.*.ret_val = srv;
+        e.*.ret_w = srw;
     }
     clear_locals_from(e, base);
     e.*.loc_n = base;
@@ -2381,6 +2701,7 @@ pub fn interp_dump(src: [u8], buf: read Buf) -> unit {
         static_n: 0usize,
         alloc_vt_sid: 0u32,
         alloc_sid: 0u32,
+        cur_exp_ty: 0u32,
     };
     set_self_span(src, write e);
     // Structural Alloc/AllocVtable identification, computed once at startup like
@@ -2388,6 +2709,7 @@ pub fn interp_dump(src: [u8], buf: read Buf) -> unit {
     let avt: u32 = find_alloc_vtable_struct(read p, src, write e);
     e.alloc_vt_sid = avt;
     e.alloc_sid = find_alloc_struct(read p, src, write e, avt);
+    synth_boxresults(write p, src);
     run_statics(read p, src, write e);
     let mainid: u32 = find_main(read p, src, write e);
     let mut ret: i64 = 0i64;

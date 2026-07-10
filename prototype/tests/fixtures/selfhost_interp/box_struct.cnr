@@ -1,0 +1,42 @@
+// S5b: box a two-field struct and read its fields through the Box. Verifies the
+// 24-byte Box carries a pointer to a correctly sized/aligned pointee (move into
+// the heap slot) and that field access auto-derefs through a Box (`bx.x`) as
+// well as via an explicit `.*` (`bx.*.y`).
+struct AllocVtable {
+    alloc: fn(rawptr u8, usize, usize) -> rawptr u8,
+    free: fn(rawptr u8, rawptr u8, usize, usize) -> unit,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize }
+
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live Bump whose [next,end) window is this arena's alone" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let aligned: usize = (b.next + align - 1usize) / align * align;
+        if aligned + size > b.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit { return; }
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+
+struct Pt { x: i64, y: i64 }
+
+fn main() alloc -> i64 {
+    let mut st: Bump = Bump { next: 8192usize, end: 16384usize };
+    unsafe "drive box through the vtable ABI over an arena-internal window" {
+        let al: Alloc = Alloc { ctx: cast_ptr[u8](addr_of_mut(st)), vt: addr_of(BUMP_VT) };
+        let br: BoxResult Pt = box(al, Pt { x: 11i64, y: 22i64 });
+        match br {
+            BoxResult::boxed(bx) => {
+                return bx.x + bx.*.y;
+            },
+            BoxResult::oom => {
+                return 0 - 1i64;
+            },
+        }
+    }
+}
