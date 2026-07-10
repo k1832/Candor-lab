@@ -570,6 +570,11 @@ impl<'a> Interp<'a> {
                 foreign: fp.foreign,
                 ret: Box::new(self.resolve_ty(&fp.ret)),
             }),
+            // Compiler-known std `Vec[T]` is kept as an application (its element
+            // type drives per-element drop and stride); never lowered to a nominal.
+            TyKind::App { name, args } if name == "Vec" => {
+                Type::App(name.clone(), args.iter().map(|a| self.resolve_ty(a)).collect())
+            }
             TyKind::App { .. } | TyKind::Proj { .. } => {
                 unreachable!("generic types are monomorphized before interpretation")
             }
@@ -1491,6 +1496,28 @@ impl<'a> Interp<'a> {
                         return self.build_named_enum("Opt", "None", &[]);
                     }
                 }
+                // `Vec[T]` indexed access: `at(read self, i) -> Opt[T]` — copies the
+                // element into `Some`, or yields `None` past the end (0009 Indexed).
+                let vt = self.expr_static_ty(base).map(|t| match t {
+                    Type::Borrow(e) | Type::BorrowMut(e) => *e,
+                    other => other,
+                });
+                if let Some(Type::App(n, targs)) = &vt {
+                    if n == "Vec" {
+                        let elem = targs.first().cloned().unwrap_or(Type::Error);
+                        let vbase = self.vec_base(base)?;
+                        let iv = self.eval_value(&args[0], Some(&Type::usize()))?;
+                        let i = self.read_u64(iv.addr)?;
+                        let len = self.read_u64(vbase + 8)?;
+                        if i < len {
+                            let buf = self.read_u64(vbase)?;
+                            let stride = round_up(self.size_of(&elem), self.align_of(&elem));
+                            return self.build_named_enum("Opt", "Some", &[(elem, buf + i * stride)]);
+                        } else {
+                            return self.build_named_enum("Opt", "None", &[]);
+                        }
+                    }
+                }
             }
         }
         // Interface method call `recv.m(args)` (design 0007 static dispatch): the
@@ -1782,6 +1809,12 @@ impl<'a> Interp<'a> {
             "push" if self.arg0_is_string(args) => self.bi_string_push(args, span)?,
             "append" if self.arg0_is_string(args) => self.bi_string_append(args)?,
             "as_str" if self.arg0_is_string(args) => self.bi_string_as_str(args)?,
+            // std growable `Vec[T]` (allocator-explicit, alloc-copy-free growth).
+            "vec_new" => self.bi_vec_new(args)?,
+            "push" if self.arg0_is_vec(args) => self.bi_vec_push(args, span)?,
+            "pop" if self.arg0_is_vec(args) => self.bi_vec_pop(args, span)?,
+            "get" if self.arg0_is_vec(args) => self.bi_vec_get(args, span)?,
+            "set" if self.arg0_is_vec(args) => self.bi_vec_set(args, span)?,
             // Structured-concurrency blessed primitives (design 0012 §1.4, §3.3).
             "split_mut" => self.bi_split_mut(args, span)?,
             "cancelled" => {
@@ -2005,6 +2038,14 @@ impl<'a> Interp<'a> {
 
     fn bi_len(&mut self, args: &[Expr]) -> R<RVal> {
         let sv = self.eval_value(&args[0], None)?;
+        // `len(read Vec[T])`: the length field is at offset 8 of the Vec, which the
+        // `read`/`write` borrow points at.
+        let peeled = match &sv.ty { Type::Borrow(e) | Type::BorrowMut(e) => (**e).clone(), t => t.clone() };
+        if matches!(&peeled, Type::App(n, _) if n == "Vec") {
+            let vbase = match &sv.ty { Type::Borrow(_) | Type::BorrowMut(_) => self.read_u64(sv.addr)?, _ => sv.addr };
+            let n = self.read_u64(vbase + 8)?;
+            return self.usize_val(n);
+        }
         let n = match &sv.ty {
             Type::Slice(_) | Type::SliceMut(_) | Type::Str => self.read_u64(sv.addr + 8)?,
             Type::Array(_, len) => self.lay().array_len(len),
@@ -2251,6 +2292,181 @@ impl<'a> Interp<'a> {
         self.write_bytes(a, &buf.to_le_bytes())?;
         self.write_bytes(a + 8, &len.to_le_bytes())?;
         Ok(RVal { ty: Type::Str, addr: a, origin: Origin::None })
+    }
+
+    // ===================================================================
+    // std growable `Vec[T]` (PROPOSAL-selfhost-ergonomics candidate A). Compiler-
+    // known, allocator-explicit. Layout mirrors `String`:
+    // `{ buf: rawptr @0, len @8, cap @16, ctx @24, vt @32 }` (5 u64 words).
+    // Growth is alloc-new + copy + free-old (the vtable exposes no `realloc`).
+    // ===================================================================
+
+    fn arg0_is_vec(&self, args: &[Expr]) -> bool {
+        let Some(a) = args.first() else { return false };
+        let inner = match &a.kind {
+            ExprKind::Prefix { op: PrefixOp::Read | PrefixOp::Write, expr } => expr.as_ref(),
+            _ => a,
+        };
+        let t = match self.expr_static_ty(inner) {
+            Some(Type::Borrow(b)) | Some(Type::BorrowMut(b)) => Some(*b),
+            other => other,
+        };
+        matches!(t, Some(Type::App(n, _)) if n == "Vec")
+    }
+
+    /// The element type of the `Vec[T]` named by `e` (peeling `read`/`write`).
+    fn vec_elem_of(&self, e: &Expr) -> Type {
+        let inner = match &e.kind {
+            ExprKind::Prefix { op: PrefixOp::Read | PrefixOp::Write, expr } => expr.as_ref(),
+            _ => e,
+        };
+        let t = match self.expr_static_ty(inner) {
+            Some(Type::Borrow(b)) | Some(Type::BorrowMut(b)) => Some(*b),
+            other => other,
+        };
+        match t {
+            Some(Type::App(n, targs)) if n == "Vec" => targs.first().cloned().unwrap_or(Type::Error),
+            _ => Type::Error,
+        }
+    }
+
+    /// The base address of the `Vec` a `read`/`write`/owned argument names.
+    fn vec_base(&mut self, e: &Expr) -> R<u64> {
+        let v = self.eval_value(e, None)?;
+        match &v.ty {
+            Type::Borrow(_) | Type::BorrowMut(_) => self.read_u64(v.addr),
+            _ => Ok(v.addr),
+        }
+    }
+
+    fn vec_stride(&self, elem: &Type) -> u64 {
+        round_up(self.size_of(elem), self.align_of(elem))
+    }
+
+    /// `vec_new(a: read Alloc) -> Vec[T]` — an empty buffer carrying `a`.
+    fn bi_vec_new(&mut self, args: &[Expr]) -> R<RVal> {
+        let av = self.eval_value(&args[0], None)?;
+        let alloc_addr = match &av.ty {
+            Type::Borrow(_) | Type::BorrowMut(_) => self.read_u64(av.addr)?,
+            _ => av.addr,
+        };
+        let (_, ctx_off) = self.field_offset(self.alloc_struct_name(), "ctx");
+        let (_, vt_off) = self.field_offset(self.alloc_struct_name(), "vt");
+        let ctx = self.read_u64(alloc_addr + ctx_off)?;
+        let vt = self.read_u64(alloc_addr + vt_off)?;
+        let ty = Type::App("Vec".to_string(), vec![Type::Error]);
+        let (addr, id) = self.alloc_temp(ty.clone());
+        self.write_bytes(addr, &0u64.to_le_bytes())?;       // buf @0
+        self.write_bytes(addr + 8, &0u64.to_le_bytes())?;   // len @8
+        self.write_bytes(addr + 16, &0u64.to_le_bytes())?;  // cap @16
+        self.write_bytes(addr + 24, &ctx.to_le_bytes())?;   // ctx @24
+        self.write_bytes(addr + 32, &vt.to_le_bytes())?;    // vt @32
+        Ok(RVal { ty, addr, origin: Origin::Temp(id) })
+    }
+
+    /// Ensure room for `need` more elements, growing via alloc-copy-free.
+    fn vec_reserve(&mut self, base: u64, elem: &Type, need: u64) -> R<()> {
+        let len = self.read_u64(base + 8)?;
+        let cap = self.read_u64(base + 16)?;
+        if len + need <= cap {
+            return Ok(());
+        }
+        let stride = self.vec_stride(elem);
+        let align = self.align_of(elem);
+        let newcap = (len + need).max(cap * 2).max(4);
+        let ctx = self.read_u64(base + 24)?;
+        let vt = self.read_u64(base + 32)?;
+        let (_, alloc_off) = self.field_offset(self.alloc_vtable_name(), "alloc");
+        let afn = self.read_u64(vt + alloc_off)?;
+        let newbuf = self.call_scalar(afn, vec![
+            (Type::RawPtr(Box::new(Type::Scalar(ScalarTy::U8))), ctx),
+            (Type::usize(), newcap * stride),
+            (Type::usize(), align),
+        ])?;
+        if newbuf == 0 {
+            return Err(self.fault(FaultKind::Panic, "Vec allocation failed (OOM)"));
+        }
+        let oldbuf = self.read_u64(base)?;
+        if len > 0 && oldbuf != 0 {
+            self.move_bytes(newbuf, oldbuf, len * stride)?;
+        }
+        if oldbuf != 0 {
+            self.call_free(ctx, vt, oldbuf, cap * stride, align)?;
+        }
+        self.write_bytes(base, &newbuf.to_le_bytes())?;
+        self.write_bytes(base + 16, &newcap.to_le_bytes())?;
+        Ok(())
+    }
+
+    /// `push(write self: Vec[T], v: T)` — moves `v` onto the end, growing if full.
+    fn bi_vec_push(&mut self, args: &[Expr], span: Span) -> R<RVal> {
+        let elem = self.vec_elem_of(&args[0]);
+        let base = self.vec_base(&args[0])?;
+        self.cur_span = span;
+        let rv = self.eval_value(&args[1], Some(&elem))?;
+        self.vec_reserve(base, &elem, 1)?;
+        let stride = self.vec_stride(&elem);
+        let buf = self.read_u64(base)?;
+        let len = self.read_u64(base + 8)?;
+        self.move_to(buf + len * stride, rv)?;
+        self.write_bytes(base + 8, &(len + 1).to_le_bytes())?;
+        Ok(self.unit_val())
+    }
+
+    /// `pop(write self: Vec[T]) -> Opt[T]` — moves the last element out.
+    fn bi_vec_pop(&mut self, args: &[Expr], span: Span) -> R<RVal> {
+        let elem = self.vec_elem_of(&args[0]);
+        let base = self.vec_base(&args[0])?;
+        self.cur_span = span;
+        let len = self.read_u64(base + 8)?;
+        if len == 0 {
+            return self.build_named_enum("Opt", "None", &[]);
+        }
+        let newlen = len - 1;
+        let stride = self.vec_stride(&elem);
+        let buf = self.read_u64(base)?;
+        let src = buf + newlen * stride;
+        self.write_bytes(base + 8, &newlen.to_le_bytes())?;
+        self.build_named_enum("Opt", "Some", &[(elem, src)])
+    }
+
+    /// `get(read self: Vec[T], i: usize) -> read T` — a bounds-faulting borrow.
+    fn bi_vec_get(&mut self, args: &[Expr], span: Span) -> R<RVal> {
+        let elem = self.vec_elem_of(&args[0]);
+        let base = self.vec_base(&args[0])?;
+        self.cur_span = span;
+        let len = self.read_u64(base + 8)?;
+        let iv = self.eval_value(&args[1], Some(&Type::usize()))?;
+        let i = self.read_u64(iv.addr)?;
+        if i >= len {
+            return Err(self.fault(FaultKind::Bounds, format!("Vec index {i} out of bounds (len {len})")));
+        }
+        let stride = self.vec_stride(&elem);
+        let buf = self.read_u64(base)?;
+        let a = self.mem.stack_alloc(8, 8);
+        self.write_bytes(a, &(buf + i * stride).to_le_bytes())?;
+        Ok(RVal { ty: Type::Borrow(Box::new(elem)), addr: a, origin: Origin::None })
+    }
+
+    /// `set(write self: Vec[T], i: usize, v: T)` — drops the overwritten element,
+    /// then moves `v` into slot `i` (bounds-faulting).
+    fn bi_vec_set(&mut self, args: &[Expr], span: Span) -> R<RVal> {
+        let elem = self.vec_elem_of(&args[0]);
+        let base = self.vec_base(&args[0])?;
+        self.cur_span = span;
+        let len = self.read_u64(base + 8)?;
+        let iv = self.eval_value(&args[1], Some(&Type::usize()))?;
+        let i = self.read_u64(iv.addr)?;
+        if i >= len {
+            return Err(self.fault(FaultKind::Bounds, format!("Vec index {i} out of bounds (len {len})")));
+        }
+        let stride = self.vec_stride(&elem);
+        let buf = self.read_u64(base)?;
+        let dst = buf + i * stride;
+        let rv = self.eval_value(&args[2], Some(&elem))?;
+        self.drop_value(dst, &elem, &MoveMask::default(), &mut Vec::new())?;
+        self.move_to(dst, rv)?;
+        Ok(self.unit_val())
     }
 
     fn drop_and_consume(&mut self, rv: RVal) -> R<()> {
@@ -2724,6 +2940,25 @@ impl<'a> Interp<'a> {
                 Ok(())
             }
             Type::Box(inner) => self.drop_box(addr, inner),
+            // Compiler-known std `Vec[T]`: drop each LIVE element (`0..len`), then
+            // free the backing buffer through the carried allocator (alloc-on-drop).
+            // Popped elements decremented `len`, so they are not re-dropped here.
+            Type::App(n, args) if n == "Vec" => {
+                let buf = self.read_u64(addr)?; // buf @0
+                if buf != 0 {
+                    let elem = args.first().cloned().unwrap_or(Type::Error);
+                    let stride = round_up(self.size_of(&elem), self.align_of(&elem));
+                    let len = self.read_u64(addr + 8)?; // len @8
+                    for i in (0..len).rev() {
+                        self.drop_value(buf + i * stride, &elem, &MoveMask::default(), &mut Vec::new())?;
+                    }
+                    let cap = self.read_u64(addr + 16)?; // cap @16
+                    let ctx = self.read_u64(addr + 24)?; // ctx @24
+                    let vt = self.read_u64(addr + 32)?; // vt @32
+                    self.call_free(ctx, vt, buf, cap * stride, self.align_of(&elem))?;
+                }
+                Ok(())
+            }
             // Compiler-known `String` (design 0013): free its heap buffer through
             // the carried allocator's vtable (alloc-on-drop).
             Type::Named(n) if n == "String" => {

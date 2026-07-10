@@ -443,6 +443,17 @@ Honest about what lands, staged so each stage is independently testable:
 - **Stage 2 — `String` in std.** `String` as a std type generic over `Alloc`
   (0008 §5), `push(u32)` / `append(str)` / `as_str`. Depends on 0007/0009 being in
   place (it is) for the allocator-as-parameter idiom.
+- **Stage 2b — `Vec[T]` in std (PROPOSAL-selfhost-ergonomics candidate A).** The
+  growable heap array is compiler-known for the same reason `String` is (§7 note):
+  the `Alloc` vtable exposes no `realloc`, and in-language growth over a raw buffer
+  is beyond the current builtin surface — so `Vec[T]` is a compiler-known
+  application (`{ buf, len, cap, ctx, vt }`, its element type carried by the type
+  argument), allocator-explicit (`vec_new(read Alloc)`). Growth is alloc-new + copy
+  + free-old (the ruling's alloc-copy-free default). Ops: `push`/`pop`/`get`/`set`/
+  `len` and the ground-floor `Indexed` `at` (wiring `for x in read v`). Drop drops
+  each live element then frees the buffer (alloc-on-drop propagates: a non-`alloc`
+  function dropping a `Vec` is E0401). This removes the lexer's fixed `[1024]Tok`
+  cap. P6 untouched (std, not core); P9 satisfied (allocator threaded, never core).
 - **Deferred (on the ledger):** OBL-TEXT-CHARS (`Chars` view, `char_count`),
   the full formatting machinery over `append`, and any `Path`/`Cow`/interning std
   types — none in the text budget.

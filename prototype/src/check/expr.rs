@@ -1571,6 +1571,24 @@ impl<'a> Checker<'a> {
             .unwrap_or(false)
     }
 
+    /// Does the first argument (peeling a `read`/`write` borrow) have type
+    /// `Vec[T]`? Routes the overloaded collection builtins (`push`/`pop`/`get`/
+    /// `set`/`len`) to the `Vec` forms, leaving same-named user functions alone.
+    fn arg0_is_vec(&mut self, args: &[Expr]) -> bool {
+        args.first()
+            .map(|a| matches!(self.synth_arg_type(a), Type::App(n, _) if n == "Vec"))
+            .unwrap_or(false)
+    }
+
+    /// The element type `T` of the `Vec[T]` named by the first argument (peeling a
+    /// `read`/`write` borrow). `Error` if the argument is not a `Vec`.
+    fn vec_arg_elem(&mut self, args: &[Expr]) -> Type {
+        match args.first().map(|a| self.synth_arg_type(a)) {
+            Some(Type::App(n, targs)) if n == "Vec" => targs.first().cloned().unwrap_or(Type::Error),
+            _ => Type::Error,
+        }
+    }
+
     fn check_builtin(&mut self, name: &str, args: &[Expr], span: Span) -> Option<Type> {
         let t = match name {
             "box" => {
@@ -1774,6 +1792,67 @@ impl<'a> Checker<'a> {
                 // `as_str(read self: String) -> str` — borrow the built text back.
                 self.arg0(args, span, "as_str");
                 Type::Str
+            }
+            // ----- std collection: `Vec[T]` (growable heap array, P9) ----------
+            "vec_new" => {
+                // `vec_new(a: read Alloc) -> Vec[T]` — allocator-explicit (P9). The
+                // element type `T` is fixed by the expected (annotation) type.
+                let t = self.arg0(args, span, "vec_new");
+                let peeled = match &t { Type::Borrow(i) | Type::BorrowMut(i) => (**i).clone(), _ => t.clone() };
+                if !matches!(peeled, Type::Error) && !matches!(&peeled, Type::Named(n) if n == "Alloc") {
+                    self.mismatch(span, "vec_new", "read Alloc", &t);
+                }
+                self.note_alloc(span, "`vec_new` builds an owning Vec (allocates/frees on drop)");
+                match &self.expected_ty {
+                    Some(Type::App(n, targs)) if n == "Vec" => Type::App("Vec".to_string(), targs.clone()),
+                    _ => Type::App("Vec".to_string(), vec![Type::Error]),
+                }
+            }
+            "push" if self.arg0_is_vec(args) => {
+                // `push(write self: Vec[T], v: T)` — moves `v` in, growing if full.
+                let elem = self.vec_arg_elem(args);
+                if args.len() == 2 {
+                    self.check_expr(&args[0], Use::Value);
+                    self.check_against(&args[1], &elem);
+                } else {
+                    self.arity(span, "push", 2);
+                }
+                self.note_alloc(span, "`push` may grow the Vec (allocates)");
+                Type::unit()
+            }
+            "pop" if self.arg0_is_vec(args) => {
+                // `pop(write self: Vec[T]) -> Opt[T]` — moves the last element out
+                // (ownership transfers into the `Some` payload; nothing is dropped).
+                self.arg0(args, span, "pop");
+                Type::Named("Opt".to_string())
+            }
+            "get" if self.arg0_is_vec(args) => {
+                // `get(read self: Vec[T], i: usize) -> read T` — a bounds-faulting
+                // shared-borrow accessor of the element at `i`.
+                let elem = self.vec_arg_elem(args);
+                if args.len() == 2 {
+                    self.check_expr(&args[0], Use::BorrowShared);
+                    let i = self.check_expr(&args[1], Use::Value);
+                    self.expect_integer(&i, args[1].span);
+                } else {
+                    self.arity(span, "get", 2);
+                }
+                Type::Borrow(Box::new(elem))
+            }
+            "set" if self.arg0_is_vec(args) => {
+                // `set(write self: Vec[T], i: usize, v: T)` — drops the old element
+                // at `i` (allocator work if it owns heap) and moves `v` in.
+                let elem = self.vec_arg_elem(args);
+                if args.len() == 3 {
+                    self.check_expr(&args[0], Use::Value);
+                    let i = self.check_expr(&args[1], Use::Value);
+                    self.expect_integer(&i, args[1].span);
+                    self.check_against(&args[2], &elem);
+                } else {
+                    self.arity(span, "set", 3);
+                }
+                self.note_alloc(span, "`set` drops the overwritten element (may free)");
+                Type::unit()
             }
             // ----- text: `str` core operations (design 0013) -----------------
             "as_bytes" => {

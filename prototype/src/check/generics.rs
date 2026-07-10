@@ -806,6 +806,20 @@ impl<'a> Checker<'a> {
                 }
                 return Some(crate::types::Type::Named("Opt".to_string()));
             }
+            // A `Vec[T]` receiver answers the same ground-floor `Indexed` method
+            // `at(read self, i: usize) -> Opt[T]`, wiring `for x in read v` (0009).
+            if let crate::types::Type::App(n, _) = &recv_ty {
+                if n == "Vec" {
+                    self.check_expr(base, Use::BorrowShared);
+                    if args.len() == 1 {
+                        let it = self.check_expr(&args[0], Use::Value);
+                        self.expect_integer(&it, args[0].span);
+                    } else {
+                        self.diags.push(Diag::error("E0706", "method `at` expects 1 argument(s)".to_string(), span));
+                    }
+                    return Some(crate::types::Type::Named("Opt".to_string()));
+                }
+            }
         }
         // The receiver's nominal / application / type-parameter identity.
         match &recv_ty {

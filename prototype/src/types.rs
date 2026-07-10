@@ -372,6 +372,11 @@ fn needs_drop_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> bool
         // A projection is unbounded (design 0009 §2.3): conservatively needs-drop.
         Type::Proj(_, _) => true,
         Type::App(n, args) => {
+            // Compiler-known std `Vec[T]` always frees its heap buffer on drop
+            // (alloc-on-drop), independent of `T`.
+            if n == "Vec" {
+                return true;
+            }
             if let Some(g) = env.lookup_generic(n) {
                 if g.has_drop {
                     return true;
@@ -606,9 +611,11 @@ fn box_subpaths_rec(
         // own place, exactly like a non-`copy` parameter.
         Type::Proj(_, _) => out.push(prefix.clone()),
         Type::App(n, _) => {
-            // An alloc-on-drop generic aggregate frees at its own place regardless
-            // of a bare `Box` field (design 0007 §3.4, F5).
-            if env.lookup_generic(n).map(|g| g.alloc_on_drop).unwrap_or(false)
+            // A `Vec[T]` (compiler-known, alloc-on-drop) frees at its own place;
+            // and an alloc-on-drop generic aggregate frees at its own place
+            // regardless of a bare `Box` field (design 0007 §3.4, F5).
+            if n == "Vec"
+                || env.lookup_generic(n).map(|g| g.alloc_on_drop).unwrap_or(false)
                 || bears_box(ty, env)
             {
                 out.push(prefix.clone());
@@ -632,6 +639,11 @@ fn bears_box_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> bool 
         // A projection is unbounded (design 0009 §2.3): conservatively box-bearing.
         Type::Proj(_, _) => true,
         Type::App(n, args) => {
+            // A `Vec[T]` owns a heap buffer whose drop frees; treat it as
+            // box-bearing so a dropped `Vec` temporary is accounted allocator work.
+            if n == "Vec" {
+                return true;
+            }
             if let Some(g) = env.lookup_generic(n) {
                 let map: std::collections::HashMap<String, Type> =
                     g.params.iter().cloned().zip(args.iter().cloned()).collect();

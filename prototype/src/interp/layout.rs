@@ -59,6 +59,9 @@ impl<'a> Layout<'a> {
                 }
             }
             Type::Never | Type::Error => 1,
+            // Compiler-known std `Vec[T]` is `{ buf, len, cap, ctx, vt }` — five
+            // `u64` words, 8-aligned, independent of the element type.
+            Type::App(n, _) if n == "Vec" => 8,
             Type::Param(_) | Type::App(_, _) | Type::Proj(_, _) => {
                 unreachable!("generic types are monomorphized before interpretation")
             }
@@ -90,6 +93,8 @@ impl<'a> Layout<'a> {
                 }
             }
             Type::Never | Type::Error => 0,
+            // Compiler-known std `Vec[T]`: `buf`+`len`+`cap`+`ctx`+`vt` = 5×8 = 40.
+            Type::App(n, _) if n == "Vec" => 40,
             Type::Param(_) | Type::App(_, _) | Type::Proj(_, _) => {
                 unreachable!("generic types are monomorphized before interpretation")
             }

@@ -1155,6 +1155,11 @@ impl<'a> Monomorphizer<'a> {
                 Some(t) => self.type_to_ast_kind(t),
                 None => TyKind::Named(n.clone()),
             },
+            TyKind::App { name, args } if name == "Vec" => {
+                // Compiler-known std `Vec[T]` stays an application through
+                // monomorphization; only its arguments are rewritten.
+                TyKind::App { name: name.clone(), args: args.iter().map(|a| self.rewrite_ty(a, map)).collect() }
+            }
             TyKind::App { name, args } => {
                 let sargs: Vec<Type> = args.iter().map(|a| self.ast_to_type(a, map)).collect();
                 self.enqueue(name, sargs.clone());
@@ -1220,6 +1225,9 @@ impl<'a> Monomorphizer<'a> {
         match t {
             Type::Scalar(s) => TyKind::Scalar(*s),
             Type::Named(n) => TyKind::Named(n.clone()),
+            Type::App(n, args) if n == "Vec" => {
+                TyKind::App { name: n.clone(), args: args.iter().map(|a| self.type_to_ast(a)).collect() }
+            }
             Type::App(n, args) => {
                 self.enqueue(n, args.clone());
                 TyKind::Named(inst_type_name(n, args))
