@@ -1,0 +1,20 @@
+struct Point { x: i64, y: i64 }
+enum Opt { None, Some(i64) }
+fn add(a: i64, b: i64) -> i64 {
+    return a + b;
+}
+fn get_x(p: read Point) -> i64 {
+    return p.x;
+}
+fn choose(o: read Opt) -> i64 {
+    return match o {
+        Opt::None => 0,
+        Opt::Some(v) => v,
+    };
+}
+fn main() -> i64 {
+    let p: Point = Point { x: 1, y: 2 };
+    let s: i64 = add(p.x, get_x(read p));
+    let o: Opt = Opt::Some(s);
+    return choose(read o);
+}

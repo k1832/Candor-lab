@@ -1,0 +1,6 @@
+struct Box2 { v: i64 }
+fn f() -> i64 {
+    let b: Box2 = Box2 { v: unknownval };
+    let q: Missing2 = 0;
+    return b.v;
+}

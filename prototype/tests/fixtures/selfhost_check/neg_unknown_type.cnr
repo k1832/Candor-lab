@@ -1,0 +1,8 @@
+struct S {
+    a: Bogus,
+    b: i64,
+}
+fn f(p: Missing) -> Nope {
+    let x: Alsobad = 0;
+    return 0;
+}

@@ -417,3 +417,56 @@ alternative is the complexity Bet 5 traded away, and reopening it re-blinds the 
 accounting). Re-open trigger: a slice whose pass-context tuple grows to 4-5 threaded views on the
 majority of signatures. OBL-ITER-BORROW and OBL-TEXT-CHARS re-routed to region-free discharge
 paths; OBL-TEXT-RESULT left open as a separate smaller question.
+
+### Slice 3 addendum — the type checker (name resolution + type-error core in Candor, 2026-07-10)
+
+Writing the self-hosted CHECKER (`prototype/selfhost/checker/checker.cnr`, composed after
+lexer + parser; gated by DIAGNOSTIC equality vs the Rust oracle over a corpus) surfaced three
+findings, the first of which is the load-bearing datum the Candidate-C ruling named as its
+re-open trigger.
+
+(1) **CONTEXT-TUPLE SIZE — the C-ruling re-open trigger is NOT tripped: the checker reaches
+THREE threaded views, of which only TWO are read-views.** Every pass/walker signature threads
+exactly `(read P arena, [u8] src, write C state)` — 9 of the file's functions, i.e. the majority.
+Two are read-only VIEWS (the parser's node arena `P`, and the source bytes `src` that §3.4 forbids
+as a struct field — friction #1); the third is a single MUTABLE aggregate `C`. Crucially the count
+stays at three ONLY because ALL mutable checker state — the locals/scope stack, the diagnostic
+buffer, AND the item-table root — is folded into the ONE struct `C` (owned fixed arrays, which
+structs MAY hold). Had those been threaded as separate params (locals, diags, item-table), the
+tuple would be FIVE and the trigger would fire. So the essential read-view floor a value-first
+checker pays is 2 (arena + source), not 4-5; state aggregation absorbs the rest. The "item table"
+needed no new structure at all: struct/enum/fn/static decls are resolved by walking the parser's
+item `nx`-chain (O(n), n tiny) from a root index stored in `C`. VERDICT for the C decision: the
+hardest slice so far threads 2 read-views on the majority of signatures — under the 4-5 trigger.
+The ratified source-threading cost holds; no re-open warranted by this slice.
+
+(2) **The span-lean slice-2 arena confines the checker to NAME-TOKEN-span diagnostics.** Slice 2
+excluded spans from its canonical AST (differential target = tree shape), so the arena `Node`
+stores only NAME-token spans (`p0/p1`) for identifiers/types/fields and NO span at all for
+integer/bool literals. But the oracle's diagnostics for the VALUE-type-level codes carry COMPOSITE
+spans = `span_from(lo)` = (leftmost-token-start … rightmost-token-end) of the whole enclosing
+expr/decl (E0703 mismatch, E0706 arg-count, E0107 field, E0108/E0605 enum, E0709 literal-range).
+The arena cannot reproduce these without re-deriving a per-node `(start,end)` by walking to
+leftmost/rightmost tokens — and even that fails for E0709 because literals store no offset. So
+diagnostic-equality is provable ONLY for the codes whose oracle span coincides with a single
+stored name token: **E0102** (unknown type) and **E0103** (unknown name), both matched exactly
+(codes + spans) on 7/7 corpus fixtures (3 positive/clean, 4 negative), 9 diagnostics. This is the
+honest boundary: a sound name-resolution + item-table core that matches the oracle, not broad
+value-type coverage that would drift on spans. GATE to unlock the rest: give the arena a per-node
+`(start,end)` span pair (2 usizes/node — cheap, but reverses slice 2's span-free decision) OR store
+literal spans; either turns the composite-span code families (E0703/E0706/E0107/E0108/E0605/E0709)
+into gate-checkable targets.
+
+(3) **The `write`-param double-reborrow trap (49 errors at once).** Passing a `write C` PARAMETER
+onward as `write c` does NOT auto-reborrow — it write-borrows the borrow, yielding
+`borrow_mut borrow_mut C` and an E0703 at EVERY call site. A `write` param must be passed BARE
+(`c`) to auto-reborrow; `write c` is correct ONLY for an owned local (the entry fn). This is the
+write-path dual of slice 2's `p.*.f = g(p,…)` two-phase hazard and §11.4's `read (deref c)` rule:
+the surface gives no cue that bare-vs-`write` flips meaning between owned locals and write params,
+and the failure is a wall of identical type-mismatch errors, not a targeted one. A reborrow lint,
+or an explicit reborrow operator, would remove the trap. What WORKED cleanly: reusing the lexer's
+`span_eq`/`emit_*`/`trace` sink and the parser's `P`/`Node`/`T_*` arena by CONCATENATION; a
+canonical `CODE start end` dump sorted by (code,start,end) so emission order need not match the
+oracle's traversal; and filtering the oracle to the covered code families so the differential
+harness self-reports coverage honestly (positive fixtures = empty covered-set, negatives = the
+specific codes).

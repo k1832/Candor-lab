@@ -1,0 +1,15 @@
+enum Sh { A, B(i64), C(i64) }
+fn eval(s: read Sh, flag: bool) -> i64 {
+    let base: i64 = 10;
+    let mut acc: i64 = 0;
+    if flag {
+        let bonus: i64 = 5;
+        acc = acc + bonus + base;
+    }
+    let r: i64 = match s {
+        Sh::A => base,
+        Sh::B(n) => base + n,
+        Sh::C(m) => m + acc,
+    };
+    return r + base;
+}

@@ -1,0 +1,7 @@
+fn f() -> i64 {
+    let a: i64 = 1;
+    return a + b;
+}
+fn g() -> i64 {
+    return missing(1, 2);
+}

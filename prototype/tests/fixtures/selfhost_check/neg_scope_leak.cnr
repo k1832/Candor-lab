@@ -1,0 +1,8 @@
+enum E { X, Y(i64) }
+fn f(e: read E) -> i64 {
+    let outer: i64 = match e {
+        E::X => 0,
+        E::Y(inner) => inner,
+    };
+    return outer + inner;
+}
