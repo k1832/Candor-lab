@@ -27,7 +27,7 @@
 // `interp.cnr` is NOT self-checked in this slice, so it uses the full language.
 
 use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl};
-use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_SC, T_RET, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_STRUCT, T_NAMED, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT};
+use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_SC, T_RET, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_STRUCT, T_NAMED, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_VARIANT, T_ENUMCTOR, T_MATCH, T_ARM, T_PVARIANT, T_WILD, T_BIND, T_NAME};
 
 // ---- fault kind codes (shared with the Rust harness) ------------------------
 static FK_OVERFLOW: i32 = 0;
@@ -225,6 +225,18 @@ fn find_struct(pp: read P, src: [u8], e: write E, s: usize, en: usize) -> u32 {
     }
     return 0u32;
 }
+// The declared enum named [s,en), or 0 if absent.
+fn find_enum(pp: read P, src: [u8], e: write E, s: usize, en: usize) -> u32 {
+    let mut cur: u32 = e.head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_ENUM && name_eq(src, nd.p0, nd.p1, s, en) {
+            return cur;
+        }
+        cur = nd.nx;
+    }
+    return 0u32;
+}
 // Index of the in-scope local named [s,en), or a count-sized sentinel if absent.
 fn find_local(src: [u8], e: write E, s: usize, en: usize) -> usize {
     let mut i: usize = e.loc_n;
@@ -355,6 +367,19 @@ fn struct_of_ty(pp: read P, src: [u8], e: write E, tn: u32) -> u32 {
     }
     return 0u32;
 }
+// The `T_ENUM` decl node for an enum type descriptor, or 0 if not an enum. A
+// scrutinee's `cur_ty` may be an enum decl node directly (a constructor result)
+// OR a `T_NAMED` local/param, so route both through here.
+fn enum_of_ty(pp: read P, src: [u8], e: write E, tn: u32) -> u32 {
+    if tn == 0u32 { return 0u32; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_ENUM { return tn; }
+    if (nd.tag == T_NAMED || nd.tag == T_SC) {
+        if sc_width(src, nd.p0, nd.p1) != 0 { return 0u32; }
+        return find_enum(pp, src, e, nd.p0, nd.p1);
+    }
+    return 0u32;
+}
 fn array_len_of(pp: read P, sn: u32) -> usize {
     let nd: Node = pp.nodes[conv usize sn];
     if nd.tag == T_INT { return conv usize nd.ival; }
@@ -368,9 +393,13 @@ fn ty_size(pp: read P, src: [u8], e: write E, tn: u32) -> usize {
         let w: i32 = sc_width(src, nd.p0, nd.p1);
         if w != 0 { return w_size(w); }
         let sid: u32 = find_struct(pp, src, e, nd.p0, nd.p1);
-        return struct_size(pp, src, e, sid);
+        if sid != 0u32 { return struct_size(pp, src, e, sid); }
+        let eid: u32 = find_enum(pp, src, e, nd.p0, nd.p1);
+        if eid != 0u32 { return enum_size(pp, src, e, eid); }
+        return 0usize;
     }
     if nd.tag == T_STRUCT { return struct_size(pp, src, e, tn); }
+    if nd.tag == T_ENUM { return enum_size(pp, src, e, tn); }
     if nd.tag == T_ARRAY {
         let n: usize = array_len_of(pp, nd.a);
         let esz: usize = ty_size(pp, src, e, nd.b);
@@ -386,9 +415,13 @@ fn ty_align(pp: read P, src: [u8], e: write E, tn: u32) -> usize {
         let w: i32 = sc_width(src, nd.p0, nd.p1);
         if w != 0 { return w_size(w); }
         let sid: u32 = find_struct(pp, src, e, nd.p0, nd.p1);
-        return struct_align(pp, src, e, sid);
+        if sid != 0u32 { return struct_align(pp, src, e, sid); }
+        let eid: u32 = find_enum(pp, src, e, nd.p0, nd.p1);
+        if eid != 0u32 { return 8usize; }
+        return 1usize;
     }
     if nd.tag == T_STRUCT { return struct_align(pp, src, e, tn); }
+    if nd.tag == T_ENUM { return 8usize; }
     if nd.tag == T_ARRAY { return ty_align(pp, src, e, nd.b); }
     return 1usize;
 }
@@ -466,15 +499,34 @@ fn is_copy(pp: read P, src: [u8], e: write E, tn: u32) -> bool {
     let nd: Node = pp.nodes[conv usize tn];
     if nd.tag == T_ARRAY { return is_copy(pp, src, e, nd.b); }
     let sid: u32 = struct_of_ty(pp, src, e, tn);
-    if sid == 0u32 { return true; }
-    let snode: Node = pp.nodes[conv usize sid];
-    if snode.op == 0 { return false; }
-    if snode.c != 0u32 { return false; }
-    let mut cur: u32 = snode.b;
-    while cur != 0u32 {
-        let fd: Node = pp.nodes[conv usize cur];
-        if !is_copy(pp, src, e, fd.a) { return false; }
-        cur = fd.nx;
+    if sid != 0u32 {
+        let snode: Node = pp.nodes[conv usize sid];
+        if snode.op == 0 { return false; }
+        if snode.c != 0u32 { return false; }
+        let mut cur: u32 = snode.b;
+        while cur != 0u32 {
+            let fd: Node = pp.nodes[conv usize cur];
+            if !is_copy(pp, src, e, fd.a) { return false; }
+            cur = fd.nx;
+        }
+        return true;
+    }
+    let eid: u32 = enum_of_ty(pp, src, e, tn);
+    if eid != 0u32 {
+        let enode: Node = pp.nodes[conv usize eid];
+        if enode.op == 0 { return false; }
+        let mut vc: u32 = enode.b;
+        while vc != 0u32 {
+            let vd: Node = pp.nodes[conv usize vc];
+            let mut pc: u32 = vd.a;
+            while pc != 0u32 {
+                let pn: Node = pp.nodes[conv usize pc];
+                if !is_copy(pp, src, e, pc) { return false; }
+                pc = pn.nx;
+            }
+            vc = vd.nx;
+        }
+        return true;
     }
     return true;
 }
@@ -484,14 +536,32 @@ fn needs_drop(pp: read P, src: [u8], e: write E, tn: u32) -> bool {
     let nd: Node = pp.nodes[conv usize tn];
     if nd.tag == T_ARRAY { return needs_drop(pp, src, e, nd.b); }
     let sid: u32 = struct_of_ty(pp, src, e, tn);
-    if sid == 0u32 { return false; }
-    let snode: Node = pp.nodes[conv usize sid];
-    if snode.c != 0u32 { return true; }
-    let mut cur: u32 = snode.b;
-    while cur != 0u32 {
-        let fd: Node = pp.nodes[conv usize cur];
-        if needs_drop(pp, src, e, fd.a) { return true; }
-        cur = fd.nx;
+    if sid != 0u32 {
+        let snode: Node = pp.nodes[conv usize sid];
+        if snode.c != 0u32 { return true; }
+        let mut cur: u32 = snode.b;
+        while cur != 0u32 {
+            let fd: Node = pp.nodes[conv usize cur];
+            if needs_drop(pp, src, e, fd.a) { return true; }
+            cur = fd.nx;
+        }
+        return false;
+    }
+    let eid: u32 = enum_of_ty(pp, src, e, tn);
+    if eid != 0u32 {
+        let enode: Node = pp.nodes[conv usize eid];
+        let mut vc: u32 = enode.b;
+        while vc != 0u32 {
+            let vd: Node = pp.nodes[conv usize vc];
+            let mut pc: u32 = vd.a;
+            while pc != 0u32 {
+                let pn: Node = pp.nodes[conv usize pc];
+                if needs_drop(pp, src, e, pc) { return true; }
+                pc = pn.nx;
+            }
+            vc = vd.nx;
+        }
+        return false;
     }
     return false;
 }
@@ -507,6 +577,96 @@ fn field_index(pp: read P, src: [u8], sid: u32, fs: usize, fen: usize) -> i32 {
         cur = fd.nx;
     }
     return 0 - 1i32;
+}
+
+// ---- enum layout (mirrors src/interp/layout.rs enum_size/payload_offset) -----
+// Enum layout: {tag: u64 @0, payload @8}. The payload is laid out struct-style
+// (declared order, natural alignment) from offset 8; enum size = round_up(8 +
+// max padded-payload, 8), enum align = 8 always. Tag = the variant's 0-based
+// declared index. The payload chain is a raw type-node `nx`-chain (each node IS
+// the field's type), so this generalizes S2's struct-field layout.
+fn payload_size(pp: read P, src: [u8], e: write E, head: u32) -> usize {
+    let mut off: usize = 0usize;
+    let mut align: usize = 1usize;
+    let mut cur: u32 = head;
+    while cur != 0u32 {
+        let tn: Node = pp.nodes[conv usize cur];
+        let a: usize = ty_align(pp, src, e, cur);
+        if a > align { align = a; }
+        off = round_up_us(off, a);
+        off = off + ty_size(pp, src, e, cur);
+        cur = tn.nx;
+    }
+    return round_up_us(off, align);
+}
+fn enum_size(pp: read P, src: [u8], e: write E, eid: u32) -> usize {
+    if eid == 0u32 { return 0usize; }
+    let enode: Node = pp.nodes[conv usize eid];
+    let mut max: usize = 0usize;
+    let mut cur: u32 = enode.b;
+    while cur != 0u32 {
+        let vd: Node = pp.nodes[conv usize cur];
+        let psz: usize = payload_size(pp, src, e, vd.a);
+        if psz > max { max = psz; }
+        cur = vd.nx;
+    }
+    return round_up_us(8usize + max, 8usize);
+}
+// The `T_VARIANT` node at 0-based declared index `idx`, or 0 if out of range.
+fn variant_by_index(pp: read P, eid: u32, idx: i32) -> u32 {
+    let enode: Node = pp.nodes[conv usize eid];
+    let mut cur: u32 = enode.b;
+    let mut k: i32 = 0;
+    while cur != 0u32 {
+        if k == idx { return cur; }
+        let vd: Node = pp.nodes[conv usize cur];
+        k = k + 1i32;
+        cur = vd.nx;
+    }
+    return 0u32;
+}
+// 0-based declared index of the variant named [s,en), or -1 if absent.
+fn variant_index_by_name(pp: read P, src: [u8], eid: u32, s: usize, en: usize) -> i32 {
+    let enode: Node = pp.nodes[conv usize eid];
+    let mut cur: u32 = enode.b;
+    let mut k: i32 = 0;
+    while cur != 0u32 {
+        let vd: Node = pp.nodes[conv usize cur];
+        if name_eq(src, vd.p0, vd.p1, s, en) { return k; }
+        k = k + 1i32;
+        cur = vd.nx;
+    }
+    return 0 - 1i32;
+}
+// Offset (from the enum base, INCLUDING the tag) of payload field `i`.
+fn variant_payload_off(pp: read P, src: [u8], e: write E, vid: u32, i: i32) -> usize {
+    let vd: Node = pp.nodes[conv usize vid];
+    let mut off: usize = 0usize;
+    let mut k: i32 = 0;
+    let mut cur: u32 = vd.a;
+    while cur != 0u32 {
+        let tn: Node = pp.nodes[conv usize cur];
+        let a: usize = ty_align(pp, src, e, cur);
+        off = round_up_us(off, a);
+        if k == i { return 8usize + off; }
+        off = off + ty_size(pp, src, e, cur);
+        k = k + 1i32;
+        cur = tn.nx;
+    }
+    return 8usize;
+}
+// Type node of payload field `i` of variant `vid`, or 0 if absent.
+fn variant_payload_ty(pp: read P, vid: u32, i: i32) -> u32 {
+    let vd: Node = pp.nodes[conv usize vid];
+    let mut k: i32 = 0;
+    let mut cur: u32 = vd.a;
+    while cur != 0u32 {
+        if k == i { return cur; }
+        let tn: Node = pp.nodes[conv usize cur];
+        k = k + 1i32;
+        cur = tn.nx;
+    }
+    return 0u32;
 }
 
 // ---- move-mask side table (whole-value + ONE-LEVEL partial move) -------------
@@ -655,6 +815,41 @@ fn drop_fields_rev(pp: read P, src: [u8], e: write E, addr: usize, sid: u32, li:
     }
     return 0;
 }
+// Drop the ACTIVE variant's payload fields in REVERSE order, skipping fields the
+// move-mask marks moved (a bound non-copy payload). `li` is the owning local's
+// index for the mask, or -1 for a temp/nested value. Enums carry no drop hook,
+// so this is the whole of enum drop -- tag-directed, the dual of drop_fields_rev.
+fn drop_variant_rev(pp: read P, src: [u8], e: write E, addr: usize, vid: u32, li: i64) -> i32 {
+    let vd: Node = pp.nodes[conv usize vid];
+    let mut foff: [64]usize = [0usize; 64];
+    let mut ftyp: [64]u32 = [0u32; 64];
+    let mut n: usize = 0usize;
+    let mut off: usize = 0usize;
+    let mut cur: u32 = vd.a;
+    while cur != 0u32 {
+        let tn: Node = pp.nodes[conv usize cur];
+        let a: usize = ty_align(pp, src, e, cur);
+        off = round_up_us(off, a);
+        foff[n] = 8usize + off;
+        ftyp[n] = cur;
+        off = off + ty_size(pp, src, e, cur);
+        n = n + 1usize;
+        cur = tn.nx;
+    }
+    let mut k: usize = n;
+    while k > 0usize {
+        k = k - 1usize;
+        let mut skip: bool = false;
+        if li >= 0i64 {
+            if field_moved(e, conv usize li, conv i32 k) { skip = true; }
+        }
+        if !skip {
+            let sc: i32 = drop_value(pp, src, e, addr + foff[k], ftyp[k], 0 - 1i64);
+            if sc != 0 { return sc; }
+        }
+    }
+    return 0;
+}
 // Drop the value of type `tn` at `addr` (universal LIFO order). A struct runs its
 // hook FIRST (whole value), unless partially moved, THEN drops fields reverse; an
 // array drops elements reverse; scalars/copy are inert. `li` carries the mask.
@@ -671,6 +866,12 @@ fn drop_value(pp: read P, src: [u8], e: write E, addr: usize, tn: u32, li: i64) 
             }
         }
         return drop_fields_rev(pp, src, e, addr, sid, li);
+    }
+    let eid: u32 = enum_of_ty(pp, src, e, tn);
+    if eid != 0u32 {
+        let tagv: i64 = mem_load(e, addr, W_USIZE);
+        let vid: u32 = variant_by_index(pp, eid, conv i32 tagv);
+        return drop_variant_rev(pp, src, e, addr, vid, li);
     }
     let nd: Node = pp.nodes[conv usize tn];
     if nd.tag == T_ARRAY {
@@ -1067,6 +1268,157 @@ fn eval_array_lit(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     return 0;
 }
 
+// ---- enum constructors + match ----------------------------------------------
+// Construct an enum value: resolve the enum + variant, allocate its size, write
+// the tag as u64 @0, then store/copy each payload arg at its payload offset. The
+// value is left in the aggregate channel (addr in cur_val, cur_w == 0, cur_ty =
+// the enum decl node); a non-copy enum registers a temp like a struct literal.
+fn eval_enum_ctor(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let eid: u32 = find_enum(pp, src, e, nd.p0, nd.p1);
+    let vnamenode: Node = pp.nodes[conv usize nd.a];
+    let vidx: i32 = variant_index_by_name(pp, src, eid, vnamenode.p0, vnamenode.p1);
+    let vid: u32 = variant_by_index(pp, eid, vidx);
+    let size: usize = enum_size(pp, src, e, eid);
+    let addr: usize = bump_alloc(e, size, 8usize);
+    zero_slot(e, addr, size);
+    mem_store(e, addr, conv i64 vidx, W_USIZE);
+    let mut k: i32 = 0;
+    let mut cur: u32 = nd.b;
+    while cur != 0u32 {
+        let an: Node = pp.nodes[conv usize cur];
+        let off: usize = variant_payload_off(pp, src, e, vid, k);
+        let pty: u32 = variant_payload_ty(pp, vid, k);
+        let pw: i32 = scalar_width(pp, src, pty);
+        if pw != 0 {
+            let sc: i32 = eval_expr(pp, src, e, cur, pw);
+            if sc != 0 { return sc; }
+            mem_store(e, addr + off, e.cur_val, pw);
+        } else {
+            let sc: i32 = eval_expr(pp, src, e, cur, 0 - 1i32);
+            if sc != 0 { return sc; }
+            let forg: i32 = e.cur_org;
+            let foa: usize = e.cur_org_a;
+            let fob: i32 = e.cur_org_b;
+            let sa: usize = conv usize e.cur_val;
+            let fsz: usize = ty_size(pp, src, e, pty);
+            mem_copy(e, addr + off, sa, fsz);
+            if !is_copy(pp, src, e, pty) {
+                do_consume(e, forg, foa, fob);
+            }
+        }
+        k = k + 1i32;
+        cur = an.nx;
+    }
+    e.*.cur_val = conv i64 addr;
+    e.*.cur_w = 0;
+    e.*.cur_ty = eid;
+    e.*.cur_org = 0;
+    if !is_copy(pp, src, e, eid) {
+        let ti: usize = reg_temp(e, addr, eid);
+        e.*.cur_org = 1;
+        e.*.cur_org_a = ti;
+    }
+    return 0;
+}
+// Evaluate a match: peel the scrutinee to its enum place, read the tag, pick the
+// FIRST source-order arm whose pattern matches (variant pattern by name; wildcard
+// / bare-binding match any), then run the arm in a fresh scope. Bindings pull from
+// the active variant's payload offsets: a copy payload is byte-copied to a fresh
+// slot; a non-copy payload is aliased and the scrutinee's payload field is marked
+// moved in the move-mask (so the scrutinee's later drop skips it). S4 targets
+// OWNED scrutinees; borrowed/boxed peeling is deferred.
+fn eval_match(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let sc: i32 = eval_expr(pp, src, e, nd.a, 0 - 1i32);
+    if sc != 0 { return sc; }
+    let scrut_addr: usize = conv usize e.cur_val;
+    let scrut_ty: u32 = e.cur_ty;
+    let scrut_org: i32 = e.cur_org;
+    let scrut_org_a: usize = e.cur_org_a;
+    let eid: u32 = enum_of_ty(pp, src, e, scrut_ty);
+    let tagv: i64 = mem_load(e, scrut_addr, W_USIZE);
+    let vid: u32 = variant_by_index(pp, eid, conv i32 tagv);
+    let vnode: Node = pp.nodes[conv usize vid];
+    let mut chosen: u32 = 0u32;
+    let mut acur: u32 = nd.b;
+    while acur != 0u32 {
+        let arm: Node = pp.nodes[conv usize acur];
+        let pat: Node = pp.nodes[conv usize arm.a];
+        if pat.tag == T_WILD || pat.tag == T_BIND {
+            chosen = acur;
+            break;
+        }
+        if pat.tag == T_PVARIANT {
+            let pnamenode: Node = pp.nodes[conv usize pat.a];
+            if name_eq(src, pnamenode.p0, pnamenode.p1, vnode.p0, vnode.p1) {
+                chosen = acur;
+                break;
+            }
+        }
+        acur = arm.nx;
+    }
+    if chosen == 0u32 {
+        set_fault(e, FK_PANIC, nd.p0, nd.p1);
+        return 1;
+    }
+    let base: usize = e.loc_n;
+    let base_bump: usize = e.stack_bump;
+    let armnd: Node = pp.nodes[conv usize chosen];
+    let patnd: Node = pp.nodes[conv usize armnd.a];
+    if patnd.tag == T_PVARIANT {
+        let mut k: i32 = 0;
+        let mut pcur: u32 = patnd.b;
+        while pcur != 0u32 {
+            let subnd: Node = pp.nodes[conv usize pcur];
+            let off: usize = variant_payload_off(pp, src, e, vid, k);
+            let pty: u32 = variant_payload_ty(pp, vid, k);
+            let sub_addr: usize = scrut_addr + off;
+            if subnd.tag == T_BIND {
+                let pw: i32 = scalar_width(pp, src, pty);
+                if is_copy(pp, src, e, pty) {
+                    let psz: usize = ty_size(pp, src, e, pty);
+                    let pal: usize = ty_align(pp, src, e, pty);
+                    let slot: usize = bump_alloc(e, psz, pal);
+                    mem_copy(e, slot, sub_addr, psz);
+                    loc_push(e, subnd.p0, subnd.p1, slot, pw, pty, 1);
+                } else {
+                    loc_push(e, subnd.p0, subnd.p1, sub_addr, 0, pty, 1);
+                    if scrut_org == 2 {
+                        mv_push(e, scrut_org_a, k);
+                    }
+                }
+            }
+            k = k + 1i32;
+            pcur = subnd.nx;
+        }
+    }
+    let mut bs: i32 = eval_expr(pp, src, e, armnd.b, 0 - 1i32);
+    if bs != 1 {
+        let sv: i64 = e.cur_val;
+        let sw: i32 = e.cur_w;
+        let sty: u32 = e.cur_ty;
+        let mut di: usize = e.loc_n;
+        while di > base {
+            di = di - 1usize;
+            if e.loc_owns[di] != 0u8 {
+                let ty: u32 = e.loc_ty[di];
+                if needs_drop(pp, src, e, ty) && !whole_moved(e, di) {
+                    let dc: i32 = drop_value(pp, src, e, e.loc_addr[di], ty, conv i64 di);
+                    if dc != 0 { bs = 1; }
+                }
+            }
+        }
+        e.*.cur_val = sv;
+        e.*.cur_w = sw;
+        e.*.cur_ty = sty;
+    }
+    clear_locals_from(e, base);
+    e.*.loc_n = base;
+    e.*.stack_bump = base_bump;
+    return bs;
+}
+
 // ---- expression evaluation ---------------------------------------------------
 // Status: 0 normal, 1 fault, 2 return, 3 break, 4 continue. A normal scalar value
 // is left in E.cur_val / E.cur_w; a normal aggregate value is an ADDRESS in
@@ -1141,6 +1493,12 @@ fn eval_expr(pp: read P, src: [u8], e: write E, i: u32, exp_w: i32) -> i32 {
     }
     if tg == T_ARRAYREP {
         return eval_array_rep(pp, src, e, i);
+    }
+    if tg == T_ENUMCTOR {
+        return eval_enum_ctor(pp, src, e, i);
+    }
+    if tg == T_MATCH {
+        return eval_match(pp, src, e, i);
     }
     if tg == T_PAREN {
         return eval_expr(pp, src, e, nd.a, exp_w);

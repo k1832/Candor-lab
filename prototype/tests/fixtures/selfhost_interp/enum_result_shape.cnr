@@ -1,0 +1,29 @@
+enum Res { ok good(i64), bad(i64) }
+fn pick(flag: bool) -> Res {
+    if flag {
+        return Res::good(42i64);
+    }
+    return Res::bad(7i64);
+}
+fn main() -> i64 {
+    let a: Res = pick(true);
+    let b: Res = pick(false);
+    let mut r: i64 = 0i64;
+    match a {
+        Res::good(x) => {
+            r = r + x;
+        },
+        Res::bad(y) => {
+            r = r - y;
+        },
+    }
+    match b {
+        Res::good(x) => {
+            r = r + x;
+        },
+        Res::bad(y) => {
+            r = r - y;
+        },
+    }
+    return r;
+}

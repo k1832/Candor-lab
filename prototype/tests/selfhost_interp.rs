@@ -157,6 +157,13 @@ const CORPUS: &[(&str, Shape)] = &[
     ("drop_break.cnr", Ret),
     ("drop_nested.cnr", Ret),
     ("drop_param.cnr", Ret),
+    // ---- S4: ENUMS + MATCH ----
+    ("enum_construct_match.cnr", Ret),
+    ("match_wildcard.cnr", Ret),
+    ("enum_multi_variant.cnr", Ret),
+    ("match_bind_multi.cnr", Ret),
+    ("enum_result_shape.cnr", Ret),
+    ("enum_drop_payload.cnr", Ret),
 ];
 
 fn read_fixture(rel: &str) -> String {

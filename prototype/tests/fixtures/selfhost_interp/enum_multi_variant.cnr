@@ -1,0 +1,21 @@
+enum V { none, one(i64), two(i16, i64) }
+fn main() -> i64 {
+    let a: V = V::two(7i16, 100i64);
+    let mut r: i64 = 0i64;
+    match a {
+        V::none => {
+            r = 1i64;
+        },
+        V::one(x) => {
+            r = x;
+        },
+        V::two(p, q) => {
+            if p == 7i16 {
+                r = q;
+            } else {
+                r = 0i64;
+            }
+        },
+    }
+    return r;
+}

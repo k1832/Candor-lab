@@ -316,3 +316,24 @@ One lesson per entry, one-line summary first.
   addresses never surface in the RET/TRACE/FAULT dump, the byte arena's base/size are
   free choices — reset the bump per block AND per call to bound loops/recursion
   (self-interp S2, 2026-07-10). See [[self-host-analyses]].
+
+- **Self-interp enums: a scrutinee's type reaches `match` in TWO shapes, enum
+  drop is tag-directed, and by-value match arms must not diverge in move state.**
+  For S4 (enums+match) three points recur in every later enum slice (S5 BoxResult
+  reuses all of it): (1) `enum_of_ty` must accept BOTH a `T_NAMED` local/param type
+  AND a bare `T_ENUM` decl node — a constructor result carries the decl node
+  directly in `cur_ty`, a local carries the named type; route both or a `match` on
+  a freshly-constructed enum silently mis-resolves. Enum layout mirrors
+  src/interp/layout.rs: `{tag:u64@0, payload@8}`, payload laid out struct-style from
+  offset 8, size `round_up(8+max_payload,8)`, align 8 always, tag = 0-based variant
+  index. (2) Enums carry NO drop hook, so enum drop is the WHOLE story of reading
+  tag@0, selecting the active variant, and dropping its payload fields in reverse
+  honoring S3's one-level move-mask (`drop_variant_rev`, dual of `drop_fields_rev`) —
+  S3's `needs_drop`/`drop_value` knew nothing of enums and must be extended. A bound
+  non-copy payload is aliased in place and its field marked moved on the scrutinee's
+  DIRECT-LOCAL root (`cur_org==2`); copy payloads are byte-copied and are fully
+  S3-independent. (3) FIXTURE-AUTHORING TRAP: the real checker rejects a by-value
+  `match` where one arm binds+moves a payload and a sibling arm does not — E0302
+  "inconsistent move state at join". Make every arm move consistently (all bind a
+  payload, or use a single wildcard arm) or the fixture never reaches the interp.
+  (self-interp S4, 2026-07-10). See [[self-host-analyses]].

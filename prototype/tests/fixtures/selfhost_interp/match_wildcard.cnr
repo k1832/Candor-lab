@@ -1,0 +1,14 @@
+enum Color { red, green, blue }
+fn main() -> i64 {
+    let c: Color = Color::green;
+    let mut r: i64 = 0i64;
+    match c {
+        Color::red => {
+            r = 1i64;
+        },
+        _ => {
+            r = 2i64;
+        },
+    }
+    return r;
+}

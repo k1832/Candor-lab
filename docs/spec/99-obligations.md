@@ -1076,3 +1076,54 @@ wrongly dropped — out of subset (all S3 params are by-value). (4) Field/index 
 its old value only for direct-local (`T_ID`) targets, matching the oracle's `place_is_local_direct`
 gate for the tested cases; a `x.f = ...` old-value drop is best-effort. interp.cnr remains NOT
 self-checked.
+
+### S4 — ENUMS and MATCH in the self-interpreter (fourth slice, 2026-07-10)
+
+The self-interpreter (`prototype/selfhost/interp/interp.cnr`) gains ENUM VALUES and `match`,
+reproducing the Rust reference (`src/interp/{layout,eval}.rs`) byte-exact. Same gate
+(`prototype/tests/selfhost_interp.rs`, EXECUTION equality vs `run_source_real`): the corpus grows
+from 44 to 50 fixtures (all returns; one also traces a drop schedule). Confined to interp.cnr — NO
+parser change; slice-2's parser already emits `T_ENUM`/`T_VARIANT`, `T_ENUMCTOR`, `T_MATCH`/`T_ARM`,
+and the `T_WILD`/`T_BIND`/`T_PVARIANT` pattern nodes. All 44 prior interp fixtures and every
+lexer/parser/checker/analyses/loans/effects self-check gate stay byte-exact (585 suite green, 0
+failing; clippy clean).
+
+ENUM LAYOUT (mirrors src/interp/layout.rs). `{tag: u64 @0, payload @8}`: the payload is laid out
+struct-style (declared order, natural alignment) from offset 8; enum size = `round_up(8 +
+max-padded-payload, 8)`, enum align = 8 always; the tag is the variant's 0-based declared index.
+`find_enum`/`enum_of_ty` mirror `find_struct`/`struct_of_ty`, and `enum_of_ty` resolves BOTH a
+`T_NAMED` local/param type and a `T_ENUM` decl node carried directly in `cur_ty` by a constructor
+result (the R1 scrutinee-ambiguity: a scrutinee's `cur_ty` is one or the other). The payload chain
+is a raw type-node `nx`-chain, so `payload_size`/`variant_payload_off` generalize S2's struct-field
+layout over a chain whose elements ARE the field types. `ty_size`/`ty_align`, `is_copy`, and
+`needs_drop` extend their `T_NAMED` (and direct-`T_ENUM`) paths to enums: an enum is `copy` iff its
+`T_ENUM.op` marker is set and every variant payload is copy; it NEEDS drop iff any variant payload
+needs drop (enums carry no drop hook of their own).
+
+CONSTRUCTION + MATCH (mirrors eval.rs ~2876/2948). `T_ENUMCTOR` resolves the enum by name and the
+variant by name over the `T_VARIANT` chain, allocates the enum size, writes the tag as u64 @0, then
+stores/copies each payload arg at its `variant_payload_off` (consuming a non-copy arg's origin, and
+registering the whole value as a non-copy temp exactly like a struct literal). `T_MATCH` evaluates
+the scrutinee to its enum place, reads the tag, selects the FIRST source-order arm whose pattern
+matches (a `T_PVARIANT` by variant-name equality; `T_WILD` and a bare `T_BIND` match any), then runs
+the arm body in a fresh scope with the same save/restore of `loc_n`/`stack_bump` and reverse-order
+scope-drop as `exec_block`, propagating the arm's status code and leaving its value in the register
+(R5). Pattern binding pulls each payload sub from the active variant's offsets: a COPY payload is
+byte-copied to a fresh bump slot and owned; a NON-COPY payload is ALIASED in place and the
+scrutinee's payload field is marked moved in S3's one-level field-granular move-mask (`mv_push(root,
+i)`), so the scrutinee's later drop skips it (R3). ENUM DROP is tag-directed and is S4's alone (S3
+did not know enums): `drop_value` reads tag @0, resolves the active variant, and drops that variant's
+payload fields in reverse honoring the move-mask (`drop_variant_rev`, the dual of `drop_fields_rev`);
+this is the whole of enum drop since enums have no hook. The COPY-payload match core is fully
+S3-INDEPENDENT — copy payloads are byte-copied and never touch the mask or a drop point.
+
+RESTRICTIONS / DEFERRED (OBL-SELFHOST-INTERP-ENUM). (1) OWNED scrutinees only: the scrutinee is
+peeled no further than an owned enum place, so a borrowed/boxed scrutinee (the oracle's
+`peel_scrutinee` Borrow/BorrowMut/Box arms, which bind sub-patterns by borrow) is out of subset
+(R2) — mirrors the checker slice's owned-scrutinee-match boundary. (2) NESTED variant sub-patterns
+are not bound (a `T_PVARIANT` sub inside a variant pattern) — the oracle faults on them too. (3)
+Whole-scrutinee `T_BIND` binds nothing (the oracle no-ops it as well). (4) The non-copy partial-move
+mark keys on the scrutinee's DIRECT-LOCAL root (`cur_org == 2`), matching S3's one-level mask; a
+constructor-temp scrutinee's partial move is not tracked (out of subset — all fixtures match a
+local). (5) BoxResult (compiler-synthesized, Box-payload variants) is DEFERRED to S5, which reuses
+this enum layout + tag-directed drop. interp.cnr remains NOT self-checked.

@@ -1,0 +1,12 @@
+enum Triple { t(i64, i64, i64) }
+fn main() -> i64 {
+    let a: Triple = Triple::t(10i64, 20i64, 30i64);
+    match a {
+        Triple::t(x, y, z) => {
+            trace(x);
+            trace(y);
+            trace(z);
+        },
+    }
+    return 0i64;
+}

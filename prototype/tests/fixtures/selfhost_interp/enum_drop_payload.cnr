@@ -1,0 +1,21 @@
+struct Noisy { id: i64 } drop(write self) { trace(self.id); }
+enum Two { a(Noisy), b(Noisy) }
+enum Opt1 { some(Noisy), none }
+fn main() -> i64 {
+    let e1: Two = Two::a(Noisy { id: 7i64 });
+    match e1 {
+        Two::a(n) => {
+            trace(1i64);
+        },
+        Two::b(m) => {
+            trace(3i64);
+        },
+    }
+    let e2: Opt1 = Opt1::some(Noisy { id: 8i64 });
+    match e2 {
+        _ => {
+            trace(2i64);
+        },
+    }
+    return 0i64;
+}
