@@ -1,0 +1,11 @@
+// Borrow-clean: two SHARED borrows of the same place coexist (shared XOR shared
+// is allowed -- any number of shared loans).
+struct S { v: i64 }
+fn keep2(a: read S, b: read S) -> unit { return; }
+fn f() -> unit {
+    let x: S = S { v: 0 };
+    let a = read x;
+    let b = read x;
+    keep2(a, b);
+    return;
+}

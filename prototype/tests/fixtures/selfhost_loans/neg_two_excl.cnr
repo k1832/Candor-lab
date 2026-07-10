@@ -1,0 +1,10 @@
+// E0801: a second exclusive borrow conflicts with the first live loan.
+struct S { v: i64 }
+fn keep2(a: read S, b: read S) -> unit { return; }
+fn f() -> unit {
+    let mut x: S = S { v: 0 };
+    let a = write x;
+    let b = write x;
+    keep2(a, b);
+    return;
+}

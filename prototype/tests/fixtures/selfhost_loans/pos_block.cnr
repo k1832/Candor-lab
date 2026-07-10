@@ -1,0 +1,14 @@
+// Borrow-clean: the loan drops at the inner block's exit (lexical == NLL here),
+// so the later move of the same place does NOT conflict.
+struct S { v: i64 }
+fn consume(s: S) -> unit { return; }
+fn keep(r: read S) -> unit { return; }
+fn f() -> unit {
+    let mut x: S = S { v: 0 };
+    {
+        let a = write x;
+        keep(a);
+    }
+    consume(x);
+    return;
+}

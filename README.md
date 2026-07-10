@@ -7,7 +7,8 @@ than a gatekeeper.
 
 **Status: the first-version scope is complete and RUNNING, and Candor is
 beginning to compile itself.** The self-hosting arc is underway — a lexer,
-parser, type checker, and move/borrow analysis, each *written in Candor* and
+parser, type checker, and the borrow checker's move + XOR-loan core, each
+*written in Candor* and
 each differentially verified token-for-token / AST-for-AST / diagnostic-for-
 diagnostic against the Rust reference. The language now has text (`str`/`String`,
 design 0013), a std `Vec[T]`, and standalone binaries that do real libc I/O

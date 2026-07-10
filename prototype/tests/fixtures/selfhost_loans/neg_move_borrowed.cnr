@@ -1,0 +1,11 @@
+// E0802: moving a place while it is borrowed.
+struct S { v: i64 }
+fn consume(s: S) -> unit { return; }
+fn keep(r: read S) -> unit { return; }
+fn f() -> unit {
+    let mut x: S = S { v: 0 };
+    let a = write x;
+    consume(x);
+    keep(a);
+    return;
+}

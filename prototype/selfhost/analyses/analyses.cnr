@@ -1,41 +1,61 @@
-// The FOURTH self-hosted slice of Candor: the MOVE / INIT (definite-assignment)
-// core of the borrow checker, WRITTEN IN CANDOR, consuming the self-hosted
-// parser's Node ARENA (slice 2). Gated by DIAGNOSTIC equality (code + span)
-// against the Rust oracle's move/init analysis (`prototype/src/check/init.rs`
-// over the shared CFG in `dataflow.rs`), FILTERED to the families this slice
-// covers. Spec: docs/spec/03 §1.5-1.6 (move/drop), §7.4 (definite assignment);
-// docs/spec/04 (ownership/borrows — moves-as-exclusive-accesses).
+// The FOURTH+FIFTH self-hosted slices of Candor: the MOVE/INIT (definite-
+// assignment) core PLUS the LOAN (borrow) core of the borrow checker, WRITTEN IN
+// CANDOR, consuming the self-hosted parser's Node ARENA (slice 2). Gated by
+// DIAGNOSTIC equality (code + span) against the Rust oracle (`init.rs` over the
+// shared CFG `dataflow.rs`, and `loans.rs`'s XOR conflict scan), FILTERED to the
+// families these slices cover. Spec: docs/spec/03 §1.5-1.6 (move/drop), §7.4
+// (definite assignment); docs/spec/04 §2.1-2.3 (the XOR rule, loans, moves/writes
+// as exclusive accesses).
 //
 // This file is a LIBRARY, always CONCATENATED AFTER lexer.cnr + parser.cnr (the
-// harness in prototype/tests/selfhost_analyses.rs composes lexer + parser +
+// harnesses in selfhost_analyses.rs / selfhost_loans.rs compose lexer + parser +
 // analyses + a generated `main`). It REUSES the lexer's `span_eq`, `emit_num`,
 // `emit_sp`, `emit_nl`, `trace` sink and the parser's `Node`/`P` arena, the
 // `T_*`/`PF_*` tag statics, and `parse_program`. It does NOT redefine them.
 //
-// COVERED CODE FAMILIES (the sound core this slice proves against the oracle):
-//   E0301  use of a MOVED value           (span = the identifier use site)
-//   E0304  use of a possibly-UNINIT value (span = the identifier use site)
-// Both attach to a BARE-IDENTIFIER use, whose span the span-lean slice-2 arena
+// COVERED CODE FAMILIES (the sound core these slices prove against the oracle):
+//   E0301  use of a MOVED value            (span = the identifier use site)
+//   E0304  use of a possibly-UNINIT value  (span = the identifier use site)
+//   E0801  conflicting borrow (XOR)        (span = the conflicting borrow's place)
+//   E0802  move of a borrowed place        (span = the moved place)
+//   E0804  read of an exclusively-borrowed place (span = the read place)
+// ALL attach to a BARE-IDENTIFIER access, whose span the span-lean slice-2 arena
 // carries verbatim in the `T_ID` node's `p0/p1`, so they match the oracle span
-// exactly. The move-JOIN family whose oracle span is a SYNTHETIC block/join span
-// the arena does not carry -- E0302 (move-join disagreement, span = join_span),
-// E0309 (needs-drop maybe-init at a drop point, span = scope-exit/reassign span)
-// -- are OUT OF SUBSET this slice, the SAME span-lean boundary slice 3 hit for
-// E0703 etc. The dataflow JOIN is still computed (so E0301/E0304 are correct
-// across if/match branches), only the join-anchored diagnostics are not emitted.
-// Loans (E0801-E0809) are deferred to slice 5. Recorded in OBL-SELFHOST-ERGO.
+// exactly. OUT OF SUBSET on the SAME span-lean boundary (a whole-statement or
+// synthetic-block span the arena does not carry): the move-JOIN codes E0302
+// (join_span) / E0309 (scope-exit span), and the loan codes E0803 (write-while-
+// borrowed; span = the whole assignment STATEMENT) and E0809 (write-through-
+// shared; a TYPE-level check in expr.rs, composite prefix/statement span, and it
+// needs per-binding borrow-TYPE tracking the span-lean arena does not seed). The
+// dataflow JOIN is still computed (E0301/E0304 correct across if/match branches).
 //
-// CONTEXT: the analysis threads the tuple (read P arena, [u8] src, write A). The
-// per-place move+init STATE, the locals table, the item head, and the growable
-// diagnostic buffer ALL aggregate into the one state object `A` -- so the
-// state-heavy borrow analysis stays at THREE threaded views, exactly like slice
-// 3's (read P, [u8] src, write C). The C-ruling 4-5 re-open trigger does NOT
-// fire: `src` cannot be a struct field (0001 3.4 / friction #1) and the arena is
-// a distinct object, but everything mutable merges into `A`.
+// LOAN MODEL. A loan = (borrowed place's ROOT local, kind shared/excl) recorded
+// only when a borrow value LANDS in a `let` binding (the oracle's Binding anchor;
+// a transient call-arg borrow is the oracle's Temp anchor -> no persistent loan).
+// LIVENESS is a RESTRICTED-LEXICAL approximation: a loan is in scope from its
+// `let` to the end of its enclosing block. This is CONSERVATIVE vs the oracle's
+// backward NLL-lite liveness (a loan live to its binding's LAST use); the gate
+// fixtures are restricted to the lexical==NLL region (the borrow binding is used
+// at/after every conflict point, no dead-borrow-then-reuse), reported honestly in
+// selfhost_loans.rs. Overlap is ROOT-granularity (same root local -- the slice-4
+// boundary; distinct-field borrows are excluded). The XOR check emits one
+// diagnostic per conflicting in-scope loan, matching the oracle's per-(access,
+// loan) emission (so N live loans at a move yield N E0802 lines, as the oracle does).
 //
-// Vec is exercised as its FIRST self-hosting customer for the growable
-// diagnostic buffer (`dcode/ds/de`); the value-SNAPSHOTTED per-place flow state
-// stays a fixed array (a Vec cannot be cheaply cloned at every branch join).
+// CONTEXT-TUPLE (the C-ruling load-bearing datum). Adding the loan state does NOT
+// force a 4th threaded view: the two parallel loan Vecs + the `loan_n` frontier
+// aggregate INTO the one state object `A`, so every walk signature still threads
+// exactly (read P arena, [u8] src, write A) -- THREE views, two of them read-only
+// (arena + the §3.4-forbidden `src`), like slices 3 and 4. The state-heaviest
+// analysis (move/init state PLUS a growable loan set) stays under the 4-5 re-open
+// trigger; state aggregation absorbs the loan set exactly as it absorbed the
+// per-place lattice. Vec's allocator is needed only at CONSTRUCTION (entry fn).
+//
+// Vec is exercised as its FIRST (diagnostic buffer, append-only) and SECOND (the
+// loan set, a STACK with a frontier) self-hosting customers; the value-SNAPSHOTTED
+// per-place flow state stays a fixed array (a Vec cannot be cheaply cloned at
+// every branch join). The loan set's stack POP at block exit is emulated by a
+// set-or-push at the `loan_n` frontier -- Vec is append-only, the measured cost.
 
 // ---- allocator prelude (to obtain the `Alloc` handle `vec_new` requires) -----
 // A bump arena over a reserved flat-memory window. This ~20-line prelude + the
@@ -82,6 +102,9 @@ struct A {
     dcode: Vec[i64],       // GROWABLE diagnostic buffer (Vec first customer)
     ds: Vec[i64],
     de: Vec[i64],
+    ln_root: Vec[i64],     // per in-scope loan: borrowed place's ROOT local id
+    ln_kind: Vec[i64],     // per in-scope loan: 0 = shared, 1 = exclusive
+    loan_n: usize,         // live-loan FRONTIER (restored at each block exit)
 }
 
 // ---- small helpers ----------------------------------------------------------
@@ -137,6 +160,57 @@ fn push_diag(a: write A, code: i64, s: usize, e: usize) alloc -> unit {
     push(write a.dcode, code);
     push(write a.ds, conv i64 s);
     push(write a.de, conv i64 e);
+    return;
+}
+
+// ---- loan set (Vec — the SECOND self-hosting Vec customer) -------------------
+// The in-scope loan set is two parallel Vecs (root local id + kind) with a stack
+// FRONTIER `loan_n` restored at each block exit. Vec is append-ONLY, so a stack
+// POP is emulated by set-or-push at the frontier -- the measured Vec-as-stack
+// friction, distinct from slice 4's append-only diagnostic-buffer usage.
+fn loan_push(a: write A, root: i32, kind: i32) alloc -> unit {
+    let i: usize = a.loan_n;
+    if i < len(read a.ln_root) {
+        set(write a.ln_root, i, conv i64 root);
+        set(write a.ln_kind, i, conv i64 kind);
+    } else {
+        push(write a.ln_root, conv i64 root);
+        push(write a.ln_kind, conv i64 kind);
+    }
+    a.*.loan_n = i + 1usize;
+    return;
+}
+
+// The XOR conflict check at an access point (loans.rs `conflict_scan`/`judge`).
+// acc: 0 = read (shared), 1 = move (exclusive), 3 = shared borrow, 4 = exclusive
+// borrow. Overlap is ROOT-granularity (same root local — the slice-4 boundary).
+// Emits ONE diagnostic per conflicting in-scope loan, exactly as the oracle
+// emits one per (access, loan) pair. E0803 (write-while-borrowed) is NOT emitted
+// here: its oracle span is the whole assignment STATEMENT the span-lean arena
+// does not carry (the loan analog of slice 4's E0302/E0309).
+fn loan_check(a: write A, root: i32, acc: i32, s: usize, e: usize) alloc -> unit {
+    let n: usize = a.loan_n;
+    let mut i: usize = 0usize;
+    while i < n {
+        let lr: i32 = conv i32 get(read a.ln_root, i).*;
+        let lk: i32 = conv i32 get(read a.ln_kind, i).*;
+        if lr == root {
+            if acc == 1 {
+                push_diag(a, 802, s, e);
+            } else if acc == 4 {
+                push_diag(a, 801, s, e);
+            } else if acc == 3 {
+                if lk == 1 {
+                    push_diag(a, 801, s, e);
+                }
+            } else if acc == 0 {
+                if lk == 1 {
+                    push_diag(a, 804, s, e);
+                }
+            }
+        }
+        i = i + 1usize;
+    }
     return;
 }
 
@@ -311,7 +385,12 @@ fn place_use(pp: read P, src: [u8], a: write A, idnode: u32, ctx: i32) alloc -> 
     require_init(a, id, nd.p0, nd.p1);
     if ctx == 0 {
         if a.loc_copy[conv usize id] == 0 {
+            // a non-copy value use is a MOVE (exclusive access): E0802 vs any loan
+            loan_check(a, id, 1, nd.p0, nd.p1);
             a.*.st[conv usize id] = 2;
+        } else {
+            // a copy value use is a READ (shared access): E0804 vs an excl loan
+            loan_check(a, id, 0, nd.p0, nd.p1);
         }
     }
     return;
@@ -325,6 +404,63 @@ fn borrow_place(pp: read P, src: [u8], a: write A, operand: u32) alloc -> unit {
         return;
     }
     chk_expr(pp, src, a, operand);
+    return;
+}
+
+// A borrow expression `read x` / `write x`: an init-check on the operand root
+// PLUS the XOR conflict check against in-scope loans (the borrow ACCESS, E0801).
+// The loan itself is recorded only when the borrow value LANDS in a let binding
+// (record_loan) -- mirroring the oracle's Temp-vs-Binding anchor split, so a
+// transient call-argument borrow creates no persistent loan.
+fn borrow_expr(pp: read P, src: [u8], a: write A, operand: u32, kind: i32) alloc -> unit {
+    let r: u32 = root_of(pp, operand);
+    if r != 0u32 {
+        let rn: Node = pp.nodes[conv usize r];
+        let id: i32 = lookup_local(a, src, rn.p0, rn.p1);
+        if id < 0 {
+            return;
+        }
+        require_init(a, id, rn.p0, rn.p1);
+        let mut acc: i32 = 3;
+        if kind == 1 {
+            acc = 4;
+        }
+        loan_check(a, id, acc, rn.p0, rn.p1);
+        return;
+    }
+    chk_expr(pp, src, a, operand);
+    return;
+}
+
+// Record the loan a landed borrow value carries: `let a = read/write x` puts a
+// loan on x's ROOT, in scope over the enclosing block (the LEXICAL liveness
+// approximation -- see the header note). Only the direct borrow-let form is
+// covered; a borrow reached through a call return or an assignment target is not.
+fn record_loan(pp: read P, src: [u8], a: write A, init: u32) alloc -> unit {
+    if init == 0u32 {
+        return;
+    }
+    let bn: Node = pp.nodes[conv usize init];
+    if bn.tag != T_PREFIX {
+        return;
+    }
+    if bn.op != PF_READ && bn.op != PF_WRITE {
+        return;
+    }
+    let r: u32 = root_of(pp, bn.a);
+    if r == 0u32 {
+        return;
+    }
+    let rn: Node = pp.nodes[conv usize r];
+    let id: i32 = lookup_local(a, src, rn.p0, rn.p1);
+    if id < 0 {
+        return;
+    }
+    let mut kind: i32 = 0;
+    if bn.op == PF_WRITE {
+        kind = 1;
+    }
+    loan_push(a, id, kind);
     return;
 }
 
@@ -351,8 +487,15 @@ fn chk_expr(pp: read P, src: [u8], a: write A, i: u32) alloc -> unit {
         return;
     }
     if tg == T_PREFIX {
-        // read/write/deref/clone: a borrow or read-through of the operand place.
-        borrow_place(pp, src, a, nd.a);
+        // read/write = a BORROW (loan point, E0801 XOR check); deref/clone = a
+        // plain read-through (init check only, no loan point).
+        if nd.op == PF_READ {
+            borrow_expr(pp, src, a, nd.a, 0);
+        } else if nd.op == PF_WRITE {
+            borrow_expr(pp, src, a, nd.a, 1);
+        } else {
+            borrow_place(pp, src, a, nd.a);
+        }
         return;
     }
     if tg == T_PAREN || tg == T_TRY {
@@ -632,6 +775,7 @@ fn chk_stmt(pp: read P, src: [u8], a: write A, i: u32) alloc -> unit {
             st0 = 1;
         }
         loc_push(a, nd.p0, nd.p1, cp, st0);
+        record_loan(pp, src, a, nd.b);
         return;
     }
     if nd.tag == T_ASSIGN {
@@ -655,6 +799,7 @@ fn chk_stmt(pp: read P, src: [u8], a: write A, i: u32) alloc -> unit {
 // A block scopes its statement chain; a `return`/`break` inside stops the rest.
 fn chk_block(pp: read P, src: [u8], a: write A, head: u32) alloc -> unit {
     let saved: usize = a.loc_n;
+    let lsaved: usize = a.loan_n;
     let mut cur: u32 = head;
     while cur != 0u32 {
         if a.diverged == 1 {
@@ -665,6 +810,7 @@ fn chk_block(pp: read P, src: [u8], a: write A, head: u32) alloc -> unit {
         cur = sub.nx;
     }
     a.*.loc_n = saved;
+    a.*.loan_n = lsaved;
     return;
 }
 
@@ -675,6 +821,7 @@ fn analyze_items(pp: read P, src: [u8], a: write A) alloc -> unit {
         let nd: Node = pp.nodes[conv usize cur];
         if nd.tag == T_FN {
             a.*.loc_n = 0usize;
+            a.*.loan_n = 0usize;
             a.*.diverged = 0;
             let mut pcur: u32 = nd.c;
             while pcur != 0u32 {
@@ -781,6 +928,9 @@ fn analyze_dump(src: [u8], buf: read Buf) alloc -> unit {
         dcode: vec_new(read al),
         ds: vec_new(read al),
         de: vec_new(read al),
+        ln_root: vec_new(read al),
+        ln_kind: vec_new(read al),
+        loan_n: 0usize,
     };
     analyze_items(read p, src, write a);
     sort_diags(write a);

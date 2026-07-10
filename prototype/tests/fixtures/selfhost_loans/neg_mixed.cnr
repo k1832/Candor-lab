@@ -1,0 +1,14 @@
+// Two families in one program: E0801 (second exclusive borrow) then E0802 TWICE
+// (moving x with BOTH loans a and b still live -- one diagnostic per live loan,
+// matching the oracle's per-(access,loan) emission).
+struct S { v: i64 }
+fn consume(s: S) -> unit { return; }
+fn keep2(a: read S, b: read S) -> unit { return; }
+fn f() -> unit {
+    let mut x: S = S { v: 0 };
+    let a = write x;
+    let b = write x;
+    consume(x);
+    keep2(a, b);
+    return;
+}

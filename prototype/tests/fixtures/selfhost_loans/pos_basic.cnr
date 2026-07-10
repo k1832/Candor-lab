@@ -1,0 +1,9 @@
+// Borrow-clean: a single exclusive borrow, used through its binding.
+struct S { v: i64 }
+fn keep(r: read S) -> unit { return; }
+fn f() -> unit {
+    let mut x: S = S { v: 0 };
+    let a = write x;
+    keep(a);
+    return;
+}

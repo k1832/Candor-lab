@@ -1,0 +1,9 @@
+// E0804: reading a place while it is exclusively borrowed.
+fn use_i(r: read i64) -> unit { return; }
+fn f() -> unit {
+    let mut x: i64 = 0;
+    let a = write x;
+    let y = x;
+    use_i(a);
+    return;
+}
