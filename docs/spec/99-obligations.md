@@ -756,3 +756,56 @@ use-chain head; all three P-literals updated. The arena model is UNCHANGED ([N]N
 region-free view threading). All prior selfhost oracle gates stay byte-exact green under the larger
 arenas + the new field. Isolation-gate runtime ~7.7s (lex+parse+check of the 4011-token file, twice,
 with the checker's linear name scans); the Map/symbol-table adoption remains the planned perf lever.
+
+### Fixpoint gate — the self-hosted ANALYSES core accepts the self-host source (step 3 deepened, 2026-07-10)
+
+The deepest self-check turn so far: the self-hosted borrow-checker ANALYSES core
+(`selfhost/analyses/analyses.cnr`, `analyze_dump` — move/init E0301/E0304, loans
+E0801-E0804, effect E0401, exhaustiveness E0601) run OVER real self-host source
+(`lexer.cnr` and `checker.cnr`) now emits an EMPTY covered-diagnostic set, byte-equal
+to the module-aware Rust oracle (`check_dir` over the real lexer+parser+analyses[+checker]
+tree, which runs the full Rust check pipeline and is likewise ∅). Two gates added to
+`prototype/tests/selfhost_analyses.rs` (`candor_analyses_check_lexer_source_clean_fixpoint`,
+`candor_analyses_check_checker_source_clean_fixpoint`), each with a use-after-move injected
+into a copy of the checked source asserted to fire E0301 — so the clean set is non-vacuous.
+Runtime ~7.5s for both (two analyze passes over ~3.7k/4.0k-token files). checker.cnr is the
+right deep target: a non-leaf module, but the analysis needs no import resolution (it runs
+dataflow over the parsed AST and treats unresolved names as non-locals). Full suite 580 green.
+
+FALSE POSITIVE FOUND AND FIXED (the real find — the scoping prediction did NOT hold ∅ on the
+first run). The unfixed analysis emitted E0301 (use-after-move) 1× on lexer.cnr and 22× on
+checker.cnr, all on `write`-borrow PARAMETERS (`c: write C`, `buf: write Buf`) passed onward
+bare to a call or field-read after such a pass. Root cause (`analyses.cnr` `param_copy` +
+`place_use`): a `write` param was classified non-copy (`loc_copy == 0`), correct for the LOAN
+analysis's exclusive-access sense but wrong for the MOVE analysis — `place_use` ctx-0 then marked
+the param MOVED (`st = 2`), so the next use was use-after-move. A borrow reference cannot be moved
+out of; passing a `write`/`read` param bare AUTO-REBORROWS. Minimal fix: a new per-local
+`loc_ref` flag (set for read/write params and borrow-typed bindings via `is_ref_binding`); in
+`place_use` the `st = 2` move is now guarded by `loc_ref == 0`, so only an OWNED non-copy value
+moves, a reference reborrows. The `loan_check` access (acc) is unchanged, so no loan diagnostic
+shifts. All negative fixtures stay byte-exact (selfhost_analyses/loans/effects green in isolation):
+the loan fixtures move only OWNED `let mut x` locals, never a reference, so no true positive is
+silenced.
+
+### OBL-SELFHOST-ANALYSES-NAMERES (deferred, 2026-07-10) — analyses.cnr is NOT name-res-clean under the self-host CHECKER
+
+Item scoped for this slice: extend the self-host CHECKER's E0102/E0103 clean gate to a FOURTH
+module, `analyses.cnr`, if it embeds byte-exact. MEASURED: analyses.cnr embeds BYTE-EXACT (7666
+self-host tokens == 7666 oracle tokens; 4662 parser nodes; both under the 8192 arenas — NOT the
+77.7 KB parser.cnr embedding ceiling, which corrupted at token-count divergence). BUT the
+self-host checker (`checker.cnr`) does NOT check it clean: 142 spurious E0102/E0103 where the
+module-aware oracle emits ∅. Two causes, BOTH requiring an extension of the CHECKER slice (not the
+analyses slice that is this arc's subject):
+(1) CONFIRMED — `checker.cnr`'s `is_builtin` lacks the Vec/allocator vocabulary `get` / `set` /
+`vec_new` / `map_new` that analyses.cnr uses but lexer/parser/checker.cnr themselves never do; those
+callees flag E0103 from their first use (line 204).
+(2) OBSERVED, not root-caused — imported/item names (`Node`, the `T_*` statics, local fns) resolve
+correctly through a hard boundary at analyses.cnr byte 22600 (line 560, a `let rn: Node` in
+`chk_expr`'s `T_OUT` arm) and fail after it. It is NOT a checker fixed-buffer capacity limit (growing
+the `[512]` locals AND diagnostic arrays to `[8192]` left the count at exactly 142) and NOT the
+embedding ceiling; it points at a self-host parser/checker interaction on an analyses.cnr-specific
+construct that the small parser fixtures do not cover, needing deeper (interpreter-level) debugging.
+DEFERRED: the analyses.cnr name-res gate is not added; discharging it means teaching checker.cnr the
+Vec builtin set and resolving cause (2). This is a capability the checker slice deliberately omitted
+(it needed only the builtins lexer/parser use), so per the slice discipline it is logged, not hacked.
+Gate to unlock: extend `checker.cnr`'s builtin table + isolate the line-560 resolution boundary.

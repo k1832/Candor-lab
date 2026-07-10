@@ -113,6 +113,9 @@ struct A {
     loc_p0: [256]usize,    // per-local: name-span start
     loc_p1: [256]usize,    // per-local: name-span end
     loc_copy: [256]i32,    // per-local: 1 = copy type (use = Read), 0 = move
+    loc_ref: [256]i32,     // per-local: 1 = a borrow REFERENCE (read/write param
+                           // or borrow-typed binding) -- a use REBORROWS, never
+                           // moves the referent (a borrow cannot be moved out of)
     st: [256]i32,          // per-local flow state (the snapshotted lattice)
     loc_n: usize,          // live local count (the local-id frontier)
     diverged: i32,         // 1 once control has left this path (return/break)
@@ -176,6 +179,7 @@ fn loc_push(a: write A, s: usize, e: usize, cp: i32, st0: i32) -> unit {
     a.*.loc_p0[i] = s;
     a.*.loc_p1[i] = e;
     a.*.loc_copy[i] = cp;
+    a.*.loc_ref[i] = 0;
     a.*.st[i] = st0;
     a.*.loc_ty[i] = 0u32;
     a.*.loc_n = i + 1usize;
@@ -414,9 +418,13 @@ fn place_use(pp: read P, src: [u8], a: write A, idnode: u32, ctx: i32) alloc -> 
     require_init(a, id, nd.p0, nd.p1);
     if ctx == 0 {
         if a.loc_copy[conv usize id] == 0 {
-            // a non-copy value use is a MOVE (exclusive access): E0802 vs any loan
+            // a non-copy value use is an exclusive access: E0802 vs any loan. It
+            // MOVES the place only if it OWNS the value -- a borrow REFERENCE
+            // (loc_ref == 1) auto-reborrows and is never moved out of.
             loan_check(a, id, 1, nd.p0, nd.p1);
-            a.*.st[conv usize id] = 2;
+            if a.loc_ref[conv usize id] == 0 {
+                a.*.st[conv usize id] = 2;
+            }
         } else {
             // a copy value use is a READ (shared access): E0804 vs an excl loan
             loan_check(a, id, 0, nd.p0, nd.p1);
@@ -803,6 +811,28 @@ fn chk_loop(pp: read P, src: [u8], a: write A, cond: u32, body: u32) alloc -> un
     return;
 }
 
+// A `let` binding is a borrow REFERENCE if its declared type is a borrow, or (when
+// unannotated) its init is a `read`/`write` borrow expression. Such a binding
+// holds a reference: using it reborrows, it is never moved out of.
+fn is_ref_binding(pp: read P, ann: u32, init: u32) -> i32 {
+    if ann != 0u32 {
+        let an: Node = pp.nodes[conv usize ann];
+        if an.tag == T_BORROW || an.tag == T_BORROWMUT {
+            return 1;
+        }
+        return 0;
+    }
+    if init != 0u32 {
+        let inn: Node = pp.nodes[conv usize init];
+        if inn.tag == T_PREFIX {
+            if inn.op == PF_READ || inn.op == PF_WRITE {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 // A statement: `let` / `assign` / a bare expression statement.
 fn chk_stmt(pp: read P, src: [u8], a: write A, i: u32) alloc -> unit {
     let nd: Node = pp.nodes[conv usize i];
@@ -825,6 +855,9 @@ fn chk_stmt(pp: read P, src: [u8], a: write A, i: u32) alloc -> unit {
         }
         loc_push(a, nd.p0, nd.p1, cp, st0);
         a.*.loc_ty[a.loc_n - 1usize] = nd.a;
+        if is_ref_binding(pp, nd.a, nd.b) == 1 {
+            a.*.loc_ref[a.loc_n - 1usize] = 1;
+        }
         record_loan(pp, src, a, nd.b);
         return;
     }
@@ -1116,6 +1149,10 @@ fn analyze_items(pp: read P, src: [u8], a: write A) alloc -> unit {
                 }
                 loc_push(a, pm.p0, pm.p1, cp, st0);
                 a.*.loc_ty[a.loc_n - 1usize] = pm.a;
+                // read (op 1) / write (op 2) params are borrow references.
+                if pm.op == 1 || pm.op == 2 {
+                    a.*.loc_ref[a.loc_n - 1usize] = 1;
+                }
                 pcur = pm.nx;
             }
             chk_expr(pp, src, a, nd.d);
@@ -1205,6 +1242,7 @@ pub fn analyze_dump(src: [u8], buf: read Buf) alloc -> unit {
         loc_p0: [0usize; 256],
         loc_p1: [0usize; 256],
         loc_copy: [0; 256],
+        loc_ref: [0; 256],
         st: [0; 256],
         loc_n: 0usize,
         diverged: 0,

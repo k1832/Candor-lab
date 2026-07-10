@@ -247,3 +247,17 @@ One lesson per entry, one-line summary first.
   compiler-known type by name in ONE stage, grep the other stages for the same
   name test — the checker and interpreter must agree on the structural identity,
   or module qualification desyncs them.
+
+- **A `write`/`read` borrow PARAMETER is a reference — using it (passing bare,
+  field-read) REBORROWS, it never MOVES. A move analysis must not conflate the
+  loan-analysis "non-copy exclusive access" flag with "moves on use."** The
+  self-host move/init analysis classified a `write C` param as non-copy
+  (`loc_copy == 0`) — right for the loan sense (E0804 exclusive access) but it
+  also drove `place_use` to mark the param MOVED, so the next bare pass/field-read
+  was a false E0301 use-after-move (1× on lexer.cnr, 22× on checker.cnr; the Rust
+  oracle emitted ∅). Fix: a separate `loc_ref` flag (read/write params +
+  borrow-typed bindings) gates the move — only an OWNED non-copy value moves, a
+  reference reborrows. Lesson: "can this place be moved" (ownership) and "does
+  this place hold an exclusive borrow" (loan kind) are DIFFERENT properties; a
+  borrow reference is non-copy for aliasing yet un-movable — track them apart, or
+  every reborrowed `write` param reads as a use-after-move (2026-07-10).
