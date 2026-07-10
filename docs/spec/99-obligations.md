@@ -1423,3 +1423,50 @@ Rust oracle. Runtime: the interp checker gate ~46s, the interp analyses gate ~49
 Map-in-checker perf lever remains if these grow. All 71 interp fixtures + every prior self-check gate
 stay byte-exact; clippy clean.
 
+
+### Self-lowering L0 — the MIR serialization boundary (2026-07-11)
+
+The enabler for the self-lowering tier: a MIR program can now cross from a serialized
+TEXT form into the Rust MIR interpreter, gated EXECUTIONALLY against the tree-walking
+oracle. Built SOLO, Rust-side only — NO Candor lowering yet (that is L1+). The boundary
+is proven on REAL MIR produced by the existing Rust lowering (`mir::build`), so it is
+validated before any Candor code depends on it.
+
+- WIRE FORMAT (`prototype/src/mir/serial.rs`): a canonical, deterministic, human-readable
+  S-expression text for a whole `MirProgram`. Atoms are bare keywords/decimal integers;
+  names and string literals are `"…"`-quoted with `\\ \" \n \t` escapes; whitespace-
+  insensitive on read, canonically indented on write. Deliberately simple to EMIT — the
+  L1 Candor lowering emits exactly this text. It faithfully carries everything the MIR
+  interpreter reads from `MirProgram`: every fn/block/statement/terminator/rvalue/operand/
+  place/proj, each `LocalDecl` (type + name + drop_obligation), the full recursive `Type`
+  (incl. `FnPtr` params/alloc/foreign, arrays/slices/box/rawptr), fault edges as
+  `(fedge KIND start end)` — spans are LOAD-BEARING (the FAULT comparison checks span
+  identity), projection offsets + index stride/len/span/slice, the `Drop` move masks
+  (`(moved (path …) …)`), the `fn_ptrs` table (order = id, load-bearing for indirect
+  calls), `drop_hooks` (sorted by key for determinism), and the `statics` table. The
+  derived `fn_index` (name → position in `fns`) and the runtime `items`/`consts` are NOT
+  on the wire: `fn_index` is rebuilt on load; `items`/`consts` are derived from the fixture
+  SOURCE by the Rust front-end, exactly as `lower_and_run` does (the harness rebuilds them).
+
+- SERIALIZER/DESERIALIZER: `serialize(prog) -> String` / `deserialize(s) -> Result<MirProgram, String>`,
+  round-trip-exact (`serialize(deserialize(serialize(p))) == serialize(p)`).
+
+- GATE (`prototype/tests/mir_serial.rs`): for each corpus fixture — lower source to MIR
+  via `mir::build`, serialize → deserialize → run via `mir::interp::run(prog, rebuilt
+  items, consts)`, render RET/TRACE/FAULT in the `selfhost_interp` schema, and assert
+  byte-exact to `run_source_real` (the oracle). Three facts per fixture: (1) wire round-trip
+  idempotence; (2) deserialized MIR == oracle; (3) in-memory MIR == deserialized == oracle
+  (the boundary changed nothing).
+
+- PROVEN: all 71 corpus fixtures round-trip byte-exact vs the oracle (61 returns,
+  10 faults) — the same corpus the self-interp gate uses: scalar core + every scalar fault
+  kind (spans/fault identity), aggregates (struct/array field offsets, strides, copyval),
+  move/drop schedule (Drop move masks), enums + match, allocator ABI (fn_ptrs table,
+  statics, indirect calls, structural Alloc), box/BoxResult/unbox + alloc-on-drop
+  (drop_hooks → fn ids), paged memory + pointer intrinsics, and the five-program systems
+  corpus (11_1..11_5). NOTHING deferred — every MIR construct the existing Rust lowering
+  emits round-trips. This is the boundary L1's Candor lowering must EMIT INTO: emit this
+  exact wire text (carrying spans + fault edges + move masks + fn_ptrs + drop_hooks +
+  statics), and the Rust MIR interpreter runs it identically to the oracle.
+
+Additive: every existing gate stays green; new gate green in isolation; clippy clean.
