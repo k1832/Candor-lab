@@ -1,0 +1,9 @@
+// S6a: `offsetof` of the FIRST field is 0 -- the base case of the intrinsic, which
+// resolves the field's byte offset through the same S2 layout table the interp
+// already uses for field reads.
+struct Q { a: u32, b: i64 }
+fn main() -> i64 {
+    let off: usize = offsetof(Q, a);
+    if off == 0usize { return 100i64; }
+    return 0 - 1i64;
+}

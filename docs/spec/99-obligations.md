@@ -1246,3 +1246,64 @@ S5 the heap. The systems corpus is now gated ONLY on S6 (DENSE high-address memo
 `offsetof`/`ptr_offset`/`ptr_to_addr` intrinsics — the last self-interp gap before the systems
 programs run. interp.cnr remains NOT self-checked (it uses the full language, incl. `unsafe` and the
 raw-pointer intrinsics).
+
+### S6a — PAGED memory model + the three pointer intrinsics (sixth slice, part a, 2026-07-11)
+
+The self-interpreter (`prototype/selfhost/interp/interp.cnr`) swaps its flat 16 KiB byte arena for a
+PAGED backing store and adds the three pointer intrinsics the systems corpus needs — the
+INFRASTRUCTURE for that corpus; the five corpus programs (11_1..11_5) are S6b, a separate slice.
+Same gate (`prototype/tests/selfhost_interp.rs`, EXECUTION equality vs `run_source_real`): the corpus
+grows from 60 to 66 fixtures (all returns). Confined to interp.cnr — NO parser change (the parser
+already emits `T_OFFSETOF`, and `ptr_offset`/`ptr_to_addr` are `T_CALL` builtins). All 60 prior
+interp fixtures stay byte-exact through the paged model (the migration-without-regression check), and
+every lexer/parser/checker/analyses/loans/effects self-check gate stays green (585+ suite, 0 failing;
+clippy clean).
+
+WHY PAGED. The systems corpus uses fixed addresses up to ~16.9 MiB (0x1013800), unreachable in the
+16 KiB arena. A dense 17 MiB array is memory-feasible but INIT-time-infeasible: the oracle running
+interp.cnr initializes an `[N]u8` array-repeat with a guarded per-byte move (~18M for 17 MiB). Paging
+allocates+zeroes only TOUCHED pages, so E stays small (a 128-frame pool = 512 KiB) while addressing a
+sparse 32 MiB space.
+
+THE MODEL. `E` gains `pages:[524288]u8` (128 × 4096-byte frames), `pagedir:[8192]i32` (page-number →
+pool slot, sentinel -1, covering 0..32 MiB), and `page_bump:usize`. `xlate(e, addr)`: `page = addr
+>> 12`, `off = addr & 4095` (4096 = 2^12, so shift+mask, no division); on first touch of a page it
+binds the next `page_bump` slot and ZEROES that frame; returns `slot*4096 + off`. `mem_load`/
+`mem_store`/`mem_copy`/`zero_slot` route every byte through `xlate` — translating each byte
+independently, so a load/store/copy SPANNING a page boundary (a struct straddling 4096) is correct.
+`bump_alloc` is unchanged (it hands out addresses; xlate maps them lazily). ZERO-ON-PAGE-ALLOC is
+load-bearing: a whole-value copy of a padded enum (a `leaf(i64)` variant of a 24-byte `Node` writes
+only bytes 0..15) reads the unwritten tail, which must read 0 to match the oracle (whose init-byte
+guard would otherwise fault). The self-host bump bases stay LOW (stack_bump from 8) and diverge from
+the oracle's STACK_BASE — fine, only values are observable; fixed high addresses (≥2 MiB) never
+collide with sub-MiB bump locals.
+
+INIT ARRAY DROPPED. The vestigial `init:[16384]u8` (the oracle's uninit-guard bitmap, ported but
+WRITE-ONLY in the self-host — it was never read; the self-host `mem_load` has no guard) is removed
+along with the flat `mem`, eliminating an array and its per-write marking.
+
+THE THREE INTRINSICS. `offsetof(T, field)` → `T_OFFSETOF` expr (node `.a` = struct type, `[.p0,.p1)`
+= field name-span): resolve the struct via `struct_of_ty`, return the field's byte offset by name-
+span from the S2 layout table (`field_off`) as a usize. `ptr_offset(p, n)` → name-dispatched `T_CALL`
+builtin: base = the 8-byte address in `p`; stride = `ty_size(inner of p's rawptr type)`; result =
+`base + n*stride` (`n` is isize, may be negative), returning a rawptr of the same inner. `ptr_to_addr
+(p)` → builtin: the pointer's address as a plain usize (a rawptr scalar already carries its address,
+so only the type changes). `unbox` was S5b; `field_ptr`/`container_of`/`sizeof` are unused by the
+corpus and NOT added.
+
+MIGRATION FIX. An array-repeat element `[0 - 1i32; N]` (untyped `0`) mis-types the element in the
+oracle and trips its init-byte guard; `[0i32 - 1i32; N]` types cleanly — used for the `pagedir`
+sentinel fill. FIXTURES (each byte-exact vs `run_source_real`): `high_addr_roundtrip` (u32
+write/read + ptr_to_addr at a fixed 3 MiB address — paged high-address + MMIO access), `offsetof_
+first_field` (offset 0) and `offsetof_nonzero_field` (a padded later field at 8 — offsetof mirrors
+layout alignment), `ptr_offset_stride` (index a `[3]Pt` by pointer arithmetic — stride = size_of(Pt)
+= 16), `enum_padding_copy` (whole-move a padded `Node::leaf` twice — proves zero-on-page-alloc
+satisfies the guard, the load-bearing correctness for S6b's 11_5), `page_boundary` (an i64 straddling
+a 4096 boundary with non-zero bytes in both halves — cross-page store/load). NOTE: interp.cnr does
+not implement `conv` in the INTERPRETED program, so the fixtures branch/compare instead of casting.
+RUNTIME: paging adds ~0.12 s/fixture (~25%), dominated by the oracle's per-fixture 512 KiB `pages`
+zero-init; correctness landed, cost noted.
+
+The self-interpreter now executes S1 scalars + S2 structs/arrays + S3 move/drop + S4 enums/match +
+S5 the heap + S6a paged memory & pointer intrinsics. The systems corpus (11_1..11_5) is now gated
+ONLY on S6b — the corpus programs themselves. interp.cnr remains NOT self-checked.

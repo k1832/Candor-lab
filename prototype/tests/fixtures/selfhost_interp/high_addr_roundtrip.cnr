@@ -1,0 +1,17 @@
+// S6a: the paged memory model handles a fixed HIGH address far above the bump
+// arena. `addr_to_ptr` lands a pointer at 3 MiB (0x300000) -- unreachable in the
+// old 16 KiB flat arena -- and an MMIO-style write/read round-trips a u32 through
+// it, proving `xlate` allocates the touched page lazily and reads it back.
+// `ptr_to_addr` recovers the raw address, exercising the third intrinsic.
+fn main() -> i64 {
+    let mut r: i64 = 0i64;
+    unsafe "MMIO-style access at a fixed 3 MiB address through the paged store" {
+        let p: rawptr u32 = addr_to_ptr[u32](3145728usize);
+        ptr_write(p, 3735928559u32);
+        let v: u32 = ptr_read(p);
+        let a: usize = ptr_to_addr(p);
+        if a == 3145728usize { trace(1i64); } else { trace(0i64); }
+        if v == 3735928559u32 { r = 777i64; } else { r = 0i64; }
+    }
+    return r;
+}

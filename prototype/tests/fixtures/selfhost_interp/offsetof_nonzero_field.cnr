@@ -1,0 +1,9 @@
+// S6a: `offsetof` of a LATER field returns the padded declared-order offset (`a`
+// is a u32 at 0, but `b: i64` aligns to 8, so `b` sits at offset 8, not 4) --
+// proving offsetof mirrors the layout table's alignment, not naive field summing.
+struct Q { a: u32, b: i64 }
+fn main() -> i64 {
+    let off: usize = offsetof(Q, b);
+    if off == 8usize { return 8i64; }
+    return 0 - 1i64;
+}

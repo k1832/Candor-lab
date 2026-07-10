@@ -1,0 +1,15 @@
+// S6a: a store that STRADDLES a 4096-byte page boundary. An i64 written at address
+// 3145724 occupies bytes 3145724..3145731 -- four in page 767, four in page 768.
+// The per-byte `xlate` in the accessors must translate each half independently and
+// reassemble the value on read, proving cross-page loads/stores are correct. The
+// value has non-zero bytes in both halves so a dropped-half bug would be caught.
+fn main() -> i64 {
+    let mut r: i64 = 0i64;
+    unsafe "an i64 straddling the page boundary must reassemble across two pages" {
+        let p: rawptr i64 = addr_to_ptr[i64](3145724usize);
+        ptr_write(p, 1234605616436508552i64);
+        let v: i64 = ptr_read(p);
+        r = v;
+    }
+    return r;
+}

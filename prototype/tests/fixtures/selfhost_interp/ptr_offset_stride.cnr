@@ -1,0 +1,15 @@
+// S6a: `ptr_offset` advances a pointer by whole ELEMENTS -- stride = size_of(inner)
+// = 16 for `Pt` -- not by bytes. Pointer-index arr[1] and read it back, proving the
+// stride comes from the pointee type, not a hardcoded 1.
+copy struct Pt { x: i64, y: i64 }
+fn main() -> i64 {
+    let mut arr: [3]Pt = [Pt { x: 10i64, y: 11i64 }, Pt { x: 20i64, y: 21i64 }, Pt { x: 30i64, y: 31i64 }];
+    let mut r: i64 = 0i64;
+    unsafe "walk the array by pointer arithmetic; stride is size_of(Pt) = 16" {
+        let base: rawptr Pt = addr_of_mut(arr[0]);
+        let second: rawptr Pt = ptr_offset(base, 1isize);
+        let v: Pt = ptr_read(second);
+        r = v.x + v.y;
+    }
+    return r;
+}

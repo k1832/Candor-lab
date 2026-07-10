@@ -177,6 +177,14 @@ const CORPUS: &[(&str, Shape)] = &[
     ("boxresult_oom.cnr", Ret),
     ("box_drop_frees.cnr", Ret),
     ("nested_box.cnr", Ret),
+    // ---- S6a: PAGED memory model + pointer intrinsics (offsetof / ptr_offset /
+    // ptr_to_addr). Infrastructure for the systems corpus (the corpus is S6b). ----
+    ("high_addr_roundtrip.cnr", Ret),
+    ("offsetof_first_field.cnr", Ret),
+    ("offsetof_nonzero_field.cnr", Ret),
+    ("ptr_offset_stride.cnr", Ret),
+    ("enum_padding_copy.cnr", Ret),
+    ("page_boundary.cnr", Ret),
 ];
 
 fn read_fixture(rel: &str) -> String {

@@ -17,7 +17,7 @@
 // (structs/arrays of scalars), so there is NO drop obligation yet -- `trace` output is
 // purely explicit `trace(x)` calls, never a drop side-effect. Move/drop is S3.
 //
-// VALUE MODEL (S2 convergence). Locals and aggregates live in a flat `mem: [N]u8`
+// VALUE MODEL (S2 convergence). Locals and aggregates live in a flat byte-addressable
 // stack arena (bump-allocated, reset per block/call); a scalar local is stored/loaded
 // by (address, width) instead of S1's pure `i64` slot. Scalar arithmetic still flows
 // through the `cur_val`/`cur_w` registers (byte-exact with the oracle); an aggregate
@@ -27,7 +27,7 @@
 // `interp.cnr` is NOT self-checked in this slice, so it uses the full language.
 
 use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl};
-use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_SC, T_RET, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_STRUCT, T_NAMED, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_VARIANT, T_ENUMCTOR, T_MATCH, T_ARM, T_PVARIANT, T_WILD, T_BIND, T_NAME, T_STATIC, T_RAWPTR, T_FNPTR, T_UNSAFE, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_BOX, T_BOXRESULT, T_PREFIX, PF_DEREF};
+use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_SC, T_RET, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_STRUCT, T_NAMED, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_VARIANT, T_ENUMCTOR, T_MATCH, T_ARM, T_PVARIANT, T_WILD, T_BIND, T_NAME, T_STATIC, T_RAWPTR, T_FNPTR, T_UNSAFE, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_BOX, T_BOXRESULT, T_PREFIX, PF_DEREF};
 
 // ---- fault kind codes (shared with the Rust harness) ------------------------
 static FK_OVERFLOW: i32 = 0;
@@ -45,10 +45,11 @@ static W_USIZE: i32 = 10;
 // frame's floor. Each local now owns an ADDRESS into `mem` (`loc_addr`) plus a
 // width (`loc_w`, 0 for aggregates) and its type node (`loc_ty`). Recursion is
 // carried by interp.cnr's OWN Candor call stack -- `call_fn` restores loc_n and
-// stack_bump on return. `mem`/`init`/`stack_bump` are the flat byte arena (ported
-// from src/interp/mem.rs, sized for the tiny fixtures with headroom); `init` marks
-// written bytes -- the model's uninit guard structure is kept, though the guard's
-// BadPointer fault is a later (pointer) slice.
+// stack_bump on return. The byte store is PAGED (S6a): `pages` is a small pool of
+// 4096-byte frames, `pagedir` maps a 12-bit page number to a pool slot (sentinel
+// -1 = untouched), and `page_bump` hands out the next free slot. `xlate` maps a
+// linear address to a backing offset, allocating+zeroing a frame on first touch --
+// so a program may use sparse high addresses (up to 32 MiB) without a dense array.
 struct E {
     head: u32,
     loc_p0: [1024]usize,
@@ -70,8 +71,9 @@ struct E {
     arg_w: [16]i32,
     arg_addr: [16]usize,
     arg_n: usize,
-    mem: [16384]u8,
-    init: [16384]u8,
+    pages: [524288]u8,
+    pagedir: [8192]i32,
+    page_bump: usize,
     stack_bump: usize,
     plc_addr: usize,
     plc_w: i32,
@@ -415,7 +417,7 @@ fn lit_width(suf: i32, exp_w: i32) -> i32 {
     return 4;
 }
 
-// ---- flat byte memory (ported from src/interp/mem.rs) ------------------------
+// ---- paged byte memory (S6a; the flat model of src/interp/mem.rs, made sparse) --
 fn round_up_us(x: usize, a: usize) -> usize {
     if a <= 1usize { return x; }
     return ((x + a - 1usize) / a) * a;
@@ -425,14 +427,38 @@ fn bump_alloc(e: write E, size: usize, align: usize) -> usize {
     e.*.stack_bump = a + size;
     return a;
 }
+// Translate a linear address to an offset into the `pages` pool. The high bits are
+// the page number (4096 = 2^12, so a shift+mask, no division); a page is bound to a
+// pool slot on first touch and its frame zeroed then -- zero-on-alloc, so a byte a
+// program never wrote still reads 0 (load-bearing for enum padding: a whole-value
+// copy that spans a variant's unwritten tail must see zeros, matching the oracle).
+fn xlate(e: write E, addr: usize) -> usize {
+    let page: usize = addr >> 12usize;
+    let off: usize = addr & 4095usize;
+    if e.pagedir[page] < 0i32 {
+        let slot: usize = e.page_bump;
+        e.*.page_bump = slot + 1usize;
+        e.*.pagedir[page] = conv i32 slot;
+        let base: usize = slot * 4096usize;
+        let mut z: usize = 0usize;
+        while z < 4096usize {
+            e.*.pages[base + z] = 0u8;
+            z = z + 1usize;
+        }
+    }
+    let mapped: usize = conv usize e.pagedir[page];
+    return mapped * 4096usize + off;
+}
 // Load a scalar of width `w` from `addr`, little-endian, sign/zero-extended into
-// the i64 register exactly as S1/the oracle's read_int represents it.
+// the i64 register exactly as S1/the oracle's read_int represents it. Each byte is
+// translated independently, so a load straddling a page boundary is handled.
 fn mem_load(e: write E, addr: usize, w: i32) -> i64 {
     let size: usize = w_size(w);
     let mut raw: u64 = 0u64;
     let mut k: usize = 0usize;
     while k < size {
-        let byte: u64 = conv u64 e.mem[addr + k];
+        let pa: usize = xlate(e, addr + k);
+        let byte: u64 = conv u64 e.pages[pa];
         let sh: u64 = conv u64 (8usize * k);
         wrapping { raw = raw | (byte << sh); }
         k = k + 1usize;
@@ -456,19 +482,22 @@ fn mem_store(e: write E, addr: usize, val: i64, w: i32) -> unit {
     let mut k: usize = 0usize;
     while k < size {
         let b: u8 = conv u8 (u & 255u64);
-        e.*.mem[addr + k] = b;
-        e.*.init[addr + k] = 1u8;
+        let pa: usize = xlate(e, addr + k);
+        e.*.pages[pa] = b;
         u = u >> 8u64;
         k = k + 1usize;
     }
     return;
 }
+// Per-byte translation of both endpoints, so a copy spanning page boundaries on the
+// source or destination side (a struct straddling a 4096 frame) copies correctly.
 fn mem_copy(e: write E, dst: usize, s: usize, size: usize) -> unit {
     let mut k: usize = 0usize;
     while k < size {
-        let b: u8 = e.mem[s + k];
-        e.*.mem[dst + k] = b;
-        e.*.init[dst + k] = 1u8;
+        let spa: usize = xlate(e, s + k);
+        let b: u8 = e.pages[spa];
+        let dpa: usize = xlate(e, dst + k);
+        e.*.pages[dpa] = b;
         k = k + 1usize;
     }
     return;
@@ -476,8 +505,8 @@ fn mem_copy(e: write E, dst: usize, s: usize, size: usize) -> unit {
 fn zero_slot(e: write E, addr: usize, size: usize) -> unit {
     let mut k: usize = 0usize;
     while k < size {
-        e.*.mem[addr + k] = 0u8;
-        e.*.init[addr + k] = 1u8;
+        let pa: usize = xlate(e, addr + k);
+        e.*.pages[pa] = 0u8;
         k = k + 1usize;
     }
     return;
@@ -1833,6 +1862,17 @@ fn eval_expr(pp: read P, src: [u8], e: write E, i: u32, exp_w: i32) -> i32 {
         e.*.cur_ty = i;
         return 0;
     }
+    if tg == T_OFFSETOF {
+        // offsetof(T, field): the S2 layout table gives the field's byte offset by
+        // name-span (nd.a = struct type, [nd.p0, nd.p1) = field name), as a usize.
+        let sid: u32 = struct_of_ty(pp, src, e, nd.a);
+        let off: usize = field_off(pp, src, e, sid, nd.p0, nd.p1);
+        e.*.cur_val = conv i64 off;
+        e.*.cur_w = W_USIZE;
+        e.*.cur_ty = 0u32;
+        e.*.cur_org = 0;
+        return 0;
+    }
     if tg == T_PAREN {
         return eval_expr(pp, src, e, nd.a, exp_w);
     }
@@ -2274,6 +2314,37 @@ fn eval_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     if span_eq(src, callee.p0, callee.p1, b"unbox") {
         return bi_unbox(pp, src, e, i);
     }
+    if span_eq(src, callee.p0, callee.p1, b"ptr_offset") {
+        // ptr_offset(p, n): advance a rawptr by `n` elements of its pointee. Stride
+        // is ty_size(inner); `n` is isize (may be negative). Mirrors bi_ptr_offset.
+        let sc: i32 = eval_expr(pp, src, e, nd.b, W_USIZE);
+        if sc != 0 { return sc; }
+        let base: usize = conv usize to_u64(e.cur_val);
+        let pty: u32 = e.cur_ty;
+        let inner: u32 = rawptr_inner(pp, pty);
+        let stride: usize = ty_size(pp, src, e, inner);
+        let pnode: Node = pp.nodes[conv usize nd.b];
+        let sc2: i32 = eval_expr(pp, src, e, pnode.nx, 5);
+        if sc2 != 0 { return sc2; }
+        let n: i64 = e.cur_val;
+        let mut na: i64 = 0i64;
+        wrapping { na = conv i64 base + n * conv i64 stride; }
+        e.*.cur_val = na;
+        e.*.cur_w = W_USIZE;
+        e.*.cur_ty = pty;
+        e.*.cur_org = 0;
+        return 0;
+    }
+    if span_eq(src, callee.p0, callee.p1, b"ptr_to_addr") {
+        // ptr_to_addr(p): expose the pointer's address as a plain usize. A rawptr
+        // scalar already carries its address in cur_val, so only the type changes.
+        let sc: i32 = eval_expr(pp, src, e, nd.b, W_USIZE);
+        if sc != 0 { return sc; }
+        e.*.cur_w = W_USIZE;
+        e.*.cur_ty = 0u32;
+        e.*.cur_org = 0;
+        return 0;
+    }
     // Direct call (a declared fn) or, when the name is not a fn, an INDIRECT call
     // through a fn-ptr value: evaluate the callee expression -- which yields the
     // fn's arena node id -- and call that (the oracle's indirect path, :1604-1610).
@@ -2666,8 +2737,9 @@ pub fn interp_dump(src: [u8], buf: read Buf) -> unit {
         arg_w: [0; 16],
         arg_addr: [0usize; 16],
         arg_n: 0usize,
-        mem: [0u8; 16384],
-        init: [0u8; 16384],
+        pages: [0u8; 524288],
+        pagedir: [0i32 - 1i32; 8192],
+        page_bump: 0usize,
         stack_bump: 8usize,
         plc_addr: 0usize,
         plc_w: 0,

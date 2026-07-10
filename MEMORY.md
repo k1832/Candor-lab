@@ -391,3 +391,28 @@ One lesson per entry, one-line summary first.
   function after a `return` must not leak into the pending return value. Drop order
   is pointee-then-free, and it recurses (Box of a Box). (self-interp S5b,
   2026-07-11). See [[self-host-analyses]].
+
+- **Self-interp S6a (paged memory + pointer intrinsics): page the byte store so
+  the oracle need only init touched frames, and two authoring traps — untyped
+  `0` in an array-repeat and no `conv` in the interpreted subset.** The systems
+  corpus uses fixed addresses to ~16.9 MiB; a dense 17 MiB `[N]u8` in `E` is
+  memory-feasible but INIT-infeasible because the oracle running interp.cnr
+  initializes an array-repeat with a guarded per-byte move (~18M for 17 MiB). Fix:
+  a PAGED store — `pages` (a small 128×4096 frame pool), `pagedir` (page-number →
+  slot, sentinel -1, covering 0..32 MiB), `page_bump`; `xlate(addr)` = `page =
+  addr>>12`, `off = addr&4095` (shift+mask, no division), binding+ZEROING a frame
+  on first touch. Route every accessor byte through `xlate` (per-byte, so cross-
+  page load/store/copy is automatic). Zero-on-page-alloc is load-bearing: a whole-
+  value copy of a padded enum reads the variant's unwritten tail, which must read 0
+  to match the oracle's init-byte guard. TWO TRAPS that cost time: (1) an array-
+  repeat element `[0 - 1i32; N]` with an UNTYPED `0` mis-types the element and trips
+  the oracle's uninit guard (bad_pointer read) at construction — write `[0i32 -
+  1i32; N]` so the element is cleanly i32 (used for the pagedir -1 fill). (2) The
+  self-interp does NOT implement `conv` in the INTERPRETED program (no T_CONV arm;
+  it falls through to 0), so a fixture's `conv i64 <usize>` silently yields 0 —
+  fixtures must branch/compare against typed literals instead of casting. The
+  self-host bump bases stay low and diverge from the oracle's STACK_BASE; only
+  values are observable, so fixed high addresses never collide with sub-MiB locals.
+  The dropped `init` bitmap was write-only in the self-host (no guard). Cost: paging
+  adds ~0.12 s/fixture (~25%), the oracle's per-fixture 512 KiB `pages` zero-init.
+  (self-interp S6a, 2026-07-11). See [[self-host-analyses]].

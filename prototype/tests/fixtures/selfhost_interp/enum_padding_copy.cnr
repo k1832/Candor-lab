@@ -1,0 +1,23 @@
+// S6a: whole-value COPY of a padded enum reads the variant's unwritten tail. `Node`
+// is 24 bytes (tag@0, max payload 16 @8); `leaf` writes only bytes 0..15, leaving
+// 16..23 as padding. Passing the value by move (and returning it) copies all 24
+// bytes -- the padding must read as zero (zero-on-page-alloc) or the oracle's uninit
+// guard would fault. This is the load-bearing correctness the systems corpus needs.
+enum Node { leaf(i64), pair(i64, i64) }
+fn identity(n: Node) -> Node {
+    return n;
+}
+fn main() -> i64 {
+    let a: Node = Node::leaf(42i64);
+    let b: Node = identity(a);
+    let mut r: i64 = 0i64;
+    match b {
+        Node::leaf(x) => {
+            r = x;
+        },
+        Node::pair(p, q) => {
+            r = p + q;
+        },
+    }
+    return r;
+}
