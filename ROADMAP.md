@@ -74,6 +74,24 @@ primitives (Vec, str, Alloc, CharStep) — the runtime/language split every real
 3. Extend self-host checker coverage to the feature set the self-host SOURCE uses (only that).
 4. The fixpoint gate: the self-host checker checks the self-host source, oracle-matched.
 
+**Fixpoint scoping RESULT (2026-07-10):** the gate is ~a handful of small slices, not N. The
+self-host source is structurally clean where it matters (zero persistent loans; no
+box/unbox/clone/match/enums), so the deferred error codes (E0302/E0309/E0809/E0401/E0601) are
+UNREACHABLE over it — out of scope for self-checking (they matter only for negative error
+fixtures). The gate reduces to "the checker traverses the whole source without false-rejecting,
+oracle-matched (∅)." First sub-goal DONE: the self-host checker checks lexer.cnr clean (leaf
+module, arena growth only).
+
+**Fixpoint path RULED: HONEST import-resolution (deciding authority, 2026-07-10)** — over the
+pragmatic concatenate-into-one-blob alternative. Each module is checked IN ISOLATION with its
+`use` imports resolved, faithful to the module tree we built (not a concatenated blob) and with a
+smaller max input (parser.cnr ~20.7k tokens vs a ~42k blob → better tree-walker perf). Cost: a
+real feature (use/pub in the self-host lexer/parser/checker) plus possibly adopting the std Map
+into the checker's currently-linear name scan for runtime. Slice order: import-resolution (the
+gate) → per-module arena growth → per-module clean gates (parser/checker/analyses) →
+analyses-clean (E0301/E0304, empirically inspected for move/init false positives) → Map-in-checker
+perf if needed.
+
 **Scheduled — modularize the self-host source (dogfood the module system).** The four
 self-host `.cnr` files use zero `use` imports; the oracle harness composes them by
 `include_str!` concatenation (convenience, not a language limit — modules stage 1 works,
