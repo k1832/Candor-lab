@@ -22,10 +22,7 @@ as that trigger, held the ruling on its hardest evidence.
 
 Structured concurrency — the final language feature — executes on real
 OS threads with compile-time race freedom, across all engines including
-standalone AOT binaries. Twelve designs - memory model through structured concurrency - each
-adversarially reviewed; one rejected outright and reworked to acceptance (0012,
-whose reviewer constructed a genuine safe-code race against the draft's own
-flagship example). The compilation architecture is fully realized (design 0010,
+standalone AOT binaries. The compilation architecture is fully realized (design 0010,
 stages A-D closed). Candor compiles through a checked MIR to optimized native x86-64
 via Cranelift, with the fault-window reordering license enforced by an
 executable validator and the P5 invariant made empirical: four engines -
@@ -76,15 +73,20 @@ divergence.
 
 ## Critical path
 
-The project follows the sequencing in philosophy §8:
+The project followed the sequencing in philosophy §8, and has walked the whole of it:
 
-1. **Bet 5 validation** *(current phase)* — pre-register the kill criterion,
-   design the memory-model core, build a throwaway-syntax prototype
-   (checker + interpreter), port the adversarial workload basket
-   (allocator, intrusive-list scheduler, MMIO driver state machine, parser,
-   arena compiler pass), publish the verdict either way.
-2. **Semantic core and specification skeleton** — gated on Bet 5 surviving.
-3. **Minimal toolchain**, then breadth.
+1. **Bet 5 validation** *(complete)* — criterion pre-registered and frozen, memory
+   model designed, the throwaway-syntax prototype built, the five-program basket
+   ported and measured against idiomatic Rust; verdict published (killed as first
+   registered, provisionally confirmed under a corrected successor registration).
+2. **Semantic core and specification skeleton** *(complete)* — thirteen reviewed
+   designs, a normative spec with a live obligations ledger, the fault model
+   formalized.
+3. **Toolchain, then breadth** *(in progress)* — the full compiler (four verified
+   engines, native + freestanding emission, incremental build, formatter, migrator,
+   LSP), a self-hosted core, and the P19 competence apparatus all exist at prototype
+   scale. Remaining: self-hosting completion, the 0.x distribution, and the 1.0
+   stability gate (see [ROADMAP.md](ROADMAP.md)).
 
 ## Repository layout
 
