@@ -1589,6 +1589,32 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Does the first argument have type `Map[V]`? Routes the overloaded collection
+    /// builtins (`insert`/`contains`/`get`) to the `Map` forms.
+    fn arg0_is_map(&mut self, args: &[Expr]) -> bool {
+        args.first()
+            .map(|a| matches!(self.synth_arg_type(a), Type::App(n, _) if n == "Map"))
+            .unwrap_or(false)
+    }
+
+    /// The value type `V` of the `Map[V]` named by the first argument.
+    fn map_arg_valty(&mut self, args: &[Expr]) -> Type {
+        match args.first().map(|a| self.synth_arg_type(a)) {
+            Some(Type::App(n, targs)) if n == "Map" => targs.first().cloned().unwrap_or(Type::Error),
+            _ => Type::Error,
+        }
+    }
+
+    /// A `Map` key is a byte-string view: `str` or `[u8]` (design 0013 §1.3). No
+    /// user-defined-key hashing (the "refuse the language form" ruling).
+    fn expect_bytestring(&mut self, t: &Type, span: Span, ctx: &str) {
+        let ok = matches!(t, Type::Str | Type::Error)
+            || matches!(t, Type::Slice(e) if matches!(**e, Type::Scalar(ScalarTy::U8)));
+        if !ok {
+            self.mismatch(span, ctx, "str or [u8]", t);
+        }
+    }
+
     fn check_builtin(&mut self, name: &str, args: &[Expr], span: Span) -> Option<Type> {
         let t = match name {
             "box" => {
@@ -1792,6 +1818,60 @@ impl<'a> Checker<'a> {
                 // `as_str(read self: String) -> str` — borrow the built text back.
                 self.arg0(args, span, "as_str");
                 Type::Str
+            }
+            // ----- std hash `Map[V]` — byte-string keys (`str`/`[u8]`), P9 -----
+            "map_new" => {
+                // `map_new(a: read Alloc) -> Map[V]` — allocator-explicit (P9). The
+                // value type `V` is fixed by the expected (annotation) type.
+                let t = self.arg0(args, span, "map_new");
+                let peeled = match &t { Type::Borrow(i) | Type::BorrowMut(i) => (**i).clone(), _ => t.clone() };
+                if !matches!(peeled, Type::Error) && !matches!(&peeled, Type::Named(n) if n == "Alloc") {
+                    self.mismatch(span, "map_new", "read Alloc", &t);
+                }
+                self.note_alloc(span, "`map_new` builds an owning Map (allocates/frees on drop)");
+                match &self.expected_ty {
+                    Some(Type::App(n, targs)) if n == "Map" => Type::App("Map".to_string(), targs.clone()),
+                    _ => Type::App("Map".to_string(), vec![Type::Error]),
+                }
+            }
+            "insert" if self.arg0_is_map(args) => {
+                // `insert(write self: Map[V], key: read str/[u8], v: V)` — moves `v`
+                // in; drops the displaced value on an existing key.
+                let valty = self.map_arg_valty(args);
+                if args.len() == 3 {
+                    self.check_expr(&args[0], Use::Value);
+                    let k = self.check_expr(&args[1], Use::Value);
+                    self.expect_bytestring(&k, args[1].span, "insert");
+                    self.check_against(&args[2], &valty);
+                } else {
+                    self.arity(span, "insert", 3);
+                }
+                self.note_alloc(span, "`insert` may allocate a key copy / grow the Map");
+                Type::unit()
+            }
+            "contains" if self.arg0_is_map(args) => {
+                // `contains(read self: Map[V], key: read str/[u8]) -> bool`.
+                if args.len() == 2 {
+                    self.check_expr(&args[0], Use::BorrowShared);
+                    let k = self.check_expr(&args[1], Use::Value);
+                    self.expect_bytestring(&k, args[1].span, "contains");
+                } else {
+                    self.arity(span, "contains", 2);
+                }
+                Type::bool()
+            }
+            "get" if self.arg0_is_map(args) => {
+                // `get(read self: Map[V], key: read str/[u8]) -> read V` — a borrow
+                // of the stored value; FAULTS if absent (pair with `contains`).
+                let valty = self.map_arg_valty(args);
+                if args.len() == 2 {
+                    self.check_expr(&args[0], Use::BorrowShared);
+                    let k = self.check_expr(&args[1], Use::Value);
+                    self.expect_bytestring(&k, args[1].span, "get");
+                } else {
+                    self.arity(span, "get", 2);
+                }
+                Type::Borrow(Box::new(valty))
             }
             // ----- std collection: `Vec[T]` (growable heap array, P9) ----------
             "vec_new" => {

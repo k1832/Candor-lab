@@ -372,9 +372,9 @@ fn needs_drop_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> bool
         // A projection is unbounded (design 0009 §2.3): conservatively needs-drop.
         Type::Proj(_, _) => true,
         Type::App(n, args) => {
-            // Compiler-known std `Vec[T]` always frees its heap buffer on drop
-            // (alloc-on-drop), independent of `T`.
-            if n == "Vec" {
+            // Compiler-known std `Vec[T]`/`Map[V]` always free their heap buffer
+            // on drop (alloc-on-drop), independent of the element/value type.
+            if n == "Vec" || n == "Map" {
                 return true;
             }
             if let Some(g) = env.lookup_generic(n) {
@@ -615,6 +615,7 @@ fn box_subpaths_rec(
             // and an alloc-on-drop generic aggregate frees at its own place
             // regardless of a bare `Box` field (design 0007 §3.4, F5).
             if n == "Vec"
+                || n == "Map"
                 || env.lookup_generic(n).map(|g| g.alloc_on_drop).unwrap_or(false)
                 || bears_box(ty, env)
             {
@@ -639,9 +640,9 @@ fn bears_box_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> bool 
         // A projection is unbounded (design 0009 §2.3): conservatively box-bearing.
         Type::Proj(_, _) => true,
         Type::App(n, args) => {
-            // A `Vec[T]` owns a heap buffer whose drop frees; treat it as
-            // box-bearing so a dropped `Vec` temporary is accounted allocator work.
-            if n == "Vec" {
+            // A `Vec[T]`/`Map[V]` owns a heap buffer whose drop frees; treat it
+            // as box-bearing so a dropped temporary is accounted allocator work.
+            if n == "Vec" || n == "Map" {
                 return true;
             }
             if let Some(g) = env.lookup_generic(n) {

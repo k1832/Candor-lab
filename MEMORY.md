@@ -213,3 +213,23 @@ One lesson per entry, one-line summary first.
   channel). The fix that held: gate borrow REFERENTS transitively including
   through copy fields, with fn pointers as a portable leaf. Concurrency
   reviews must always attack copy-out-from-behind-borrows first.
+
+- **A compiler-known std collection has a fixed 9-site integration checklist.**
+  Adding `Map` (mirroring `Vec`/`String`) touched exactly: `types.rs`
+  (`needs_drop`, `bears_box`, `box_subpaths` — the three that drive alloc-on-drop
+  / E0401; `is_copy`/`is_portable` need NO change, their `App`-no-registered-generic
+  default already yields non-copy/non-portable), `interp/layout.rs`
+  (`size_of`+`align_of`), `interp/eval.rs` (`resolve_ty` keeps it an `App`, the
+  `drop_value` arm, the shared `len` builtin, the builtin dispatch + op fns),
+  `generics.rs` (`rewrite_ty`+`type_to_ast_kind` keep it an `App` through
+  monomorphization), and `check/expr.rs` (`arg0_is_*` router + `check_builtin`
+  arms). The resolver needs nothing — unknown call names are treated as builtins
+  resolved by the checker (`ast.rs` comment). Overloaded op names (`get`) are
+  disambiguated by mutually-exclusive `arg0_is_X` guards, so arm order between
+  collections does not matter. Grep `"Vec"` across `src` to find every site.
+
+- **`read`/`write` param mode on a borrow-kind type (`str`, `[u8]`, any view) is
+  E0203 — pass views by value.** A `fn f(word: read str)` is ill-formed; `str` is
+  already a view, so it is `fn f(word: str)`. Bit the Map keyword-classify
+  demonstrator (2026-07-10). Owned collections take `read`/`write` (they are not
+  borrow-kind); their contained views do not.

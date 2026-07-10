@@ -572,7 +572,7 @@ impl<'a> Interp<'a> {
             }),
             // Compiler-known std `Vec[T]` is kept as an application (its element
             // type drives per-element drop and stride); never lowered to a nominal.
-            TyKind::App { name, args } if name == "Vec" => {
+            TyKind::App { name, args } if name == "Vec" || name == "Map" => {
                 Type::App(name.clone(), args.iter().map(|a| self.resolve_ty(a)).collect())
             }
             TyKind::App { .. } | TyKind::Proj { .. } => {
@@ -1850,6 +1850,12 @@ impl<'a> Interp<'a> {
             "pop" if self.arg0_is_vec(args) => self.bi_vec_pop(args, span)?,
             "get" if self.arg0_is_vec(args) => self.bi_vec_get(args, span)?,
             "set" if self.arg0_is_vec(args) => self.bi_vec_set(args, span)?,
+            // std hash `Map[V]` — byte-string keys (`str`/`[u8]`), FNV-1a hash,
+            // open addressing + linear probing, alloc-copy-rehash-free growth.
+            "map_new" => self.bi_map_new(args)?,
+            "insert" if self.arg0_is_map(args) => self.bi_map_insert(args, span)?,
+            "contains" if self.arg0_is_map(args) => self.bi_map_contains(args, span)?,
+            "get" if self.arg0_is_map(args) => self.bi_map_get(args, span)?,
             // Structured-concurrency blessed primitives (design 0012 §1.4, §3.3).
             "split_mut" => self.bi_split_mut(args, span)?,
             "cancelled" => {
@@ -2076,7 +2082,7 @@ impl<'a> Interp<'a> {
         // `len(read Vec[T])`: the length field is at offset 8 of the Vec, which the
         // `read`/`write` borrow points at.
         let peeled = match &sv.ty { Type::Borrow(e) | Type::BorrowMut(e) => (**e).clone(), t => t.clone() };
-        if matches!(&peeled, Type::App(n, _) if n == "Vec") {
+        if matches!(&peeled, Type::App(n, _) if n == "Vec" || n == "Map") {
             let vbase = match &sv.ty { Type::Borrow(_) | Type::BorrowMut(_) => self.read_u64(sv.addr)?, _ => sv.addr };
             let n = self.read_u64(vbase + 8)?;
             return self.usize_val(n);
@@ -2562,6 +2568,268 @@ impl<'a> Interp<'a> {
         self.drop_value(dst, &elem, &MoveMask::default(), &mut Vec::new())?;
         self.move_to(dst, rv)?;
         Ok(self.unit_val())
+    }
+
+    // ===================================================================
+    // Compiler-known std hash `Map[V]` (PROPOSAL-selfhost-ergonomics cand. B).
+    //
+    // KEYS are byte-strings (`str`/`[u8]`) — the self-host hot case (the keyword
+    // ladder, the checker item table). No user-defined-key hashing (the "refuse
+    // the language form" ruling); the VALUE type `V` is generic. Layout mirrors
+    // `Vec`/`String`: `{ buf: rawptr @0, len @8, cap @16, ctx @24, vt @32 }` (5 u64
+    // words). `buf` points at `cap` open-addressed BUCKETS, each
+    // `{ state: u64 @0 (0=empty,1=occupied), keyptr @8, keylen @16, value: V @24 }`
+    // with stride `round_up(24 + size_of(V), 8)`. The hash is 64-bit FNV-1a over
+    // the key bytes; the slot is `hash & (cap-1)` with linear probing (`cap` is a
+    // power of two). The map OWNS a heap byte-copy of every key (freed on drop).
+    // Growth is alloc-new + rehash-move + free-old at load factor 3/4. `len` is
+    // read at offset 8 by the shared `len` builtin (same as `Vec`).
+    // ===================================================================
+
+    fn arg0_is_map(&self, args: &[Expr]) -> bool {
+        let Some(a) = args.first() else { return false };
+        let inner = match &a.kind {
+            ExprKind::Prefix { op: PrefixOp::Read | PrefixOp::Write, expr } => expr.as_ref(),
+            _ => a,
+        };
+        let t = match self.expr_static_ty(inner) {
+            Some(Type::Borrow(b)) | Some(Type::BorrowMut(b)) => Some(*b),
+            other => other,
+        };
+        matches!(t, Some(Type::App(n, _)) if n == "Map")
+    }
+
+    /// The value type `V` of the `Map[V]` named by `e` (peeling `read`/`write`).
+    fn map_valty_of(&self, e: &Expr) -> Type {
+        let inner = match &e.kind {
+            ExprKind::Prefix { op: PrefixOp::Read | PrefixOp::Write, expr } => expr.as_ref(),
+            _ => e,
+        };
+        let t = match self.expr_static_ty(inner) {
+            Some(Type::Borrow(b)) | Some(Type::BorrowMut(b)) => Some(*b),
+            other => other,
+        };
+        match t {
+            Some(Type::App(n, targs)) if n == "Map" => targs.first().cloned().unwrap_or(Type::Error),
+            _ => Type::Error,
+        }
+    }
+
+    /// The base address of the `Map` a `read`/`write`/owned argument names.
+    fn map_base(&mut self, e: &Expr) -> R<u64> {
+        let v = self.eval_value(e, None)?;
+        match &v.ty {
+            Type::Borrow(_) | Type::BorrowMut(_) => self.read_u64(v.addr),
+            _ => Ok(v.addr),
+        }
+    }
+
+    fn map_stride(&self, valty: &Type) -> u64 {
+        round_up(24 + self.size_of(valty), 8)
+    }
+
+    /// 64-bit FNV-1a over the key bytes (deterministic; offset basis
+    /// 0xcbf29ce484222325, prime 0x100000001b3).
+    fn map_hash(bytes: &[u8]) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for &b in bytes {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
+    }
+
+    fn map_vt_alloc(&mut self, ctx: u64, vt: u64, size: u64, align: u64) -> R<u64> {
+        let (_, alloc_off) = self.field_offset(self.alloc_vtable_name(), "alloc");
+        let afn = self.read_u64(vt + alloc_off)?;
+        self.call_scalar(afn, vec![
+            (Type::RawPtr(Box::new(Type::Scalar(ScalarTy::U8))), ctx),
+            (Type::usize(), size),
+            (Type::usize(), align),
+        ])
+    }
+
+    /// The slot of `key` if present (an occupied bucket with matching bytes), else
+    /// `None`. Linear probing terminates at the first empty bucket — no tombstones
+    /// exist (no `remove` op ships).
+    fn map_find(&mut self, buf: u64, cap: u64, stride: u64, key: &[u8]) -> R<Option<u64>> {
+        if cap == 0 || buf == 0 {
+            return Ok(None);
+        }
+        let mask = cap - 1;
+        let mut idx = Self::map_hash(key) & mask;
+        loop {
+            let b = buf + idx * stride;
+            if self.read_u64(b)? == 0 {
+                return Ok(None);
+            }
+            let klen = self.read_u64(b + 16)?;
+            if klen == key.len() as u64 {
+                let kptr = self.read_u64(b + 8)?;
+                if self.read_bytes(kptr, klen, true)? == key {
+                    return Ok(Some(idx));
+                }
+            }
+            idx = (idx + 1) & mask;
+        }
+    }
+
+    /// The first empty slot along `key`'s probe chain — for inserting a NEW key
+    /// (the caller has established `key` is absent and `cap > 0`, load factor < 1).
+    fn map_find_empty(&mut self, buf: u64, cap: u64, stride: u64, key: &[u8]) -> R<u64> {
+        let mask = cap - 1;
+        let mut idx = Self::map_hash(key) & mask;
+        loop {
+            let b = buf + idx * stride;
+            if self.read_u64(b)? == 0 {
+                return Ok(idx);
+            }
+            idx = (idx + 1) & mask;
+        }
+    }
+
+    /// Ensure room for one more entry; grow (initial 8, then x2) and rehash when the
+    /// load factor would exceed 3/4. Alloc-new + rehash-move (key ptr/len + value
+    /// bytes move; no key re-copy) + free-old.
+    fn map_reserve(&mut self, base: u64, valty: &Type) -> R<()> {
+        let len = self.read_u64(base + 8)?;
+        let cap = self.read_u64(base + 16)?;
+        if cap != 0 && (len + 1) * 4 <= cap * 3 {
+            return Ok(());
+        }
+        let stride = self.map_stride(valty);
+        let newcap = if cap == 0 { 8 } else { cap * 2 };
+        let ctx = self.read_u64(base + 24)?;
+        let vt = self.read_u64(base + 32)?;
+        let newbuf = self.map_vt_alloc(ctx, vt, newcap * stride, 8)?;
+        if newbuf == 0 {
+            return Err(self.fault(FaultKind::Panic, "Map allocation failed (OOM)"));
+        }
+        self.write_bytes(newbuf, &vec![0u8; (newcap * stride) as usize])?;
+        let oldbuf = self.read_u64(base)?;
+        if oldbuf != 0 {
+            let vsz = self.size_of(valty);
+            for i in 0..cap {
+                let ob = oldbuf + i * stride;
+                if self.read_u64(ob)? == 1 {
+                    let kptr = self.read_u64(ob + 8)?;
+                    let klen = self.read_u64(ob + 16)?;
+                    let kbytes = self.read_bytes(kptr, klen, true)?;
+                    let slot = self.map_find_empty(newbuf, newcap, stride, &kbytes)?;
+                    let nb = newbuf + slot * stride;
+                    self.write_bytes(nb, &1u64.to_le_bytes())?;
+                    self.write_bytes(nb + 8, &kptr.to_le_bytes())?;
+                    self.write_bytes(nb + 16, &klen.to_le_bytes())?;
+                    if vsz > 0 {
+                        self.move_bytes(nb + 24, ob + 24, vsz)?;
+                    }
+                }
+            }
+            self.call_free(ctx, vt, oldbuf, cap * stride, 8)?;
+        }
+        self.write_bytes(base, &newbuf.to_le_bytes())?;
+        self.write_bytes(base + 16, &newcap.to_le_bytes())?;
+        Ok(())
+    }
+
+    /// `map_new(a: read Alloc) -> Map[V]` — an empty map carrying `a`.
+    fn bi_map_new(&mut self, args: &[Expr]) -> R<RVal> {
+        let av = self.eval_value(&args[0], None)?;
+        let alloc_addr = match &av.ty {
+            Type::Borrow(_) | Type::BorrowMut(_) => self.read_u64(av.addr)?,
+            _ => av.addr,
+        };
+        let (_, ctx_off) = self.field_offset(self.alloc_struct_name(), "ctx");
+        let (_, vt_off) = self.field_offset(self.alloc_struct_name(), "vt");
+        let ctx = self.read_u64(alloc_addr + ctx_off)?;
+        let vt = self.read_u64(alloc_addr + vt_off)?;
+        let ty = Type::App("Map".to_string(), vec![Type::Error]);
+        let (addr, id) = self.alloc_temp(ty.clone());
+        self.write_bytes(addr, &0u64.to_le_bytes())?;      // buf @0
+        self.write_bytes(addr + 8, &0u64.to_le_bytes())?;  // len @8
+        self.write_bytes(addr + 16, &0u64.to_le_bytes())?; // cap @16
+        self.write_bytes(addr + 24, &ctx.to_le_bytes())?;  // ctx @24
+        self.write_bytes(addr + 32, &vt.to_le_bytes())?;   // vt @32
+        Ok(RVal { ty, addr, origin: Origin::Temp(id) })
+    }
+
+    /// `insert(write self: Map[V], key: read str/[u8], v: V)` — moves `v` in. On an
+    /// existing key, drops the displaced value and reuses the stored key copy; on a
+    /// new key, allocates an owned byte-copy of the key (growing/rehashing if full).
+    fn bi_map_insert(&mut self, args: &[Expr], span: Span) -> R<RVal> {
+        let valty = self.map_valty_of(&args[0]);
+        let base = self.map_base(&args[0])?;
+        self.cur_span = span;
+        let (kptr, klen) = self.read_byteview(&args[1])?;
+        let key = self.read_bytes(kptr, klen, true)?;
+        let rv = self.eval_value(&args[2], Some(&valty))?;
+        let stride = self.map_stride(&valty);
+        let buf0 = self.read_u64(base)?;
+        let cap0 = self.read_u64(base + 16)?;
+        if let Some(slot) = self.map_find(buf0, cap0, stride, &key)? {
+            let voff = buf0 + slot * stride + 24;
+            self.drop_value(voff, &valty, &MoveMask::default(), &mut Vec::new())?;
+            self.move_to(voff, rv)?;
+            return Ok(self.unit_val());
+        }
+        self.map_reserve(base, &valty)?;
+        let buf = self.read_u64(base)?;
+        let cap = self.read_u64(base + 16)?;
+        let slot = self.map_find_empty(buf, cap, stride, &key)?;
+        let ctx = self.read_u64(base + 24)?;
+        let vt = self.read_u64(base + 32)?;
+        let kbuf = self.map_vt_alloc(ctx, vt, klen, 1)?;
+        if kbuf == 0 {
+            return Err(self.fault(FaultKind::Panic, "Map key allocation failed (OOM)"));
+        }
+        self.write_bytes(kbuf, &key)?;
+        let b = buf + slot * stride;
+        self.write_bytes(b, &1u64.to_le_bytes())?;        // state = occupied
+        self.write_bytes(b + 8, &kbuf.to_le_bytes())?;    // keyptr
+        self.write_bytes(b + 16, &klen.to_le_bytes())?;   // keylen
+        self.move_to(b + 24, rv)?;                        // value
+        let len = self.read_u64(base + 8)?;
+        self.write_bytes(base + 8, &(len + 1).to_le_bytes())?;
+        Ok(self.unit_val())
+    }
+
+    /// `contains(read self: Map[V], key: read str/[u8]) -> bool`.
+    fn bi_map_contains(&mut self, args: &[Expr], span: Span) -> R<RVal> {
+        let valty = self.map_valty_of(&args[0]);
+        let base = self.map_base(&args[0])?;
+        self.cur_span = span;
+        let (kptr, klen) = self.read_byteview(&args[1])?;
+        let key = self.read_bytes(kptr, klen, true)?;
+        let stride = self.map_stride(&valty);
+        let buf = self.read_u64(base)?;
+        let cap = self.read_u64(base + 16)?;
+        let found = self.map_find(buf, cap, stride, &key)?.is_some();
+        let a = self.mem.stack_alloc(1, 1);
+        self.write_bytes(a, &[found as u8])?;
+        Ok(RVal { ty: Type::bool(), addr: a, origin: Origin::None })
+    }
+
+    /// `get(read self: Map[V], key: read str/[u8]) -> read V` — a borrow of the
+    /// stored value; FAULTS if the key is absent (region-free single-borrow-out,
+    /// paired with `contains`, mirroring `Vec::get`).
+    fn bi_map_get(&mut self, args: &[Expr], span: Span) -> R<RVal> {
+        let valty = self.map_valty_of(&args[0]);
+        let base = self.map_base(&args[0])?;
+        self.cur_span = span;
+        let (kptr, klen) = self.read_byteview(&args[1])?;
+        let key = self.read_bytes(kptr, klen, true)?;
+        let stride = self.map_stride(&valty);
+        let buf = self.read_u64(base)?;
+        let cap = self.read_u64(base + 16)?;
+        match self.map_find(buf, cap, stride, &key)? {
+            Some(slot) => {
+                let voff = buf + slot * stride + 24;
+                let a = self.mem.stack_alloc(8, 8);
+                self.write_bytes(a, &voff.to_le_bytes())?;
+                Ok(RVal { ty: Type::Borrow(Box::new(valty)), addr: a, origin: Origin::None })
+            }
+            None => Err(self.fault(FaultKind::Bounds, "Map key not found".to_string())),
+        }
     }
 
     fn drop_and_consume(&mut self, rv: RVal) -> R<()> {
@@ -3051,6 +3319,29 @@ impl<'a> Interp<'a> {
                     let ctx = self.read_u64(addr + 24)?; // ctx @24
                     let vt = self.read_u64(addr + 32)?; // vt @32
                     self.call_free(ctx, vt, buf, cap * stride, self.align_of(&elem))?;
+                }
+                Ok(())
+            }
+            // Compiler-known std hash `Map[V]`: free each LIVE key byte-copy, drop
+            // each LIVE value, then free the bucket buffer (alloc-on-drop).
+            Type::App(n, args) if n == "Map" => {
+                let buf = self.read_u64(addr)?; // buf @0
+                if buf != 0 {
+                    let valty = args.first().cloned().unwrap_or(Type::Error);
+                    let stride = round_up(24 + self.size_of(&valty), 8);
+                    let cap = self.read_u64(addr + 16)?; // cap @16
+                    let ctx = self.read_u64(addr + 24)?; // ctx @24
+                    let vt = self.read_u64(addr + 32)?;  // vt @32
+                    for i in 0..cap {
+                        let b = buf + i * stride;
+                        if self.read_u64(b)? == 1 {
+                            let kptr = self.read_u64(b + 8)?;
+                            let klen = self.read_u64(b + 16)?;
+                            self.call_free(ctx, vt, kptr, klen, 1)?;
+                            self.drop_value(b + 24, &valty, &MoveMask::default(), &mut Vec::new())?;
+                        }
+                    }
+                    self.call_free(ctx, vt, buf, cap * stride, 8)?;
                 }
                 Ok(())
             }

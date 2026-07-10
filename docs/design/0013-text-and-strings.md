@@ -454,6 +454,30 @@ Honest about what lands, staged so each stage is independently testable:
   each live element then frees the buffer (alloc-on-drop propagates: a non-`alloc`
   function dropping a `Vec` is E0401). This removes the lexer's fixed `[1024]Tok`
   cap. P6 untouched (std, not core); P9 satisfied (allocator threaded, never core).
+- **Stage 2c — `Map[V]` in std (PROPOSAL-selfhost-ergonomics candidate B).** A
+  hash dictionary, compiler-known for the same `Alloc`-vtable reason as `String`/
+  `Vec` (§7 note; growth reallocates a bucket array the builtin surface cannot).
+  Layout mirrors `Vec`: `{ buf, len, cap, ctx, vt }`, where `buf` points at `cap`
+  open-addressed BUCKETS `{ state, keyptr, keylen, value: V }` (stride
+  `round_up(24 + size_of(V), 8)`). **Keys are byte-strings only** — `str`/`[u8]`,
+  the self-host hot case (the lexer's keyword ladder, the checker's item table);
+  the map owns a heap byte-copy of every key. This is the deliberate minimal form:
+  candidate B's ruling **refuses a byte-string `match` language form** and a
+  user-implementable `Hash` interface (0007's `[K: Hash, V]`) is **not** built —
+  keys are hashable-by-construction (a built-in 64-bit FNV-1a over the key bytes,
+  deterministic; slot = `hash & (cap-1)`, `cap` a power of two, linear probing).
+  Integer/user-defined keys are deferred (not in this round; an `i64` key, if ever
+  needed, is spellable as its bytes or added then). Value type `V` is generic.
+  Ops (allocator-explicit): `map_new(read Alloc) -> Map[V]`, `insert(write self,
+  key: read str/[u8], v: V)` (drops the displaced value on an existing key,
+  reusing the stored key copy), `contains(read self, key) -> bool`, `get(read
+  self, key) -> read V` (a region-free single-borrow-out, FAULTS if absent — paired
+  with `contains`, mirroring `Vec::get`; `Opt[read V]` is impossible since a borrow
+  cannot be an enum payload, §3.4), and the shared `len`. Growth is alloc-new +
+  rehash-move + free-old at load factor 3/4 (the ruling's alloc-copy-free default,
+  plus a rehash). Drop frees each live key copy, drops each live value, then frees
+  the bucket buffer — alloc-on-drop propagates (a non-`alloc` function dropping a
+  `Map` is E0401), exactly like `Vec`. P6 untouched (std, not core); P9 satisfied.
 - **Deferred (on the ledger):** OBL-TEXT-CHARS (`Chars` view, `char_count`),
   the full formatting machinery over `append`, and any `Path`/`Cow`/interning std
   types — none in the text budget.
