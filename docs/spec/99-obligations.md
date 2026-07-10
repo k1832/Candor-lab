@@ -407,3 +407,13 @@ default stack; (6) at higher-order over borrows. What WORKED cleanly: reusing th
 by CONCATENATION (span_eq, emit_*), threading `(write P, [u8], read Buf)` through mutual recursion
 via automatic write-param reborrow, and a SPAN-FREE canonical S-expression as the differential
 target (excluding spans sidesteps span-arithmetic divergence and keeps the gate on tree SHAPE).
+
+## OBL-SELFHOST-ERGO friction #1 (source-threading) — RATIFIED as accepted cost, 2026-07-10
+
+Ruled by high-effort deliberation (docs/design/PROPOSAL-selfhost-ergonomics.md, Candidate C
+disposition): 0001 §3.4's no-borrow-fields rule stands; threading ambient read-only views through
+pass call-trees is the accepted essential cost of the value-first model (the region-parameterized
+alternative is the complexity Bet 5 traded away, and reopening it re-blinds the frozen Bet 5 valve
+accounting). Re-open trigger: a slice whose pass-context tuple grows to 4-5 threaded views on the
+majority of signatures. OBL-ITER-BORROW and OBL-TEXT-CHARS re-routed to region-free discharge
+paths; OBL-TEXT-RESULT left open as a separate smaller question.

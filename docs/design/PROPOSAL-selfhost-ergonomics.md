@@ -356,3 +356,40 @@ Delegated to the orchestrator with instruction to gather more evidence first.
   work to avoid source conflicts. std Vec's one open sub-question (a `realloc` vtable slot vs.
   alloc-copy-free growth) is resolved at build time, defaulting to alloc-copy-free unless the
   Alloc-vtable change proves cheap — it needs no authority call.
+
+## Candidate C — RULED (A), high-effort deliberation, 2026-07-10
+
+**Ruling: ratify 0001 §3.4 (no borrow fields). Source-threading is an accepted essential cost,
+not re-openable without new evidence of the named trigger shape below.** Decided by a high-effort
+deliberation (Fable-5, fresh context) the deciding authority authorized for this amendment-scale
+call; full argument in the review record. The decisive findings:
+
+- **The pressure case got WEAKER at 6.5× scale.** The parser slice records source-threading under
+  "what worked cleanly" (threaded via 0005's implicit reborrow), not among its seven frictions.
+  The reopen bar (a basket-grade case where the friction is the *dominant* reading cost or an
+  expressiveness *failure*) is met by neither: the friction is wide-but-shallow (2-3 uniform
+  tokens/signature, zero ambiguity, provenance made visible = P2/P13 value), and its single narrow
+  root is "one pass-context struct per program cannot hold its input." Every recursive data
+  structure (Tok, Node) chose spans and u32 arena indices with no complaint — the index-arena is
+  natural Candor style, and borrow fields would not fix the arena idiom anyway (a self-referential
+  tree can't be built from borrows).
+- **B is not containable.** Region-parameterized fields = the second borrow system minus only
+  higher-ranked regions: region params on type decls (spelled at every use per NN#17), variance,
+  outlives/subtyping (the `P` struct's own first use needs TWO provenances → conflation), a region
+  solver replacing 0001 §2.3's one-pass liveness (killing the P20 compile-speed foundation), a
+  dropck well via 0007, and re-blinding the frozen Bet 5 valve accounting — against the binding
+  v4.2 re-measurement commitment. P11 ("reject expressive growth by default") + priority order
+  (item 5 Simplicity over item 7 Ergonomics) resolves it.
+- **B's three-for-one bundle dissolves.** OBL-ITER-BORROW's own criterion is disjunctive (a
+  region-FREE borrowed-yield model suffices); OBL-TEXT-CHARS is dischargeable by a value-gear
+  decoder (next_char threading pos, the lexer's own idiom); the threading friction was already
+  cheaply absorbed by 0005. One-for-one at full price, the other two purchasable near-zero.
+
+**Named re-open trigger (the only thing that reopens this):** a future self-hosting slice (e.g.
+the checker: symbol table + source + tokens + AST) whose pass-context tuple grows to 4-5 threaded
+views on the *majority* of signatures. Today it is 2, and clean.
+
+**Consequential dispositions:** OBL-ITER-BORROW → route to its region-free branch. OBL-TEXT-CHARS
+→ value-gear decoder design. OBL-TEXT-RESULT (transient borrow-in-payload) → left OPEN as a
+separate, strictly-smaller question, NOT foreclosed by this ruling. OBL-SELFHOST-ERGO friction #1
+→ recorded as accepted essential cost.
