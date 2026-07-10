@@ -195,6 +195,23 @@ const CORPUS: &[(&str, Shape)] = &[
     ("match_bind_multi.cnr", Ret),
     ("enum_result_shape.cnr", Ret),
     ("enum_drop_payload.cnr", Ret),
+    // S5/S6 box/alloc/rawptr/statics/CallIndirect + pointer intrinsics (L5).
+    ("offsetof_first_field.cnr", Ret),
+    ("offsetof_nonzero_field.cnr", Ret),
+    ("ptr_roundtrip.cnr", Ret),
+    ("cast_ptr_read.cnr", Ret),
+    ("ptr_offset_stride.cnr", Ret),
+    ("high_addr_roundtrip.cnr", Ret),
+    ("page_boundary.cnr", Ret),
+    ("enum_padding_copy.cnr", Ret),
+    ("static_fnptr_indirect_call.cnr", Ret),
+    ("alloc_abi.cnr", Ret),
+    ("box_unbox_scalar.cnr", Ret),
+    ("box_struct.cnr", Ret),
+    ("unbox_path.cnr", Ret),
+    ("boxresult_oom.cnr", Ret),
+    ("box_drop_frees.cnr", Ret),
+    ("nested_box.cnr", Ret),
 ];
 
 fn read_fixture(rel: &str) -> String {
@@ -234,7 +251,7 @@ fn candor_lowering_execution_equal_to_oracle_over_scalar_subset() {
         }
         assert!(rets > 0 && faults > 0, "corpus must exercise both returns and faults");
         eprintln!(
-            "selfhost lower (L1+L2+L3+L4): {}/{} fixtures lower -> deserialize -> interp byte-exact vs oracle ({} returns, {} faults)",
+            "selfhost lower (L1-L5): {}/{} fixtures lower -> deserialize -> interp byte-exact vs oracle ({} returns, {} faults)",
             CORPUS.len(),
             CORPUS.len(),
             rets,

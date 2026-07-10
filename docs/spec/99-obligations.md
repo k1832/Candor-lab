@@ -1767,3 +1767,85 @@ S4 enum layout of `selfhost/interp/interp.cnr`. Plain user enums only — `BoxRe
 
 Additive: new S4 gate green in isolation (50/50 lower fixtures); full suite 589/589
 green (0 failing); clippy clean.
+
+## OBL-L5-BOX-RAWPTR — self-lowering, fifth slice: BOX/ALLOC ABI + rawptr/fnptr/statics/CallIndirect to MIR (2026-07-11)
+
+L5 extends `selfhost/lower/lower.cnr` from enums/`match` to the pointer + allocation
+surface: the rawptr/fnptr scalar operands and pointer intrinsics; top-level `static`
+items; a fn name used as a value + indirect (`CallIndirect`) calls; the BOX/ALLOCATOR
+ABI (`box`/`unbox`/`.*`-deref, the synthesized `BoxResult` enum) and alloc-on-drop.
+This is the last infrastructure slice before the L6 systems-corpus milestone. Ports
+`src/mir/build.rs`'s box/rawptr/static/indirect-call half; matches `src/mir/serial.rs`.
+
+- RAWPTR/FNPTR SCALARS: 8-byte wordy operands. `ty_size`/`ty_align`/`needs_drop`/
+  `is_copy` gain T_RAWPTR/T_FNPTR/T_BORROW(MUT) (8/8, no drop, copy), T_BOX (24/8,
+  drop, not copy), T_BOXRESULT (32/8, drop, not copy), T_SLICE(MUT) (16/8). Type
+  rendering (`pool_ty`/`emit_ty`) gains `(rawptr …)`, `(box …)`, `(boxresult …)`,
+  `(fnptr <alloc> <foreign> <ret> (params ((<mode> <ty>) …)))`, borrow/slice, and
+  the `(scalar unit)` fix. A new `is_wordy_tn` (scalar|rawptr|fnptr|borrow) routes
+  `lower_into` to `Store (use …)` for pointer-wordy locals as build.rs does.
+
+- POINTER INTRINSICS (byte-exact vs build.rs): `addr_of`/`addr_of_mut` → `Ref(place)`;
+  `ptr_read`/`ptr_write` → `Load`/`Store` through a `(deref <inner>)` place, marked
+  observable (INV-OBS-ORDER) iff the pointer is a rawptr; `cast_ptr`/`addr_to_ptr`/
+  `ptr_null` → a `Use` reinterpret into a `(rawptr T)` temp; `is_null` → `IsNull`;
+  `ptr_offset` → `PtrArith { base, index, stride = size_of(inner) }`; `ptr_to_addr`
+  → `Use`; `offsetof` → a `(const <field-offset> usize)` via the L2 layout table.
+  The pointee type + rawptr-ness of a pointer value are threaded on the result
+  (`res_pointee`/`res_israw`) so a non-place pointer arg (e.g. `cast_ptr[T](ctx)`)
+  resolves its pointee — the fix that unblocked the allocator's write-back.
+
+- STATICS: each `static NAME: T = value;` lowers to an `<init NAME>()` fn returning
+  the value into `_0` (emitted between drop hooks and user fns); a `(static "NAME"
+  <ty> "<init NAME>")` row joins the wire `statics` table; a static read is modeled
+  as `*(&STATIC)` — a `StaticAddr` temp + `Deref` place (`place_base_prep` pre-emits
+  the `staticaddr` assign before the consuming statement).
+
+- FN-PTR VALUES + CALLINDIRECT: a fn name as a value → `(const <id> u64)` where `id`
+  is its fn-pointer id, assigned in program order over drop hooks / static inits /
+  fns (`fn_ptr_id_of`, matching build.rs `reg`). The `fn_ptrs` table adds `<init …>`
+  entries in item order. An indirect call (callee a fn-ptr local) → `CallIndirect`
+  through the fn-pointer's declared param modes (`lower_args_fnptr`).
+
+- BOX/UNBOX/BOXRESULT (reusing L4's enum layout/ctor/match/drop): `box(alloc,v)` →
+  `alloc_addr_operand` (a `Ref` of the owned handle) + `materialize_place(v)` +
+  `BoxOp { dst, inner, result_ty, alloc, value }`. `unbox(b)` → `UnboxOp` + whole-b
+  move; `.*`/`bx.field` auto-deref a Box place (Box.ptr@0 ⇒ a plain `(deref …)`, so
+  no interp distinction needed). `BoxResult T` is the synthesized 2-variant enum
+  (boxed(Box T)@8 = 0, oom = 1): `lower_match_full` detects a `T_BOXRESULT` scrutinee
+  and binds `bx` as a move-bind of the Box at offset 8, marking `_0` moved. A Box
+  local (new `loc_box` flag: type = pointee node, renders `(box …)`, `drop_obligation`
+  = true) and a BoxResult local both carry drop obligations; the interp resolves the
+  `Drop` as pointee-then-free (alloc-on-drop) and enum-tag-routed BoxResult drop — the
+  lowering emits only the `Drop`, no memory model.
+
+- L4 DEFERRAL NOW IMPLEMENTED: value-producing `match` (`lower_match_dst` threads a
+  dst place; each arm body lowers via `lower_into` to it, matching build.rs). It is
+  not exercised by an L5 gate fixture (all box-matches bind a plain-local `BoxResult`
+  in statement position) but is wired for the L6 corpus. STILL DEFERRED: a non-plain-
+  local scrutinee (`match box(…)` / matching a call result — materialize to a temp
+  Place first); no gate fixture needs it and it is added when an L6 program requires
+  it.
+
+- GATE (`prototype/tests/selfhost_lower.rs`, 16 S5/S6 fixtures added): each runs
+  `lower.cnr` → wire → `deserialize` → `mir::interp::run` → byte-exact RET/TRACE/FAULT
+  vs `run_source_real`. PROVEN EXECUTION byte-exact on all 16 — offsetof_first_field,
+  offsetof_nonzero_field, ptr_roundtrip, cast_ptr_read, ptr_offset_stride,
+  high_addr_roundtrip, page_boundary, enum_padding_copy, static_fnptr_indirect_call,
+  alloc_abi, box_unbox_scalar, box_struct, unbox_path, boxresult_oom, box_drop_frees,
+  nested_box. All 50 prior L1–L4 fixtures remain byte-exact (66 total).
+
+- FINDING (extends OBL-L4-ENUM-MATCH, benign): 12/16 fixtures are 0 structural diffs
+  vs `serialize(mir::build …)`; the emitted rawptr/box/fnptr/static/CallIndirect ops,
+  the BoxOp/UnboxOp shapes, the fn-ptr-id constants, the `fn_ptrs`/`statics` tables,
+  and every box/boxresult local's `drop_obligation` are byte-identical. The ONLY wire
+  diffs are the SAME inert span-only differences (self-host parser records name-only/
+  glued spans) PLUS, in 4 box/enum fixtures, the span on the UNREACHABLE
+  non-exhaustive-`match` `(fedge panic …)` terminator (build.rs threads its `cur_span`;
+  the lowering uses the match node span). That terminator is dead code for every
+  exhaustive fixture — never delivered — so RET/TRACE/FAULT stay byte-exact. No box,
+  rawptr, static, fn-ptr, CallIndirect, or alloc-on-drop op/wire gap was found; the L6
+  systems corpus (11_1..11_5) is now unblocked.
+
+Additive: new S5/S6 gate green in isolation (66/66 lower fixtures); full suite 589/589
+green (0 failing); clippy clean.
