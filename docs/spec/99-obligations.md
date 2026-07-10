@@ -581,6 +581,29 @@ not span retention):
   the MaybeInit-at-drop condition is never computed. Deferred until the analysis gains drop-point
   modeling.
 
+### Fixpoint gate — the checker checks the LEXER's own source clean (first self-check sub-goal, 2026-07-10)
+
+First end-to-end turn of the self-check loop on real self-host source: the self-hosted checker
+(`selfhost/checker/checker.cnr`, E0102 unknown-type / E0103 unknown-value) run OVER
+`selfhost/lexer/lexer.cnr` itself emits an EMPTY covered-diagnostic set — byte-equal to the Rust
+oracle, which also emits nothing on this valid source. `lexer.cnr` is the right first target: a LEAF
+module (no `use`, no `Vec`), so every name it uses is locally declared and no builtin is missing —
+the checker resolves it CLEAN on the first try, with no false positive to fix. Gate added to
+`prototype/tests/selfhost_checker.rs` (`candor_checker_checks_lexer_source_clean_fixpoint`), reusing
+the slice-3 module-tree harness; a negative smoke (a param of an unknown type appended to the source)
+is asserted to be flagged E0102, so the clean assertion is non-vacuous.
+
+The one real blocker was ARENA CAPACITY: the fixed self-host arenas were sized for tiny fixtures, not
+a 434-line file. Measured need for `lexer.cnr`: 3690 tokens, 2389 parser nodes. Both `Buf.toks`
+(`lexer.cnr`) and `P.nodes` (`parser.cnr`) grown 1024/2048 -> **4096** (next power-of-two above the
+3690-token max; node arena gets ample margin). The arena model is UNCHANGED ([N]Node, u32 edges,
+region-free view threading). Every coupled site moved together to keep the type-level array sizes
+consistent: the `Buf.toks`/`P.nodes` struct fields, the three `[nnew(0); 4096]` P-literals
+(parser/checker/analyses `*.cnr`), and the six harness-generated `main.cnr` Buf-literals
+(selfhost_{lexer,parser,checker,analyses,effects,loans}.rs). All prior selfhost oracle gates stay
+byte-exact green under the larger arenas. Gate runtime ~6.5s (two tree-walk lex+parse+check passes
+over the 434-line file); the Map/symbol-table perf enabler remains the known lever if this grows.
+
 ## OBL-ITER-BORROW — DISCHARGED via the region-free path, 2026-07-10
 
 The candidate-C ruling re-routed this to its region-free branch; that branch WORKED, vindicating

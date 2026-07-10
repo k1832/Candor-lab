@@ -66,7 +66,7 @@ fn candor_main(src: &str) -> String {
         m.push_str(&format!("{b}u8"));
     }
     m.push_str("];\n");
-    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 1024], n: 0usize };\n");
+    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 4096], n: 0usize };\n");
     m.push_str("    let cnt: usize = lex(slice_of(src), write buf);\n");
     m.push_str("    check_dump(slice_of(src), read buf);\n");
     m.push_str("    return conv i64 cnt;\n}\n");
@@ -141,6 +141,35 @@ fn candor_checker_diagnostics_equal_to_oracle_over_corpus() {
             passed,
             CORPUS.len(),
             total_diags
+        );
+    });
+}
+
+/// FIXPOINT GATE (first self-checking sub-goal): run the self-hosted checker over
+/// the self-hosted LEXER's own source and assert its covered-diagnostic set
+/// (E0102/E0103) is EMPTY — byte-equal to the Rust oracle, which also emits
+/// nothing on this valid source (so both sides are the empty set by construction).
+/// This proves the self-check loop end-to-end on real self-host source.
+#[test]
+fn candor_checker_checks_lexer_source_clean_fixpoint() {
+    on_big_stack(|| {
+        // Teeth: a deliberately-broken variant (a param of an unknown type) MUST be
+        // flagged E0102, so the clean assertion below cannot pass vacuously.
+        let broken = format!("{LEXER_SRC}\nfn zz_smoke(x: Nonexistent) -> unit {{ return; }}\n");
+        let broken_dump = candor_dump(&broken);
+        assert!(
+            broken_dump.contains("E0102"),
+            "negative smoke: broken lexer source must be flagged E0102, got {broken_dump:?}"
+        );
+
+        // Clean: the real lexer.cnr checks clean over the covered families, byte-equal
+        // to the oracle (empty set on this valid source).
+        let oracle = oracle_dump(LEXER_SRC);
+        let mine = candor_dump(LEXER_SRC);
+        assert_eq!(mine, oracle, "self-host checker diverged from oracle on lexer.cnr");
+        assert!(
+            mine.is_empty(),
+            "self-host checker emitted covered diagnostics on clean lexer.cnr: {mine:?}"
         );
     });
 }

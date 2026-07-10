@@ -76,7 +76,7 @@ fn candor_main(src: &str) -> String {
         m.push_str(&format!("{b}u8"));
     }
     m.push_str("];\n");
-    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 1024], n: 0usize };\n");
+    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 4096], n: 0usize };\n");
     m.push_str("    let cnt: usize = lex(slice_of(src), write buf);\n");
     m.push_str("    analyze_dump(slice_of(src), read buf);\n");
     m.push_str("    return conv i64 cnt;\n}\n");
