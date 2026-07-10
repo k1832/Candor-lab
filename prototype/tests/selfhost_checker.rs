@@ -1,6 +1,6 @@
 //! The oracle gate for the THIRD self-hosted slice: a Candor TYPE-CHECKER core
-//! (`selfhost/checker/checker.cnr`, composed after `selfhost/lexer/lexer.cnr` and
-//! `selfhost/parser/parser.cnr`) is run on the tree-walker over each corpus
+//! (`selfhost/checker/checker.cnr`, loaded as a module tree with the `lexer` and
+//! `parser` modules) is run on the tree-walker over each corpus
 //! fixture. Its canonical diagnostic dump (one `E010X START END` line per
 //! diagnostic, sorted by (code,start,end)) is asserted byte-equal to the Rust
 //! oracle checker's diagnostics for the SAME source, FILTERED to the code
@@ -11,12 +11,17 @@
 //! checkers over the covered subset. Value-type-level codes whose oracle span is
 //! a COMPOSITE expression range (E0703/E0706/E0107/E0108/E0605/E0709) are OUT OF
 //! SUBSET this slice: the span-lean slice-2 arena does not carry those spans.
-//! Harness shape reuses slice 2: embed the fixture source as a `[N]u8` literal,
-//! lex via lexer.cnr, parse+check+dump via checker.cnr, reconstruct the dump
-//! from `Run.trace`, compare to the filtered+sorted oracle rendering.
+//! Harness shape reuses slice 2: a generated root `main.cnr` `use`s the
+//! `lexer`/`parser`/`checker` modules, embeds the fixture source as a `[N]u8`
+//! literal, lexes then parse+check+dumps; the tree is loaded with `run_dir`
+//! (dogfooding the module system) and the dump reconstructed from `Run.trace`,
+//! compared to the filtered+sorted oracle rendering.
 
 use candor_proto::check_source_real;
-use candor_proto::{run_source_real, RunResult};
+use candor_proto::RunResult;
+
+mod selfhost_modtree;
+use selfhost_modtree::{run_module_tree, trace_text};
 
 const LEXER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/lexer/lexer.cnr"));
@@ -46,36 +51,37 @@ fn oracle_dump(src: &str) -> String {
     s
 }
 
-fn candor_program(src: &str) -> String {
+/// Generate the root `main.cnr`: it `use`s the lexer module's `Buf`/`mk`/`lex`
+/// and the checker module's `check_dump`, embeds `src`, lexes then check-dumps it.
+fn candor_main(src: &str) -> String {
     let bytes = src.as_bytes();
-    let mut prog = String::from(LEXER_SRC);
-    prog.push('\n');
-    prog.push_str(PARSER_SRC);
-    prog.push('\n');
-    prog.push_str(CHECKER_SRC);
-    prog.push_str("\nfn main() -> i64 {\n");
-    prog.push_str(&format!("    let src: [{}]u8 = [", bytes.len()));
+    let mut m = String::from(
+        "use lexer::{Buf, mk, lex};\nuse checker::{check_dump};\n\nfn main() -> i64 {\n",
+    );
+    m.push_str(&format!("    let src: [{}]u8 = [", bytes.len()));
     for (i, b) in bytes.iter().enumerate() {
         if i > 0 {
-            prog.push_str(", ");
+            m.push_str(", ");
         }
-        prog.push_str(&format!("{b}u8"));
+        m.push_str(&format!("{b}u8"));
     }
-    prog.push_str("];\n");
-    prog.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 1024], n: 0usize };\n");
-    prog.push_str("    let cnt: usize = lex(slice_of(src), write buf);\n");
-    prog.push_str("    check_dump(slice_of(src), read buf);\n");
-    prog.push_str("    return conv i64 cnt;\n}\n");
-    prog
+    m.push_str("];\n");
+    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 1024], n: 0usize };\n");
+    m.push_str("    let cnt: usize = lex(slice_of(src), write buf);\n");
+    m.push_str("    check_dump(slice_of(src), read buf);\n");
+    m.push_str("    return conv i64 cnt;\n}\n");
+    m
 }
 
 fn candor_dump(src: &str) -> String {
-    let prog = candor_program(src);
-    match run_source_real(&prog) {
-        RunResult::Ok(run) => {
-            let bytes: Vec<u8> = run.trace.iter().map(|&v| v as u8).collect();
-            String::from_utf8(bytes).expect("dump is ASCII")
-        }
+    let main = candor_main(src);
+    let modules = [
+        ("lexer.cnr", LEXER_SRC),
+        ("parser.cnr", PARSER_SRC),
+        ("checker.cnr", CHECKER_SRC),
+    ];
+    match run_module_tree(&modules, &main) {
+        RunResult::Ok(run) => trace_text(&run),
         RunResult::Fault(f) => panic!("candor checker faulted: {}", f.to_json()),
         RunResult::CheckErrors(d) => panic!(
             "candor checker (the .cnr program) has check errors: {:?}",

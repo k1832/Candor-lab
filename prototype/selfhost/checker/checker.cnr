@@ -4,10 +4,11 @@
 // checker (`prototype/src/check/`, `resolve.rs`) over a corpus, filtered to the
 // code families this slice covers. Spec: docs/spec/03-types-and-values.md.
 //
-// This file is a LIBRARY, always CONCATENATED AFTER lexer.cnr + parser.cnr (the
-// harness in prototype/tests/selfhost_checker.rs composes lexer + parser + checker
-// + a generated `main`). It REUSES the lexer's `span_eq`, `emit_num`, `emit_sp`,
-// `trace` sink and the parser's `Node`/`P` arena and the `T_*` tag statics; it
+// This file is a LIBRARY module, composed with the `lexer` and `parser` modules
+// (the harness in prototype/tests/selfhost_checker.rs builds a module tree of
+// lexer + parser + checker + a generated root `main`). It IMPORTS the lexer's
+// `span_eq`/`emit_*` helpers and the parser's `Node`/`P` arena and `T_*` tag
+// statics via the `use` decls below (the built-in `trace` sink stays global); it
 // does NOT redefine them.
 //
 // COVERED CODE FAMILIES (the sound core this slice proves against the oracle):
@@ -24,6 +25,9 @@
 // `src` cannot live in a struct field (0001 3.4 / the ratified friction #1), and
 // the arena `P` and checker state `C` are distinct objects, so three threaded
 // views is the irreducible context for a checker over a borrow-view source.
+
+use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl};
+use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_STRUCT, T_ENUM, T_STATIC, T_NAMED, T_APP, T_ARRAY, T_SLICE, T_SLICEMUT, T_RAWPTR, T_BOX, T_BOXRESULT, T_BORROW, T_BORROWMUT, T_FNPTR, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_STR, T_BYTES, T_BOOL, T_ID, T_UNARY, T_PREFIX, T_BIN, T_CALL, T_OUT, T_FIELD, T_INDEX, T_CONV, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, T_ENUMCTOR, T_BLOCK, T_IF, T_MATCH, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_RESULT, T_PAREN, T_TRY, T_UNSAFE, T_WRAPPING, T_SATURATING, T_SIZEOF, T_ALIGNOF, T_OFFSETOF, T_FIELDPTR, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_BIND, T_PVARIANT};
 
 // ---- checker state ----------------------------------------------------------
 struct C {
@@ -522,7 +526,7 @@ fn dump_diags(c: write C) -> unit {
 }
 
 // ---- entry ------------------------------------------------------------------
-fn check_dump(src: [u8], buf: read Buf) -> unit {
+pub fn check_dump(src: [u8], buf: read Buf) -> unit {
     let mut p: P = P { nodes: [nnew(0); 2048], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32 };
     let head: u32 = parse_program(write p, src, buf);
     let mut c: C = C {

@@ -4,10 +4,11 @@
 // S-expression equality against the Rust oracle (`prototype/src/real/parser.rs`
 // via `ast.rs`). Spec: docs/spec/02-grammar.md.
 //
-// This file is a LIBRARY, always CONCATENATED AFTER lexer.cnr (the harness in
-// prototype/tests/selfhost_parser.rs composes lexer + parser + a generated
-// `main`). It REUSES lexer.cnr's `Tok`, `Buf`, `span_eq`, and the `emit_*`/
-// `trace` dump sink; it does NOT redefine them.
+// This file is a LIBRARY module, composed with the `lexer` module (the harness
+// in prototype/tests/selfhost_parser.rs builds a module tree of lexer + parser +
+// a generated root `main`). It IMPORTS lexer's `Tok`, `Buf`, `span_eq`, and the
+// `emit_*` `trace` dump helpers via the `use` below; it does NOT redefine them
+// (the built-in `trace` sink stays global).
 //
 // AST REPRESENTATION (the arena-basket idiom, no Box recursion): every AST node
 // is one `Node` (a tag + operator/flags + child INDICES + an optional source
@@ -25,8 +26,10 @@
 // form by design; the differential target is the tree SHAPE, which both parsers
 // must agree on). See the schema in the harness's oracle renderer.
 
+use lexer::{Tok, Buf, span_eq, emit_num, emit_sp, emit_nl, emit_bytes, emit_decoded, decoded_len};
+
 // ---- node arena -------------------------------------------------------------
-copy struct Node {
+pub copy struct Node {
     tag: i32,
     op: i32,
     a: u32,
@@ -41,7 +44,7 @@ copy struct Node {
     p1: usize,
 }
 
-struct P {
+pub struct P {
     nodes: [2048]Node,
     n: u32,
     pos: usize,
@@ -53,108 +56,108 @@ struct P {
     mty: u32,
 }
 
-static T_FN: i32 = 1;
-static T_STRUCT: i32 = 2;
-static T_ENUM: i32 = 3;
-static T_STATIC: i32 = 4;
-static T_SC: i32 = 10;
-static T_NAMED: i32 = 11;
-static T_APP: i32 = 12;
-static T_PROJ: i32 = 13;
-static T_ARRAY: i32 = 14;
-static T_SLICE: i32 = 15;
-static T_SLICEMUT: i32 = 16;
-static T_RAWPTR: i32 = 17;
-static T_BOX: i32 = 18;
-static T_BOXRESULT: i32 = 19;
-static T_BORROW: i32 = 20;
-static T_BORROWMUT: i32 = 21;
-static T_FNPTR: i32 = 22;
-static T_LET: i32 = 30;
-static T_ASSIGN: i32 = 31;
-static T_INT: i32 = 40;
-static T_NEGINT: i32 = 41;
-static T_STR: i32 = 42;
-static T_BYTES: i32 = 43;
-static T_BOOL: i32 = 44;
-static T_ID: i32 = 45;
-static T_UNARY: i32 = 46;
-static T_PREFIX: i32 = 47;
-static T_BIN: i32 = 48;
-static T_CALL: i32 = 49;
-static T_OUT: i32 = 50;
-static T_FIELD: i32 = 51;
-static T_INDEX: i32 = 52;
-static T_CONV: i32 = 53;
-static T_ARRAYLIT: i32 = 54;
-static T_ARRAYREP: i32 = 55;
-static T_STRUCTLIT: i32 = 56;
-static T_ENUMCTOR: i32 = 57;
-static T_BLOCK: i32 = 58;
-static T_IF: i32 = 59;
-static T_MATCH: i32 = 60;
-static T_LOOP: i32 = 61;
-static T_WHILE: i32 = 62;
-static T_RETURN: i32 = 63;
-static T_BREAK: i32 = 64;
-static T_CONTINUE: i32 = 65;
-static T_ASSERT: i32 = 66;
-static T_PANIC: i32 = 67;
-static T_RESULT: i32 = 68;
-static T_PAREN: i32 = 69;
-static T_TRY: i32 = 70;
-static T_GENERICVAL: i32 = 71;
-static T_UNSAFE: i32 = 72;
-static T_WRAPPING: i32 = 73;
-static T_SATURATING: i32 = 74;
-static T_FOR: i32 = 75;
-static T_SIZEOF: i32 = 76;
-static T_ALIGNOF: i32 = 77;
-static T_OFFSETOF: i32 = 78;
-static T_FIELDPTR: i32 = 79;
-static T_CASTPTR: i32 = 80;
-static T_ADDRTOPTR: i32 = 81;
-static T_PTRNULL: i32 = 82;
-static T_WILD: i32 = 90;
-static T_BIND: i32 = 91;
-static T_PVARIANT: i32 = 92;
-static T_PARAM: i32 = 100;
-static T_SFIELD: i32 = 101;
-static T_VARIANT: i32 = 102;
-static T_ARM: i32 = 103;
-static T_FINIT: i32 = 104;
-static T_TPARAM: i32 = 105;
-static T_FPPARAM: i32 = 106;
-static T_NAME: i32 = 107;
-static T_RET: i32 = 111;
+pub static T_FN: i32 = 1;
+pub static T_STRUCT: i32 = 2;
+pub static T_ENUM: i32 = 3;
+pub static T_STATIC: i32 = 4;
+pub static T_SC: i32 = 10;
+pub static T_NAMED: i32 = 11;
+pub static T_APP: i32 = 12;
+pub static T_PROJ: i32 = 13;
+pub static T_ARRAY: i32 = 14;
+pub static T_SLICE: i32 = 15;
+pub static T_SLICEMUT: i32 = 16;
+pub static T_RAWPTR: i32 = 17;
+pub static T_BOX: i32 = 18;
+pub static T_BOXRESULT: i32 = 19;
+pub static T_BORROW: i32 = 20;
+pub static T_BORROWMUT: i32 = 21;
+pub static T_FNPTR: i32 = 22;
+pub static T_LET: i32 = 30;
+pub static T_ASSIGN: i32 = 31;
+pub static T_INT: i32 = 40;
+pub static T_NEGINT: i32 = 41;
+pub static T_STR: i32 = 42;
+pub static T_BYTES: i32 = 43;
+pub static T_BOOL: i32 = 44;
+pub static T_ID: i32 = 45;
+pub static T_UNARY: i32 = 46;
+pub static T_PREFIX: i32 = 47;
+pub static T_BIN: i32 = 48;
+pub static T_CALL: i32 = 49;
+pub static T_OUT: i32 = 50;
+pub static T_FIELD: i32 = 51;
+pub static T_INDEX: i32 = 52;
+pub static T_CONV: i32 = 53;
+pub static T_ARRAYLIT: i32 = 54;
+pub static T_ARRAYREP: i32 = 55;
+pub static T_STRUCTLIT: i32 = 56;
+pub static T_ENUMCTOR: i32 = 57;
+pub static T_BLOCK: i32 = 58;
+pub static T_IF: i32 = 59;
+pub static T_MATCH: i32 = 60;
+pub static T_LOOP: i32 = 61;
+pub static T_WHILE: i32 = 62;
+pub static T_RETURN: i32 = 63;
+pub static T_BREAK: i32 = 64;
+pub static T_CONTINUE: i32 = 65;
+pub static T_ASSERT: i32 = 66;
+pub static T_PANIC: i32 = 67;
+pub static T_RESULT: i32 = 68;
+pub static T_PAREN: i32 = 69;
+pub static T_TRY: i32 = 70;
+pub static T_GENERICVAL: i32 = 71;
+pub static T_UNSAFE: i32 = 72;
+pub static T_WRAPPING: i32 = 73;
+pub static T_SATURATING: i32 = 74;
+pub static T_FOR: i32 = 75;
+pub static T_SIZEOF: i32 = 76;
+pub static T_ALIGNOF: i32 = 77;
+pub static T_OFFSETOF: i32 = 78;
+pub static T_FIELDPTR: i32 = 79;
+pub static T_CASTPTR: i32 = 80;
+pub static T_ADDRTOPTR: i32 = 81;
+pub static T_PTRNULL: i32 = 82;
+pub static T_WILD: i32 = 90;
+pub static T_BIND: i32 = 91;
+pub static T_PVARIANT: i32 = 92;
+pub static T_PARAM: i32 = 100;
+pub static T_SFIELD: i32 = 101;
+pub static T_VARIANT: i32 = 102;
+pub static T_ARM: i32 = 103;
+pub static T_FINIT: i32 = 104;
+pub static T_TPARAM: i32 = 105;
+pub static T_FPPARAM: i32 = 106;
+pub static T_NAME: i32 = 107;
+pub static T_RET: i32 = 111;
 
-static OP_ADD: i32 = 1;
-static OP_SUB: i32 = 2;
-static OP_MUL: i32 = 3;
-static OP_DIV: i32 = 4;
-static OP_REM: i32 = 5;
-static OP_EQ: i32 = 6;
-static OP_NE: i32 = 7;
-static OP_LT: i32 = 8;
-static OP_LE: i32 = 9;
-static OP_GT: i32 = 10;
-static OP_GE: i32 = 11;
-static OP_AND: i32 = 12;
-static OP_OR: i32 = 13;
-static OP_BITAND: i32 = 14;
-static OP_BITOR: i32 = 15;
-static OP_BITXOR: i32 = 16;
-static OP_SHL: i32 = 17;
-static OP_SHR: i32 = 18;
-static UN_NEG: i32 = 1;
-static UN_NOT: i32 = 2;
-static UN_BITNOT: i32 = 3;
-static PF_DEREF: i32 = 1;
-static PF_READ: i32 = 2;
-static PF_WRITE: i32 = 3;
-static PF_CLONE: i32 = 4;
+pub static OP_ADD: i32 = 1;
+pub static OP_SUB: i32 = 2;
+pub static OP_MUL: i32 = 3;
+pub static OP_DIV: i32 = 4;
+pub static OP_REM: i32 = 5;
+pub static OP_EQ: i32 = 6;
+pub static OP_NE: i32 = 7;
+pub static OP_LT: i32 = 8;
+pub static OP_LE: i32 = 9;
+pub static OP_GT: i32 = 10;
+pub static OP_GE: i32 = 11;
+pub static OP_AND: i32 = 12;
+pub static OP_OR: i32 = 13;
+pub static OP_BITAND: i32 = 14;
+pub static OP_BITOR: i32 = 15;
+pub static OP_BITXOR: i32 = 16;
+pub static OP_SHL: i32 = 17;
+pub static OP_SHR: i32 = 18;
+pub static UN_NEG: i32 = 1;
+pub static UN_NOT: i32 = 2;
+pub static UN_BITNOT: i32 = 3;
+pub static PF_DEREF: i32 = 1;
+pub static PF_READ: i32 = 2;
+pub static PF_WRITE: i32 = 3;
+pub static PF_CLONE: i32 = 4;
 
-fn nnew(tag: i32) -> Node {
+pub fn nnew(tag: i32) -> Node {
     return Node { tag: tag, op: 0, a: 0u32, b: 0u32, c: 0u32, d: 0u32, e: 0u32, nx: 0u32, ival: 0u64, suf: 0, p0: 0usize, p1: 0usize };
 }
 fn push_node(p: write P, nd: Node) -> u32 {
@@ -1962,7 +1965,7 @@ fn parse_item(p: write P, src: [u8], buf: read Buf) -> u32 {
 }
 
 // Parse the whole program: returns the head of the item chain (via nx).
-fn parse_program(p: write P, src: [u8], buf: read Buf) -> u32 {
+pub fn parse_program(p: write P, src: [u8], buf: read Buf) -> u32 {
     let mut head: u32 = 0u32;
     let mut tail: u32 = 0u32;
     loop {
@@ -1983,7 +1986,7 @@ fn parse_program(p: write P, src: [u8], buf: read Buf) -> u32 {
 }
 
 // ---- canonical S-expression dump (bytes through `trace`) --------------------
-fn emit_lit(s: [u8]) -> unit {
+pub fn emit_lit(s: [u8]) -> unit {
     let mut i: usize = 0usize;
     while i < len(s) {
         trace(conv i64 s[i]);
@@ -2820,7 +2823,7 @@ fn emit_regions_inline(p: write P, src: [u8], head: u32) -> unit {
     return;
 }
 
-fn parse_dump(src: [u8], buf: read Buf) -> unit {
+pub fn parse_dump(src: [u8], buf: read Buf) -> unit {
     let mut p: P = P { nodes: [nnew(0); 2048], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32 };
     let head: u32 = parse_program(write p, src, buf);
     emit_lit(b"(program");

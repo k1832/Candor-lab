@@ -569,3 +569,61 @@ guarantee); a str_from_unchecked forgery yields wrong values, never UB. Tree-wal
 (str ops are oracle-only per the text stage). Both features candidate C would have unlocked
 (borrowed iteration, char iteration) are now proven buildable WITHOUT region-parameterized types -
 the ruling vindicated constructively, twice.
+
+
+## OBL-SELFHOST-MOD — self-host module-tree split (step 2 of self-checking self-hosting, 2026-07-10)
+
+Modularizing the self-host compiler — the one substantial Candor program that did not exercise
+modules — into a real `use`/`pub` tree loaded by the stage-1 module system (design 0008) DOGFOODED
+that system and surfaced its ergonomic edges. The oracle gates stayed byte-exact (573 green): a
+pure source-organization refactor. lexer / parser / checker now load as a module tree (the harness
+materializes flat `lexer.cnr` + `parser.cnr` + `checker.cnr` + a generated root `main.cnr` and runs
+it via `run_dir`); analyses / loans / effects are DEFERRED by the hard blocker below.
+
+What WORKED — the shared-type graph crosses module boundaries cleanly via NAMED imports:
+`pub struct Tok`/`Buf` (lexer) and `pub struct Node`/`P` (parser) are `use`d and used as TYPES in
+type position (params, fields, array elems, borrows) — the loader's rewriter qualifies `Named`/
+`App`/`Proj`/`Array`/`Borrow` type nodes; `pub fn` cross-module calls resolve as values; the
+`pub static` T_* / PF_* AST-tag vocabulary crosses as value idents. The merge (every non-root item
+mangled to `module::name`) is output-invariant, and name clashes that the flat concatenation had to
+avoid (checker's and analyses' duplicate `name_eq`/`loc_push`/…) become NON-issues under mangling.
+
+Frictions found (module ergonomics):
+
+(1) **No glob import (`use m::*`) and no `pub use` re-export (design 0008 §6, stage-1 deferred) force
+every cross-module name to be enumerated by hand.** checker's `use parser::{…}` lists 65 names and
+analyses' 66 — almost entirely the ~60-entry `T_*` tag vocabulary the consumers read off the arena.
+A facade/prelude module that re-exports the tag set is impossible without `pub use`; a glob would
+collapse each list to one line. This is the dominant verbosity tax of the split.
+
+(2) **file=module / directory=namespace maps `selfhost/lexer/lexer.cnr` to the module `lexer::lexer`,
+not `lexer`.** Clean single-segment module names (`lexer`, `parser`) require FLAT files in one
+directory, and the `foo.cnr`-beside-`foo/`-directory body merge is stage-1-deferred, so the harness
+copies the sources FLAT into a per-fixture temp dir (with the generated `main.cnr`) rather than
+pointing the loader at the existing nested `selfhost/*/` layout.
+
+(3) **The entry convention (`fn main` must live in the root `main.cnr`) means the modular self-host
+source is not a standalone checkable tree** — it is a LIBRARY tree with no root, so it is loadable
+only with a driver `main.cnr` supplied (here, per-fixture, embedding the corpus source as a `[N]u8`
+literal). `check_dir` on the library alone reports E0905.
+
+### OBL-SELFHOST-MOD-F1 — the checker's builtin-`Alloc` name test breaks under module qualification (BLOCKER; compiler-work item)
+
+`src/check/expr.rs` types the allocator-explicit builtins `vec_new` / `string_new` / `map_new` by
+requiring their argument to be `Type::Named(n) if n == "Alloc"` — a LITERAL name test. The module
+loader qualifies a user-defined `struct Alloc` to `analyses::Alloc`, so the checker rejects it with
+E0703 ("`vec_new` expects `read Alloc`, found `borrow analyses::Alloc`") — five times for the
+analyses slice's Vec-backed diagnostic buffer — BEFORE the interpreter runs. The interpreter side
+(`src/interp/eval.rs`) ALREADY identifies the `Alloc`/`AllocVtable` structs STRUCTURALLY (its own
+"finding F1", added precisely so box/unbox survive module-qualified names), but that fix was never
+applied to the checker. So this is NOT a module-system type-graph limit — the shared-type graph
+crosses fine — but a compiler incompleteness: finding-F1 was discharged in the interpreter and left
+open in the checker. Consequence: any module tree that both defines its own `struct Alloc` and calls
+`vec_new`/`string_new`/`map_new` cannot load, which blocks the analyses (move/init + loans) and
+effects slices (all three share the Vec-based diagnostic buffer). Per this pass's scope the blocker
+is REPORTED, not patched. Fix (a compiler-work item): identify the allocator handle structurally in
+the checker (mirror `eval.rs`'s `alloc_struct` detection), or peel the module qualification before
+the name test, so the arg-type check accepts the qualified `Alloc`. Until then the deferred harnesses
+keep concatenating lexer + parser + analyses into one single-file program (output-invariant: `pub`
+and `use` are inert contextual keywords under single-file parse, so the shared lexer/parser sources —
+now `pub`/`use`-annotated for the modular slices — concatenate unchanged).

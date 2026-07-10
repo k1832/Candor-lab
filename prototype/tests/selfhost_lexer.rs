@@ -5,15 +5,20 @@
 //! this gate is token-stream EQUALITY between the two lexers.
 //!
 //! Harness interface (documented in the .cnr header): the Candor lexer is a
-//! library (`lex` + `dump`); this harness appends a generated `fn main` that
-//! embeds the fixture's source bytes as a `[N]u8` literal, calls `lex` into a
-//! fixed `Buf`, and calls `dump`, which emits each output BYTE of the canonical
-//! text through the built-in `trace` sink. We reconstruct the text from
-//! `Run.trace` and compare it to the oracle's byte-identical rendering.
+//! library module (`lex` + `dump`); this harness loads it as a module tree with
+//! a generated root `main.cnr` that `use`s the lexer, embeds the fixture's source
+//! bytes as a `[N]u8` literal, calls `lex` into a fixed `Buf`, and calls `dump`,
+//! which emits each output BYTE of the canonical text through the built-in
+//! `trace` sink. We reconstruct the text from `Run.trace` and compare it to the
+//! oracle's byte-identical rendering. Loading (via `run_dir`) dogfoods the
+//! stage-1 module system (design 0008) instead of string-concatenating sources.
 
 use candor_proto::real::token::{RTok, RToken};
 use candor_proto::token::ScalarTy;
-use candor_proto::{run_source_real, RunResult};
+use candor_proto::RunResult;
+
+mod selfhost_modtree;
+use selfhost_modtree::{run_module_tree, trace_text};
 
 const LEXER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/lexer/lexer.cnr"));
@@ -122,35 +127,32 @@ fn oracle_dump(src: &str) -> String {
     out
 }
 
-/// Build the runnable Candor program: the lexer library + a generated `main`
-/// that embeds `src` as a byte-array literal, lexes it, and dumps the stream.
-fn candor_program(src: &str) -> String {
+/// Generate the root `main.cnr`: it `use`s the lexer module's `Buf`/`mk`/`lex`/
+/// `dump`, embeds `src` as a byte-array literal, lexes it, and dumps the stream.
+fn candor_main(src: &str) -> String {
     let bytes = src.as_bytes();
-    let mut prog = String::from(LEXER_SRC);
-    prog.push_str("\nfn main() -> i64 {\n");
-    prog.push_str(&format!("    let src: [{}]u8 = [", bytes.len()));
+    let mut m = String::from("use lexer::{Buf, mk, lex, dump};\n\nfn main() -> i64 {\n");
+    m.push_str(&format!("    let src: [{}]u8 = [", bytes.len()));
     for (i, b) in bytes.iter().enumerate() {
         if i > 0 {
-            prog.push_str(", ");
+            m.push_str(", ");
         }
-        prog.push_str(&format!("{b}u8"));
+        m.push_str(&format!("{b}u8"));
     }
-    prog.push_str("];\n");
-    prog.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 1024], n: 0usize };\n");
-    prog.push_str("    let cnt: usize = lex(slice_of(src), write buf);\n");
-    prog.push_str("    dump(slice_of(src), read buf);\n");
-    prog.push_str("    return conv i64 cnt;\n}\n");
-    prog
+    m.push_str("];\n");
+    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 1024], n: 0usize };\n");
+    m.push_str("    let cnt: usize = lex(slice_of(src), write buf);\n");
+    m.push_str("    dump(slice_of(src), read buf);\n");
+    m.push_str("    return conv i64 cnt;\n}\n");
+    m
 }
 
-/// Run the Candor lexer on `src`, returning the reconstructed canonical dump.
+/// Run the Candor lexer on `src` as a `lexer` + `main` module tree, returning the
+/// reconstructed canonical dump.
 fn candor_dump(src: &str) -> String {
-    let prog = candor_program(src);
-    match run_source_real(&prog) {
-        RunResult::Ok(run) => {
-            let bytes: Vec<u8> = run.trace.iter().map(|&v| v as u8).collect();
-            String::from_utf8(bytes).expect("dump is ASCII")
-        }
+    let main = candor_main(src);
+    match run_module_tree(&[("lexer.cnr", LEXER_SRC)], &main) {
+        RunResult::Ok(run) => trace_text(&run),
         RunResult::Fault(f) => panic!("candor lexer faulted: {}", f.to_json()),
         RunResult::CheckErrors(d) => panic!(
             "candor lexer check errors: {:?}",

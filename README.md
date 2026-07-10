@@ -107,7 +107,9 @@ docs/
 prototype/           the compiler: lexer, parser, checker, MIR, Cranelift backend,
                      AOT/freestanding emission, incremental build, formatter, migrator
 prototype/selfhost/  Candor compiling itself — lexer/parser/checker/analyses in .cnr,
-                     each oracle-gated against the Rust reference
+                     each oracle-gated against the Rust reference. lexer/parser/checker
+                     load as a `use`/`pub` module tree (dogfooding stage-1 modules);
+                     analyses stays concatenated (deferred: OBL-SELFHOST-MOD-F1)
 dist/                the extractable 0.x distribution surface (README, tour, examples)
 baselines/rust/      the five idiomatic Rust baselines (frozen)
 ports/candor/        the five Candor ports (development history public as it happens)

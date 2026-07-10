@@ -13,6 +13,13 @@
 // `emit_sp`, `emit_nl`, `trace` sink and the parser's `Node`/`P` arena, the
 // `T_*`/`PF_*` tag statics, and `parse_program`. It does NOT redefine them.
 //
+// NOTE (deferred, OBL-SELFHOST-MOD-F1): unlike lexer/parser/checker, this slice
+// is NOT yet loaded as a module tree. It defines `struct Alloc` and calls the
+// allocator-explicit `vec_new`, whose checker arg-type test hardcodes the type
+// name `Alloc` (src/check/expr.rs); module qualification renames it to
+// `analyses::Alloc`, which the checker rejects (E0703). Pending that checker fix,
+// the harness keeps concatenating lexer + parser + analyses.
+//
 // COVERED CODE FAMILIES (the sound core these slices prove against the oracle):
 //   E0301  use of a MOVED value            (span = the identifier use site)
 //   E0304  use of a possibly-UNINIT value  (span = the identifier use site)
@@ -56,6 +63,7 @@
 // per-place flow state stays a fixed array (a Vec cannot be cheaply cloned at
 // every branch join). The loan set's stack POP at block exit is emulated by a
 // set-or-push at the `loan_n` frontier -- Vec is append-only, the measured cost.
+
 
 // ---- allocator prelude (to obtain the `Alloc` handle `vec_new` requires) -----
 // A bump arena over a reserved flat-memory window. This ~20-line prelude + the

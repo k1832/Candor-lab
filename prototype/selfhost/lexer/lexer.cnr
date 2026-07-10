@@ -17,7 +17,7 @@
 //   Punctuation/operators and EOF(99) carry no payload.
 
 // ---- token record -----------------------------------------------------------
-copy struct Tok {
+pub copy struct Tok {
     kind: i32,
     start: usize,
     end: usize,
@@ -27,12 +27,12 @@ copy struct Tok {
     p1: usize,
 }
 
-struct Buf {
+pub struct Buf {
     toks: [1024]Tok,
     n: usize,
 }
 
-fn mk(k: i32, s: usize, e: usize) -> Tok {
+pub fn mk(k: i32, s: usize, e: usize) -> Tok {
     return Tok { kind: k, start: s, end: e, ival: 0u64, suf: 0, p0: 0usize, p1: 0usize };
 }
 
@@ -63,7 +63,7 @@ fn hexval(b: u8) -> u64 {
 }
 
 // ---- keyword / scalar recognition (spec 01 §2) ------------------------------
-fn span_eq(src: [u8], s: usize, e: usize, lit: [u8]) -> bool {
+pub fn span_eq(src: [u8], s: usize, e: usize, lit: [u8]) -> bool {
     let m: usize = e - s;
     if m != len(lit) {
         return false;
@@ -315,7 +315,7 @@ fn push_tok(buf: write Buf, t: Tok) -> unit {
 
 // The library entry point: lex `src` into `buf`, returning the token count
 // (the trailing EOF token included), exactly as the Rust oracle's Vec<RToken>.
-fn lex(src: [u8], buf: write Buf) -> usize {
+pub fn lex(src: [u8], buf: write Buf) -> usize {
     let n: usize = len(src);
     let mut pos: usize = 0usize;
     loop {
@@ -332,13 +332,13 @@ fn lex(src: [u8], buf: write Buf) -> usize {
 }
 
 // ---- canonical dump (bytes emitted through `trace`) -------------------------
-fn emit_sp() -> unit {
+pub fn emit_sp() -> unit {
     trace(32);
 }
-fn emit_nl() -> unit {
+pub fn emit_nl() -> unit {
     trace(10);
 }
-fn emit_num(v: u64) -> unit {
+pub fn emit_num(v: u64) -> unit {
     if v == 0u64 {
         trace(48);
     } else {
@@ -357,14 +357,14 @@ fn emit_num(v: u64) -> unit {
         }
     }
 }
-fn emit_bytes(src: [u8], s: usize, e: usize) -> unit {
+pub fn emit_bytes(src: [u8], s: usize, e: usize) -> unit {
     let mut i: usize = s;
     while i < e {
         trace(conv i64 src[i]);
         i = i + 1usize;
     }
 }
-fn decoded_len(src: [u8], s: usize, e: usize) -> u64 {
+pub fn decoded_len(src: [u8], s: usize, e: usize) -> u64 {
     let mut i: usize = s;
     let mut c: u64 = 0u64;
     while i < e {
@@ -377,7 +377,7 @@ fn decoded_len(src: [u8], s: usize, e: usize) -> u64 {
     }
     return c;
 }
-fn emit_decoded(src: [u8], s: usize, e: usize) -> unit {
+pub fn emit_decoded(src: [u8], s: usize, e: usize) -> unit {
     let mut i: usize = s;
     while i < e {
         let mut dec: u8 = src[i];
@@ -424,7 +424,7 @@ fn emit_tok(src: [u8], t: Tok) -> unit {
     emit_nl();
 }
 
-fn dump(src: [u8], buf: read Buf) -> unit {
+pub fn dump(src: [u8], buf: read Buf) -> unit {
     let mut i: usize = 0usize;
     while i < buf.n {
         let t: Tok = buf.toks[i];

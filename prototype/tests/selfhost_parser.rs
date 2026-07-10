@@ -1,5 +1,6 @@
 //! The oracle gate for the SECOND self-hosted slice: a Candor PARSER
-//! (`selfhost/parser/parser.cnr`, composed after `selfhost/lexer/lexer.cnr`) is
+//! (`selfhost/parser/parser.cnr`, loaded as a module tree with the `lexer`
+//! module `selfhost/lexer/lexer.cnr`) is
 //! run on the tree-walker over each in-subset real-syntax corpus fixture, and
 //! its canonical AST S-expression dump is asserted byte-equal to the Rust oracle
 //! parser's (`src/real/parser.rs` -> `ast.rs`) dump of the SAME source in the
@@ -8,14 +9,19 @@
 //! The canonical S-expression schema (SPAN-FREE by design; the differential
 //! target is tree shape, which both parsers must agree on) is implemented on the
 //! Candor side by `parse_dump` and here by `render_program`; the two must match
-//! token-for-token. Harness shape reuses slice 1: embed the fixture source as a
-//! `[N]u8` literal, lex via lexer.cnr, parse+dump via parser.cnr, reconstruct
-//! the text from `Run.trace`, compare.
+//! token-for-token. Harness shape reuses slice 1: a generated root `main.cnr`
+//! `use`s the `lexer`/`parser` modules, embeds the fixture source as a `[N]u8`
+//! literal, lexes via lexer, parse-dumps via parser; the tree is loaded with
+//! `run_dir` (dogfooding the module system), and the text is reconstructed from
+//! `Run.trace` and compared.
 
 use candor_proto::ast::*;
 use candor_proto::real::parser::parse_format;
 use candor_proto::token::ScalarTy;
-use candor_proto::{run_source_real, RunResult};
+use candor_proto::RunResult;
+
+mod selfhost_modtree;
+use selfhost_modtree::{run_module_tree, trace_text};
 
 const LEXER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/lexer/lexer.cnr"));
@@ -720,34 +726,32 @@ fn oracle_dump(src: &str) -> String {
     r.s
 }
 
-fn candor_program(src: &str) -> String {
+/// Generate the root `main.cnr`: it `use`s the lexer module's `Buf`/`mk`/`lex`
+/// and the parser module's `parse_dump`, embeds `src`, lexes then parse-dumps it.
+fn candor_main(src: &str) -> String {
     let bytes = src.as_bytes();
-    let mut prog = String::from(LEXER_SRC);
-    prog.push('\n');
-    prog.push_str(PARSER_SRC);
-    prog.push_str("\nfn main() -> i64 {\n");
-    prog.push_str(&format!("    let src: [{}]u8 = [", bytes.len()));
+    let mut m = String::from(
+        "use lexer::{Buf, mk, lex};\nuse parser::{parse_dump};\n\nfn main() -> i64 {\n",
+    );
+    m.push_str(&format!("    let src: [{}]u8 = [", bytes.len()));
     for (i, b) in bytes.iter().enumerate() {
         if i > 0 {
-            prog.push_str(", ");
+            m.push_str(", ");
         }
-        prog.push_str(&format!("{b}u8"));
+        m.push_str(&format!("{b}u8"));
     }
-    prog.push_str("];\n");
-    prog.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 1024], n: 0usize };\n");
-    prog.push_str("    let cnt: usize = lex(slice_of(src), write buf);\n");
-    prog.push_str("    parse_dump(slice_of(src), read buf);\n");
-    prog.push_str("    return conv i64 cnt;\n}\n");
-    prog
+    m.push_str("];\n");
+    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 1024], n: 0usize };\n");
+    m.push_str("    let cnt: usize = lex(slice_of(src), write buf);\n");
+    m.push_str("    parse_dump(slice_of(src), read buf);\n");
+    m.push_str("    return conv i64 cnt;\n}\n");
+    m
 }
 
 fn candor_dump(src: &str) -> String {
-    let prog = candor_program(src);
-    match run_source_real(&prog) {
-        RunResult::Ok(run) => {
-            let bytes: Vec<u8> = run.trace.iter().map(|&v| v as u8).collect();
-            String::from_utf8(bytes).expect("dump is ASCII")
-        }
+    let main = candor_main(src);
+    match run_module_tree(&[("lexer.cnr", LEXER_SRC), ("parser.cnr", PARSER_SRC)], &main) {
+        RunResult::Ok(run) => trace_text(&run),
         RunResult::Fault(f) => panic!("candor parser faulted: {}", f.to_json()),
         RunResult::CheckErrors(d) => panic!(
             "candor parser check errors: {:?}",
