@@ -73,3 +73,16 @@ primitives (Vec, str, Alloc, CharStep) — the runtime/language split every real
    on all codes.
 3. Extend self-host checker coverage to the feature set the self-host SOURCE uses (only that).
 4. The fixpoint gate: the self-host checker checks the self-host source, oracle-matched.
+
+**Scheduled — modularize the self-host source (dogfood the module system).** The four
+self-host `.cnr` files use zero `use` imports; the oracle harness composes them by
+`include_str!` concatenation (convenience, not a language limit — modules stage 1 works,
+proven by `tests/fixtures/modules/ok_tree/`). The self-host compiler is the one substantial
+Candor program that does NOT exercise modules. Split it into a proper `use`/`pub` tree
+(lexer / parser / checker / analyses as real modules sharing `Tok`/`Node`/state via named
+imports), teaching the oracle harness to load a module tree instead of concatenating. Expected
+to surface real stage-1 module-ergonomics obligations (cross-module type refs need named
+imports not alias paths; no `pub use` re-exports) — that friction is valuable signal, logged to
+99-obligations.md. Serialized: touches `selfhost/` + every oracle harness, so it runs SOLO,
+after the Map enabler and outside any compiler-crate agent's window. Slot: after step 1 (Map)
+lands, before the step-3 coverage slices — a split, better-navigable source eases those.
