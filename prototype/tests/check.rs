@@ -1204,3 +1204,45 @@ fn retest_nonallocating_hook_type_not_alloc_on_drop() {
          fn dropit(r: R) -> unit { }",
     );
 }
+
+// ----- structural allocator-handle acceptance (OBL-SELFHOST-MOD-F1) --------
+// `vec_new`/`map_new`/`string_new` identify their allocator argument
+// STRUCTURALLY (a struct whose `vt` field is a `rawptr` to a vtable struct with
+// `alloc`/`free` fn-ptr fields), never by the bare name `Alloc`, so a renamed or
+// module-qualified handle is accepted while a non-handle struct is still
+// rejected. These use the real (`.cnr`) surface syntax for the `[T]` generics.
+
+const RENAMED_ALLOC: &str = "\
+struct Vt { alloc: fn(rawptr u8, usize, usize) -> rawptr u8, \
+free: fn(rawptr u8, rawptr u8, usize, usize) -> unit } \
+copy struct Handle { ctx: rawptr u8, vt: rawptr Vt } ";
+
+fn real_codes(src: &str) -> Vec<String> {
+    let diags = candor_proto::check_source_real(src).expect("parse ok");
+    diags.into_iter().map(|d| d.code).collect()
+}
+
+#[test]
+fn vec_new_accepts_structural_alloc_under_a_different_name() {
+    let cs = real_codes(&format!(
+        "{RENAMED_ALLOC} fn f(a: Handle) alloc -> unit {{ let v: Vec[i64] = vec_new(read a); }}"
+    ));
+    assert!(!cs.iter().any(|c| c == "E0703"), "unexpected E0703: {cs:?}");
+}
+
+#[test]
+fn map_new_accepts_structural_alloc_under_a_different_name() {
+    let cs = real_codes(&format!(
+        "{RENAMED_ALLOC} fn f(a: Handle) alloc -> unit {{ let m: Map[i64] = map_new(read a); }}"
+    ));
+    assert!(!cs.iter().any(|c| c == "E0703"), "unexpected E0703: {cs:?}");
+}
+
+#[test]
+fn vec_new_rejects_non_allocator_struct() {
+    let cs = real_codes(
+        "copy struct NotAlloc { x: i64 } \
+         fn g(a: NotAlloc) alloc -> unit { let v: Vec[i64] = vec_new(read a); }",
+    );
+    assert!(cs.iter().any(|c| c == "E0703"), "expected E0703: {cs:?}");
+}

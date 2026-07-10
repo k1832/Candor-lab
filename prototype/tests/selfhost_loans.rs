@@ -26,13 +26,18 @@
 //!    then-reuse; `pos_block` exercises a loan that DROPS at a block exit so a
 //!    later move is clean under BOTH liveness models.
 //!
-//! Harness shape reuses slice 4 (`selfhost_analyses.rs`): embed the fixture
-//! source as a `[N]u8` literal, lex + parse + analyze + dump via the concatenated
-//! `.cnr` program on a 256 MiB thread, compare to the filtered+sorted oracle
-//! rendering. The generated `main` is `alloc` (the analysis's Vecs).
+//! Harness shape reuses slice 4 (`selfhost_analyses.rs`): a generated root
+//! `main.cnr` `use`s the `lexer`/`analyses` modules, embeds the fixture source
+//! as a `[N]u8` literal, lexes then analyze-dumps; the lexer + parser + analyses
+//! tree is loaded with `run_dir` on a 256 MiB thread, and the dump reconstructed
+//! from `Run.trace` compared to the filtered+sorted oracle rendering. The
+//! generated `main` is `alloc` (the analysis's Vecs).
 
 use candor_proto::check_source_real;
-use candor_proto::{run_source_real, RunResult};
+use candor_proto::RunResult;
+
+mod selfhost_modtree;
+use selfhost_modtree::{run_module_tree, trace_text};
 
 const LEXER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/lexer/lexer.cnr"));
@@ -59,36 +64,39 @@ fn oracle_dump(src: &str) -> String {
     s
 }
 
-fn candor_program(src: &str) -> String {
+/// Generate the root `main.cnr`: it `use`s the lexer module's `Buf`/`mk`/`lex`
+/// and the analyses module's `analyze_dump`, embeds `src`, lexes then
+/// analyze-dumps it. It is `alloc` because `analyze_dump`'s growable diagnostic
+/// buffer is a `Vec`.
+fn candor_main(src: &str) -> String {
     let bytes = src.as_bytes();
-    let mut prog = String::from(LEXER_SRC);
-    prog.push('\n');
-    prog.push_str(PARSER_SRC);
-    prog.push('\n');
-    prog.push_str(ANALYSES_SRC);
-    prog.push_str("\nfn main() alloc -> i64 {\n");
-    prog.push_str(&format!("    let src: [{}]u8 = [", bytes.len()));
+    let mut m = String::from(
+        "use lexer::{Buf, mk, lex};\nuse analyses::{analyze_dump};\n\nfn main() alloc -> i64 {\n",
+    );
+    m.push_str(&format!("    let src: [{}]u8 = [", bytes.len()));
     for (i, b) in bytes.iter().enumerate() {
         if i > 0 {
-            prog.push_str(", ");
+            m.push_str(", ");
         }
-        prog.push_str(&format!("{b}u8"));
+        m.push_str(&format!("{b}u8"));
     }
-    prog.push_str("];\n");
-    prog.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 1024], n: 0usize };\n");
-    prog.push_str("    let cnt: usize = lex(slice_of(src), write buf);\n");
-    prog.push_str("    analyze_dump(slice_of(src), read buf);\n");
-    prog.push_str("    return conv i64 cnt;\n}\n");
-    prog
+    m.push_str("];\n");
+    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 1024], n: 0usize };\n");
+    m.push_str("    let cnt: usize = lex(slice_of(src), write buf);\n");
+    m.push_str("    analyze_dump(slice_of(src), read buf);\n");
+    m.push_str("    return conv i64 cnt;\n}\n");
+    m
 }
 
 fn candor_dump(src: &str) -> String {
-    let prog = candor_program(src);
-    match run_source_real(&prog) {
-        RunResult::Ok(run) => {
-            let bytes: Vec<u8> = run.trace.iter().map(|&v| v as u8).collect();
-            String::from_utf8(bytes).expect("dump is ASCII")
-        }
+    let main = candor_main(src);
+    let modules = [
+        ("lexer.cnr", LEXER_SRC),
+        ("parser.cnr", PARSER_SRC),
+        ("analyses.cnr", ANALYSES_SRC),
+    ];
+    match run_module_tree(&modules, &main) {
+        RunResult::Ok(run) => trace_text(&run),
         RunResult::Fault(f) => panic!("candor analysis faulted: {}", f.to_json()),
         RunResult::CheckErrors(d) => panic!(
             "candor analysis (the .cnr program) has check errors: {:?}",

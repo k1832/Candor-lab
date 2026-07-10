@@ -233,3 +233,17 @@ One lesson per entry, one-line summary first.
   already a view, so it is `fn f(word: str)`. Bit the Map keyword-classify
   demonstrator (2026-07-10). Owned collections take `read`/`write` (they are not
   borrow-kind); their contained views do not.
+
+- **Compiler-known std types must be identified STRUCTURALLY, never by name —
+  and the same predicate must hold in BOTH the interpreter and the checker.**
+  The allocator handle `Alloc`/`AllocVtable` are detected by shape (vtable =
+  struct with `alloc`+`free` fn-ptr fields; handle = struct whose `vt` is a
+  `rawptr` to it), because the module loader qualifies a user `struct Alloc` to
+  `analyses::Alloc` and any literal `n == "Alloc"` test then fails. finding-F1
+  fixed this in `interp/eval.rs` but left the identical name test live in
+  `check/expr.rs` (the `vec_new`/`string_new`/`map_new` arms), so a module tree
+  defining its own `Alloc` was rejected with a spurious E0703 before it ever ran
+  (OBL-SELFHOST-MOD-F1, 2026-07-10). Lesson: when you special-case a
+  compiler-known type by name in ONE stage, grep the other stages for the same
+  name test — the checker and interpreter must agree on the structural identity,
+  or module qualification desyncs them.

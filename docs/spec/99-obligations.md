@@ -576,9 +576,13 @@ the ruling vindicated constructively, twice.
 Modularizing the self-host compiler — the one substantial Candor program that did not exercise
 modules — into a real `use`/`pub` tree loaded by the stage-1 module system (design 0008) DOGFOODED
 that system and surfaced its ergonomic edges. The oracle gates stayed byte-exact (573 green): a
-pure source-organization refactor. lexer / parser / checker now load as a module tree (the harness
-materializes flat `lexer.cnr` + `parser.cnr` + `checker.cnr` + a generated root `main.cnr` and runs
-it via `run_dir`); analyses / loans / effects are DEFERRED by the hard blocker below.
+pure source-organization refactor. COMPLETE (2026-07-10): ALL SIX slices — lexer / parser / checker
+AND analyses / loans / effects — now load as a module tree (each harness materializes the flat
+`lexer.cnr` + `parser.cnr` + the slice's `.cnr` + a generated root `main.cnr` and runs it via
+`run_dir`). The blocker below (OBL-SELFHOST-MOD-F1) is DISCHARGED, so analyses/loans/effects — which
+define their own `struct Alloc` and use the Vec-backed diagnostic buffer — now load modular too;
+`analyses.cnr` imports the lexer (5 names) and parser (66 names, incl. `Node`) by NAMED `use` and
+exports `pub fn analyze_dump`. Full suite 576 green (573 + the 3 new checker tests below).
 
 What WORKED — the shared-type graph crosses module boundaries cleanly via NAMED imports:
 `pub struct Tok`/`Buf` (lexer) and `pub struct Node`/`P` (parser) are `use`d and used as TYPES in
@@ -607,7 +611,7 @@ source is not a standalone checkable tree** — it is a LIBRARY tree with no roo
 only with a driver `main.cnr` supplied (here, per-fixture, embedding the corpus source as a `[N]u8`
 literal). `check_dir` on the library alone reports E0905.
 
-### OBL-SELFHOST-MOD-F1 — the checker's builtin-`Alloc` name test breaks under module qualification (BLOCKER; compiler-work item)
+### OBL-SELFHOST-MOD-F1 — the checker's builtin-`Alloc` name test breaks under module qualification (DISCHARGED 2026-07-10)
 
 `src/check/expr.rs` types the allocator-explicit builtins `vec_new` / `string_new` / `map_new` by
 requiring their argument to be `Type::Named(n) if n == "Alloc"` — a LITERAL name test. The module
@@ -620,10 +624,15 @@ applied to the checker. So this is NOT a module-system type-graph limit — the 
 crosses fine — but a compiler incompleteness: finding-F1 was discharged in the interpreter and left
 open in the checker. Consequence: any module tree that both defines its own `struct Alloc` and calls
 `vec_new`/`string_new`/`map_new` cannot load, which blocks the analyses (move/init + loans) and
-effects slices (all three share the Vec-based diagnostic buffer). Per this pass's scope the blocker
-is REPORTED, not patched. Fix (a compiler-work item): identify the allocator handle structurally in
-the checker (mirror `eval.rs`'s `alloc_struct` detection), or peel the module qualification before
-the name test, so the arg-type check accepts the qualified `Alloc`. Until then the deferred harnesses
-keep concatenating lexer + parser + analyses into one single-file program (output-invariant: `pub`
-and `use` are inert contextual keywords under single-file parse, so the shared lexer/parser sources —
-now `pub`/`use`-annotated for the modular slices — concatenate unchanged).
+effects slices (all three share the Vec-based diagnostic buffer). RESOLUTION (2026-07-10). `src/check/expr.rs` now identifies the allocator handle STRUCTURALLY,
+mirroring `eval.rs`'s finding-F1 detection, via one helper `is_alloc_handle(&self, ty: &Type) -> bool`
+(with `is_alloc_vtable`) called from all three arms (`vec_new`/`string_new`/`map_new`) in place of the
+`n == "Alloc"` name test: the handle is a struct whose `vt` field is a `rawptr` to the vtable struct,
+and the vtable is the struct with fn-ptr fields `alloc` and `free` — looked up through the checker's
+own `self.items.lookup_struct`. The check stays borrow-peeled (the arg is `read Alloc`). The bare
+single-file `struct Alloc` satisfies the same predicate, so single-file and module-qualified paths
+pass through ONE test — no name special-case. A focused checker test proves it (tests/check.rs):
+`vec_new`/`map_new` on a RENAMED handle (`struct Handle`, `vt: rawptr Vt`) type-check with no E0703,
+and a non-handle struct passed to `vec_new` still gets E0703. With the checker fixed, the
+analyses/loans/effects harnesses were converted from `include_str!` concatenation to the module-tree
+loader (`run_module_tree`), completing the split — all six slices are now modular.

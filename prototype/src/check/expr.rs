@@ -1780,7 +1780,7 @@ impl<'a> Checker<'a> {
                 // `string_new(a: read Alloc) -> String` — allocator-explicit (P9).
                 let t = self.arg0(args, span, "string_new");
                 let peeled = match &t { Type::Borrow(i) | Type::BorrowMut(i) => (**i).clone(), _ => t.clone() };
-                if !matches!(peeled, Type::Error) && !matches!(&peeled, Type::Named(n) if n == "Alloc") {
+                if !matches!(peeled, Type::Error) && !self.is_alloc_handle(&peeled) {
                     self.mismatch(span, "string_new", "read Alloc", &t);
                 }
                 self.note_alloc(span, "`string_new` builds an owning String (allocates)");
@@ -1825,7 +1825,7 @@ impl<'a> Checker<'a> {
                 // value type `V` is fixed by the expected (annotation) type.
                 let t = self.arg0(args, span, "map_new");
                 let peeled = match &t { Type::Borrow(i) | Type::BorrowMut(i) => (**i).clone(), _ => t.clone() };
-                if !matches!(peeled, Type::Error) && !matches!(&peeled, Type::Named(n) if n == "Alloc") {
+                if !matches!(peeled, Type::Error) && !self.is_alloc_handle(&peeled) {
                     self.mismatch(span, "map_new", "read Alloc", &t);
                 }
                 self.note_alloc(span, "`map_new` builds an owning Map (allocates/frees on drop)");
@@ -1879,7 +1879,7 @@ impl<'a> Checker<'a> {
                 // element type `T` is fixed by the expected (annotation) type.
                 let t = self.arg0(args, span, "vec_new");
                 let peeled = match &t { Type::Borrow(i) | Type::BorrowMut(i) => (**i).clone(), _ => t.clone() };
-                if !matches!(peeled, Type::Error) && !matches!(&peeled, Type::Named(n) if n == "Alloc") {
+                if !matches!(peeled, Type::Error) && !self.is_alloc_handle(&peeled) {
                     self.mismatch(span, "vec_new", "read Alloc", &t);
                 }
                 self.note_alloc(span, "`vec_new` builds an owning Vec (allocates/frees on drop)");
@@ -2056,6 +2056,29 @@ impl<'a> Checker<'a> {
             }
             Type::Error
         }
+    }
+
+    /// True if `ty` is the compiler-known allocator handle struct, identified
+    /// STRUCTURALLY (never by a hardcoded name), mirroring the interpreter's
+    /// finding-F1 detection in `interp/eval.rs`: the handle is a struct whose
+    /// `vt` field is a `rawptr` to the vtable struct, and the vtable is the
+    /// struct with fn-ptr fields `alloc` and `free`. This lets the
+    /// allocator-explicit builtins accept the allocator regardless of how the
+    /// module tree qualifies its name (bare `Alloc` vs `analyses::Alloc`).
+    fn is_alloc_handle(&self, ty: &Type) -> bool {
+        let Type::Named(name) = ty else { return false };
+        let Some(handle) = self.items.lookup_struct(name) else { return false };
+        handle.fields.iter().any(|(fname, fty)| {
+            fname == "vt"
+                && matches!(fty, Type::RawPtr(inner)
+                    if matches!(&**inner, Type::Named(vt) if self.is_alloc_vtable(vt)))
+        })
+    }
+
+    fn is_alloc_vtable(&self, name: &str) -> bool {
+        let Some(vt) = self.items.lookup_struct(name) else { return false };
+        vt.fields.iter().any(|(n, t)| n == "alloc" && matches!(t, Type::FnPtr(_)))
+            && vt.fields.iter().any(|(n, t)| n == "free" && matches!(t, Type::FnPtr(_)))
     }
 
     fn arity(&mut self, span: Span, name: &str, n: usize) {
