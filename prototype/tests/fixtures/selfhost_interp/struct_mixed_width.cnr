@@ -1,0 +1,8 @@
+copy struct M { flag: bool, small: i8, big: i64 }
+fn main() -> i64 {
+    let m: M = M { flag: true, small: 5i8, big: 1000i64 };
+    if m.flag && m.small == 5i8 {
+        return m.big;
+    }
+    return 0i64;
+}

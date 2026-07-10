@@ -1,0 +1,6 @@
+copy struct Inner { a: i64, b: i64 }
+copy struct Outer { p: Inner, q: i64 }
+fn main() -> i64 {
+    let o: Outer = Outer { p: Inner { a: 10i64, b: 20i64 }, q: 5i64 };
+    return o.p.a + o.p.b + o.q;
+}

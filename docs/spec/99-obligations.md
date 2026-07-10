@@ -963,3 +963,51 @@ WHAT IS GATED / NOT. Gated: interp.cnr's EXECUTION behavior (ret/trace/fault) by
 oracle. NOT gated this slice: interp.cnr under the self-CHECK gates (E0102/E0103 name-res and the
 analyses families) — it is new, larger surface, deferred to a later concern like the earlier
 modules were. No in-subset construct was un-matchable; the whole MVP subset reproduces byte-exact.
+
+### S2 — flat byte-memory + structs and arrays in the self-interpreter (second slice, 2026-07-10)
+
+The self-interpreter (`prototype/selfhost/interp/interp.cnr`) gains a FLAT BYTE-MEMORY model
+plus STRUCTS and ARRAYS, extended to match the Rust reference (`prototype/src/interp/`) byte-exact
+on aggregate programs. Same gate (`prototype/tests/selfhost_interp.rs`, EXECUTION equality vs
+`run_source_real`): the corpus grows from 24 to 36 fixtures (34 returns, 2 faults) — the 12 new
+S2 fixtures cover struct literal + field read, nested struct, field assignment, struct as by-value
+fn param + return, mixed-width struct layout (bool/i8/i64 padding), array literal + index read,
+array repeat `[e; N]`, index assignment, array of structs, struct containing array, an aggregate
+`Bounds` fault (`a[len]`), and a mixed struct/array program with ordered `trace`s.
+
+FLAT MEMORY MODEL (S1's value model CONVERGED onto memory). `E` now carries a byte arena
+`mem: [N]u8` + an `init: [N]u8` written-byte bitmap + a `stack_bump` (ported from src/interp/mem.rs;
+STATIC/STACK bases are free choices since addresses never surface in the RET/TRACE/FAULT dump, so
+the arena is sized small — 16 KiB — with headroom, reset per block AND per call to bound loops and
+recursion). Locals/params/aggregates live at bump-allocated addresses; a scalar local is
+stored/loaded by (address, width) via little-endian `mem_store`/`mem_load` (sign/zero-extended to
+mirror the oracle's read_int), REPLACING S1's pure `i64` slot. Scalar arithmetic still flows through
+the `cur_val`/`cur_w` registers (byte-exact); an aggregate value is carried as an ADDRESS —
+`cur_w == 0` marks it, `cur_val` is the address, `cur_ty` its type node. Faithfulness invariant:
+all 24 S1 fixtures pass byte-exact THROUGH the new model. `init` is marked on every write (the
+uninit-guard structure is kept), but the guard's BadPointer fault stays a later (pointer) slice.
+
+TYPE/LAYOUT TABLE EXTRACTED FROM THE ARENA AST (scoping blocker #1, DISCHARGED). A type descriptor
+is an arena node: scalar keywords are `T_SC` (NOT `T_NAMED` — the transcription trap that first
+read every scalar local as an aggregate address), user structs are `T_NAMED`, arrays are `T_ARRAY`
+(`.a` length, `.b` element), and a struct VALUE carries its `T_STRUCT` decl node directly.
+`ty_size`/`ty_align` mirror src/interp/layout.rs: scalars by width (bool/i8/u8=1, i16/u16=2,
+i32/u32=4, else 8); arrays = round_up(size,align) stride × len (literal `[N]` lengths only —
+named/`static` lengths need a const table, deferred); structs walk the `T_SFIELD` chain in DECLARED
+order at natural alignment, size rounded up to the struct's alignment (= max field alignment).
+Field offsets are computed by the same running-offset walk; field-init evaluation follows declared
+order (observable when a field value calls `trace`).
+
+STRUCT + ARRAY OPS. Struct literals write each field at its offset (whole-slot zero-fill first, so
+padding counts as initialized); field read/assign compute `base + field_offset`; `let`/by-value
+param/return copy the bytes (aggregate returns land in a caller-owned `ret_slot` reserved below the
+frame's reset point, so they survive the stack_bump reset). Array literals (`[a, b, ...]` listed and
+`[e; N]` repeat), index read/assign compute `base + i*stride`; the `Bounds` fault (`i >= len`, shared
+harness code 4) reports the base array expression's span, matching eval.rs's eval_place cur_span
+threading exactly. Nested structs, arrays of structs, and structs containing arrays all landed.
+
+COPY-ONLY / DROP-DEFERRED BOUNDARY. S2 stays on COPY aggregates (`copy struct`s and arrays of copy
+scalars), so there is NO drop obligation to model — `trace` output is purely explicit `trace(x)`
+calls, never a drop side-effect. The move/drop schedule (and trace-on-drop) is S3. Also deferred:
+named/`static` array lengths, `conv`, borrows/`read`/`write` params, and field/index off a bare call
+result (`make().f`) — S2 fixtures assign to a local first. interp.cnr remains NOT self-checked.

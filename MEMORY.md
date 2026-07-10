@@ -300,3 +300,19 @@ One lesson per entry, one-line summary first.
   min/max. u64↔i64 reinterpretation via `wrapping { conv }`. Verified byte-exact vs
   the oracle. This is the standard trick for any Candor numeric code that can't
   reach for a wider type (self-interp S1, 2026-07-10). See [[self-host-analyses]].
+
+- **Building a size/align/offset layout table from the self-host parser's arena
+  type-nodes: scalar keywords are `T_SC`, not `T_NAMED`.** For the S2 self-interp
+  (structs+arrays over flat byte memory) I needed `ty_size`/`ty_align`/field-offset
+  driven by arena type-nodes. The trap: `parse_type` tags a SCALAR keyword (`i64`,
+  `bool`, …) as `T_SC`, and `T_NAMED` is only user structs/enums; an array is
+  `T_ARRAY` (`.a` length, `.b` element) and a struct VALUE can carry its `T_STRUCT`
+  decl node directly. Gating scalar detection on `T_NAMED` alone made every scalar
+  local resolve as a zero-width "aggregate" and read back its ADDRESS instead of its
+  value (arith fixture returned 143 vs 121). Fix: treat `T_SC`+`T_NAMED` uniformly —
+  `sc_width(p0,p1)` on the span decides scalar-vs-struct. Layout mirrors
+  src/interp/layout.rs: fields in DECLARED order at natural alignment, struct size
+  rounded to max-field alignment, array stride = round_up(size,align). Because
+  addresses never surface in the RET/TRACE/FAULT dump, the byte arena's base/size are
+  free choices — reset the bump per block AND per call to bound loops/recursion
+  (self-interp S2, 2026-07-10). See [[self-host-analyses]].

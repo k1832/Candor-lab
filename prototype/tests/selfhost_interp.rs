@@ -34,6 +34,7 @@ fn fault_code(k: FaultKind) -> i64 {
         FaultKind::DivByZero => 1,
         FaultKind::Assert => 2,
         FaultKind::Panic => 3,
+        FaultKind::Bounds => 4,
         other => panic!("out-of-subset fault kind reached the gate: {other:?}"),
     }
 }
@@ -134,6 +135,19 @@ const CORPUS: &[(&str, Shape)] = &[
     ("u64_add_overflow.cnr", Fault),
     ("u64_sub_underflow.cnr", Fault),
     ("i64_mul_overflow.cnr", Fault),
+    // ---- S2: structs + arrays over the flat byte-memory model ----
+    ("struct_field.cnr", Ret),
+    ("nested_struct.cnr", Ret),
+    ("field_assign.cnr", Ret),
+    ("struct_param_ret.cnr", Ret),
+    ("struct_mixed_width.cnr", Ret),
+    ("array_index.cnr", Ret),
+    ("array_repeat.cnr", Ret),
+    ("index_assign.cnr", Ret),
+    ("array_of_structs.cnr", Ret),
+    ("struct_with_array.cnr", Ret),
+    ("aggregate_mixed.cnr", Ret),
+    ("array_bounds.cnr", Fault),
 ];
 
 fn read_fixture(rel: &str) -> String {

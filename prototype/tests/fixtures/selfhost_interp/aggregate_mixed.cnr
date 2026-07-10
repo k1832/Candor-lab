@@ -1,0 +1,18 @@
+copy struct Vec2 { x: i64, y: i64 }
+fn add(u: Vec2, v: Vec2) -> Vec2 {
+    return Vec2 { x: u.x + v.x, y: u.y + v.y };
+}
+fn main() -> i64 {
+    let a: [2]Vec2 = [Vec2 { x: 1i64, y: 2i64 }, Vec2 { x: 3i64, y: 4i64 }];
+    let s: Vec2 = add(a[0], a[1]);
+    trace(s.x);
+    trace(s.y);
+    let mut acc: i64 = 0i64;
+    let mut i: usize = 0usize;
+    while i < 2usize {
+        acc = acc + a[i].x;
+        i = i + 1usize;
+    }
+    trace(acc);
+    return s.x + s.y;
+}

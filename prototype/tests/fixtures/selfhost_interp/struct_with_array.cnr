@@ -1,0 +1,7 @@
+copy struct Buf { data: [3]i64, n: i64 }
+fn main() -> i64 {
+    let mut b: Buf = Buf { data: [0i64; 3], n: 3i64 };
+    b.data[0] = 11i64;
+    b.data[2] = 22i64;
+    return b.data[0] + b.data[2] + b.n;
+}
