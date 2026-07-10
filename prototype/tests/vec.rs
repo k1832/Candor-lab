@@ -167,3 +167,71 @@ fn vec_demonstrator_token_buffer_no_cap() {
     let src = format!("{ALLOC}\nstruct Tok {{ kind: i64, pos: i64 }}\nfn main() alloc -> i64 {{\n  let mut bs: Bump = with_window(16777216, 1048576);\n  let al: Alloc = mk_alloc(write bs);\n  let mut toks: Vec[Tok] = vec_new(read al);\n  push(write toks, Tok {{ kind: 1, pos: 0 }}); push(write toks, Tok {{ kind: 2, pos: 1 }});\n  push(write toks, Tok {{ kind: 3, pos: 2 }}); push(write toks, Tok {{ kind: 4, pos: 3 }});\n  push(write toks, Tok {{ kind: 5, pos: 4 }}); push(write toks, Tok {{ kind: 6, pos: 5 }});\n  push(write toks, Tok {{ kind: 7, pos: 6 }}); push(write toks, Tok {{ kind: 8, pos: 7 }});\n  push(write toks, Tok {{ kind: 9, pos: 8 }}); push(write toks, Tok {{ kind: 10, pos: 9 }});\n  return conv i64 len(read toks);\n}}");
     assert_eq!(run_ret(&src), 10);
 }
+
+// ===========================================================================
+// OBL-ITER-BORROW — region-free borrowed-yield iteration (`for read x in read v`)
+// ===========================================================================
+
+#[test]
+fn vec_ref_for_borrows_each_noncopy_element_without_copy() {
+    // `for read x in read v` over a Vec of a NON-`copy`, drop-hooked struct binds
+    // `x` to a `read E` reborrow of each element. Reading `x.id` sums 10+20+30=60
+    // through the borrow (no copy). The only drops are the THREE owned elements
+    // when the Vec is dropped: if iteration had moved/copied any element, the trace
+    // would show extra drops or a wrong count. `count`/`get_ref` (RefIndexed) are
+    // wired for Vec; the loop-local `read` borrow yields region-free reborrows.
+    let src = format!(
+        "{ALLOC}{ELEM}\nfn fill(al: Alloc) alloc -> i64 {{\n  \
+         let mut v: Vec[E] = vec_new(read al);\n  \
+         push(write v, E {{ id: 10 }}); push(write v, E {{ id: 20 }}); push(write v, E {{ id: 30 }});\n  \
+         let mut sum: i64 = 0;\n  \
+         for read x in read v {{ sum = sum + x.id; }}\n  \
+         trace(sum);\n  return sum;\n}}\n\
+         fn main() alloc -> i64 {{\n  \
+         let mut bs: Bump = with_window(16777216, 1048576);\n  \
+         let al: Alloc = mk_alloc(write bs);\n  \
+         let s: i64 = fill(al);\n  \
+         if bs.live != 0 {{ return -1; }}\n  return s;\n}}"
+    );
+    assert_eq!(run_ret(&src), 60, "fields read through the per-element borrow, buffer freed (balance 0)");
+    let t = run_trace(&src);
+    assert_eq!(t.first().copied(), Some(60), "sum traced before any element drops");
+    let mut drops = t[1..].to_vec();
+    drops.sort();
+    assert_eq!(drops, vec![10, 20, 30], "each element dropped exactly once — none moved or copied by the borrow-walk");
+}
+
+#[test]
+fn vec_ref_for_mutation_during_iteration_rejected() {
+    // The loop-local `read` borrow of `v` spans the loop (used by `count`/`get_ref`
+    // each turn), so a `push(write v, ...)` inside the body conflicts by XOR
+    // (chapter 04) — iterator invalidation caught by the EXISTING loan machinery,
+    // no new rule (OBL-ITER-BORROW region-free branch).
+    let src = format!(
+        "{ALLOC}{ELEM}\nfn fill(al: Alloc) alloc -> unit {{\n  \
+         let mut v: Vec[E] = vec_new(read al);\n  \
+         push(write v, E {{ id: 1 }}); push(write v, E {{ id: 2 }});\n  \
+         for read x in read v {{ push(write v, E {{ id: x.id }}); }}\n}}\n\
+         fn main() alloc -> i64 {{ return 0; }}"
+    );
+    let e = errors(&src);
+    assert!(
+        e.iter().any(|c| c == "E0801"),
+        "expected E0801 (an exclusive borrow excludes all others, §2.2) rejecting mutation-during-iteration, got {e:?}"
+    );
+}
+
+#[test]
+fn vec_copy_indexed_for_loop_still_works_unchanged() {
+    // The copy-item `Indexed` path (`for x in read v`, `x` a COPIED item) is
+    // untouched by the borrowed variant: a Vec[i64] walk still binds `x` by copy.
+    let src = format!(
+        "{OPT}{}",
+        with_alloc(
+            "  let mut total: i64 = 0;\n  let mut v: Vec[i64] = vec_new(read al);\n  \
+             push(write v, 3); push(write v, 4); push(write v, 5);\n  \
+             for x in read v {{ total = total + x; }}\n  return total;"
+        )
+    );
+    assert_eq!(run_ret(&src), 12);
+}

@@ -29,3 +29,20 @@ pub interface Indexed {
     type Item;
     fn at(read self, i: usize) -> Opt[Item];
 }
+
+// `RefIndexed` is the region-free BORROWED-yield protocol (OBL-ITER-BORROW's
+// region-free branch): `for read x in read coll` binds `x` to a `read Item`
+// reborrow of each element instead of a copy, so a walk over non-`copy` elements
+// need not copy them. It stores no borrow (no iterator object; the cursor is a
+// loop-owned `usize`, the collection a loop-local `read` borrow). `get_ref` is
+// region-free by 0001 §3.3's compact default: its sole borrow-in is `read self`
+// and its sole borrow-out is `read Item`, so the returned reborrow derives from
+// `self` with no region variable and nothing storable (no borrow field, 0001
+// §3.4). `count` gives the loop bound; both are non-`alloc` (ground floor). One
+// associated type (§2.3 intact); two methods (§2.3 caps associated *types*, not
+// method count).
+pub interface RefIndexed {
+    type Item;
+    fn count(read self) -> usize;
+    fn get_ref(read self, i: usize) -> read Item;
+}

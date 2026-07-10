@@ -539,3 +539,19 @@ compiler-stage discipline. What WORKED cleanly: reusing the lexer/parser `emit_*
 arena by concatenation; folding all state into one `A` so branch snapshots are a single array copy;
 and reading the `copy` property directly off the parser's `T_STRUCT/T_ENUM` `op` flag + type nodes
 (the `is_copy` recursion) so move-vs-copy classification needs no separate type-resolution pass.
+
+## OBL-ITER-BORROW — DISCHARGED via the region-free path, 2026-07-10
+
+The candidate-C ruling re-routed this to its region-free branch; that branch WORKED, vindicating
+the ruling's bet that borrowed iteration needs no region-parameterized types. Shipped as a THIRD
+iteration protocol RefIndexed { type Item; count(read self); get_ref(read self, i) -> read Item }:
+region-free because get_ref has a single borrow-in (read self) and single borrow-out, so 0001
+§3.3's compact default fixes provenance to self with no region variable and nothing stored. The
+literal next_ref(write self, coll) -> Opt[read Item] shape was shown UNVIABLE (two borrow-params
+force mandatory regions; a borrow in Opt's payload is E0201) - dissolved by folding the cursor
+into the loop and splitting count() out so get_ref returns a bare read Item. P3: three protocols
+selected by two visible syntactic axes (operand mode + binding mode), forced not sprawl. Loan
+lifetime: the loop's read loan spans the body, so mutation-during-iteration is E0801 by existing
+machinery. for write x (mutating yield) extends the same compact-default argument and is future
+work, still region-free. Prototype: RefIndexed wired for Vec; a user impl should typecheck via
+the compact default (not yet exercised end-to-end).

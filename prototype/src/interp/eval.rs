@@ -1519,6 +1519,39 @@ impl<'a> Interp<'a> {
                     }
                 }
             }
+            // The region-free BORROWED-yield protocol `RefIndexed` (OBL-ITER-BORROW):
+            // `count(read self) -> usize` and `get_ref(read self, i) -> read Item`.
+            // A `Vec[T]` receiver answers both, wiring `for read x in read v`.
+            // `get_ref` returns a *borrow value* (an 8-byte slot holding the address
+            // of element `i` in the buffer) — no copy, so it works over non-`copy`
+            // elements.
+            if field == "count" || field == "get_ref" {
+                let vt = self.expr_static_ty(base).map(|t| match t {
+                    Type::Borrow(e) | Type::BorrowMut(e) => *e,
+                    other => other,
+                });
+                if let Some(Type::App(n, targs)) = &vt {
+                    if n == "Vec" {
+                        let vbase = self.vec_base(base)?;
+                        let len = self.read_u64(vbase + 8)?;
+                        if field == "count" {
+                            return self.usize_val(len);
+                        }
+                        // get_ref: reborrow of element `i`.
+                        let elem = targs.first().cloned().unwrap_or(Type::Error);
+                        let iv = self.eval_value(&args[0], Some(&Type::usize()))?;
+                        let i = self.read_u64(iv.addr)?;
+                        if i >= len {
+                            return Err(self.fault(FaultKind::Bounds, format!("Vec index {i} out of bounds (len {len})")));
+                        }
+                        let stride = round_up(self.size_of(&elem), self.align_of(&elem));
+                        let buf = self.read_u64(vbase)?;
+                        let a = self.mem.stack_alloc(8, 8);
+                        self.write_bytes(a, &(buf + i * stride).to_le_bytes())?;
+                        return Ok(RVal { ty: Type::Borrow(Box::new(elem)), addr: a, origin: Origin::None });
+                    }
+                }
+            }
         }
         // Interface method call `recv.m(args)` (design 0007 static dispatch): the
         // impl is chosen by the receiver's runtime nominal type.

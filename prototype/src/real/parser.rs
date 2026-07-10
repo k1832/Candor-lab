@@ -1030,6 +1030,13 @@ impl RParser {
     /// nodes (§4.2). `for`/`in` are contextual (§4.4); operand is `ExprNoStruct`.
     fn parse_for(&mut self, lo: usize) -> PResult<Stmt> {
         self.bump(); // `for`
+        // A `read`-prefixed binding selects the region-free BORROWED-yield protocol
+        // (`RefIndexed`, OBL-ITER-BORROW's region-free branch): `for read x in read
+        // coll` binds `x` to a `read Item` reborrow of each element rather than a
+        // copy. The borrow is visible in the binding, syntax-directed (NN#13), and
+        // requires a `read`-borrowed operand. `write x` (mutating yield) stays
+        // deferred (needs swap/replace).
+        let by_ref = self.eat(&RTok::Kw(RKw::Read));
         let pat = self.parse_pattern()?;
         if !self.at_ident("in") {
             return Err(self.unexpected("`in` in a `for` header"));
@@ -1041,7 +1048,7 @@ impl RParser {
         if self.preserve_for {
             // Formatter path: keep the surface `for` node (NN#11); never desugar.
             let e = Expr {
-                kind: ExprKind::For { pattern: pat, operand: Box::new(operand), body },
+                kind: ExprKind::For { pattern: pat, operand: Box::new(operand), body, by_ref },
                 span: sp,
             };
             return Ok(Stmt { kind: StmtKind::Expr(e), span: sp });
@@ -1049,7 +1056,16 @@ impl RParser {
         let n = self.for_ctr;
         self.for_ctr += 1;
         let indexed = matches!(operand.kind, ExprKind::Prefix { op: PrefixOp::Read, .. });
-        let block = if indexed {
+        let block = if by_ref {
+            if !indexed {
+                return Err(Diag::error(
+                    "P0011",
+                    "a `read`-binding `for read x in ...` requires a `read`-borrowed operand (design 0009 §4; OBL-ITER-BORROW region-free branch)",
+                    sp,
+                ));
+            }
+            self.desugar_ref_indexed(pat, operand, body, n, sp)?
+        } else if indexed {
             self.desugar_indexed(pat, operand, body, n, sp)
         } else {
             let it = format!("__it{n}");
@@ -1057,6 +1073,63 @@ impl RParser {
             self.desugar_iter(pat, operand, body, n, sp)
         };
         Ok(Stmt { kind: StmtKind::Expr(block), span: sp })
+    }
+
+    /// Borrowed-yield desugar (OBL-ITER-BORROW, region-free branch): the operand's
+    /// loop-local `read` borrow `__c` is held across the loop; `count(read self)`
+    /// gives the bound and `get_ref(read self, i) -> read Item` yields a *reborrow*
+    /// of element `i` (no copy — usable over non-`copy` elements). Region-free by
+    /// 0001 §3.3's compact default: `get_ref` has a single borrow-in (`read self`)
+    /// and a single borrow-out (`read Item`), so the return derives from `self`
+    /// with no region variable and nothing storable (no borrow field, 0001 §3.4).
+    /// The loop-local `read` loan on `coll` spans the loop, so a `write coll` in the
+    /// body conflicts by XOR (chapter 04) — mutation-during-iteration rejected,
+    /// reusing the existing loan machinery (no new rule).
+    fn desugar_ref_indexed(&self, pat: Pattern, operand: Expr, body: Block, n: usize, sp: Span) -> PResult<Expr> {
+        let name = match &pat.kind {
+            PatKind::Binding(nm) => nm.clone(),
+            _ => {
+                return Err(Diag::error(
+                    "P0012",
+                    "a `read`-binding `for read x in ...` binds a single name to a per-element borrow (a destructuring pattern would move, which a borrow cannot)",
+                    pat.span,
+                ));
+            }
+        };
+        let c = format!("__c{n}");
+        let cnt = format!("__n{n}");
+        let i = format!("__i{n}");
+        let usize_ty = Ty { kind: TyKind::Scalar(crate::token::ScalarTy::Usize), span: sp };
+        // Loop body: `if __i >= __n { break; } let x = __c.get_ref(__i); __i = __i + 1u; BODY`
+        let guard_cond = Expr {
+            kind: ExprKind::Binary { op: BinOp::Ge, lhs: Box::new(ident_expr(&i, sp)), rhs: Box::new(ident_expr(&cnt, sp)) },
+            span: sp,
+        };
+        let guard = Stmt {
+            kind: StmtKind::Expr(Expr {
+                kind: ExprKind::If { cond: Box::new(guard_cond), then_blk: Block { stmts: vec![break_stmt(sp)], span: sp }, else_blk: None },
+                span: sp,
+            }),
+            span: sp,
+        };
+        let get = method_call(ident_expr(&c, sp), "get_ref", vec![ident_expr(&i, sp)], sp);
+        let bind_x = Stmt { kind: StmtKind::Let { mutable: false, name, ty: None, init: Some(get) }, span: sp };
+        let inc = assign_stmt(
+            ident_expr(&i, sp),
+            Expr { kind: ExprKind::Binary { op: BinOp::Add, lhs: Box::new(ident_expr(&i, sp)), rhs: Box::new(Expr { kind: ExprKind::IntLit { value: 1, suffix: None }, span: sp }) }, span: sp },
+            sp,
+        );
+        let mut loop_stmts = vec![guard, bind_x, inc];
+        loop_stmts.extend(body.stmts);
+        let loope = Expr { kind: ExprKind::Loop(Block { stmts: loop_stmts, span: sp }), span: sp };
+        let count_call = method_call(ident_expr(&c, sp), "count", Vec::new(), sp);
+        let stmts = vec![
+            Stmt { kind: StmtKind::Let { mutable: false, name: c, ty: None, init: Some(operand) }, span: sp },
+            Stmt { kind: StmtKind::Let { mutable: false, name: cnt, ty: None, init: Some(count_call) }, span: sp },
+            Stmt { kind: StmtKind::Let { mutable: true, name: i, ty: Some(usize_ty), init: Some(Expr { kind: ExprKind::IntLit { value: 0, suffix: None }, span: sp }) }, span: sp },
+            Stmt { kind: StmtKind::Expr(loope), span: sp },
+        ];
+        Ok(block_expr(stmts, sp))
     }
 
     /// Consuming desugar (design 0009 §4.2): the operand is MOVED into `__it`,

@@ -1202,8 +1202,9 @@ impl Fmt<'_> {
                 self.indent_str();
                 self.push("}");
             }
-            ExprKind::For { pattern, operand, body } => {
+            ExprKind::For { pattern, operand, body, by_ref } => {
                 self.push("for ");
+                if *by_ref { self.push("read "); }
                 self.emit_pattern(pattern);
                 self.push(" in ");
                 self.emit_head(operand);

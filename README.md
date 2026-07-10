@@ -11,7 +11,8 @@ parser, type checker, and the analysis core — move/init, the borrow checker's
 XOR loans, the alloc-effect partition, and match exhaustiveness — each *written
 in Candor* and differentially verified token-for-token / AST-for-AST / diagnostic-
 for-diagnostic against the Rust reference. The language now has text (`str`/`String`,
-design 0013), a std `Vec[T]`, and standalone binaries that do real libc I/O
+design 0013), a std `Vec[T]` with borrowed-element iteration (a region-free path that
+vindicated the region-fields ruling's bet), and standalone binaries that do real libc I/O
 through an auditable trust boundary. Thirteen designs — memory model through
 structured concurrency to the text budget — each adversarially reviewed; one
 rejected outright and reworked to acceptance (0012, whose reviewer built a real

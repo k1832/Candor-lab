@@ -664,8 +664,9 @@ impl R {
                 }
                 self.w(")");
             }
-            ExprKind::For { pattern, operand, body } => {
+            ExprKind::For { pattern, operand, body, by_ref } => {
                 self.w("(for ");
+                if *by_ref { self.w("read "); }
                 self.pattern(pattern);
                 self.sp();
                 self.expr(operand);

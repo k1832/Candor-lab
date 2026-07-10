@@ -529,7 +529,7 @@ pub enum ExprKind {
     /// `loop`+`match` at parse time (design 0009 §4.2), so the checker /
     /// interpreter / MIR never see this node. It exists only so the blessed
     /// formatter can reproduce the canonical `for` spelling (NN#11).
-    For { pattern: Pattern, operand: Box<Expr>, body: Block },
+    For { pattern: Pattern, operand: Box<Expr>, body: Block, by_ref: bool },
 
     /// `scope { ... }` — a structured-concurrency region (design 0012 §1.1).
     /// Block-like in statement-leading position; every task spawned inside joins

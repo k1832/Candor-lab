@@ -821,6 +821,38 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        // The region-free BORROWED-yield protocol `RefIndexed` (OBL-ITER-BORROW):
+        // `count(read self) -> usize` (the loop bound) and `get_ref(read self, i:
+        // usize) -> read Item` (a reborrow of element `i`, no copy). A `Vec[T]`
+        // receiver answers both, wiring `for read x in read v`. `get_ref` is the
+        // compact-default single-borrow-in/single-borrow-out shape (0001 §3.3): the
+        // returned `read T` derives from `read self` with no region variable.
+        if method == "count" {
+            if let crate::types::Type::App(n, _) = &recv_ty {
+                if n == "Vec" {
+                    self.check_expr(base, Use::BorrowShared);
+                    if !args.is_empty() {
+                        self.diags.push(Diag::error("E0706", "method `count` expects 0 argument(s)".to_string(), span));
+                    }
+                    return Some(crate::types::Type::usize());
+                }
+            }
+        }
+        if method == "get_ref" {
+            if let crate::types::Type::App(n, targs) = &recv_ty {
+                if n == "Vec" {
+                    let elem = targs.first().cloned().unwrap_or(crate::types::Type::Error);
+                    self.check_expr(base, Use::BorrowShared);
+                    if args.len() == 1 {
+                        let it = self.check_expr(&args[0], Use::Value);
+                        self.expect_integer(&it, args[0].span);
+                    } else {
+                        self.diags.push(Diag::error("E0706", "method `get_ref` expects 1 argument(s)".to_string(), span));
+                    }
+                    return Some(crate::types::Type::Borrow(Box::new(elem)));
+                }
+            }
+        }
         // The receiver's nominal / application / type-parameter identity.
         match &recv_ty {
             Type::Param(pname) => {
