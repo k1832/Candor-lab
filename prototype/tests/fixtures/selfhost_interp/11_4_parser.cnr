@@ -1,0 +1,105 @@
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+}
+
+copy struct Alloc {
+    ctx: rawptr u8,
+    vt: rawptr AllocVtable,
+}
+
+struct Bump {
+    next: usize,
+    end: usize,
+}
+
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "bump owns [ctx..)" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let mask: usize = align - 1;
+        let aligned: usize = (b.next + mask) / align * align;
+        if aligned + size > b.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {}
+
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+
+fn mk_alloc(state: write Bump) -> Alloc {
+    unsafe "handle + backing outlive every Box" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) };
+    }
+}
+
+enum Expr {
+    num(i64),
+    add(Box Expr, Box Expr),
+    mul(Box Expr, Box Expr),
+}
+
+static PLUS: u8 = 43u8;
+
+fn read_number(s: [u8], pos: write usize) -> i64 {
+    let c: u8 = s[pos.*];
+    pos.* = pos.* + 1;
+    return conv i64 c - 48;
+}
+
+fn peek(s: [u8], pos: read usize) -> u8 {
+    if pos.* >= len(s) {
+        return 0u8;
+    }
+    return s[pos.*];
+}
+
+fn advance(pos: write usize) -> unit {
+    pos.* = pos.* + 1;
+}
+
+fn parse_term(a: read Alloc, s: [u8], pos: write usize) alloc -> BoxResult Expr {
+    let n: i64 = read_number(s, pos);
+    return box(a, Expr::num(n));
+}
+
+fn parse_expr(a: read Alloc, s: [u8], pos: write usize) alloc -> BoxResult Expr {
+    // MIGRATE: two-arm BoxResult match -> `box(a, v)?` (author-assisted, design 0006 §5)
+    match parse_term(a, s, pos) {
+        BoxResult::oom => return BoxResult::oom,
+        BoxResult::boxed(lhs) => {
+            if peek(s, pos) == PLUS {
+                advance(pos);
+                // MIGRATE: two-arm BoxResult match -> `box(a, v)?` (author-assisted, design 0006 §5)
+                match parse_expr(a, s, pos) {
+                    BoxResult::oom => return BoxResult::oom,
+                    BoxResult::boxed(rhs) => return box(a, Expr::add(lhs, rhs)),
+                }
+            }
+            return BoxResult::boxed(lhs);
+        },
+    }
+}
+
+fn eval_owned(e: Expr) alloc -> i64 {
+    match e {
+        Expr::num(n) => return n,
+        Expr::add(l, r) => return eval_owned(unbox(l)) + eval_owned(unbox(r)),
+        Expr::mul(l, r) => return eval_owned(unbox(l)) * eval_owned(unbox(r)),
+    }
+}
+
+fn main() alloc -> i64 {
+    let mut st: Bump = Bump { next: 16777216, end: 33554432 };
+    let a: Alloc = mk_alloc(write st);
+    let s: [u8] = b"5+3+9";
+    let mut pos: usize = 0;
+    // MIGRATE: two-arm BoxResult match -> `box(a, v)?` (author-assisted, design 0006 §5)
+    match parse_expr(read a, s, write pos) {
+        BoxResult::oom => return 0 - 1,
+        BoxResult::boxed(root) => return eval_owned(unbox(root)),
+    }
+}

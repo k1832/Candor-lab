@@ -26,8 +26,8 @@
 // are values; FAULT spans are SOURCE spans), so the arena's base/size are free choices.
 // `interp.cnr` is NOT self-checked in this slice, so it uses the full language.
 
-use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl};
-use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_SC, T_RET, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_STRUCT, T_NAMED, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_VARIANT, T_ENUMCTOR, T_MATCH, T_ARM, T_PVARIANT, T_WILD, T_BIND, T_NAME, T_STATIC, T_RAWPTR, T_FNPTR, T_UNSAFE, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_BOX, T_BOXRESULT, T_PREFIX, PF_DEREF};
+use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl, decoded_len};
+use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_SC, T_RET, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_STRUCT, T_NAMED, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_VARIANT, T_ENUMCTOR, T_MATCH, T_ARM, T_PVARIANT, T_WILD, T_BIND, T_NAME, T_STATIC, T_RAWPTR, T_FNPTR, T_UNSAFE, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_BOX, T_BOXRESULT, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_CONV, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT, T_BYTES, T_STR, T_PARAM};
 
 // ---- fault kind codes (shared with the Rust harness) ------------------------
 static FK_OVERFLOW: i32 = 0;
@@ -35,6 +35,7 @@ static FK_DIVZERO: i32 = 1;
 static FK_ASSERT: i32 = 2;
 static FK_PANIC: i32 = 3;
 static FK_BOUNDS: i32 = 4;
+static FK_CONVLOSS: i32 = 5;
 
 // ---- width codes: 1..10 mirror the lexer's suffix codes; 11 = bool; 0 = unit ----
 static W_BOOL: i32 = 11;
@@ -108,6 +109,10 @@ struct E {
     alloc_vt_sid: u32,
     alloc_sid: u32,
     cur_exp_ty: u32,
+    gen_boxresult: u32,
+    gen_box: u32,
+    gen_inner: u32,
+    scw: [16]u32,
 }
 
 // ---- bit-pattern reinterpretation via wrapping conv (no transmute needed) ----
@@ -258,6 +263,126 @@ fn synth_boxresults(p: write P, src: [u8]) -> unit {
             en.b = boxedid;
             let enid: u32 = inode(p, en);
             p.*.nodes[conv usize i].c = enid;
+        }
+        i = i + 1u32;
+    }
+    return;
+}
+// A generic BoxResult scaffold (used when a `box(...)`/`BoxResult::*` has no
+// annotated `BoxResult T` in scope: 11_1/11_5 match a box directly). Mirrors the
+// oracle deriving the result type from the value: the boxed payload's inner type
+// rides `e.gen_inner`, set at each box; size (32) is inner-independent.
+fn synth_generic_boxresult(p: write P, src: [u8], e: write E) -> unit {
+    let boxed0: usize = find_needle(src, b"boxed");
+    let oom0: usize = find_needle(src, b"oom");
+    let mut bn: Node = nnew(T_BOX);
+    bn.a = 0u32;
+    let boxid: u32 = inode(p, bn);
+    let mut vo: Node = nnew(T_VARIANT);
+    vo.p0 = oom0;
+    vo.p1 = oom0 + 3usize;
+    let oomid: u32 = inode(p, vo);
+    let mut vb: Node = nnew(T_VARIANT);
+    vb.p0 = boxed0;
+    vb.p1 = boxed0 + 5usize;
+    vb.a = boxid;
+    vb.nx = oomid;
+    let boxedid: u32 = inode(p, vb);
+    let mut en: Node = nnew(T_ENUM);
+    en.op = 0;
+    en.b = boxedid;
+    let enid: u32 = inode(p, en);
+    let mut br: Node = nnew(T_BOXRESULT);
+    br.a = 0u32;
+    br.c = enid;
+    let brid: u32 = inode(p, br);
+    e.*.gen_boxresult = brid;
+    e.*.gen_box = boxid;
+    e.*.gen_inner = 0u32;
+    return;
+}
+// A synthetic `T_SC` scalar type node per width (span points at the type name in
+// source), so a scalar boxed WITHOUT an annotation (11_1's `box(a, 1234)`) still
+// carries a real inner type node for its Box deref/unbox/drop.
+fn synth_scw(p: write P, src: [u8], e: write E, w: i32, name: [u8]) -> unit {
+    let pos: usize = find_needle(src, name);
+    if pos < len(src) {
+        let mut nd: Node = nnew(T_SC);
+        nd.p0 = pos;
+        nd.p1 = pos + len(name);
+        e.*.scw[conv usize w] = inode(p, nd);
+    }
+    return;
+}
+fn synth_scalar_nodes(p: write P, src: [u8], e: write E) -> unit {
+    synth_scw(p, src, e, 1, b"i8");
+    synth_scw(p, src, e, 2, b"i16");
+    synth_scw(p, src, e, 3, b"i32");
+    synth_scw(p, src, e, 4, b"i64");
+    synth_scw(p, src, e, 5, b"isize");
+    synth_scw(p, src, e, 6, b"u8");
+    synth_scw(p, src, e, 7, b"u16");
+    synth_scw(p, src, e, 8, b"u32");
+    synth_scw(p, src, e, 9, b"u64");
+    synth_scw(p, src, e, 10, b"usize");
+    synth_scw(p, src, e, 11, b"bool");
+    return;
+}
+// The element type node for an array literal/rep VALUE: an enum-ctor or struct-lit
+// value names its type (a `T_NAMED` over the name span); scalar/other values -> 0.
+fn synth_elem_type(p: write P, valnode: u32) -> u32 {
+    let vn: Node = p.nodes[conv usize valnode];
+    if vn.tag == T_ENUMCTOR || vn.tag == T_STRUCTLIT {
+        let mut nm: Node = nnew(T_NAMED);
+        nm.p0 = vn.p0;
+        nm.p1 = vn.p1;
+        return inode(p, nm);
+    }
+    return 0u32;
+}
+// Give each aggregate-element array-rep a concrete `[N]T` type node (stored in its
+// `.c`), so a value like `[Node::leaf(0); 4096]` can be sized when boxed -- the
+// oracle's array value carries its `Array(elem, N)` type. Scalar reps stay untyped.
+fn synth_array_types(p: write P) -> unit {
+    let n0: u32 = p.n;
+    let mut i: u32 = 1u32;
+    while i < n0 {
+        let nd: Node = p.nodes[conv usize i];
+        if nd.tag == T_ARRAYREP {
+            let et: u32 = synth_elem_type(p, nd.a);
+            if et != 0u32 {
+                let mut arr: Node = nnew(T_ARRAY);
+                arr.a = nd.b;
+                arr.b = et;
+                let aid: u32 = inode(p, arr);
+                p.*.nodes[conv usize i].c = aid;
+            }
+        }
+        i = i + 1u32;
+    }
+    return;
+}
+// A `read`/`write` parameter is a BORROW (a pointer), but the parser records the
+// borrow kind in the param's `.op` and stores the INNER type in `.a`. Give each
+// such param a real `T_BORROW`/`T_BORROWMUT` type node (rewriting `.a`), so the
+// interp stores it as an 8-byte pointer scalar and `param.*` derefs correctly.
+fn synth_param_borrows(p: write P) -> unit {
+    let n0: u32 = p.n;
+    let mut i: u32 = 1u32;
+    while i < n0 {
+        let nd: Node = p.nodes[conv usize i];
+        if nd.tag == T_PARAM {
+            if nd.op == 1 {
+                let mut b: Node = nnew(T_BORROW);
+                b.a = nd.a;
+                let bid: u32 = inode(p, b);
+                p.*.nodes[conv usize i].a = bid;
+            } else if nd.op == 2 {
+                let mut b: Node = nnew(T_BORROWMUT);
+                b.a = nd.a;
+                let bid: u32 = inode(p, b);
+                p.*.nodes[conv usize i].a = bid;
+            }
         }
         i = i + 1u32;
     }
@@ -524,6 +649,7 @@ fn scalar_width(pp: read P, src: [u8], tn: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize tn];
     if (nd.tag == T_NAMED || nd.tag == T_SC) { return sc_width(src, nd.p0, nd.p1); }
     if nd.tag == T_RAWPTR || nd.tag == T_FNPTR { return W_USIZE; }
+    if nd.tag == T_BORROW || nd.tag == T_BORROWMUT { return W_USIZE; }
     return 0;
 }
 // A rawptr / fn-ptr type node carries its pointee type in `.a`. A declared
@@ -584,6 +710,8 @@ fn ty_size(pp: read P, src: [u8], e: write E, tn: u32) -> usize {
     if nd.tag == T_STRUCT { return struct_size(pp, src, e, tn); }
     if nd.tag == T_ENUM { return enum_size(pp, src, e, tn); }
     if nd.tag == T_RAWPTR || nd.tag == T_FNPTR { return 8usize; }
+    if nd.tag == T_BORROW || nd.tag == T_BORROWMUT { return 8usize; }
+    if nd.tag == T_SLICE || nd.tag == T_SLICEMUT { return 16usize; }
     if nd.tag == T_BOX { return 24usize; }
     if nd.tag == T_BOXRESULT { return 32usize; }
     if nd.tag == T_ARRAY {
@@ -609,6 +737,8 @@ fn ty_align(pp: read P, src: [u8], e: write E, tn: u32) -> usize {
     if nd.tag == T_STRUCT { return struct_align(pp, src, e, tn); }
     if nd.tag == T_ENUM { return 8usize; }
     if nd.tag == T_RAWPTR || nd.tag == T_FNPTR { return 8usize; }
+    if nd.tag == T_BORROW || nd.tag == T_BORROWMUT { return 8usize; }
+    if nd.tag == T_SLICE || nd.tag == T_SLICEMUT { return 8usize; }
     if nd.tag == T_BOX || nd.tag == T_BOXRESULT { return 8usize; }
     if nd.tag == T_ARRAY { return ty_align(pp, src, e, nd.b); }
     return 1usize;
@@ -1081,7 +1211,9 @@ fn drop_value(pp: read P, src: [u8], e: write E, addr: usize, tn: u32, li: i64) 
     }
     let nd: Node = pp.nodes[conv usize tn];
     if nd.tag == T_BOX {
-        return drop_box(pp, src, e, addr, nd.a);
+        let mut binner: u32 = nd.a;
+        if tn == e.gen_box { binner = e.gen_inner; }
+        return drop_box(pp, src, e, addr, binner);
     }
     if nd.tag == T_ARRAY {
         let n: usize = array_len_of(pp, nd.a);
@@ -1310,11 +1442,14 @@ fn shift_op(op: i32, a: i64, amt: i64, w: i32, e: write E, p0: usize, p1: usize)
 // layer reads the pointer at the place and re-bases on the pointee.
 fn peel_box_place(pp: read P, e: write E) -> unit {
     loop {
-        let bnode: Node = pp.nodes[conv usize e.plc_ty];
-        if bnode.tag == T_BOX {
+        let boxid: u32 = e.plc_ty;
+        let bnode: Node = pp.nodes[conv usize boxid];
+        if bnode.tag == T_BOX || bnode.tag == T_BORROW || bnode.tag == T_BORROWMUT {
             let ptr: i64 = mem_load(e, e.plc_addr, W_USIZE);
             e.*.plc_addr = conv usize to_u64(ptr);
-            e.*.plc_ty = bnode.a;
+            let mut inner: u32 = bnode.a;
+            if boxid == e.gen_box { inner = e.gen_inner; }
+            e.*.plc_ty = inner;
         } else {
             return;
         }
@@ -1332,8 +1467,10 @@ fn eval_place(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
         if nd.op == PF_DEREF {
             let sc: i32 = eval_place(pp, src, e, nd.a);
             if sc != 0 { return sc; }
-            let bnode: Node = pp.nodes[conv usize e.plc_ty];
-            let inner: u32 = bnode.a;
+            let boxid: u32 = e.plc_ty;
+            let bnode: Node = pp.nodes[conv usize boxid];
+            let mut inner: u32 = bnode.a;
+            if boxid == e.gen_box { inner = e.gen_inner; }
             let ptr: i64 = mem_load(e, e.plc_addr, W_USIZE);
             e.*.plc_addr = conv usize to_u64(ptr);
             e.*.plc_ty = inner;
@@ -1385,6 +1522,22 @@ fn eval_place(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
         let base_addr: usize = e.plc_addr;
         let arr_ty: u32 = e.plc_ty;
         let arrnd: Node = pp.nodes[conv usize arr_ty];
+        if arrnd.tag == T_SLICE || arrnd.tag == T_SLICEMUT || arrnd.tag == T_STR {
+            let sptr: usize = conv usize to_u64(mem_load(e, base_addr, W_USIZE));
+            let slen: usize = conv usize to_u64(mem_load(e, base_addr + 8usize, W_USIZE));
+            if iv >= conv u64 slen {
+                set_fault(e, FK_BOUNDS, e.cur_p0, e.cur_p1);
+                return 1;
+            }
+            let selem: u32 = arrnd.a;
+            let sesz: usize = ty_size(pp, src, e, selem);
+            let seal: usize = ty_align(pp, src, e, selem);
+            let sstride: usize = round_up_us(sesz, seal);
+            e.*.plc_addr = sptr + (conv usize iv) * sstride;
+            e.*.plc_ty = selem;
+            e.*.plc_w = scalar_width(pp, src, selem);
+            return 0;
+        }
         let n: usize = array_len_of(pp, arrnd.a);
         if iv >= conv u64 n {
             set_fault(e, FK_BOUNDS, e.cur_p0, e.cur_p1);
@@ -1514,7 +1667,7 @@ fn eval_array_rep(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     }
     e.*.cur_val = conv i64 addr;
     e.*.cur_w = 0;
-    e.*.cur_ty = 0u32;
+    e.*.cur_ty = nd.c;
     return 0;
 }
 fn eval_array_lit(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
@@ -1568,7 +1721,10 @@ fn eval_array_lit(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
 // the enum decl node); a non-copy enum registers a temp like a struct literal.
 fn eval_enum_ctor(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
-    let eid: u32 = find_enum(pp, src, e, nd.p0, nd.p1);
+    let mut eid: u32 = find_enum(pp, src, e, nd.p0, nd.p1);
+    if span_eq(src, nd.p0, nd.p1, b"BoxResult") {
+        eid = enum_of_ty(pp, src, e, e.gen_boxresult);
+    }
     let vnamenode: Node = pp.nodes[conv usize nd.a];
     let vidx: i32 = variant_index_by_name(pp, src, eid, vnamenode.p0, vnamenode.p1);
     let vid: u32 = variant_by_index(pp, eid, vidx);
@@ -1716,6 +1872,84 @@ fn eval_match(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     return bs;
 }
 
+// ---- conv (integer widening/narrowing) --------------------------------------
+// Mirrors src/interp/eval.rs eval_conv: read the source integer at its declared
+// signedness, then range-check against the TARGET scalar's range. In-range keeps
+// the value (its bit pattern already fits the target width); out-of-range in the
+// checked regime is a ConvLoss fault (the corpus stays in range). `sw`/`tw` are
+// width codes; unsigned values are compared via their u64 magnitude.
+fn conv_in_range(sval: i64, sw: i32, tw: i32) -> bool {
+    if w_signed(tw) {
+        let lo: i64 = smin(tw);
+        let hi: i64 = smax(tw);
+        if w_signed(sw) {
+            return sval >= lo && sval <= hi;
+        }
+        return to_u64(sval) <= to_u64(hi);
+    }
+    let hi: u64 = umax(tw);
+    if w_signed(sw) {
+        if sval < 0i64 { return false; }
+        return to_u64(sval) <= hi;
+    }
+    return to_u64(sval) <= hi;
+}
+fn eval_conv(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let sc: i32 = eval_expr(pp, src, e, nd.b, 0 - 1i32);
+    if sc != 0 { return sc; }
+    let sw: i32 = e.cur_w;
+    let sval: i64 = e.cur_val;
+    let tnode: Node = pp.nodes[conv usize nd.a];
+    let tw: i32 = sc_width(src, tnode.p0, tnode.p1);
+    if conv_in_range(sval, sw, tw) {
+        e.*.cur_val = sval;
+        e.*.cur_w = tw;
+        e.*.cur_ty = 0u32;
+        e.*.cur_org = 0;
+        return 0;
+    }
+    set_fault(e, FK_CONVLOSS, e.cur_p0, e.cur_p1);
+    return 1;
+}
+// ---- byte-string literal (`b"..."`) -----------------------------------------
+// Mirrors src/interp/eval.rs BytesLit: decode the literal's bytes into memory,
+// then materialize a `[u8]` fat pointer {ptr@0, len@8} (16 bytes) over them. The
+// escape decoding matches the lexer's `emit_decoded`.
+fn eval_bytes_lit(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let n: usize = conv usize decoded_len(src, nd.p0, nd.p1);
+    let mut dn: usize = n;
+    if dn == 0usize { dn = 1usize; }
+    let data: usize = bump_alloc(e, dn, 1usize);
+    let mut si: usize = nd.p0;
+    let mut k: usize = 0usize;
+    while si < nd.p1 {
+        let mut dec: u8 = src[si];
+        if src[si] == 92u8 && si + 1usize < nd.p1 {
+            let nx: u8 = src[si + 1usize];
+            if nx == 34u8 { dec = 34u8; }
+            else if nx == 92u8 { dec = 92u8; }
+            else if nx == 110u8 { dec = 10u8; }
+            else if nx == 116u8 { dec = 9u8; }
+            else { dec = nx; }
+            si = si + 2usize;
+        } else {
+            si = si + 1usize;
+        }
+        mem_store(e, data + k, conv i64 dec, 6);
+        k = k + 1usize;
+    }
+    let fat: usize = bump_alloc(e, 16usize, 8usize);
+    mem_store(e, fat, conv i64 data, W_USIZE);
+    mem_store(e, fat + 8usize, conv i64 n, W_USIZE);
+    e.*.cur_val = conv i64 fat;
+    e.*.cur_w = 0;
+    e.*.cur_ty = 0u32;
+    e.*.cur_org = 0;
+    return 0;
+}
+
 // ---- expression evaluation ---------------------------------------------------
 // Status: 0 normal, 1 fault, 2 return, 3 break, 4 continue. A normal scalar value
 // is left in E.cur_val / E.cur_w; a normal aggregate value is an ADDRESS in
@@ -1799,6 +2033,21 @@ fn eval_expr(pp: read P, src: [u8], e: write E, i: u32, exp_w: i32) -> i32 {
             if sc != 0 { return sc; }
             return load_place(e);
         }
+        if nd.op == PF_READ || nd.op == PF_WRITE {
+            let sc: i32 = eval_place(pp, src, e, nd.a);
+            if sc != 0 { return sc; }
+            e.*.cur_val = conv i64 e.plc_addr;
+            e.*.cur_w = W_USIZE;
+            e.*.cur_ty = 0u32;
+            e.*.cur_org = 0;
+            return 0;
+        }
+    }
+    if tg == T_CONV {
+        return eval_conv(pp, src, e, i);
+    }
+    if tg == T_BYTES {
+        return eval_bytes_lit(pp, src, e, i);
     }
     if tg == T_FIELD || tg == T_INDEX {
         let sc: i32 = eval_place(pp, src, e, i);
@@ -2100,7 +2349,10 @@ fn fn_ret_tynode(pp: read P, fnid: u32) -> u32 {
 // `let` -- the same node the synthetic enum is linked from.
 fn bi_box(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
-    let rty: u32 = e.cur_exp_ty;
+    let mut rty: u32 = e.cur_exp_ty;
+    if rty == 0u32 || pp.nodes[conv usize rty].tag != T_BOXRESULT {
+        rty = e.gen_boxresult;
+    }
     let a0: u32 = nd.b;
     let a0nd: Node = pp.nodes[conv usize a0];
     let a1: u32 = a0nd.nx;
@@ -2120,6 +2372,9 @@ fn bi_box(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let vorg: i32 = e.cur_org;
     let voa: usize = e.cur_org_a;
     let vob: i32 = e.cur_org_b;
+    if rty == e.gen_boxresult {
+        if vw != 0 { e.*.gen_inner = e.scw[conv usize vw]; } else { e.*.gen_inner = vty; }
+    }
     let mut vsz: usize = 0usize;
     let mut val: usize = 1usize;
     let mut vcopy: bool = true;
@@ -2191,7 +2446,8 @@ fn bi_unbox(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let boa: usize = e.cur_org_a;
     let bob: i32 = e.cur_org_b;
     let bnode: Node = pp.nodes[conv usize bxty];
-    let inner: u32 = bnode.a;
+    let mut inner: u32 = bnode.a;
+    if bxty == e.gen_box { inner = e.gen_inner; }
     let ptr: usize = conv usize to_u64(mem_load(e, bxaddr, W_USIZE));
     let ctx: i64 = mem_load(e, bxaddr + 8usize, W_USIZE);
     let vt: i64 = mem_load(e, bxaddr + 16usize, W_USIZE);
@@ -2305,6 +2561,23 @@ fn eval_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
         let av: u64 = to_u64(e.cur_val);
         if av == 0u64 { e.*.cur_val = 1i64; } else { e.*.cur_val = 0i64; }
         e.*.cur_w = W_BOOL;
+        e.*.cur_org = 0;
+        return 0;
+    }
+    if span_eq(src, callee.p0, callee.p1, b"len") {
+        let sc: i32 = eval_expr(pp, src, e, nd.b, 0 - 1i32);
+        if sc != 0 { return sc; }
+        let saddr: usize = conv usize e.cur_val;
+        let snode: Node = pp.nodes[conv usize e.cur_ty];
+        let mut ln: usize = 0usize;
+        if snode.tag == T_SLICE || snode.tag == T_SLICEMUT || snode.tag == T_STR {
+            ln = conv usize to_u64(mem_load(e, saddr + 8usize, W_USIZE));
+        } else if snode.tag == T_ARRAY {
+            ln = array_len_of(pp, snode.a);
+        }
+        e.*.cur_val = conv i64 ln;
+        e.*.cur_w = W_USIZE;
+        e.*.cur_ty = 0u32;
         e.*.cur_org = 0;
         return 0;
     }
@@ -2774,6 +3047,10 @@ pub fn interp_dump(src: [u8], buf: read Buf) -> unit {
         alloc_vt_sid: 0u32,
         alloc_sid: 0u32,
         cur_exp_ty: 0u32,
+        gen_boxresult: 0u32,
+        gen_box: 0u32,
+        gen_inner: 0u32,
+        scw: [0u32; 16],
     };
     set_self_span(src, write e);
     // Structural Alloc/AllocVtable identification, computed once at startup like
@@ -2782,6 +3059,10 @@ pub fn interp_dump(src: [u8], buf: read Buf) -> unit {
     e.alloc_vt_sid = avt;
     e.alloc_sid = find_alloc_struct(read p, src, write e, avt);
     synth_boxresults(write p, src);
+    synth_array_types(write p);
+    synth_param_borrows(write p);
+    synth_generic_boxresult(write p, src, write e);
+    synth_scalar_nodes(write p, src, write e);
     run_statics(read p, src, write e);
     let mainid: u32 = find_main(read p, src, write e);
     let mut ret: i64 = 0i64;

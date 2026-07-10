@@ -1,0 +1,89 @@
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+}
+
+copy struct Alloc {
+    ctx: rawptr u8,
+    vt: rawptr AllocVtable,
+}
+
+struct Bump {
+    next: usize,
+    end: usize,
+}
+
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "bump owns [ctx..)" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let mask: usize = align - 1;
+        let aligned: usize = (b.next + mask) / align * align;
+        if aligned + size > b.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {}
+
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+
+fn mk_alloc(state: write Bump) -> Alloc {
+    unsafe "handle + backing outlive the Arena's Box" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) };
+    }
+}
+
+copy enum Node {
+    leaf(i64),
+    binop(u8, u32, u32),
+}
+
+struct Arena {
+    mem: Box [4096]Node,
+    count: u32,
+}
+
+fn apply(op: u8, l: i64, r: i64) -> i64 {
+    return l + r;
+}
+
+fn arena_push(ar: write Arena, n: Node) -> u32 {
+    let i: u32 = ar.count;
+    ar.*.mem[conv usize i] = n;
+    ar.*.count = i + 1;
+    return i;
+}
+
+fn arena_get(ar: read Arena, i: u32) -> read Node {
+    return read ar.mem[conv usize i];
+}
+
+fn fold_consts(ar: write Arena, root: u32) -> i64 {
+    match arena_get(ar, root) {
+        Node::leaf(v) => return v,
+        Node::binop(op, l, r) => {
+            let lv: i64 = fold_consts(ar, l);
+            let rv: i64 = fold_consts(ar, r);
+            return apply(op, lv, rv);
+        },
+    }
+}
+
+fn main() alloc -> i64 {
+    let mut st: Bump = Bump { next: 16777216, end: 33554432 };
+    let al: Alloc = mk_alloc(write st);
+    // MIGRATE: two-arm BoxResult match -> `box(a, v)?` (author-assisted, design 0006 §5)
+    match box(read al, [Node::leaf(0); 4096]) {
+        BoxResult::oom => return 0 - 1,
+        BoxResult::boxed(mem) => {
+            let mut ar: Arena = Arena { mem: mem, count: 0u32 };
+            let l: u32 = arena_push(write ar, Node::leaf(2));
+            let r: u32 = arena_push(write ar, Node::leaf(3));
+            let root: u32 = arena_push(write ar, Node::binop(0u8, l, r));
+            return fold_consts(write ar, root);
+        },
+    }
+}

@@ -35,6 +35,7 @@ fn fault_code(k: FaultKind) -> i64 {
         FaultKind::Assert => 2,
         FaultKind::Panic => 3,
         FaultKind::Bounds => 4,
+        FaultKind::ConvLoss => 5,
         other => panic!("out-of-subset fault kind reached the gate: {other:?}"),
     }
 }
@@ -185,6 +186,12 @@ const CORPUS: &[(&str, Shape)] = &[
     ("ptr_offset_stride.cnr", Ret),
     ("enum_padding_copy.cnr", Ret),
     ("page_boundary.cnr", Ret),
+    // ---- S6b: the SYSTEMS CORPUS (five real programs), oracle-matched ----
+    ("11_3_mmio.cnr", Ret),
+    ("11_1_allocator.cnr", Ret),
+    ("11_2_scheduler.cnr", Ret),
+    ("11_5_arena.cnr", Ret),
+    ("11_4_parser.cnr", Ret),
 ];
 
 fn read_fixture(rel: &str) -> String {

@@ -1307,3 +1307,52 @@ zero-init; correctness landed, cost noted.
 The self-interpreter now executes S1 scalars + S2 structs/arrays + S3 move/drop + S4 enums/match +
 S5 the heap + S6a paged memory & pointer intrinsics. The systems corpus (11_1..11_5) is now gated
 ONLY on S6b — the corpus programs themselves. interp.cnr remains NOT self-checked.
+
+### S6b — THE MILESTONE: the self-interpreter RUNS the five systems-corpus programs (sixth slice, part b, 2026-07-11)
+
+The self-hosted Candor interpreter (`prototype/selfhost/interp/interp.cnr`) now EXECUTES all five
+systems-corpus programs — Candor's hardest real programs — each byte-exact against the Rust reference
+(`run_source_real`). Same gate (`prototype/tests/selfhost_interp.rs`, EXECUTION equality): the corpus
+grows from 66 to 71 fixtures (61 returns, 10 faults). Confined to interp.cnr + the gate list (plus one
+harness line mapping `ConvLoss`) — NO parser change (the parser already emits every needed node). All
+66 prior interp fixtures stay byte-exact, every lexer/parser/checker/analyses self-check gate stays
+green (585 suite, 0 failing; clippy clean).
+
+THE FIVE (each RET oracle-matched): `11_3_mmio` RET 42 (enums/match + `addr_to_ptr` MMIO at a fixed 3
+MiB window), `11_1_allocator` RET 1234 (a pool free-list allocator, `box` matched directly), `11_2_
+scheduler` RET 42 (a rawptr intrusive list with a hand-written `container_of` = `cast_ptr` +
+`ptr_offset` + `conv isize offsetof`), `11_5_arena` RET 5 (a `Box [4096]Node` arena, ~96 KiB, + a
+recursive `fold_consts`), `11_4_parser` RET 17 (a recursive-descent expression parser over a `b"..."`
+byte-slice, enums with `Box` payloads, `box`/`unbox`).
+
+WHAT S6b IMPLEMENTED (each a real interp fix mirroring the oracle, not a fixture special-case):
+- `conv` (`T_CONV`, the #1 blocker, unimplemented before). Mirrors `src/interp/eval.rs::eval_conv`:
+  read the source integer at its declared signedness, range-check against the TARGET scalar's
+  `(min,max)` (unsigned magnitudes compared via u64); in range keeps the bit pattern at the new width,
+  out-of-range in the checked regime is a `ConvLoss` fault (`FK_CONVLOSS = 5`, added to the harness's
+  kind map; the corpus stays in range). All five use `conv`; 11_2 also needs it inside `container_of`.
+- BORROW parameters (`read`/`write` params, e.g. `state: write Bump`, `a: read Alloc`). The parser
+  UNWRAPS a borrow param — it stores the inner type in `T_PARAM.a` and the borrow kind in `T_PARAM.op`
+  (1 = read, 2 = write) — so the interp never saw a borrow node and copied the POINTEE by value (the
+  `mk_alloc`/`pool_handle` `ctx = &st` bug). `synth_param_borrows` gives each such param a real
+  `T_BORROW`/`T_BORROWMUT` node (rewriting `.a`), so it is stored as an 8-byte pointer scalar;
+  `PF_READ`/`PF_WRITE` expressions (`write st`) yield a place ADDRESS; `peel_box_place` now peels
+  borrows as well as boxes, so `param.*`/`param.field` deref correctly.
+- SLICES + byte-strings (11_4): `[u8]`/`[T]` (`T_SLICE`/`T_SLICEMUT`) size 16 / align 8; `b"..."`
+  (`T_BYTES`) decodes its bytes into memory and materializes a `{ptr,len}` fat pointer (escape
+  decoding shared with the lexer's `decoded_len`); `len(s)` reads the length field; slice indexing
+  reads `ptr`/`len` and bounds-faults, distinct from array indexing.
+- The compiler-known `BoxResult` shape WITHOUT an annotation (11_1/11_5 `match box(...)` directly, and
+  11_4's `BoxResult::boxed(lhs)`/`::oom` ctors). A generic `{boxed(Box _), oom}` scaffold routes such
+  values; the boxed inner type rides `e.gen_inner`, set at each `box` from the value's type — a
+  synthesized `T_SC` node for a scalar value (`box(a, 1234)`), a synthesized `[N]T` node for an
+  array-rep value (`box(al, [Node::leaf(0); 4096])`, so it can be sized). `box`/`unbox`/deref/drop
+  consult `gen_inner` when the box node is the generic one.
+
+NOTHING NEEDED S7+. Every one of the five is monomorphic and lands entirely within the S1–S6 value
+model + these additions; no generics/monomorphization, no `for`/iterators, no `Vec`/`Map`, no `?`
+were required. RUNTIME: the gate runs ~82 s (the oracle running interp.cnr over the corpus, dominated
+by 11_5's ~96 KiB arena build + the recursive drop of 4096 copy `Node`s, and 11_4's recursive parse/
+eval); correctness landed, cost noted. The self-hosted interpreter now executes Candor's full
+systems-programming surface — allocators, intrusive lists, MMIO, an arena, and a recursive-descent
+parser — matching the reference engine byte-for-byte. interp.cnr remains NOT self-checked.
