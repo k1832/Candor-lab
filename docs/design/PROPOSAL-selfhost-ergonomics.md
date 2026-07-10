@@ -393,3 +393,16 @@ views on the *majority* of signatures. Today it is 2, and clean.
 → value-gear decoder design. OBL-TEXT-RESULT (transient borrow-in-payload) → left OPEN as a
 separate, strictly-smaller question, NOT foreclosed by this ruling. OBL-SELFHOST-ERGO friction #1
 → recorded as accepted essential cost.
+
+## Candidate C — SETTLED (not merely ratified), 2026-07-10
+
+The ruling's falsifiable re-open trigger ("4-5 threaded views on the majority of signatures")
+has now been tested against the five self-hosting slices that were its designated stressors —
+parser (2 views), type checker (2 read-views), move/init analysis (3), loan analysis (3, with a
+growable loan set), effects+exhaustiveness (3, with an alloc table + per-local type map). Every
+slice, including the state-heaviest, aggregated its state into a single struct and stayed at
+three views; the trigger never fired. The decision is recorded as SETTLED: the aggregate-state-
+into-one-struct idiom is confirmed as the load-bearing Candor pattern that makes source-threading
+a shallow, bounded cost rather than a pervasive one. Reopening now requires new evidence of a
+DIFFERENT shape than the trigger (the trigger is empirically dead), which would itself be a fresh
+amendment proposal, not a continuation of this one.
