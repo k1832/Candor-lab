@@ -25,7 +25,7 @@
 // It is NOT self-checked in this slice, so it uses the full language.
 
 use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl, emit_bytes};
-use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_PARAM, T_SC, T_NAMED, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT};
+use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_PARAM, T_SC, T_NAMED, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, T_STRUCT, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT};
 
 // ---- fault kind codes (the wire keyword table in serial.rs) -----------------
 static FK_OVERFLOW: i32 = 0;
@@ -89,6 +89,19 @@ struct M {
     o2v: u64,
     o2n: i32,
     o2w: i32,
+    loc_tn: [512]u32,
+    loc_ptr: [512]i32,
+    bnd_tn: [512]u32,
+    dbuf: [4096]u8,
+    dbuf_n: usize,
+    ret_tn: u32,
+    plc_tn: u32,
+    luk_tn: u32,
+    ak: [16]i32,
+    av: [16]u64,
+    an: [16]i32,
+    aw: [16]i32,
+    na: usize,
     err: i32,
 }
 
@@ -134,6 +147,137 @@ fn name_eq(src: [u8], a0: usize, a1: usize, b0: usize, b1: usize) -> bool {
         i = i + 1usize;
     }
     return true;
+}
+
+// ---- layout table (ported from interp.cnr / src/mir/layout.rs) ---------------
+// Declared-order fields at natural alignment; struct size rounded to max field
+// alignment; array stride = round_up(elem_size, elem_align). Pure over the arena
+// AST + `head` (the item list), mirroring interp.cnr's ty_size/ty_align/field_off.
+fn w_size(w: i32) -> usize {
+    if w == 1 || w == 6 || w == W_BOOL { return 1usize; }
+    if w == 2 || w == 7 { return 2usize; }
+    if w == 3 || w == 8 { return 4usize; }
+    return 8usize;
+}
+fn round_up_us(x: usize, a: usize) -> usize {
+    if a <= 1usize { return x; }
+    return ((x + a - 1usize) / a) * a;
+}
+fn find_struct(pp: read P, src: [u8], head: u32, s: usize, en: usize) -> u32 {
+    let mut cur: u32 = head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_STRUCT && name_eq(src, s, en, nd.p0, nd.p1) { return cur; }
+        cur = nd.nx;
+    }
+    return 0u32;
+}
+// The T_STRUCT decl node for a type descriptor, or 0 if not a struct.
+fn struct_id_of(pp: read P, src: [u8], head: u32, tn: u32) -> u32 {
+    if tn == 0u32 { return 0u32; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_STRUCT { return tn; }
+    if nd.tag == T_NAMED || nd.tag == T_SC {
+        if sc_width(src, nd.p0, nd.p1) != 0 { return 0u32; }
+        return find_struct(pp, src, head, nd.p0, nd.p1);
+    }
+    return 0u32;
+}
+fn array_len_of(pp: read P, sn: u32) -> usize {
+    let nd: Node = pp.nodes[conv usize sn];
+    if nd.tag == T_INT { return conv usize nd.ival; }
+    return 0usize;
+}
+fn ty_size(pp: read P, src: [u8], head: u32, tn: u32) -> usize {
+    if tn == 0u32 { return 0usize; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_NAMED || nd.tag == T_SC {
+        let w: i32 = sc_width(src, nd.p0, nd.p1);
+        if w != 0 { return w_size(w); }
+        let sid: u32 = find_struct(pp, src, head, nd.p0, nd.p1);
+        if sid != 0u32 { return struct_size(pp, src, head, sid); }
+        return 0usize;
+    }
+    if nd.tag == T_STRUCT { return struct_size(pp, src, head, tn); }
+    if nd.tag == T_ARRAY {
+        let n: usize = array_len_of(pp, nd.a);
+        let esz: usize = ty_size(pp, src, head, nd.b);
+        let eal: usize = ty_align(pp, src, head, nd.b);
+        return round_up_us(esz, eal) * n;
+    }
+    return 0usize;
+}
+fn ty_align(pp: read P, src: [u8], head: u32, tn: u32) -> usize {
+    if tn == 0u32 { return 1usize; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_NAMED || nd.tag == T_SC {
+        let w: i32 = sc_width(src, nd.p0, nd.p1);
+        if w != 0 { return w_size(w); }
+        let sid: u32 = find_struct(pp, src, head, nd.p0, nd.p1);
+        if sid != 0u32 { return struct_align(pp, src, head, sid); }
+        return 1usize;
+    }
+    if nd.tag == T_STRUCT { return struct_align(pp, src, head, tn); }
+    if nd.tag == T_ARRAY { return ty_align(pp, src, head, nd.b); }
+    return 1usize;
+}
+fn struct_size(pp: read P, src: [u8], head: u32, sid: u32) -> usize {
+    if sid == 0u32 { return 0usize; }
+    let snode: Node = pp.nodes[conv usize sid];
+    let mut off: usize = 0usize;
+    let mut align: usize = 1usize;
+    let mut cur: u32 = snode.b;
+    while cur != 0u32 {
+        let fd: Node = pp.nodes[conv usize cur];
+        let a: usize = ty_align(pp, src, head, fd.a);
+        if a > align { align = a; }
+        off = round_up_us(off, a);
+        off = off + ty_size(pp, src, head, fd.a);
+        cur = fd.nx;
+    }
+    return round_up_us(off, align);
+}
+fn struct_align(pp: read P, src: [u8], head: u32, sid: u32) -> usize {
+    if sid == 0u32 { return 1usize; }
+    let snode: Node = pp.nodes[conv usize sid];
+    let mut align: usize = 1usize;
+    let mut cur: u32 = snode.b;
+    while cur != 0u32 {
+        let fd: Node = pp.nodes[conv usize cur];
+        let a: usize = ty_align(pp, src, head, fd.a);
+        if a > align { align = a; }
+        cur = fd.nx;
+    }
+    return align;
+}
+fn field_off(pp: read P, src: [u8], head: u32, sid: u32, fs: usize, fen: usize) -> usize {
+    if sid == 0u32 { return 0usize; }
+    let snode: Node = pp.nodes[conv usize sid];
+    let mut off: usize = 0usize;
+    let mut cur: u32 = snode.b;
+    while cur != 0u32 {
+        let fd: Node = pp.nodes[conv usize cur];
+        let a: usize = ty_align(pp, src, head, fd.a);
+        off = round_up_us(off, a);
+        if name_eq(src, fs, fen, fd.p0, fd.p1) { return off; }
+        off = off + ty_size(pp, src, head, fd.a);
+        cur = fd.nx;
+    }
+    return 0usize;
+}
+fn field_ty(pp: read P, src: [u8], sid: u32, fs: usize, fen: usize) -> u32 {
+    if sid == 0u32 { return 0u32; }
+    let snode: Node = pp.nodes[conv usize sid];
+    let mut cur: u32 = snode.b;
+    while cur != 0u32 {
+        let fd: Node = pp.nodes[conv usize cur];
+        if name_eq(src, fs, fen, fd.p0, fd.p1) { return fd.a; }
+        cur = fd.nx;
+    }
+    return 0u32;
+}
+fn stride_of(pp: read P, src: [u8], head: u32, elem: u32) -> usize {
+    return round_up_us(ty_size(pp, src, head, elem), ty_align(pp, src, head, elem));
 }
 
 // ---- pool primitives (statement / terminator wire text) ---------------------
@@ -250,6 +394,88 @@ fn pool_operand(m: write M, k: i32, v: u64, ng: i32, w: i32) -> unit {
     return;
 }
 
+// Emit a Type s-expression (serial.rs ty_to) into the pool, over an arena type
+// node: scalars -> (scalar w); T_ARRAY -> (array <elem> (litlen N)); a struct name
+// -> (named "Name"). Mirrors interp.cnr's layout view of type descriptors.
+fn pool_ty(m: write M, pp: read P, src: [u8], tn: u32) -> unit {
+    let w: i32 = scalar_width(pp, src, tn);
+    if w != 0 {
+        pool_lit(m, b"(scalar ");
+        pool_scalar(m, w);
+        pool_byte(m, 41);
+        return;
+    }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_ARRAY {
+        pool_lit(m, b"(array ");
+        pool_ty(m, pp, src, nd.b);
+        pool_lit(m, b" (litlen ");
+        pool_num(m, conv u64 array_len_of(pp, nd.a));
+        pool_lit(m, b"))");
+        return;
+    }
+    pool_lit(m, b"(named ");
+    pool_qspan(m, src, nd.p0, nd.p1);
+    pool_byte(m, 41);
+    return;
+}
+
+// ---- destination-place buffer (dbuf) -----------------------------------------
+// A place is `(place <root> (proj <entries>))`. Destination places (let/return/
+// assign targets and each aggregate sub-field) are built into `dbuf` as the inner
+// proj-entry text, so they survive the value lowering that follows (which renders
+// its own READ places directly to the pool). Fills push/truncate `dbuf_n` as they
+// descend field/element paths. `reloc_to_dbuf` reuses the pool primitives as a
+// scratch, then relocates the rendered bytes into `dbuf` and rewinds the pool.
+fn reloc_to_dbuf(m: write M, start: usize) -> unit {
+    let mut j: usize = start;
+    while j < m.pool_n {
+        m.*.dbuf[m.dbuf_n] = m.pool[j];
+        m.*.dbuf_n = m.dbuf_n + 1usize;
+        j = j + 1usize;
+    }
+    m.*.pool_n = start;
+    return;
+}
+fn dbuf_field(m: write M, pp: read P, src: [u8], off: usize, fty: u32) -> unit {
+    let s: usize = m.pool_n;
+    pool_lit(m, b" (field ");
+    pool_num(m, conv u64 off);
+    pool_byte(m, 32);
+    pool_ty(m, pp, src, fty);
+    pool_byte(m, 41);
+    reloc_to_dbuf(m, s);
+    return;
+}
+fn dbuf_index_const(m: write M, ix: usize, stride: usize, ln: usize, sp0: usize, sp1: usize) -> unit {
+    let s: usize = m.pool_n;
+    pool_lit(m, b" (index (const ");
+    pool_num(m, conv u64 ix);
+    pool_lit(m, b" usize) ");
+    pool_num(m, conv u64 stride);
+    pool_byte(m, 32);
+    pool_num(m, conv u64 ln);
+    pool_byte(m, 32);
+    pool_num(m, conv u64 sp0);
+    pool_byte(m, 32);
+    pool_num(m, conv u64 sp1);
+    pool_lit(m, b" false)");
+    reloc_to_dbuf(m, s);
+    return;
+}
+fn place_from_dbuf(m: write M, root: i32) -> unit {
+    pool_lit(m, b"(place ");
+    pool_num(m, conv u64 root);
+    pool_lit(m, b" (proj");
+    let mut j: usize = 0usize;
+    while j < m.dbuf_n {
+        pool_byte(m, conv i32 m.dbuf[j]);
+        j = j + 1usize;
+    }
+    pool_lit(m, b"))");
+    return;
+}
+
 // ---- IR-builder core --------------------------------------------------------
 fn new_local(m: write M, w: i32, named: i32, p0: usize, p1: usize) -> i32 {
     let id: i32 = conv i32 m.loc_n;
@@ -258,6 +484,34 @@ fn new_local(m: write M, w: i32, named: i32, p0: usize, p1: usize) -> i32 {
     m.*.loc_named[k] = named;
     m.*.loc_p0[k] = p0;
     m.*.loc_p1[k] = p1;
+    m.*.loc_tn[k] = 0u32;
+    m.*.loc_ptr[k] = 0;
+    m.*.loc_n = m.loc_n + 1usize;
+    return id;
+}
+// An aggregate local: its type is the arena type node `tn` (emitted verbatim).
+fn new_local_tn(m: write M, tn: u32, named: i32, p0: usize, p1: usize) -> i32 {
+    let id: i32 = conv i32 m.loc_n;
+    let k: usize = m.loc_n;
+    m.*.loc_w[k] = 0;
+    m.*.loc_named[k] = named;
+    m.*.loc_p0[k] = p0;
+    m.*.loc_p1[k] = p1;
+    m.*.loc_tn[k] = tn;
+    m.*.loc_ptr[k] = 0;
+    m.*.loc_n = m.loc_n + 1usize;
+    return id;
+}
+// A caller-owned return-slot / by-value-argument pointer: `(rawptr <tn>)`.
+fn new_local_ptr(m: write M, tn: u32, named: i32, p0: usize, p1: usize) -> i32 {
+    let id: i32 = conv i32 m.loc_n;
+    let k: usize = m.loc_n;
+    m.*.loc_w[k] = 0;
+    m.*.loc_named[k] = named;
+    m.*.loc_p0[k] = p0;
+    m.*.loc_p1[k] = p1;
+    m.*.loc_tn[k] = tn;
+    m.*.loc_ptr[k] = 1;
     m.*.loc_n = m.loc_n + 1usize;
     return id;
 }
@@ -539,12 +793,13 @@ fn st_assign_conv(m: write M, dst: i32, tow: i32, regime: i32, hasfault: i32, fp
 }
 
 // ---- environment (bindings; no drops in the scalar subset) ------------------
-fn bind(m: write M, p0: usize, p1: usize, id: i32, w: i32) -> unit {
+fn bind(m: write M, p0: usize, p1: usize, id: i32, w: i32, tn: u32) -> unit {
     let k: usize = m.bnd_n;
     m.*.bnd_p0[k] = p0;
     m.*.bnd_p1[k] = p1;
     m.*.bnd_local[k] = id;
     m.*.bnd_w[k] = w;
+    m.*.bnd_tn[k] = tn;
     m.*.bnd_n = k + 1usize;
     return;
 }
@@ -555,6 +810,7 @@ fn lookup(m: write M, src: [u8], p0: usize, p1: usize) -> i32 {
         i = i - 1usize;
         if name_eq(src, p0, p1, m.bnd_p0[i], m.bnd_p1[i]) {
             m.*.luk_w = m.bnd_w[i];
+            m.*.luk_tn = m.bnd_tn[i];
             return m.bnd_local[i];
         }
     }
@@ -670,8 +926,37 @@ fn lower_value(pp: read P, src: [u8], m: write M, i: u32, exp_w: i32) -> i32 {
         set_res_const(m, 0u64, 0, 0);
         return 0;
     }
+    if nd.tag == T_FIELD || nd.tag == T_INDEX {
+        return lower_field_index_read(pp, src, m, i);
+    }
     m.*.err = 1;
     return 1;
+}
+
+// A scalar field/element read in value position: `id = load(<place>, <ty>)`.
+fn lower_field_index_read(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let ttn: u32 = resolve_place_tn(pp, src, m, i);
+    let w: i32 = scalar_width(pp, src, ttn);
+    if w == 0 { m.*.err = 1; return 1; }
+    let id: i32 = new_local(m, w, 0, 0, 0);
+    if m.reachable != 0 {
+        let s: usize = m.pool_n;
+        pool_lit(m, b"(stmt (assign ");
+        pool_num(m, conv u64 id);
+        pool_lit(m, b" (load ");
+        render_place_read(pp, src, m, i);
+        pool_byte(m, 32);
+        pool_ty(m, pp, src, ttn);
+        pool_lit(m, b")) ");
+        pool_num(m, conv u64 nd.p0);
+        pool_byte(m, 32);
+        pool_num(m, conv u64 nd.p1);
+        pool_lit(m, b" false)");
+        chunk_end(m, s);
+    }
+    set_res_local(m, id, w);
+    return 0;
 }
 
 fn lower_unary(pp: read P, src: [u8], m: write M, i: u32, exp_w: i32) -> i32 {
@@ -813,45 +1098,10 @@ fn lower_call(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
     let fnnd: Node = pp.nodes[conv usize fnid];
     let mut retw: i32 = 0;
     if fnnd.e != 0u32 { retw = scalar_width(pp, src, pp.nodes[conv usize fnnd.e].a); }
-    // lower args with each param's width as expected; collect operands.
-    let mut ak: [16]i32 = [0; 16];
-    let mut av: [16]u64 = [0u64; 16];
-    let mut an: [16]i32 = [0; 16];
-    let mut aw: [16]i32 = [0; 16];
-    let mut na: usize = 0usize;
-    let mut argc: u32 = nd.b;
-    let mut parc: u32 = fnnd.c;
-    while argc != 0u32 {
-        let pnw: i32 = scalar_width(pp, src, pp.nodes[conv usize parc].a);
-        let sc: i32 = lower_value(pp, src, m, argc, pnw);
-        if sc != 0 { return sc; }
-        ak[na] = m.res_kind; av[na] = m.res_val; an[na] = m.res_neg; aw[na] = m.res_w;
-        na = na + 1usize;
-        argc = pp.nodes[conv usize argc].nx;
-        parc = pp.nodes[conv usize parc].nx;
-    }
+    let sc: i32 = lower_args(pp, src, m, fnnd, nd.b);
+    if sc != 0 { return sc; }
     let id: i32 = new_local(m, retw, 0, 0, 0);
-    // Emit the call assign chunk directly (variadic args).
-    if m.reachable != 0 {
-        let s: usize = m.pool_n;
-        pool_lit(m, b"(stmt (assign ");
-        pool_num(m, conv u64 id);
-        pool_lit(m, b" (call ");
-        pool_qspan(m, src, callee.p0, callee.p1);
-        pool_lit(m, b" (args");
-        let mut j: usize = 0usize;
-        while j < na {
-            pool_byte(m, 32);
-            pool_operand(m, ak[j], av[j], an[j], aw[j]);
-            j = j + 1usize;
-        }
-        pool_lit(m, b"))) ");
-        pool_num(m, conv u64 nd.p0);
-        pool_byte(m, 32);
-        pool_num(m, conv u64 nd.p1);
-        pool_lit(m, b" false)");
-        chunk_end(m, s);
-    }
+    emit_call(m, src, id, callee.p0, callee.p1, nd.p0, nd.p1);
     set_res_local(m, id, retw);
     return 0;
 }
@@ -936,18 +1186,379 @@ fn lower_assert(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
     return 0;
 }
 
-fn lower_into(pp: read P, src: [u8], m: write M, e: u32, dst: i32, w: i32) -> i32 {
-    let sc: i32 = lower_value(pp, src, m, e, w);
-    if sc != 0 { return sc; }
-    set_o1(m, m.res_kind, m.res_val, m.res_neg, m.res_w);
-    st_store_use(m, dst, m.cur_p0, m.cur_p1);
+// ---- places (lvalues) --------------------------------------------------------
+// The root local of a place expression (innermost identifier).
+fn resolve_place_root(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    if nd.tag == T_PAREN { return resolve_place_root(pp, src, m, nd.a); }
+    if nd.tag == T_FIELD || nd.tag == T_INDEX { return resolve_place_root(pp, src, m, nd.a); }
+    if nd.tag == T_ID { return lookup(m, src, nd.p0, nd.p1); }
+    return 0 - 1i32;
+}
+// The arena type node of a place expression (no emission).
+fn resolve_place_tn(pp: read P, src: [u8], m: write M, i: u32) -> u32 {
+    let nd: Node = pp.nodes[conv usize i];
+    if nd.tag == T_PAREN { return resolve_place_tn(pp, src, m, nd.a); }
+    if nd.tag == T_ID {
+        let _id: i32 = lookup(m, src, nd.p0, nd.p1);
+        return m.luk_tn;
+    }
+    if nd.tag == T_FIELD {
+        let btn: u32 = resolve_place_tn(pp, src, m, nd.a);
+        let sid: u32 = struct_id_of(pp, src, m.head, btn);
+        return field_ty(pp, src, sid, nd.p0, nd.p1);
+    }
+    if nd.tag == T_INDEX {
+        let btn: u32 = resolve_place_tn(pp, src, m, nd.a);
+        let an: Node = pp.nodes[conv usize btn];
+        return an.b;
+    }
+    return 0u32;
+}
+// Append the projection entries of place `i` to the pool (space-prefixed), setting
+// plc_local (root) and plc_tn (leaf type). The index-value subexpression must be a
+// constant or a simple local (the L2 subset) so it emits no statement mid-place.
+fn emit_projs(pp: read P, src: [u8], m: write M, i: u32) -> unit {
+    let nd: Node = pp.nodes[conv usize i];
+    m.*.cur_p0 = nd.p0;
+    m.*.cur_p1 = nd.p1;
+    if nd.tag == T_PAREN { emit_projs(pp, src, m, nd.a); return; }
+    if nd.tag == T_ID {
+        let id: i32 = lookup(m, src, nd.p0, nd.p1);
+        if id < 0 { m.*.err = 1; }
+        m.*.plc_local = id;
+        m.*.plc_tn = m.luk_tn;
+        return;
+    }
+    if nd.tag == T_FIELD {
+        emit_projs(pp, src, m, nd.a);
+        let btn: u32 = m.plc_tn;
+        let sid: u32 = struct_id_of(pp, src, m.head, btn);
+        let off: usize = field_off(pp, src, m.head, sid, nd.p0, nd.p1);
+        let fty: u32 = field_ty(pp, src, sid, nd.p0, nd.p1);
+        pool_lit(m, b" (field ");
+        pool_num(m, conv u64 off);
+        pool_byte(m, 32);
+        pool_ty(m, pp, src, fty);
+        pool_byte(m, 41);
+        m.*.plc_tn = fty;
+        return;
+    }
+    if nd.tag == T_INDEX {
+        emit_projs(pp, src, m, nd.a);
+        let bp0: usize = m.cur_p0;
+        let bp1: usize = m.cur_p1;
+        let atn: u32 = m.plc_tn;
+        let anode: Node = pp.nodes[conv usize atn];
+        let elem: u32 = anode.b;
+        let stride: usize = stride_of(pp, src, m.head, elem);
+        let ln: usize = array_len_of(pp, anode.a);
+        let _sc: i32 = lower_value(pp, src, m, nd.b, 10);
+        pool_lit(m, b" (index ");
+        pool_operand(m, m.res_kind, m.res_val, m.res_neg, m.res_w);
+        pool_byte(m, 32);
+        pool_num(m, conv u64 stride);
+        pool_byte(m, 32);
+        pool_num(m, conv u64 ln);
+        pool_byte(m, 32);
+        pool_num(m, conv u64 bp0);
+        pool_byte(m, 32);
+        pool_num(m, conv u64 bp1);
+        pool_lit(m, b" false)");
+        m.*.plc_tn = elem;
+        return;
+    }
+    m.*.err = 1;
+    return;
+}
+// Render a READ place `(place root (proj ...))` directly into the pool; sets plc_tn.
+fn render_place_read(pp: read P, src: [u8], m: write M, i: u32) -> unit {
+    let root: i32 = resolve_place_root(pp, src, m, i);
+    if root < 0 { m.*.err = 1; }
+    pool_lit(m, b"(place ");
+    pool_num(m, conv u64 root);
+    pool_lit(m, b" (proj");
+    emit_projs(pp, src, m, i);
+    pool_lit(m, b"))");
+    return;
+}
+// Build the destination place of `i` into dbuf; sets plc_local (root) + plc_tn.
+fn build_dbuf_place(pp: read P, src: [u8], m: write M, i: u32) -> unit {
+    m.*.dbuf_n = 0usize;
+    let s: usize = m.pool_n;
+    emit_projs(pp, src, m, i);
+    reloc_to_dbuf(m, s);
+    return;
+}
+
+// ---- aggregate initialization (lower_into over the current dbuf destination) --
+fn find_finit(pp: read P, src: [u8], head_fi: u32, fs: usize, fen: usize) -> u32 {
+    let mut cur: u32 = head_fi;
+    while cur != 0u32 {
+        let fi: Node = pp.nodes[conv usize cur];
+        if name_eq(src, fs, fen, fi.p0, fi.p1) { return cur; }
+        cur = fi.nx;
+    }
+    return 0u32;
+}
+// Emit `(stmt (store <dbuf place> (use <o1>)) ...)` for a scalar leaf.
+fn emit_store_dbuf(m: write M, root: i32, sp0: usize, sp1: usize) -> unit {
+    if m.reachable == 0 { return; }
+    let s: usize = m.pool_n;
+    pool_lit(m, b"(stmt (store ");
+    place_from_dbuf(m, root);
+    pool_lit(m, b" (use ");
+    pool_operand(m, m.o1k, m.o1v, m.o1n, m.o1w);
+    pool_lit(m, b")) ");
+    pool_num(m, conv u64 sp0);
+    pool_byte(m, 32);
+    pool_num(m, conv u64 sp1);
+    pool_lit(m, b" false)");
+    chunk_end(m, s);
+    return;
+}
+fn lower_struct_lit(pp: read P, src: [u8], m: write M, i: u32, root: i32, tn: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let sid: u32 = struct_id_of(pp, src, m.head, tn);
+    if sid == 0u32 { m.*.err = 1; return 1; }
+    let snode: Node = pp.nodes[conv usize sid];
+    let base_n: usize = m.dbuf_n;
+    let mut fc: u32 = snode.b;
+    while fc != 0u32 {
+        let fd: Node = pp.nodes[conv usize fc];
+        let fin: u32 = find_finit(pp, src, nd.a, fd.p0, fd.p1);
+        if fin != 0u32 {
+            let off: usize = field_off(pp, src, m.head, sid, fd.p0, fd.p1);
+            m.*.dbuf_n = base_n;
+            dbuf_field(m, pp, src, off, fd.a);
+            let sc: i32 = lower_into(pp, src, m, pp.nodes[conv usize fin].a, root, fd.a);
+            if sc != 0 { m.*.dbuf_n = base_n; return sc; }
+        }
+        fc = fd.nx;
+    }
+    m.*.dbuf_n = base_n;
     return 0;
+}
+fn lower_array_lit(pp: read P, src: [u8], m: write M, i: u32, root: i32, tn: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let anode: Node = pp.nodes[conv usize tn];
+    let elem: u32 = anode.b;
+    let stride: usize = stride_of(pp, src, m.head, elem);
+    let mut cnt: usize = 0usize;
+    let mut c: u32 = nd.a;
+    while c != 0u32 { cnt = cnt + 1usize; c = pp.nodes[conv usize c].nx; }
+    let base_n: usize = m.dbuf_n;
+    let mut idx: usize = 0usize;
+    let mut cur: u32 = nd.a;
+    while cur != 0u32 {
+        let el: Node = pp.nodes[conv usize cur];
+        m.*.dbuf_n = base_n;
+        dbuf_index_const(m, idx, stride, cnt, el.p0, el.p1);
+        let sc: i32 = lower_into(pp, src, m, cur, root, elem);
+        if sc != 0 { m.*.dbuf_n = base_n; return sc; }
+        idx = idx + 1usize;
+        cur = el.nx;
+    }
+    m.*.dbuf_n = base_n;
+    return 0;
+}
+fn lower_array_rep(pp: read P, src: [u8], m: write M, i: u32, root: i32, tn: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let anode: Node = pp.nodes[conv usize tn];
+    let elem: u32 = anode.b;
+    let stride: usize = stride_of(pp, src, m.head, elem);
+    let szn: Node = pp.nodes[conv usize nd.b];
+    let n: usize = conv usize szn.ival;
+    let ew: i32 = scalar_width(pp, src, elem);
+    if ew == 0 { m.*.err = 1; return 1; }
+    let tmp: i32 = new_local(m, ew, 0, 0, 0);
+    // Evaluate the element once into `tmp` (dbuf reset to the temp's empty place).
+    let save_n: usize = m.dbuf_n;
+    m.*.dbuf_n = 0usize;
+    let sc: i32 = lower_into(pp, src, m, nd.a, tmp, elem);
+    if sc != 0 { return sc; }
+    m.*.dbuf_n = save_n;
+    let el: Node = pp.nodes[conv usize nd.a];
+    let mut k: usize = 0usize;
+    while k < n {
+        m.*.dbuf_n = save_n;
+        dbuf_index_const(m, k, stride, n, el.p0, el.p1);
+        if m.reachable != 0 {
+            let s: usize = m.pool_n;
+            pool_lit(m, b"(stmt (copyval ");
+            place_from_dbuf(m, root);
+            pool_lit(m, b" (place ");
+            pool_num(m, conv u64 tmp);
+            pool_lit(m, b" (proj)) ");
+            pool_ty(m, pp, src, elem);
+            pool_lit(m, b") ");
+            pool_num(m, conv u64 el.p0);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 el.p1);
+            pool_lit(m, b" false)");
+            chunk_end(m, s);
+        }
+        k = k + 1usize;
+    }
+    m.*.dbuf_n = save_n;
+    return 0;
+}
+// A call returning an aggregate: the callee writes its _0 return slot, `call`
+// yields that slot's ADDRESS into a rawptr temp, then we byte-copy the pointee
+// into the destination (the caller-owned return-slot ABI of build.rs).
+fn lower_call_agg(pp: read P, src: [u8], m: write M, i: u32, root: i32, tn: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let callee: Node = pp.nodes[conv usize nd.a];
+    if callee.tag != T_ID { m.*.err = 1; return 1; }
+    let fnid: u32 = find_fn(pp, src, m.head, callee.p0, callee.p1);
+    if fnid == 0u32 { m.*.err = 1; return 1; }
+    let fnnd: Node = pp.nodes[conv usize fnid];
+    let mut retn: u32 = 0u32;
+    if fnnd.e != 0u32 { retn = pp.nodes[conv usize fnnd.e].a; }
+    let sc: i32 = lower_args(pp, src, m, fnnd, nd.b);
+    if sc != 0 { return sc; }
+    let rt: i32 = new_local_ptr(m, retn, 0, 0, 0);
+    emit_call(m, src, rt, callee.p0, callee.p1, nd.p0, nd.p1);
+    if m.reachable != 0 {
+        let s: usize = m.pool_n;
+        pool_lit(m, b"(stmt (copyval ");
+        place_from_dbuf(m, root);
+        pool_lit(m, b" (place ");
+        pool_num(m, conv u64 rt);
+        pool_lit(m, b" (proj (deref ");
+        pool_ty(m, pp, src, retn);
+        pool_lit(m, b"))) ");
+        pool_ty(m, pp, src, retn);
+        pool_lit(m, b") ");
+        pool_num(m, conv u64 nd.p0);
+        pool_byte(m, 32);
+        pool_num(m, conv u64 nd.p1);
+        pool_lit(m, b" false)");
+        chunk_end(m, s);
+    }
+    return 0;
+}
+// A whole-aggregate value read from a place (`let q = p;`): byte-copy dst <- src.
+fn lower_agg_copy(pp: read P, src: [u8], m: write M, i: u32, root: i32, tn: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    if m.reachable != 0 {
+        let s: usize = m.pool_n;
+        pool_lit(m, b"(stmt (copyval ");
+        place_from_dbuf(m, root);
+        pool_byte(m, 32);
+        render_place_read(pp, src, m, i);
+        pool_byte(m, 32);
+        pool_ty(m, pp, src, tn);
+        pool_lit(m, b") ");
+        pool_num(m, conv u64 nd.p0);
+        pool_byte(m, 32);
+        pool_num(m, conv u64 nd.p1);
+        pool_lit(m, b" false)");
+        chunk_end(m, s);
+    }
+    return 0;
+}
+// Lower an initializer expression `e` into the destination place (root + current
+// dbuf prefix) whose type is `tn`. Scalars store; aggregates recurse per field/
+// element; a call materializes through the return-slot ABI (build.rs lower_into).
+fn lower_into(pp: read P, src: [u8], m: write M, e: u32, root: i32, tn: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize e];
+    m.*.cur_p0 = nd.p0;
+    m.*.cur_p1 = nd.p1;
+    if nd.tag == T_PAREN { return lower_into(pp, src, m, nd.a, root, tn); }
+    if nd.tag == T_STRUCTLIT { return lower_struct_lit(pp, src, m, e, root, tn); }
+    if nd.tag == T_ARRAYLIT { return lower_array_lit(pp, src, m, e, root, tn); }
+    if nd.tag == T_ARRAYREP { return lower_array_rep(pp, src, m, e, root, tn); }
+    let w: i32 = scalar_width(pp, src, tn);
+    if w != 0 {
+        let sp0: usize = nd.p0;
+        let sp1: usize = nd.p1;
+        let sc: i32 = lower_value(pp, src, m, e, w);
+        if sc != 0 { return sc; }
+        set_o1(m, m.res_kind, m.res_val, m.res_neg, m.res_w);
+        emit_store_dbuf(m, root, sp0, sp1);
+        return 0;
+    }
+    if nd.tag == T_CALL { return lower_call_agg(pp, src, m, e, root, tn); }
+    return lower_agg_copy(pp, src, m, e, root, tn);
+}
+
+// ---- calls (arguments + emission) --------------------------------------------
+// Lower each argument to an operand in m.ak/av/an/aw (m.na of them): a word-sized
+// argument is its value; a by-value aggregate argument is passed as the ADDRESS of
+// its place (a `(ref ...)` into a rawptr temp), matching build.rs's call ABI.
+fn lower_args(pp: read P, src: [u8], m: write M, fnnd: Node, arg_head: u32) -> i32 {
+    m.*.na = 0usize;
+    let mut argc: u32 = arg_head;
+    let mut parc: u32 = fnnd.c;
+    while argc != 0u32 {
+        let ptn: u32 = pp.nodes[conv usize parc].a;
+        let w: i32 = scalar_width(pp, src, ptn);
+        if w != 0 {
+            let sc: i32 = lower_value(pp, src, m, argc, w);
+            if sc != 0 { return sc; }
+            let k: usize = m.na;
+            m.*.ak[k] = m.res_kind;
+            m.*.av[k] = m.res_val;
+            m.*.an[k] = m.res_neg;
+            m.*.aw[k] = m.res_w;
+            m.*.na = k + 1usize;
+        } else {
+            let rt: i32 = new_local_ptr(m, ptn, 0, 0, 0);
+            if m.reachable != 0 {
+                let an2: Node = pp.nodes[conv usize argc];
+                let s: usize = m.pool_n;
+                pool_lit(m, b"(stmt (assign ");
+                pool_num(m, conv u64 rt);
+                pool_lit(m, b" (ref ");
+                render_place_read(pp, src, m, argc);
+                pool_lit(m, b")) ");
+                pool_num(m, conv u64 an2.p0);
+                pool_byte(m, 32);
+                pool_num(m, conv u64 an2.p1);
+                pool_lit(m, b" false)");
+                chunk_end(m, s);
+            }
+            let k: usize = m.na;
+            m.*.ak[k] = 1;
+            m.*.av[k] = conv u64 rt;
+            m.*.an[k] = 0;
+            m.*.aw[k] = 0;
+            m.*.na = k + 1usize;
+        }
+        argc = pp.nodes[conv usize argc].nx;
+        parc = pp.nodes[conv usize parc].nx;
+    }
+    return 0;
+}
+fn emit_call(m: write M, src: [u8], dst: i32, cp0: usize, cp1: usize, sp0: usize, sp1: usize) -> unit {
+    if m.reachable == 0 { return; }
+    let s: usize = m.pool_n;
+    pool_lit(m, b"(stmt (assign ");
+    pool_num(m, conv u64 dst);
+    pool_lit(m, b" (call ");
+    pool_qspan(m, src, cp0, cp1);
+    pool_lit(m, b" (args");
+    let mut j: usize = 0usize;
+    while j < m.na {
+        pool_byte(m, 32);
+        pool_operand(m, m.ak[j], m.av[j], m.an[j], m.aw[j]);
+        j = j + 1usize;
+    }
+    pool_lit(m, b"))) ");
+    pool_num(m, conv u64 sp0);
+    pool_byte(m, 32);
+    pool_num(m, conv u64 sp1);
+    pool_lit(m, b" false)");
+    chunk_end(m, s);
+    return;
 }
 
 fn lower_return(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
     if nd.a != 0u32 {
-        let sc: i32 = lower_into(pp, src, m, nd.a, 0, m.ret_w);
+        m.*.dbuf_n = 0usize;
+        let sc: i32 = lower_into(pp, src, m, nd.a, 0, m.ret_tn);
         if sc != 0 { return sc; }
     }
     term_return(m);
@@ -958,16 +1569,20 @@ fn lower_stmt(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
     if nd.tag == T_LET {
         if nd.a != 0u32 {
-            let w: i32 = scalar_width(pp, src, nd.a);
-            let id: i32 = new_local(m, w, 1, nd.p0, nd.p1);
+            let tn: u32 = nd.a;
+            let w: i32 = scalar_width(pp, src, tn);
+            let mut id: i32 = 0;
+            if w != 0 { id = new_local(m, w, 1, nd.p0, nd.p1); }
+            else { id = new_local_tn(m, tn, 1, nd.p0, nd.p1); }
             if nd.b != 0u32 {
-                let sc: i32 = lower_into(pp, src, m, nd.b, id, w);
+                m.*.dbuf_n = 0usize;
+                let sc: i32 = lower_into(pp, src, m, nd.b, id, tn);
                 if sc != 0 { return sc; }
             }
-            bind(m, nd.p0, nd.p1, id, w);
+            bind(m, nd.p0, nd.p1, id, w, tn);
             return 0;
         }
-        // no annotation: infer from the initializer.
+        // no annotation: infer from the initializer (scalar subset).
         if nd.b == 0u32 { m.*.err = 1; return 1; }
         let sc: i32 = lower_value(pp, src, m, nd.b, 0 - 1i32);
         if sc != 0 { return sc; }
@@ -976,33 +1591,17 @@ fn lower_stmt(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
         let id: i32 = new_local(m, w, 1, nd.p0, nd.p1);
         set_o1(m, ok, ov, og, w);
         st_assign_use(m, id, m.cur_p0, m.cur_p1);
-        bind(m, nd.p0, nd.p1, id, w);
+        bind(m, nd.p0, nd.p1, id, w, 0u32);
         return 0;
     }
     if nd.tag == T_ASSIGN {
-        let sc: i32 = lower_place(pp, src, m, nd.a);
-        if sc != 0 { return sc; }
-        let dst: i32 = m.plc_local; let w: i32 = m.plc_w;
-        return lower_into(pp, src, m, nd.b, dst, w);
+        let ttn: u32 = resolve_place_tn(pp, src, m, nd.a);
+        build_dbuf_place(pp, src, m, nd.a);
+        let root: i32 = m.plc_local;
+        return lower_into(pp, src, m, nd.b, root, ttn);
     }
     // expression statement (trace, if/while/loop, return, ...)
     return lower_value(pp, src, m, i, 0 - 1i32);
-}
-
-fn lower_place(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
-    let nd: Node = pp.nodes[conv usize i];
-    m.*.cur_p0 = nd.p0;
-    m.*.cur_p1 = nd.p1;
-    if nd.tag == T_PAREN { return lower_place(pp, src, m, nd.a); }
-    if nd.tag == T_ID {
-        let id: i32 = lookup(m, src, nd.p0, nd.p1);
-        if id < 0 { m.*.err = 1; return 1; }
-        m.*.plc_local = id;
-        m.*.plc_w = m.luk_w;
-        return 0;
-    }
-    m.*.err = 1;
-    return 1;
 }
 
 fn lower_block(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
@@ -1030,6 +1629,8 @@ fn reset_fn(m: write M) -> unit {
     m.*.regime = 0;
     m.*.cur = 0;
     m.*.ret_w = 4;
+    m.*.ret_tn = 0u32;
+    m.*.dbuf_n = 0usize;
     m.*.fn_entry = 0;
     m.*.fn_np = 0;
     return;
@@ -1037,18 +1638,26 @@ fn reset_fn(m: write M) -> unit {
 
 fn lower_fn(pp: read P, src: [u8], m: write M, fnid: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize fnid];
-    let mut retw: i32 = 0;
-    if nd.e != 0u32 { retw = scalar_width(pp, src, pp.nodes[conv usize nd.e].a); }
+    let mut retn: u32 = 0u32;
+    if nd.e != 0u32 { retn = pp.nodes[conv usize nd.e].a; }
+    let retw: i32 = scalar_width(pp, src, retn);
     m.*.ret_w = retw;
-    let _r: i32 = new_local(m, retw, 0, 0, 0);
+    m.*.ret_tn = retn;
+    // _0 is the return place: a scalar, an aggregate slot, or unit.
+    if retw != 0 { let _r: i32 = new_local(m, retw, 0, 0, 0); }
+    else if retn != 0u32 { let _r: i32 = new_local_tn(m, retn, 0, 0, 0); }
+    else { let _r: i32 = new_local(m, 0, 0, 0, 0); }
     let mut pc: u32 = nd.c;
     let mut np: i32 = 0;
     while pc != 0u32 {
         let pn: Node = pp.nodes[conv usize pc];
         if pn.op != 0 { m.*.err = 1; return 1; }
-        let w: i32 = scalar_width(pp, src, pn.a);
-        let id: i32 = new_local(m, w, 1, pn.p0, pn.p1);
-        bind(m, pn.p0, pn.p1, id, w);
+        let ptn: u32 = pn.a;
+        let w: i32 = scalar_width(pp, src, ptn);
+        let mut id: i32 = 0;
+        if w != 0 { id = new_local(m, w, 1, pn.p0, pn.p1); }
+        else { id = new_local_tn(m, ptn, 1, pn.p0, pn.p1); }
+        bind(m, pn.p0, pn.p1, id, w, ptn);
         np = np + 1;
         pc = pn.nx;
     }
@@ -1085,6 +1694,29 @@ fn emit_qspan(src: [u8], p0: usize, p1: usize) -> unit {
     emit_byte(34);
     return;
 }
+// Emit a Type s-expression through the trace sink (mirrors pool_ty).
+fn emit_ty(pp: read P, src: [u8], tn: u32) -> unit {
+    let w: i32 = scalar_width(pp, src, tn);
+    if w != 0 {
+        emit_lit(b"(scalar ");
+        emit_scalar(w);
+        emit_byte(41);
+        return;
+    }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_ARRAY {
+        emit_lit(b"(array ");
+        emit_ty(pp, src, nd.b);
+        emit_lit(b" (litlen ");
+        emit_num(conv u64 array_len_of(pp, nd.a));
+        emit_lit(b"))");
+        return;
+    }
+    emit_lit(b"(named ");
+    emit_qspan(src, nd.p0, nd.p1);
+    emit_byte(41);
+    return;
+}
 fn emit_chunk(m: write M, start: usize, ln: usize) -> unit {
     let mut j: usize = start;
     while j < start + ln {
@@ -1106,7 +1738,7 @@ fn emit_block(m: write M, b: usize) -> unit {
     emit_byte(41);
     return;
 }
-fn emit_fn(m: write M, src: [u8], name_p0: usize, name_p1: usize) -> unit {
+fn emit_fn(m: write M, pp: read P, src: [u8], name_p0: usize, name_p1: usize) -> unit {
     emit_lit(b"(fn ");
     emit_qspan(src, name_p0, name_p1);
     emit_byte(32);
@@ -1114,9 +1746,19 @@ fn emit_fn(m: write M, src: [u8], name_p0: usize, name_p1: usize) -> unit {
     emit_lit(b" (none) (locals");
     let mut i: usize = 0usize;
     while i < m.loc_n {
-        emit_lit(b" (local (scalar ");
-        emit_scalar(m.loc_w[i]);
-        emit_lit(b") ");
+        emit_lit(b" (local ");
+        if m.loc_ptr[i] != 0 {
+            emit_lit(b"(rawptr ");
+            emit_ty(pp, src, m.loc_tn[i]);
+            emit_byte(41);
+        } else if m.loc_tn[i] != 0u32 {
+            emit_ty(pp, src, m.loc_tn[i]);
+        } else {
+            emit_lit(b"(scalar ");
+            emit_scalar(m.loc_w[i]);
+            emit_byte(41);
+        }
+        emit_byte(32);
         if m.loc_named[i] != 0 {
             emit_lit(b"(some ");
             emit_qspan(src, m.loc_p0[i], m.loc_p1[i]);
@@ -1209,6 +1851,19 @@ pub fn lower_dump(src: [u8], buf: read Buf) -> unit {
         o2v: 0u64,
         o2n: 0,
         o2w: 0,
+        loc_tn: [0u32; 512],
+        loc_ptr: [0; 512],
+        bnd_tn: [0u32; 512],
+        dbuf: [0u8; 4096],
+        dbuf_n: 0usize,
+        ret_tn: 0u32,
+        plc_tn: 0u32,
+        luk_tn: 0u32,
+        ak: [0; 16],
+        av: [0u64; 16],
+        an: [0; 16],
+        aw: [0; 16],
+        na: 0usize,
         err: 0,
     };
     collect_fnptrs(read p, src, write m);
@@ -1220,7 +1875,7 @@ pub fn lower_dump(src: [u8], buf: read Buf) -> unit {
             reset_fn(write m);
             let _sc: i32 = lower_fn(read p, src, write m, cur);
             emit_byte(32);
-            emit_fn(write m, src, nd.p0, nd.p1);
+            emit_fn(write m, read p, src, nd.p0, nd.p1);
         }
         cur = nd.nx;
     }

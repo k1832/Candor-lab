@@ -1545,3 +1545,75 @@ of the Rust reference lowering (`prototype/src/mir/build.rs`).
   faked or special-cased.
 
 Additive: every existing gate stays green; new gate green in isolation; clippy clean.
+
+### Self-lowering L2 — STRUCTS and ARRAYS: flat aggregates → MIR (2026-07-11)
+
+L2 extends `selfhost/lower/lower.cnr` from scalars to flat COPY aggregates, porting the
+aggregate half of the Rust reference lowering (`prototype/src/mir/build.rs`): struct/array
+literals, field/element access + assignment, and by-value struct params/returns. Built SOLO.
+DEFERRED to L3+: drop schedule (L3), enums/`match` (L4), box/pointers (L5), slices, `?`,
+statics, contracts, borrow params.
+
+- LAYOUT TABLE (copied into lower.cnr, adapted from `selfhost/interp/interp.cnr` +
+  `src/mir/layout.rs`): `ty_size`/`ty_align`/`struct_size`/`struct_align`/`field_off`/
+  `field_ty`/`array_len_of`/`stride_of`, pure over the Node arena + the item-list `head`
+  (not interp's `write E` — the E-coupled functions are NOT imported; per-module duplication
+  is the accepted idiom). Declared-order fields at natural alignment; struct size rounded to
+  max field alignment; array stride = `round_up(elem_size, elem_align)`. Widths→byte sizes
+  via `w_size`. These MUST agree with the Rust interp's `lay()` (which sizes locals from
+  `items`), and do: field offsets and strides are byte-exact vs `serialize(mir::build …)`.
+
+- PLACES + PROJECTIONS: an lvalue lowers to `(place <root> (proj <entries>))`. `emit_projs`
+  walks `T_ID`/`T_FIELD`/`T_INDEX`, appending `(field <offset> <fieldty>)` and
+  `(index <op> <stride> <len> <sp0> <sp1> false)` in base-first order (matching build.rs's
+  `Place.proj` order and serial.rs's `proj_to` encoding). `pool_ty`/`emit_ty` render the
+  Type s-expr (`(scalar w)` / `(array <elem> (litlen N))` / `(named "S")`) — load-bearing:
+  the interp derives a Store's width from the leaf `Proj::Field.ty`, and a local's byte size
+  from its `LocalDecl` type, so aggregate locals carry their real type node (`new_local_tn`).
+
+- BUFFERS: destination places (`let`/`return`/assign targets and each aggregate sub-field)
+  build into a persistent `dbuf` (proj-entry text), so they survive the value lowering that
+  follows; that value lowering renders its own READ places directly to the pool inline — the
+  two never alias, which is what lets a struct-literal fill emit field-read values (`Vec2 { x:
+  u.x + v.x, … }`) without clobbering the destination prefix. `dbuf` appends reuse the pool
+  primitives as scratch then relocate the bytes (`reloc_to_dbuf`).
+
+- RVALUES/STATEMENTS (byte-exact vs build.rs): struct literal → per-declared-field `Store`
+  into `dst.field(off)` (recursing for nested structs); array literal → per-element `Store`
+  into `dst.index(i, stride, len)`; array-repeat `[e;N]` → eval `e` once into a temp, then N
+  `CopyVal`s into each slot; scalar field/element READ → `Load` from the projected place into
+  a temp; field/element ASSIGN → `Store` to the projected place.
+
+- BOUNDS FAULT EDGE (load-bearing): `Proj::Index` carries `kind Bounds` implicitly and the
+  BASE expression's span (build.rs threads `cur_span` to the base after lowering the index),
+  captured in `emit_projs` right after the base recursion. `array_bounds` (`a[3]`) faults
+  `Bounds` at span 61–62 (the `a`) byte-exact vs the oracle. Index subexpressions must be a
+  constant or a simple local in the L2 subset (so the place renders with no mid-statement
+  emission) — true for every S2 fixture.
+
+- BY-VALUE STRUCT PARAM/RETURN ABI (caller-owned return slot, mirroring build.rs): an
+  aggregate ARG is passed as the ADDRESS of its place — `assign <rawptr tmp> (ref <place>)`,
+  operand `(oplocal tmp)` — and the callee copies it into its param slot (`is_wordy` false →
+  `copy_bytes`). A struct-returning call materializes via `assign <rawptr tmp> (call …)`
+  (the call yields the return-slot address) then `copyval <dst> (place <tmp> (proj (deref
+  <ty>))) <ty>`; the callee lowers `return <struct>` straight into `_0`.
+
+- GATE (`prototype/tests/selfhost_lower.rs`, S2 fixtures added to the existing corpus): each
+  runs `lower.cnr` in the tree-walker → wire → `deserialize` → `mir::interp::run` → byte-exact
+  RET/TRACE/FAULT vs `run_source_real`. PROVEN EXECUTION byte-exact on all 12 S2 aggregate
+  fixtures (11 returns + 1 fault): struct_field, nested_struct, field_assign, struct_param_ret,
+  struct_mixed_width, array_index, array_repeat, index_assign, array_of_structs,
+  struct_with_array, aggregate_mixed, and array_bounds (the Bounds fault). All L1 scalar
+  fixtures remain byte-exact.
+
+- FINDING (extends OBL-L1-TRACE-SPAN, benign): the emitted wire's field offsets, index
+  strides, `Proj` chains, field types, local aggregate types, the bounds fault span, and all
+  aggregate statement/rvalue shapes are byte-identical to `serialize(mir::build …)`. The ONLY
+  wire diffs are INERT span-only differences on non-observable statements (and on in-bounds
+  array-literal index projections and the `trace` STATEMENT span — the traced VALUE, not the
+  span, is what RET/TRACE/FAULT compares), rooted in the self-host parser recording
+  name-only/zero spans for `T_FIELD`/`T_INDEX`/`T_STRUCTLIT` nodes where the Rust AST carries
+  full-expression spans. The one load-bearing span (the `array_bounds` fault) matches. This is
+  a self-host-parser span-representation gap, NOT a lowering gap — recorded, not faked.
+
+Additive: full suite 589/589 green (0 failing); new S2 gate green in isolation; clippy clean.

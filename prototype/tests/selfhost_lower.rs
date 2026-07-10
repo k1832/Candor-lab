@@ -161,6 +161,19 @@ const CORPUS: &[(&str, Shape)] = &[
     ("u64_add_overflow.cnr", Fault),
     ("u64_sub_underflow.cnr", Fault),
     ("i64_mul_overflow.cnr", Fault),
+    // S2 aggregates: structs + arrays (field offsets, strides, copyval, bounds).
+    ("struct_field.cnr", Ret),
+    ("nested_struct.cnr", Ret),
+    ("field_assign.cnr", Ret),
+    ("struct_param_ret.cnr", Ret),
+    ("struct_mixed_width.cnr", Ret),
+    ("array_index.cnr", Ret),
+    ("array_repeat.cnr", Ret),
+    ("index_assign.cnr", Ret),
+    ("array_of_structs.cnr", Ret),
+    ("struct_with_array.cnr", Ret),
+    ("aggregate_mixed.cnr", Ret),
+    ("array_bounds.cnr", Fault),
 ];
 
 fn read_fixture(rel: &str) -> String {
@@ -200,7 +213,7 @@ fn candor_lowering_execution_equal_to_oracle_over_scalar_subset() {
         }
         assert!(rets > 0 && faults > 0, "corpus must exercise both returns and faults");
         eprintln!(
-            "selfhost lower (L1): {}/{} fixtures lower -> deserialize -> interp byte-exact vs oracle ({} returns, {} faults)",
+            "selfhost lower (L1+L2): {}/{} fixtures lower -> deserialize -> interp byte-exact vs oracle ({} returns, {} faults)",
             CORPUS.len(),
             CORPUS.len(),
             rets,
@@ -208,3 +221,4 @@ fn candor_lowering_execution_equal_to_oracle_over_scalar_subset() {
         );
     });
 }
+
