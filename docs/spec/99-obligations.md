@@ -1470,3 +1470,78 @@ validated before any Candor code depends on it.
   statics), and the Rust MIR interpreter runs it identically to the oracle.
 
 Additive: every existing gate stays green; new gate green in isolation; clippy clean.
+
+### Self-lowering L1 — the FIRST Candor lowering: scalar + control-flow → MIR (2026-07-11)
+
+The MVP of the self-lowering arc: a Candor program (`selfhost/lower/lower.cnr`, composed
+with the `lexer` + `parser` modules) reads a Candor program from the self-host parser's
+Node arena, lowers the SCALAR + CONTROL-FLOW subset to MIR, and EMITS the L0 wire text
+(the exact `mir::serial` format), so the Rust `deserialize` accepts it and `mir::interp`
+runs it. Built SOLO. This proves Candor can emit an executable control-flow graph — the
+first time a Candor-authored lowering feeds the MIR interpreter. It ports the scalar half
+of the Rust reference lowering (`prototype/src/mir/build.rs`).
+
+- SCOPE (scalar + control flow ONLY): integer/bool scalars; `let`/assignment; `if`/`else`;
+  `while`; `loop` + `break`/`continue`; `return`; arithmetic `+ - * / %` in the Checked/
+  Wrapping/Saturating regimes with the Overflow/DivByZero fault edges; comparisons;
+  `&&`/`||` (short-circuit → branch blocks); bitwise/shift; unary neg/not; `trace(x)`;
+  `assert`/`panic` (fault edges); direct non-generic fn calls with scalar params + return;
+  `conv` (ConvLoss edge). DEFERRED to L2+: structs/arrays/enums/box/pointers/drop, `match`,
+  aggregate params/returns, `?`, statics, contracts (`requires`/`ensures`), borrow params.
+
+- IR-BUILDER (`struct M`): a flat local table (each `LocalDecl` is a scalar width — L1 is
+  scalar-only, so drop_obligation is always false and there is no layout table) and a basic-
+  block table. Each statement's and terminator's wire text is rendered ONCE, at emit time,
+  into a byte POOL as a chunk; a block links its statement chunks intrusively (a block is
+  built OUT of creation order via `switch_to`, so the text is buffered and assembled in
+  block-id order at emit time). `new_local`/`new_block`/`emit_temp` mirror build.rs's
+  allocation order.
+
+- CFG FLATTENER: structured control flow → basic blocks + Goto/Branch/Return/Fault
+  terminators, porting build.rs's `lower_if`/`lower_while`/`lower_loop` block shapes and a
+  loop stack of `(continue_bb, break_bb)` for `break`/`continue`; join blocks; `&&`/`||`
+  lower to a result local + rhs/short/join branch blocks. `reachable` tracking replicates
+  build.rs's `terminate`/`emit` no-op-when-unreachable, so post-`return`/`break` code is
+  correctly dropped.
+
+- WIDTH INFERENCE: `lit_width`/`concretize` mirror build.rs's `int_type`/`concretize` — a
+  literal's width is its suffix, else the integer `expected` width threaded down, else i64;
+  fn return/param widths come from the arena type nodes (`T_RET`→`.a`, `T_PARAM`→`.a`).
+
+- FAULT-EDGE SPANS (load-bearing — the FAULT comparison checks span identity): a threaded
+  `cur_span` (set to each node's span at `lower_value` entry, and to the op-node span for a
+  fallible bin) supplies the exact `(kind, span)` the oracle delivers — bin overflow/div at
+  the T_BIN node span (div-by-zero is delivered at run time off the same `Bin.span`; the
+  edge kind is always `overflow`, matching build.rs), neg-overflow at the operand span,
+  conv-loss at the operand span, `assert` at the condition's trailing span, `panic` at the
+  T_PANIC node span.
+
+- WIRE EMISSION: the whole `MirProgram` text — `(mir (fns …) (drop_hooks) (fn_ptrs …)
+  (statics))` — is emitted through the built-in `trace` byte sink (each traced value is one
+  output byte; the harness rebuilds the string), matching `serial.rs`'s atom encoding
+  (bare keywords/decimals, `"…"`-quoted names). `fn_ptrs` lists every fn name in program
+  order; `drop_hooks`/`statics` are empty in the scalar subset. Because the port follows
+  build.rs's `new_local`/`new_block` order faithfully, the emitted wire is byte-IDENTICAL to
+  `serialize(mir::build …)` on 19/24 fixtures.
+
+- GATE (`prototype/tests/selfhost_lower.rs`): for each in-subset fixture — run `lower.cnr`
+  in the tree-walker over the embedded source to produce the wire text, `deserialize` it
+  Rust-side, rebuild `items`/`consts` from the same SOURCE, `mir::interp::run`, render
+  RET/TRACE/FAULT, and assert byte-exact to `run_source_real` (the oracle). PROVEN:
+  EXECUTION byte-exact on all 24 scalar-subset fixtures (15 returns, 9 faults) — arith,
+  rem, ifelse, while_accum, loop_break, factorial, fib, shortcircuit, compare, bitwise,
+  unary, assert_pass, trace_multi, width_i8, u64_value; and the fault fixtures overflow_i32,
+  divzero, assert_fail, panic, width_i8_overflow, width_u8_overflow, u64_add_overflow,
+  u64_sub_underflow, i64_mul_overflow. Every faulting op reaches the oracle's exact
+  fault identity (kind + span).
+
+- FINDING (OBL-L1-TRACE-SPAN, benign): the emitted wire is byte-identical to
+  `serialize(mir::build …)` on 19/24 fixtures; the 5 that differ (while_accum, fib, bitwise,
+  trace_multi, u64_value) differ ONLY in the source SPAN of `trace(x)` STATEMENTS — off by
+  one byte, because the self-host parser's `T_CALL` node does not record the call's closing-
+  paren end that the Rust AST call span includes. Statement spans are INERT for execution
+  (only fault-edge spans surface in RET/TRACE/FAULT), so all 24 still execute byte-exact.
+  This is a self-host-parser span-representation gap, NOT a lowering gap — recorded, not
+  faked or special-cased.
+
+Additive: every existing gate stays green; new gate green in isolation; clippy clean.

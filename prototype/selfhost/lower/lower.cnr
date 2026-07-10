@@ -1,0 +1,1237 @@
+// The FIRST Candor lowering (L1): a Candor program that lowers scalar + control-flow
+// Candor to MIR and EMITS the L0 wire format (src/mir/serial.rs) so the Rust
+// deserializer accepts it and the precise MIR interpreter runs it. Gated
+// EXECUTIONALLY against the tree-walking oracle in tests/selfhost_lower.rs.
+//
+// This is the MVP proving Candor can emit a control-flow graph. It ports the
+// scalar subset of the Rust reference lowering (src/mir/build.rs): integer/bool
+// scalars; let/assign; if/else; while; loop + break/continue; return; arithmetic
+// (+ - * / %) with the Checked/Wrapping/Saturating regimes and the Overflow/
+// DivByZero fault edges; comparisons; && / || (short-circuit -> branch blocks);
+// bitwise/shift; unary neg/not; trace(x); assert/panic (fault edges); direct
+// non-generic fn calls with scalar params + return; conv (with the ConvLoss edge).
+// Structs/arrays/enums/box/pointers/drop are OUT of subset (L2+).
+//
+// STRUCTURE: an IR-builder in flat arrays (locals, basic blocks) plus a byte POOL
+// holding each statement's and terminator's already-rendered wire text as a chunk
+// (blocks link their statement chunks intrusively; a block is built out of creation
+// order via switch_to, so the text is buffered and assembled in block-id order at
+// emit time). CFG flattening mirrors build.rs's lower_if/lower_while/lower_loop and
+// a loop stack of (continue_bb, break_bb). Scalar width inference mirrors build.rs's
+// int_type/concretize. Fault edges carry the operator span (T_BIN/T_CONV/T_PANIC
+// node span, or the threaded cur_span for neg/assert) exactly as the oracle.
+//
+// This module is composed with the `lexer` and `parser` modules (use decls below).
+// It is NOT self-checked in this slice, so it uses the full language.
+
+use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl, emit_bytes};
+use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_PARAM, T_SC, T_NAMED, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT};
+
+// ---- fault kind codes (the wire keyword table in serial.rs) -----------------
+static FK_OVERFLOW: i32 = 0;
+static FK_DIVZERO: i32 = 1;
+static FK_ASSERT: i32 = 2;
+static FK_PANIC: i32 = 3;
+static FK_BOUNDS: i32 = 4;
+static FK_CONVLOSS: i32 = 5;
+static W_BOOL: i32 = 11;
+
+// ---- builder state ----------------------------------------------------------
+struct M {
+    head: u32,
+    loc_w: [512]i32,
+    loc_named: [512]i32,
+    loc_p0: [512]usize,
+    loc_p1: [512]usize,
+    loc_n: usize,
+    blk_shead: [512]i32,
+    blk_stail: [512]i32,
+    blk_tstart: [512]usize,
+    blk_tlen: [512]usize,
+    blk_n: usize,
+    pool: [65536]u8,
+    pool_n: usize,
+    pn_start: [8192]usize,
+    pn_len: [8192]usize,
+    pn_nx: [8192]i32,
+    pn_n: usize,
+    bnd_p0: [512]usize,
+    bnd_p1: [512]usize,
+    bnd_local: [512]i32,
+    bnd_w: [512]i32,
+    bnd_n: usize,
+    loop_cont: [64]i32,
+    loop_brk: [64]i32,
+    loop_n: usize,
+    fp_p0: [256]usize,
+    fp_p1: [256]usize,
+    fp_n: usize,
+    cur: i32,
+    reachable: i32,
+    regime: i32,
+    ret_w: i32,
+    fn_entry: i32,
+    fn_np: i32,
+    cur_p0: usize,
+    cur_p1: usize,
+    res_kind: i32,
+    res_val: u64,
+    res_neg: i32,
+    res_w: i32,
+    plc_local: i32,
+    plc_w: i32,
+    luk_w: i32,
+    o1k: i32,
+    o1v: u64,
+    o1n: i32,
+    o1w: i32,
+    o2k: i32,
+    o2v: u64,
+    o2n: i32,
+    o2w: i32,
+    err: i32,
+}
+
+// ---- scalar-type name -> width code (mirrors interp.cnr / build.rs) ---------
+fn sc_width(src: [u8], s: usize, en: usize) -> i32 {
+    if span_eq(src, s, en, b"i8") { return 1; }
+    if span_eq(src, s, en, b"i16") { return 2; }
+    if span_eq(src, s, en, b"i32") { return 3; }
+    if span_eq(src, s, en, b"i64") { return 4; }
+    if span_eq(src, s, en, b"isize") { return 5; }
+    if span_eq(src, s, en, b"u8") { return 6; }
+    if span_eq(src, s, en, b"u16") { return 7; }
+    if span_eq(src, s, en, b"u32") { return 8; }
+    if span_eq(src, s, en, b"u64") { return 9; }
+    if span_eq(src, s, en, b"usize") { return 10; }
+    if span_eq(src, s, en, b"bool") { return W_BOOL; }
+    return 0;
+}
+fn scalar_width(pp: read P, src: [u8], tn: u32) -> i32 {
+    if tn == 0u32 { return 0; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_NAMED || nd.tag == T_SC { return sc_width(src, nd.p0, nd.p1); }
+    return 0;
+}
+// int_type / concretize (build.rs): a literal's width is its suffix, else the
+// integer `expected` width, else i64 (code 4).
+fn lit_width(suf: i32, exp_w: i32) -> i32 {
+    if suf != 0 { return suf; }
+    if exp_w >= 1 && exp_w <= 10 { return exp_w; }
+    return 4;
+}
+fn concretize(w: i32) -> i32 {
+    if w >= 1 && w <= 10 { return w; }
+    if w == W_BOOL { return W_BOOL; }
+    return 4;
+}
+fn name_eq(src: [u8], a0: usize, a1: usize, b0: usize, b1: usize) -> bool {
+    if a1 - a0 != b1 - b0 { return false; }
+    let n: usize = a1 - a0;
+    let mut i: usize = 0usize;
+    while i < n {
+        if src[a0 + i] != src[b0 + i] { return false; }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+// ---- pool primitives (statement / terminator wire text) ---------------------
+fn pool_byte(m: write M, x: i32) -> unit {
+    m.*.pool[m.pool_n] = conv u8 x;
+    m.*.pool_n = m.pool_n + 1usize;
+    return;
+}
+fn pool_lit(m: write M, s: [u8]) -> unit {
+    let mut i: usize = 0usize;
+    while i < len(s) {
+        pool_byte(m, conv i32 s[i]);
+        i = i + 1usize;
+    }
+    return;
+}
+fn pool_num(m: write M, v: u64) -> unit {
+    if v == 0u64 { pool_byte(m, 48); return; }
+    let mut b: [24]u8 = [0u8; 24];
+    let mut cnt: usize = 0usize;
+    let mut x: u64 = v;
+    while x > 0u64 {
+        b[cnt] = conv u8 (48u64 + x % 10u64);
+        x = x / 10u64;
+        cnt = cnt + 1usize;
+    }
+    let mut i: usize = cnt;
+    while i > 0usize {
+        i = i - 1usize;
+        pool_byte(m, conv i32 b[i]);
+    }
+    return;
+}
+fn pool_qspan(m: write M, src: [u8], p0: usize, p1: usize) -> unit {
+    pool_byte(m, 34);
+    let mut i: usize = p0;
+    while i < p1 {
+        pool_byte(m, conv i32 src[i]);
+        i = i + 1usize;
+    }
+    pool_byte(m, 34);
+    return;
+}
+fn pool_scalar(m: write M, w: i32) -> unit {
+    if w == 1 { pool_lit(m, b"i8"); return; }
+    if w == 2 { pool_lit(m, b"i16"); return; }
+    if w == 3 { pool_lit(m, b"i32"); return; }
+    if w == 4 { pool_lit(m, b"i64"); return; }
+    if w == 5 { pool_lit(m, b"isize"); return; }
+    if w == 6 { pool_lit(m, b"u8"); return; }
+    if w == 7 { pool_lit(m, b"u16"); return; }
+    if w == 8 { pool_lit(m, b"u32"); return; }
+    if w == 9 { pool_lit(m, b"u64"); return; }
+    if w == 10 { pool_lit(m, b"usize"); return; }
+    if w == W_BOOL { pool_lit(m, b"bool"); return; }
+    pool_lit(m, b"unit");
+    return;
+}
+fn pool_binop(m: write M, op: i32) -> unit {
+    if op == OP_ADD { pool_lit(m, b"add"); return; }
+    if op == OP_SUB { pool_lit(m, b"sub"); return; }
+    if op == OP_MUL { pool_lit(m, b"mul"); return; }
+    if op == OP_DIV { pool_lit(m, b"div"); return; }
+    if op == OP_REM { pool_lit(m, b"rem"); return; }
+    if op == OP_EQ { pool_lit(m, b"eq"); return; }
+    if op == OP_NE { pool_lit(m, b"ne"); return; }
+    if op == OP_LT { pool_lit(m, b"lt"); return; }
+    if op == OP_LE { pool_lit(m, b"le"); return; }
+    if op == OP_GT { pool_lit(m, b"gt"); return; }
+    if op == OP_GE { pool_lit(m, b"ge"); return; }
+    if op == OP_AND { pool_lit(m, b"and"); return; }
+    if op == OP_OR { pool_lit(m, b"or"); return; }
+    if op == OP_BITAND { pool_lit(m, b"bitand"); return; }
+    if op == OP_BITOR { pool_lit(m, b"bitor"); return; }
+    if op == OP_BITXOR { pool_lit(m, b"bitxor"); return; }
+    if op == OP_SHL { pool_lit(m, b"shl"); return; }
+    pool_lit(m, b"shr");
+    return;
+}
+fn pool_unop(m: write M, op: i32) -> unit {
+    if op == UN_NEG { pool_lit(m, b"neg"); return; }
+    if op == UN_NOT { pool_lit(m, b"not"); return; }
+    pool_lit(m, b"bitnot");
+    return;
+}
+fn pool_regime(m: write M, r: i32) -> unit {
+    if r == 0 { pool_lit(m, b"checked"); return; }
+    if r == 1 { pool_lit(m, b"wrapping"); return; }
+    pool_lit(m, b"saturating");
+    return;
+}
+fn pool_fault_kw(m: write M, k: i32) -> unit {
+    if k == FK_OVERFLOW { pool_lit(m, b"overflow"); return; }
+    if k == FK_DIVZERO { pool_lit(m, b"divzero"); return; }
+    if k == FK_BOUNDS { pool_lit(m, b"bounds"); return; }
+    if k == FK_CONVLOSS { pool_lit(m, b"convloss"); return; }
+    if k == FK_ASSERT { pool_lit(m, b"assert"); return; }
+    pool_lit(m, b"panic");
+    return;
+}
+fn pool_operand(m: write M, k: i32, v: u64, ng: i32, w: i32) -> unit {
+    if k == 1 {
+        pool_lit(m, b"(oplocal ");
+        pool_num(m, v);
+        pool_byte(m, 41);
+        return;
+    }
+    pool_lit(m, b"(const ");
+    if ng != 0 { pool_byte(m, 45); }
+    pool_num(m, v);
+    pool_byte(m, 32);
+    pool_scalar(m, w);
+    pool_byte(m, 41);
+    return;
+}
+
+// ---- IR-builder core --------------------------------------------------------
+fn new_local(m: write M, w: i32, named: i32, p0: usize, p1: usize) -> i32 {
+    let id: i32 = conv i32 m.loc_n;
+    let k: usize = m.loc_n;
+    m.*.loc_w[k] = w;
+    m.*.loc_named[k] = named;
+    m.*.loc_p0[k] = p0;
+    m.*.loc_p1[k] = p1;
+    m.*.loc_n = m.loc_n + 1usize;
+    return id;
+}
+fn new_block(m: write M) -> i32 {
+    let id: i32 = conv i32 m.blk_n;
+    let b: usize = m.blk_n;
+    m.*.blk_shead[b] = 0 - 1i32;
+    m.*.blk_stail[b] = 0 - 1i32;
+    // default terminator: (return)
+    let ts: usize = m.pool_n;
+    pool_lit(m, b"(return)");
+    m.*.blk_tstart[b] = ts;
+    m.*.blk_tlen[b] = m.pool_n - ts;
+    m.*.blk_n = m.blk_n + 1usize;
+    return id;
+}
+fn switch_to(m: write M, b: i32) -> unit {
+    m.*.cur = b;
+    m.*.reachable = 1;
+    return;
+}
+// Link the pool chunk [start, pool_n) as a statement of the current block.
+fn chunk_end(m: write M, start: usize) -> unit {
+    let k: usize = m.pn_n;
+    m.*.pn_start[k] = start;
+    m.*.pn_len[k] = m.pool_n - start;
+    m.*.pn_nx[k] = 0 - 1i32;
+    m.*.pn_n = m.pn_n + 1usize;
+    let b: usize = conv usize m.cur;
+    if m.blk_shead[b] < 0 {
+        m.*.blk_shead[b] = conv i32 k;
+    } else {
+        m.*.pn_nx[conv usize m.blk_stail[b]] = conv i32 k;
+    }
+    m.*.blk_stail[b] = conv i32 k;
+    return;
+}
+
+// ---- terminators (build.rs terminate: no-op when unreachable) ---------------
+fn term_goto(m: write M, target: i32) -> unit {
+    if m.reachable == 0 { return; }
+    let b: usize = conv usize m.cur;
+    let ts: usize = m.pool_n;
+    pool_lit(m, b"(goto ");
+    pool_num(m, conv u64 target);
+    pool_byte(m, 41);
+    m.*.blk_tstart[b] = ts;
+    m.*.blk_tlen[b] = m.pool_n - ts;
+    m.*.reachable = 0;
+    return;
+}
+fn term_branch(m: write M, then_bb: i32, else_bb: i32) -> unit {
+    if m.reachable == 0 { return; }
+    let b: usize = conv usize m.cur;
+    let ts: usize = m.pool_n;
+    pool_lit(m, b"(branch ");
+    pool_operand(m, m.o1k, m.o1v, m.o1n, m.o1w);
+    pool_byte(m, 32);
+    pool_num(m, conv u64 then_bb);
+    pool_byte(m, 32);
+    pool_num(m, conv u64 else_bb);
+    pool_byte(m, 41);
+    m.*.blk_tstart[b] = ts;
+    m.*.blk_tlen[b] = m.pool_n - ts;
+    m.*.reachable = 0;
+    return;
+}
+fn term_return(m: write M) -> unit {
+    if m.reachable == 0 { return; }
+    let b: usize = conv usize m.cur;
+    let ts: usize = m.pool_n;
+    pool_lit(m, b"(return)");
+    m.*.blk_tstart[b] = ts;
+    m.*.blk_tlen[b] = m.pool_n - ts;
+    m.*.reachable = 0;
+    return;
+}
+fn term_fault(m: write M, kind: i32, p0: usize, p1: usize) -> unit {
+    if m.reachable == 0 { return; }
+    let b: usize = conv usize m.cur;
+    let ts: usize = m.pool_n;
+    pool_lit(m, b"(faultterm (fedge ");
+    pool_fault_kw(m, kind);
+    pool_byte(m, 32);
+    pool_num(m, conv u64 p0);
+    pool_byte(m, 32);
+    pool_num(m, conv u64 p1);
+    pool_lit(m, b"))");
+    m.*.blk_tstart[b] = ts;
+    m.*.blk_tlen[b] = m.pool_n - ts;
+    m.*.reachable = 0;
+    return;
+}
+
+// ---- operand slots + res helpers --------------------------------------------
+fn set_res_local(m: write M, id: i32, w: i32) -> unit {
+    m.*.res_kind = 1;
+    m.*.res_val = conv u64 id;
+    m.*.res_neg = 0;
+    m.*.res_w = w;
+    return;
+}
+fn set_res_const(m: write M, v: u64, ng: i32, w: i32) -> unit {
+    m.*.res_kind = 0;
+    m.*.res_val = v;
+    m.*.res_neg = ng;
+    m.*.res_w = w;
+    return;
+}
+fn set_o1(m: write M, k: i32, v: u64, ng: i32, w: i32) -> unit {
+    m.*.o1k = k; m.*.o1v = v; m.*.o1n = ng; m.*.o1w = w;
+    return;
+}
+fn set_o2(m: write M, k: i32, v: u64, ng: i32, w: i32) -> unit {
+    m.*.o2k = k; m.*.o2v = v; m.*.o2n = ng; m.*.o2w = w;
+    return;
+}
+
+// ---- statement emitters (append a pool chunk to the current block) ----------
+// Each is a no-op when unreachable (build.rs emit).
+fn st_store_use(m: write M, dst: i32, sp0: usize, sp1: usize) -> unit {
+    if m.reachable == 0 { return; }
+    let s: usize = m.pool_n;
+    pool_lit(m, b"(stmt (store (place ");
+    pool_num(m, conv u64 dst);
+    pool_lit(m, b" (proj)) (use ");
+    pool_operand(m, m.o1k, m.o1v, m.o1n, m.o1w);
+    pool_lit(m, b")) ");
+    pool_num(m, conv u64 sp0);
+    pool_byte(m, 32);
+    pool_num(m, conv u64 sp1);
+    pool_lit(m, b" false)");
+    chunk_end(m, s);
+    return;
+}
+fn st_assign_use(m: write M, dst: i32, sp0: usize, sp1: usize) -> unit {
+    if m.reachable == 0 { return; }
+    let s: usize = m.pool_n;
+    pool_lit(m, b"(stmt (assign ");
+    pool_num(m, conv u64 dst);
+    pool_lit(m, b" (use ");
+    pool_operand(m, m.o1k, m.o1v, m.o1n, m.o1w);
+    pool_lit(m, b")) ");
+    pool_num(m, conv u64 sp0);
+    pool_byte(m, 32);
+    pool_num(m, conv u64 sp1);
+    pool_lit(m, b" false)");
+    chunk_end(m, s);
+    return;
+}
+fn st_trace(m: write M, sp0: usize, sp1: usize) -> unit {
+    if m.reachable == 0 { return; }
+    let s: usize = m.pool_n;
+    pool_lit(m, b"(stmt (trace ");
+    pool_operand(m, m.o1k, m.o1v, m.o1n, m.o1w);
+    pool_lit(m, b") ");
+    pool_num(m, conv u64 sp0);
+    pool_byte(m, 32);
+    pool_num(m, conv u64 sp1);
+    pool_lit(m, b" true)");
+    chunk_end(m, s);
+    return;
+}
+fn st_assign_cmp(m: write M, dst: i32, op: i32, sp0: usize, sp1: usize) -> unit {
+    if m.reachable == 0 { return; }
+    let s: usize = m.pool_n;
+    pool_lit(m, b"(stmt (assign ");
+    pool_num(m, conv u64 dst);
+    pool_lit(m, b" (cmp ");
+    pool_binop(m, op);
+    pool_byte(m, 32);
+    pool_operand(m, m.o1k, m.o1v, m.o1n, m.o1w);
+    pool_byte(m, 32);
+    pool_operand(m, m.o2k, m.o2v, m.o2n, m.o2w);
+    pool_lit(m, b")) ");
+    pool_num(m, conv u64 sp0);
+    pool_byte(m, 32);
+    pool_num(m, conv u64 sp1);
+    pool_lit(m, b" false)");
+    chunk_end(m, s);
+    return;
+}
+fn st_assign_bin(m: write M, dst: i32, op: i32, regime: i32, ty: i32, span0: usize, span1: usize, hasfault: i32, sp0: usize, sp1: usize) -> unit {
+    if m.reachable == 0 { return; }
+    let s: usize = m.pool_n;
+    pool_lit(m, b"(stmt (assign ");
+    pool_num(m, conv u64 dst);
+    pool_lit(m, b" (bin ");
+    pool_binop(m, op);
+    pool_byte(m, 32);
+    pool_regime(m, regime);
+    pool_byte(m, 32);
+    pool_scalar(m, ty);
+    pool_byte(m, 32);
+    pool_operand(m, m.o1k, m.o1v, m.o1n, m.o1w);
+    pool_byte(m, 32);
+    pool_operand(m, m.o2k, m.o2v, m.o2n, m.o2w);
+    pool_byte(m, 32);
+    pool_num(m, conv u64 span0);
+    pool_byte(m, 32);
+    pool_num(m, conv u64 span1);
+    pool_byte(m, 32);
+    if hasfault != 0 {
+        pool_lit(m, b"(some (fedge overflow ");
+        pool_num(m, conv u64 span0);
+        pool_byte(m, 32);
+        pool_num(m, conv u64 span1);
+        pool_lit(m, b"))");
+    } else {
+        pool_lit(m, b"(none)");
+    }
+    pool_lit(m, b")) ");
+    pool_num(m, conv u64 sp0);
+    pool_byte(m, 32);
+    pool_num(m, conv u64 sp1);
+    pool_lit(m, b" false)");
+    chunk_end(m, s);
+    return;
+}
+fn st_assign_un(m: write M, dst: i32, op: i32, regime: i32, ty: i32, hasfault: i32, fp0: usize, fp1: usize, sp0: usize, sp1: usize) -> unit {
+    if m.reachable == 0 { return; }
+    let s: usize = m.pool_n;
+    pool_lit(m, b"(stmt (assign ");
+    pool_num(m, conv u64 dst);
+    pool_lit(m, b" (un ");
+    pool_unop(m, op);
+    pool_byte(m, 32);
+    pool_regime(m, regime);
+    pool_byte(m, 32);
+    pool_scalar(m, ty);
+    pool_byte(m, 32);
+    pool_operand(m, m.o1k, m.o1v, m.o1n, m.o1w);
+    pool_byte(m, 32);
+    if hasfault != 0 {
+        pool_lit(m, b"(some (fedge overflow ");
+        pool_num(m, conv u64 fp0);
+        pool_byte(m, 32);
+        pool_num(m, conv u64 fp1);
+        pool_lit(m, b"))");
+    } else {
+        pool_lit(m, b"(none)");
+    }
+    pool_lit(m, b")) ");
+    pool_num(m, conv u64 sp0);
+    pool_byte(m, 32);
+    pool_num(m, conv u64 sp1);
+    pool_lit(m, b" false)");
+    chunk_end(m, s);
+    return;
+}
+fn st_assign_conv(m: write M, dst: i32, tow: i32, regime: i32, hasfault: i32, fp0: usize, fp1: usize, sp0: usize, sp1: usize) -> unit {
+    if m.reachable == 0 { return; }
+    let s: usize = m.pool_n;
+    pool_lit(m, b"(stmt (assign ");
+    pool_num(m, conv u64 dst);
+    pool_lit(m, b" (conv ");
+    pool_scalar(m, tow);
+    pool_byte(m, 32);
+    pool_regime(m, regime);
+    pool_byte(m, 32);
+    pool_operand(m, m.o1k, m.o1v, m.o1n, m.o1w);
+    pool_byte(m, 32);
+    if hasfault != 0 {
+        pool_lit(m, b"(some (fedge convloss ");
+        pool_num(m, conv u64 fp0);
+        pool_byte(m, 32);
+        pool_num(m, conv u64 fp1);
+        pool_lit(m, b"))");
+    } else {
+        pool_lit(m, b"(none)");
+    }
+    pool_lit(m, b")) ");
+    pool_num(m, conv u64 sp0);
+    pool_byte(m, 32);
+    pool_num(m, conv u64 sp1);
+    pool_lit(m, b" false)");
+    chunk_end(m, s);
+    return;
+}
+
+// ---- environment (bindings; no drops in the scalar subset) ------------------
+fn bind(m: write M, p0: usize, p1: usize, id: i32, w: i32) -> unit {
+    let k: usize = m.bnd_n;
+    m.*.bnd_p0[k] = p0;
+    m.*.bnd_p1[k] = p1;
+    m.*.bnd_local[k] = id;
+    m.*.bnd_w[k] = w;
+    m.*.bnd_n = k + 1usize;
+    return;
+}
+// Innermost-first lookup (shadowing); returns local id or -1 and sets luk_w.
+fn lookup(m: write M, src: [u8], p0: usize, p1: usize) -> i32 {
+    let mut i: usize = m.bnd_n;
+    while i > 0usize {
+        i = i - 1usize;
+        if name_eq(src, p0, p1, m.bnd_p0[i], m.bnd_p1[i]) {
+            m.*.luk_w = m.bnd_w[i];
+            return m.bnd_local[i];
+        }
+    }
+    return 0 - 1i32;
+}
+fn find_fn(pp: read P, src: [u8], head: u32, p0: usize, p1: usize) -> u32 {
+    let mut cur: u32 = head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_FN && name_eq(src, p0, p1, nd.p0, nd.p1) { return cur; }
+        cur = nd.nx;
+    }
+    return 0u32;
+}
+
+// ---- lowering ---------------------------------------------------------------
+// Forward-declared via mutual recursion; Candor resolves within the module.
+
+fn lower_value(pp: read P, src: [u8], m: write M, i: u32, exp_w: i32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    m.*.cur_p0 = nd.p0;
+    m.*.cur_p1 = nd.p1;
+    if nd.tag == T_PAREN { return lower_value(pp, src, m, nd.a, exp_w); }
+    if nd.tag == T_INT {
+        let w: i32 = lit_width(nd.suf, exp_w);
+        set_res_const(m, nd.ival, 0, w);
+        return 0;
+    }
+    if nd.tag == T_NEGINT {
+        let w: i32 = lit_width(nd.suf, exp_w);
+        set_res_const(m, nd.ival, 1, w);
+        return 0;
+    }
+    if nd.tag == T_BOOL {
+        set_res_const(m, nd.ival, 0, W_BOOL);
+        return 0;
+    }
+    if nd.tag == T_ID {
+        let id: i32 = lookup(m, src, nd.p0, nd.p1);
+        if id < 0 { m.*.err = 1; return 1; }
+        set_res_local(m, id, m.luk_w);
+        return 0;
+    }
+    if nd.tag == T_UNARY { return lower_unary(pp, src, m, i, exp_w); }
+    if nd.tag == T_BIN { return lower_binary(pp, src, m, i, exp_w); }
+    if nd.tag == T_CONV { return lower_conv(pp, src, m, i); }
+    if nd.tag == T_CALL { return lower_call(pp, src, m, i); }
+    if nd.tag == T_BLOCK {
+        let sc: i32 = lower_block(pp, src, m, i);
+        set_res_const(m, 0u64, 0, 0);
+        return sc;
+    }
+    if nd.tag == T_IF {
+        let sc: i32 = lower_if(pp, src, m, i);
+        set_res_const(m, 0u64, 0, 0);
+        return sc;
+    }
+    if nd.tag == T_WHILE {
+        let sc: i32 = lower_while(pp, src, m, i);
+        set_res_const(m, 0u64, 0, 0);
+        return sc;
+    }
+    if nd.tag == T_LOOP {
+        let sc: i32 = lower_loop(pp, src, m, i);
+        set_res_const(m, 0u64, 0, 0);
+        return sc;
+    }
+    if nd.tag == T_UNSAFE {
+        let sc: i32 = lower_block(pp, src, m, nd.a);
+        set_res_const(m, 0u64, 0, 0);
+        return sc;
+    }
+    if nd.tag == T_WRAPPING {
+        let save: i32 = m.regime;
+        m.*.regime = 1;
+        let sc: i32 = lower_block(pp, src, m, nd.a);
+        m.*.regime = save;
+        set_res_const(m, 0u64, 0, 0);
+        return sc;
+    }
+    if nd.tag == T_SATURATING {
+        let save: i32 = m.regime;
+        m.*.regime = 2;
+        let sc: i32 = lower_block(pp, src, m, nd.a);
+        m.*.regime = save;
+        set_res_const(m, 0u64, 0, 0);
+        return sc;
+    }
+    if nd.tag == T_RETURN {
+        let sc: i32 = lower_return(pp, src, m, i);
+        set_res_const(m, 0u64, 0, 0);
+        return sc;
+    }
+    if nd.tag == T_BREAK {
+        if m.loop_n == 0usize { m.*.err = 1; return 1; }
+        term_goto(m, m.loop_brk[m.loop_n - 1usize]);
+        set_res_const(m, 0u64, 0, 0);
+        return 0;
+    }
+    if nd.tag == T_CONTINUE {
+        if m.loop_n == 0usize { m.*.err = 1; return 1; }
+        term_goto(m, m.loop_cont[m.loop_n - 1usize]);
+        set_res_const(m, 0u64, 0, 0);
+        return 0;
+    }
+    if nd.tag == T_ASSERT {
+        let sc: i32 = lower_assert(pp, src, m, i);
+        set_res_const(m, 0u64, 0, 0);
+        return sc;
+    }
+    if nd.tag == T_PANIC {
+        term_fault(m, FK_PANIC, nd.p0, nd.p1);
+        set_res_const(m, 0u64, 0, 0);
+        return 0;
+    }
+    m.*.err = 1;
+    return 1;
+}
+
+fn lower_unary(pp: read P, src: [u8], m: write M, i: u32, exp_w: i32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    if nd.op == UN_NOT {
+        let sc: i32 = lower_value(pp, src, m, nd.a, W_BOOL);
+        if sc != 0 { return sc; }
+        let vk: i32 = m.res_kind; let vv: u64 = m.res_val; let vn: i32 = m.res_neg;
+        let id: i32 = new_local(m, W_BOOL, 0, 0, 0);
+        set_o1(m, vk, vv, vn, W_BOOL);
+        st_assign_un(m, id, UN_NOT, m.regime, W_BOOL, 0, 0, 0, m.cur_p0, m.cur_p1);
+        set_res_local(m, id, W_BOOL);
+        return 0;
+    }
+    // neg / bitnot
+    let sc: i32 = lower_value(pp, src, m, nd.a, exp_w);
+    if sc != 0 { return sc; }
+    let vk: i32 = m.res_kind; let vv: u64 = m.res_val; let vn: i32 = m.res_neg; let vw: i32 = m.res_w;
+    let sty: i32 = concretize(vw);
+    let fp0: usize = m.cur_p0; let fp1: usize = m.cur_p1;
+    let mut hasfault: i32 = 0;
+    if nd.op == UN_NEG && m.regime == 0 { hasfault = 1; }
+    let id: i32 = new_local(m, sty, 0, 0, 0);
+    set_o1(m, vk, vv, vn, sty);
+    st_assign_un(m, id, nd.op, m.regime, sty, hasfault, fp0, fp1, fp0, fp1);
+    set_res_local(m, id, sty);
+    return 0;
+}
+
+fn lower_binary(pp: read P, src: [u8], m: write M, i: u32, exp_w: i32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let op: i32 = nd.op;
+    if op == OP_AND || op == OP_OR { return lower_short_circuit(pp, src, m, i); }
+    if op >= OP_EQ && op <= OP_GE {
+        let sc: i32 = lower_value(pp, src, m, nd.a, 0 - 1i32);
+        if sc != 0 { return sc; }
+        let lk: i32 = m.res_kind; let lv: u64 = m.res_val; let ln: i32 = m.res_neg; let lw: i32 = m.res_w;
+        let ot: i32 = concretize(lw);
+        let sr: i32 = lower_value(pp, src, m, nd.b, ot);
+        if sr != 0 { return sr; }
+        let rk: i32 = m.res_kind; let rv: u64 = m.res_val; let rn: i32 = m.res_neg; let rw: i32 = m.res_w;
+        let id: i32 = new_local(m, W_BOOL, 0, 0, 0);
+        set_o1(m, lk, lv, ln, lw);
+        set_o2(m, rk, rv, rn, rw);
+        st_assign_cmp(m, id, op, m.cur_p0, m.cur_p1);
+        set_res_local(m, id, W_BOOL);
+        return 0;
+    }
+    // arithmetic / bitwise / shift
+    let mut opty: i32 = 0 - 1i32;
+    if exp_w >= 1 && exp_w <= 10 { opty = exp_w; }
+    let sc: i32 = lower_value(pp, src, m, nd.a, opty);
+    if sc != 0 { return sc; }
+    let lk: i32 = m.res_kind; let lv: u64 = m.res_val; let ln: i32 = m.res_neg; let lw: i32 = m.res_w;
+    let mut sty: i32 = opty;
+    if opty < 0 { sty = concretize(lw); }
+    let mut rexp: i32 = sty;
+    if op == OP_SHL || op == OP_SHR { rexp = 0 - 1i32; }
+    let sr: i32 = lower_value(pp, src, m, nd.b, rexp);
+    if sr != 0 { return sr; }
+    let rk: i32 = m.res_kind; let rv: u64 = m.res_val; let rn: i32 = m.res_neg; let rw: i32 = m.res_w;
+    let mut fallible: i32 = 0;
+    if op == OP_ADD || op == OP_SUB || op == OP_MUL || op == OP_DIV || op == OP_REM || op == OP_SHL || op == OP_SHR { fallible = 1; }
+    let span0: usize = nd.p0; let span1: usize = nd.p1;
+    if fallible != 0 { m.*.cur_p0 = span0; m.*.cur_p1 = span1; }
+    let mut hasfault: i32 = 0;
+    if fallible != 0 && m.regime == 0 { hasfault = 1; }
+    let id: i32 = new_local(m, sty, 0, 0, 0);
+    set_o1(m, lk, lv, ln, lw);
+    set_o2(m, rk, rv, rn, rw);
+    st_assign_bin(m, id, op, m.regime, sty, span0, span1, hasfault, span0, span1);
+    set_res_local(m, id, sty);
+    return 0;
+}
+
+fn lower_short_circuit(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let op: i32 = nd.op;
+    let rloc: i32 = new_local(m, W_BOOL, 0, 0, 0);
+    let sc: i32 = lower_value(pp, src, m, nd.a, W_BOOL);
+    if sc != 0 { return sc; }
+    let lk: i32 = m.res_kind; let lv: u64 = m.res_val; let ln: i32 = m.res_neg; let lw: i32 = m.res_w;
+    let rhs_bb: i32 = new_block(m);
+    let short_bb: i32 = new_block(m);
+    let join: i32 = new_block(m);
+    let mut then_bb: i32 = rhs_bb;
+    let mut else_bb: i32 = short_bb;
+    if op == OP_OR { then_bb = short_bb; else_bb = rhs_bb; }
+    set_o1(m, lk, lv, ln, lw);
+    term_branch(m, then_bb, else_bb);
+    switch_to(m, rhs_bb);
+    let sr: i32 = lower_value(pp, src, m, nd.b, W_BOOL);
+    if sr != 0 { return sr; }
+    set_o1(m, m.res_kind, m.res_val, m.res_neg, m.res_w);
+    st_assign_use(m, rloc, m.cur_p0, m.cur_p1);
+    term_goto(m, join);
+    switch_to(m, short_bb);
+    let mut shortval: u64 = 0u64;
+    if op == OP_OR { shortval = 1u64; }
+    set_o1(m, 0, shortval, 0, W_BOOL);
+    st_assign_use(m, rloc, m.cur_p0, m.cur_p1);
+    term_goto(m, join);
+    switch_to(m, join);
+    set_res_local(m, rloc, W_BOOL);
+    return 0;
+}
+
+fn lower_conv(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let sc: i32 = lower_value(pp, src, m, nd.b, 0 - 1i32);
+    if sc != 0 { return sc; }
+    let vk: i32 = m.res_kind; let vv: u64 = m.res_val; let vn: i32 = m.res_neg; let vw: i32 = m.res_w;
+    let tow: i32 = scalar_width(pp, src, nd.a);
+    let fp0: usize = m.cur_p0; let fp1: usize = m.cur_p1;
+    let mut hasfault: i32 = 0;
+    if m.regime == 0 { hasfault = 1; }
+    let id: i32 = new_local(m, tow, 0, 0, 0);
+    set_o1(m, vk, vv, vn, vw);
+    st_assign_conv(m, id, tow, m.regime, hasfault, fp0, fp1, fp0, fp1);
+    set_res_local(m, id, tow);
+    return 0;
+}
+
+fn lower_call(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let callee: Node = pp.nodes[conv usize nd.a];
+    if callee.tag != T_ID { m.*.err = 1; return 1; }
+    // trace(x): the observable.
+    if span_eq(src, callee.p0, callee.p1, b"trace") {
+        let sc: i32 = lower_value(pp, src, m, nd.b, 4);
+        if sc != 0 { return sc; }
+        set_o1(m, m.res_kind, m.res_val, m.res_neg, m.res_w);
+        st_trace(m, callee.p0, m.cur_p1);
+        set_res_const(m, 0u64, 0, 0);
+        return 0;
+    }
+    let fnid: u32 = find_fn(pp, src, m.head, callee.p0, callee.p1);
+    if fnid == 0u32 { m.*.err = 1; return 1; }
+    let fnnd: Node = pp.nodes[conv usize fnid];
+    let mut retw: i32 = 0;
+    if fnnd.e != 0u32 { retw = scalar_width(pp, src, pp.nodes[conv usize fnnd.e].a); }
+    // lower args with each param's width as expected; collect operands.
+    let mut ak: [16]i32 = [0; 16];
+    let mut av: [16]u64 = [0u64; 16];
+    let mut an: [16]i32 = [0; 16];
+    let mut aw: [16]i32 = [0; 16];
+    let mut na: usize = 0usize;
+    let mut argc: u32 = nd.b;
+    let mut parc: u32 = fnnd.c;
+    while argc != 0u32 {
+        let pnw: i32 = scalar_width(pp, src, pp.nodes[conv usize parc].a);
+        let sc: i32 = lower_value(pp, src, m, argc, pnw);
+        if sc != 0 { return sc; }
+        ak[na] = m.res_kind; av[na] = m.res_val; an[na] = m.res_neg; aw[na] = m.res_w;
+        na = na + 1usize;
+        argc = pp.nodes[conv usize argc].nx;
+        parc = pp.nodes[conv usize parc].nx;
+    }
+    let id: i32 = new_local(m, retw, 0, 0, 0);
+    // Emit the call assign chunk directly (variadic args).
+    if m.reachable != 0 {
+        let s: usize = m.pool_n;
+        pool_lit(m, b"(stmt (assign ");
+        pool_num(m, conv u64 id);
+        pool_lit(m, b" (call ");
+        pool_qspan(m, src, callee.p0, callee.p1);
+        pool_lit(m, b" (args");
+        let mut j: usize = 0usize;
+        while j < na {
+            pool_byte(m, 32);
+            pool_operand(m, ak[j], av[j], an[j], aw[j]);
+            j = j + 1usize;
+        }
+        pool_lit(m, b"))) ");
+        pool_num(m, conv u64 nd.p0);
+        pool_byte(m, 32);
+        pool_num(m, conv u64 nd.p1);
+        pool_lit(m, b" false)");
+        chunk_end(m, s);
+    }
+    set_res_local(m, id, retw);
+    return 0;
+}
+
+fn lower_if(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let sc: i32 = lower_value(pp, src, m, nd.a, W_BOOL);
+    if sc != 0 { return sc; }
+    let ck: i32 = m.res_kind; let cv: u64 = m.res_val; let cn: i32 = m.res_neg; let cw: i32 = m.res_w;
+    let then_bb: i32 = new_block(m);
+    let else_bb: i32 = new_block(m);
+    let join: i32 = new_block(m);
+    set_o1(m, ck, cv, cn, cw);
+    term_branch(m, then_bb, else_bb);
+    switch_to(m, then_bb);
+    let s1: i32 = lower_block(pp, src, m, nd.b);
+    if s1 != 0 { return s1; }
+    term_goto(m, join);
+    switch_to(m, else_bb);
+    if nd.c != 0u32 {
+        let s2: i32 = lower_value(pp, src, m, nd.c, 0 - 1i32);
+        if s2 != 0 { return s2; }
+    }
+    term_goto(m, join);
+    switch_to(m, join);
+    return 0;
+}
+
+fn lower_while(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let head: i32 = new_block(m);
+    let body_bb: i32 = new_block(m);
+    let exit: i32 = new_block(m);
+    term_goto(m, head);
+    switch_to(m, head);
+    let sc: i32 = lower_value(pp, src, m, nd.a, W_BOOL);
+    if sc != 0 { return sc; }
+    set_o1(m, m.res_kind, m.res_val, m.res_neg, m.res_w);
+    term_branch(m, body_bb, exit);
+    switch_to(m, body_bb);
+    m.*.loop_cont[m.loop_n] = head;
+    m.*.loop_brk[m.loop_n] = exit;
+    m.*.loop_n = m.loop_n + 1usize;
+    let s1: i32 = lower_block(pp, src, m, nd.b);
+    m.*.loop_n = m.loop_n - 1usize;
+    if s1 != 0 { return s1; }
+    term_goto(m, head);
+    switch_to(m, exit);
+    return 0;
+}
+
+fn lower_loop(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let body_bb: i32 = new_block(m);
+    let exit: i32 = new_block(m);
+    term_goto(m, body_bb);
+    switch_to(m, body_bb);
+    m.*.loop_cont[m.loop_n] = body_bb;
+    m.*.loop_brk[m.loop_n] = exit;
+    m.*.loop_n = m.loop_n + 1usize;
+    let s1: i32 = lower_block(pp, src, m, nd.a);
+    m.*.loop_n = m.loop_n - 1usize;
+    if s1 != 0 { return s1; }
+    term_goto(m, body_bb);
+    switch_to(m, exit);
+    return 0;
+}
+
+fn lower_assert(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let sc: i32 = lower_value(pp, src, m, nd.a, W_BOOL);
+    if sc != 0 { return sc; }
+    let ck: i32 = m.res_kind; let cv: u64 = m.res_val; let cn: i32 = m.res_neg; let cw: i32 = m.res_w;
+    let fp0: usize = m.cur_p0; let fp1: usize = m.cur_p1;
+    let ok_bb: i32 = new_block(m);
+    let fail_bb: i32 = new_block(m);
+    set_o1(m, ck, cv, cn, cw);
+    term_branch(m, ok_bb, fail_bb);
+    switch_to(m, fail_bb);
+    term_fault(m, FK_ASSERT, fp0, fp1);
+    switch_to(m, ok_bb);
+    return 0;
+}
+
+fn lower_into(pp: read P, src: [u8], m: write M, e: u32, dst: i32, w: i32) -> i32 {
+    let sc: i32 = lower_value(pp, src, m, e, w);
+    if sc != 0 { return sc; }
+    set_o1(m, m.res_kind, m.res_val, m.res_neg, m.res_w);
+    st_store_use(m, dst, m.cur_p0, m.cur_p1);
+    return 0;
+}
+
+fn lower_return(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    if nd.a != 0u32 {
+        let sc: i32 = lower_into(pp, src, m, nd.a, 0, m.ret_w);
+        if sc != 0 { return sc; }
+    }
+    term_return(m);
+    return 0;
+}
+
+fn lower_stmt(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    if nd.tag == T_LET {
+        if nd.a != 0u32 {
+            let w: i32 = scalar_width(pp, src, nd.a);
+            let id: i32 = new_local(m, w, 1, nd.p0, nd.p1);
+            if nd.b != 0u32 {
+                let sc: i32 = lower_into(pp, src, m, nd.b, id, w);
+                if sc != 0 { return sc; }
+            }
+            bind(m, nd.p0, nd.p1, id, w);
+            return 0;
+        }
+        // no annotation: infer from the initializer.
+        if nd.b == 0u32 { m.*.err = 1; return 1; }
+        let sc: i32 = lower_value(pp, src, m, nd.b, 0 - 1i32);
+        if sc != 0 { return sc; }
+        let w: i32 = m.res_w;
+        let ok: i32 = m.res_kind; let ov: u64 = m.res_val; let og: i32 = m.res_neg;
+        let id: i32 = new_local(m, w, 1, nd.p0, nd.p1);
+        set_o1(m, ok, ov, og, w);
+        st_assign_use(m, id, m.cur_p0, m.cur_p1);
+        bind(m, nd.p0, nd.p1, id, w);
+        return 0;
+    }
+    if nd.tag == T_ASSIGN {
+        let sc: i32 = lower_place(pp, src, m, nd.a);
+        if sc != 0 { return sc; }
+        let dst: i32 = m.plc_local; let w: i32 = m.plc_w;
+        return lower_into(pp, src, m, nd.b, dst, w);
+    }
+    // expression statement (trace, if/while/loop, return, ...)
+    return lower_value(pp, src, m, i, 0 - 1i32);
+}
+
+fn lower_place(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    m.*.cur_p0 = nd.p0;
+    m.*.cur_p1 = nd.p1;
+    if nd.tag == T_PAREN { return lower_place(pp, src, m, nd.a); }
+    if nd.tag == T_ID {
+        let id: i32 = lookup(m, src, nd.p0, nd.p1);
+        if id < 0 { m.*.err = 1; return 1; }
+        m.*.plc_local = id;
+        m.*.plc_w = m.luk_w;
+        return 0;
+    }
+    m.*.err = 1;
+    return 1;
+}
+
+fn lower_block(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
+    let bsave: usize = m.bnd_n;
+    let nd: Node = pp.nodes[conv usize i];
+    let mut cur: u32 = nd.a;
+    while cur != 0u32 {
+        if m.reachable == 0 { break; }
+        let sc: i32 = lower_stmt(pp, src, m, cur);
+        if sc != 0 { m.*.bnd_n = bsave; return sc; }
+        cur = pp.nodes[conv usize cur].nx;
+    }
+    m.*.bnd_n = bsave;
+    return 0;
+}
+
+fn reset_fn(m: write M) -> unit {
+    m.*.loc_n = 0usize;
+    m.*.blk_n = 0usize;
+    m.*.pool_n = 0usize;
+    m.*.pn_n = 0usize;
+    m.*.bnd_n = 0usize;
+    m.*.loop_n = 0usize;
+    m.*.reachable = 1;
+    m.*.regime = 0;
+    m.*.cur = 0;
+    m.*.ret_w = 4;
+    m.*.fn_entry = 0;
+    m.*.fn_np = 0;
+    return;
+}
+
+fn lower_fn(pp: read P, src: [u8], m: write M, fnid: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize fnid];
+    let mut retw: i32 = 0;
+    if nd.e != 0u32 { retw = scalar_width(pp, src, pp.nodes[conv usize nd.e].a); }
+    m.*.ret_w = retw;
+    let _r: i32 = new_local(m, retw, 0, 0, 0);
+    let mut pc: u32 = nd.c;
+    let mut np: i32 = 0;
+    while pc != 0u32 {
+        let pn: Node = pp.nodes[conv usize pc];
+        if pn.op != 0 { m.*.err = 1; return 1; }
+        let w: i32 = scalar_width(pp, src, pn.a);
+        let id: i32 = new_local(m, w, 1, pn.p0, pn.p1);
+        bind(m, pn.p0, pn.p1, id, w);
+        np = np + 1;
+        pc = pn.nx;
+    }
+    m.*.fn_np = np;
+    let entry: i32 = new_block(m);
+    m.*.fn_entry = entry;
+    switch_to(m, entry);
+    return lower_block(pp, src, m, nd.d);
+}
+
+// ---- emission (trace sink) --------------------------------------------------
+fn emit_byte(x: i32) -> unit {
+    trace(conv i64 x);
+    return;
+}
+fn emit_scalar(w: i32) -> unit {
+    if w == 1 { emit_lit(b"i8"); return; }
+    if w == 2 { emit_lit(b"i16"); return; }
+    if w == 3 { emit_lit(b"i32"); return; }
+    if w == 4 { emit_lit(b"i64"); return; }
+    if w == 5 { emit_lit(b"isize"); return; }
+    if w == 6 { emit_lit(b"u8"); return; }
+    if w == 7 { emit_lit(b"u16"); return; }
+    if w == 8 { emit_lit(b"u32"); return; }
+    if w == 9 { emit_lit(b"u64"); return; }
+    if w == 10 { emit_lit(b"usize"); return; }
+    if w == W_BOOL { emit_lit(b"bool"); return; }
+    emit_lit(b"unit");
+    return;
+}
+fn emit_qspan(src: [u8], p0: usize, p1: usize) -> unit {
+    emit_byte(34);
+    emit_bytes(src, p0, p1);
+    emit_byte(34);
+    return;
+}
+fn emit_chunk(m: write M, start: usize, ln: usize) -> unit {
+    let mut j: usize = start;
+    while j < start + ln {
+        trace(conv i64 m.pool[j]);
+        j = j + 1usize;
+    }
+    return;
+}
+fn emit_block(m: write M, b: usize) -> unit {
+    emit_lit(b" (block (stmts");
+    let mut k: i32 = m.blk_shead[b];
+    while k >= 0 {
+        emit_byte(32);
+        emit_chunk(m, m.pn_start[conv usize k], m.pn_len[conv usize k]);
+        k = m.pn_nx[conv usize k];
+    }
+    emit_lit(b") ");
+    emit_chunk(m, m.blk_tstart[b], m.blk_tlen[b]);
+    emit_byte(41);
+    return;
+}
+fn emit_fn(m: write M, src: [u8], name_p0: usize, name_p1: usize) -> unit {
+    emit_lit(b"(fn ");
+    emit_qspan(src, name_p0, name_p1);
+    emit_byte(32);
+    emit_num(conv u64 m.fn_np);
+    emit_lit(b" (none) (locals");
+    let mut i: usize = 0usize;
+    while i < m.loc_n {
+        emit_lit(b" (local (scalar ");
+        emit_scalar(m.loc_w[i]);
+        emit_lit(b") ");
+        if m.loc_named[i] != 0 {
+            emit_lit(b"(some ");
+            emit_qspan(src, m.loc_p0[i], m.loc_p1[i]);
+            emit_byte(41);
+        } else {
+            emit_lit(b"(none)");
+        }
+        emit_lit(b" false)");
+        i = i + 1usize;
+    }
+    emit_lit(b") (blocks");
+    let mut b: usize = 0usize;
+    while b < m.blk_n {
+        emit_block(m, b);
+        b = b + 1usize;
+    }
+    emit_lit(b") ");
+    emit_num(conv u64 m.fn_entry);
+    emit_lit(b" (requires) (ensures) precise)");
+    return;
+}
+
+fn collect_fnptrs(pp: read P, src: [u8], m: write M) -> unit {
+    let mut cur: u32 = m.head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_FN {
+            let k: usize = m.fp_n;
+            m.*.fp_p0[k] = nd.p0;
+            m.*.fp_p1[k] = nd.p1;
+            m.*.fp_n = k + 1usize;
+        }
+        cur = nd.nx;
+    }
+    return;
+}
+
+pub fn lower_dump(src: [u8], buf: read Buf) -> unit {
+    let mut p: P = P { nodes: [nnew(0); 32768], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
+    let head: u32 = parse_program(write p, src, buf);
+    let mut m: M = M {
+        head: head,
+        loc_w: [0; 512],
+        loc_named: [0; 512],
+        loc_p0: [0usize; 512],
+        loc_p1: [0usize; 512],
+        loc_n: 0usize,
+        blk_shead: [0; 512],
+        blk_stail: [0; 512],
+        blk_tstart: [0usize; 512],
+        blk_tlen: [0usize; 512],
+        blk_n: 0usize,
+        pool: [0u8; 65536],
+        pool_n: 0usize,
+        pn_start: [0usize; 8192],
+        pn_len: [0usize; 8192],
+        pn_nx: [0; 8192],
+        pn_n: 0usize,
+        bnd_p0: [0usize; 512],
+        bnd_p1: [0usize; 512],
+        bnd_local: [0; 512],
+        bnd_w: [0; 512],
+        bnd_n: 0usize,
+        loop_cont: [0; 64],
+        loop_brk: [0; 64],
+        loop_n: 0usize,
+        fp_p0: [0usize; 256],
+        fp_p1: [0usize; 256],
+        fp_n: 0usize,
+        cur: 0,
+        reachable: 1,
+        regime: 0,
+        ret_w: 4,
+        fn_entry: 0,
+        fn_np: 0,
+        cur_p0: 0usize,
+        cur_p1: 0usize,
+        res_kind: 0,
+        res_val: 0u64,
+        res_neg: 0,
+        res_w: 0,
+        plc_local: 0,
+        plc_w: 0,
+        luk_w: 0,
+        o1k: 0,
+        o1v: 0u64,
+        o1n: 0,
+        o1w: 0,
+        o2k: 0,
+        o2v: 0u64,
+        o2n: 0,
+        o2w: 0,
+        err: 0,
+    };
+    collect_fnptrs(read p, src, write m);
+    emit_lit(b"(mir (fns");
+    let mut cur: u32 = head;
+    while cur != 0u32 {
+        let nd: Node = p.nodes[conv usize cur];
+        if nd.tag == T_FN {
+            reset_fn(write m);
+            let _sc: i32 = lower_fn(read p, src, write m, cur);
+            emit_byte(32);
+            emit_fn(write m, src, nd.p0, nd.p1);
+        }
+        cur = nd.nx;
+    }
+    emit_lit(b") (drop_hooks) (fn_ptrs");
+    let mut fi: usize = 0usize;
+    while fi < m.fp_n {
+        emit_byte(32);
+        emit_qspan(src, m.fp_p0[fi], m.fp_p1[fi]);
+        fi = fi + 1usize;
+    }
+    emit_lit(b") (statics))");
+    emit_nl();
+    return;
+}
