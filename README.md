@@ -5,11 +5,23 @@ authorship: memory-safe, explicit where meaning lives, locally verifiable, with
 source-declared semantics and a compiler built as a conversation partner rather
 than a gatekeeper.
 
-**Status: the philosophy's complete first-version scope is designed, reviewed,
-and RUNNING.** Structured concurrency - the final feature - executes on real
-OS threads with compile-time race freedom (the checker's gate held against
-adversarial review; the rejected first draft's race construction is a permanent
-regression test), across all engines including standalone AOT binaries. Twelve designs - memory model through structured concurrency - each
+**Status: the first-version scope is complete and RUNNING, and Candor is
+beginning to compile itself.** The self-hosting arc is underway — a lexer,
+parser, type checker, and move/borrow analysis, each *written in Candor* and
+each differentially verified token-for-token / AST-for-AST / diagnostic-for-
+diagnostic against the Rust reference. The language now has text (`str`/`String`,
+design 0013), a std `Vec[T]`, and standalone binaries that do real libc I/O
+through an auditable trust boundary. Thirteen designs — memory model through
+structured concurrency to the text budget — each adversarially reviewed; one
+rejected outright and reworked to acceptance (0012, whose reviewer built a real
+safe-code race against the draft's own flagship). One design-direction question
+(region-bearing struct fields) was decided by a high-effort deliberation with a
+falsifiable re-open trigger — and the self-hosted checker, the exact slice named
+as that trigger, held the ruling on its hardest evidence.
+
+Structured concurrency — the final language feature — executes on real
+OS threads with compile-time race freedom, across all engines including
+standalone AOT binaries. Twelve designs - memory model through structured concurrency - each
 adversarially reviewed; one rejected outright and reworked to acceptance (0012,
 whose reviewer constructed a genuine safe-code race against the draft's own
 flagship example). The compilation architecture is fully realized (design 0010,
@@ -88,10 +100,15 @@ docs/
   design/            numbered design documents (memory model, grammar, soundness)
   reviews/           adversarial review records with dispositions
   measurements/      raw counter output for baselines and ports
-prototype/           Bet 5 validation prototype (throwaway syntax; checker + interpreter)
+prototype/           the compiler: lexer, parser, checker, MIR, Cranelift backend,
+                     AOT/freestanding emission, incremental build, formatter, migrator
+prototype/selfhost/  Candor compiling itself — lexer/parser/checker/analyses in .cnr,
+                     each oracle-gated against the Rust reference
+dist/                the extractable 0.x distribution surface (README, tour, examples)
 baselines/rust/      the five idiomatic Rust baselines (frozen)
 ports/candor/        the five Candor ports (development history public as it happens)
-tools/rust-count/    the Rust-side measurement counter
+tools/               rust-count, the diagnostics LSP, VS Code extension, and the
+                     P19 apparatus (spec pack, eval harness, corpus pipeline)
 ```
 
 ## Provenance
