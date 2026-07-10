@@ -1,0 +1,789 @@
+// The FOURTH self-hosted slice of Candor: the MOVE / INIT (definite-assignment)
+// core of the borrow checker, WRITTEN IN CANDOR, consuming the self-hosted
+// parser's Node ARENA (slice 2). Gated by DIAGNOSTIC equality (code + span)
+// against the Rust oracle's move/init analysis (`prototype/src/check/init.rs`
+// over the shared CFG in `dataflow.rs`), FILTERED to the families this slice
+// covers. Spec: docs/spec/03 §1.5-1.6 (move/drop), §7.4 (definite assignment);
+// docs/spec/04 (ownership/borrows — moves-as-exclusive-accesses).
+//
+// This file is a LIBRARY, always CONCATENATED AFTER lexer.cnr + parser.cnr (the
+// harness in prototype/tests/selfhost_analyses.rs composes lexer + parser +
+// analyses + a generated `main`). It REUSES the lexer's `span_eq`, `emit_num`,
+// `emit_sp`, `emit_nl`, `trace` sink and the parser's `Node`/`P` arena, the
+// `T_*`/`PF_*` tag statics, and `parse_program`. It does NOT redefine them.
+//
+// COVERED CODE FAMILIES (the sound core this slice proves against the oracle):
+//   E0301  use of a MOVED value           (span = the identifier use site)
+//   E0304  use of a possibly-UNINIT value (span = the identifier use site)
+// Both attach to a BARE-IDENTIFIER use, whose span the span-lean slice-2 arena
+// carries verbatim in the `T_ID` node's `p0/p1`, so they match the oracle span
+// exactly. The move-JOIN family whose oracle span is a SYNTHETIC block/join span
+// the arena does not carry -- E0302 (move-join disagreement, span = join_span),
+// E0309 (needs-drop maybe-init at a drop point, span = scope-exit/reassign span)
+// -- are OUT OF SUBSET this slice, the SAME span-lean boundary slice 3 hit for
+// E0703 etc. The dataflow JOIN is still computed (so E0301/E0304 are correct
+// across if/match branches), only the join-anchored diagnostics are not emitted.
+// Loans (E0801-E0809) are deferred to slice 5. Recorded in OBL-SELFHOST-ERGO.
+//
+// CONTEXT: the analysis threads the tuple (read P arena, [u8] src, write A). The
+// per-place move+init STATE, the locals table, the item head, and the growable
+// diagnostic buffer ALL aggregate into the one state object `A` -- so the
+// state-heavy borrow analysis stays at THREE threaded views, exactly like slice
+// 3's (read P, [u8] src, write C). The C-ruling 4-5 re-open trigger does NOT
+// fire: `src` cannot be a struct field (0001 3.4 / friction #1) and the arena is
+// a distinct object, but everything mutable merges into `A`.
+//
+// Vec is exercised as its FIRST self-hosting customer for the growable
+// diagnostic buffer (`dcode/ds/de`); the value-SNAPSHOTTED per-place flow state
+// stays a fixed array (a Vec cannot be cheaply cloned at every branch join).
+
+// ---- allocator prelude (to obtain the `Alloc` handle `vec_new` requires) -----
+// A bump arena over a reserved flat-memory window. This ~20-line prelude + the
+// viral `alloc` marking below is Vec's measured first-customer cost (P9).
+struct AllocVtable {
+    alloc: fn(rawptr u8, usize, usize) -> rawptr u8,
+    free: fn(rawptr u8, rawptr u8, usize, usize) -> unit,
+}
+struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize }
+
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live Bump whose [next,end) window is reserved to this arena alone; the carved block stays inside the window" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let aligned: usize = (b.next + align - 1usize) / align * align;
+        if aligned + size > b.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    return;
+}
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+fn mk_alloc(state: write Bump) -> Alloc {
+    unsafe "the Bump window and BUMP_VT outlive every Box/Vec this handle serves for the whole analysis run" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) };
+    }
+}
+
+// ---- analysis state ---------------------------------------------------------
+// St codes: 0 = Uninit, 1 = Init, 2 = Moved, 3 = MaybeInit (the dataflow::St
+// lattice of dataflow.rs).
+struct A {
+    head: u32,             // item-list head (from parse_program)
+    loc_p0: [256]usize,    // per-local: name-span start
+    loc_p1: [256]usize,    // per-local: name-span end
+    loc_copy: [256]i32,    // per-local: 1 = copy type (use = Read), 0 = move
+    st: [256]i32,          // per-local flow state (the snapshotted lattice)
+    loc_n: usize,          // live local count (the local-id frontier)
+    diverged: i32,         // 1 once control has left this path (return/break)
+    dcode: Vec[i64],       // GROWABLE diagnostic buffer (Vec first customer)
+    ds: Vec[i64],
+    de: Vec[i64],
+}
+
+// ---- small helpers ----------------------------------------------------------
+fn name_eq(src: [u8], a0: usize, a1: usize, b0: usize, b1: usize) -> bool {
+    if a1 - a0 != b1 - b0 {
+        return false;
+    }
+    let mut i: usize = 0usize;
+    let n: usize = a1 - a0;
+    while i < n {
+        if src[a0 + i] != src[b0 + i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+// The join of two lattice states (dataflow.rs `join_st`, state only): Moved
+// dominates a live meet; any other disagreement is MaybeInit.
+fn join_st(x: i32, y: i32) -> i32 {
+    if x == y {
+        return x;
+    }
+    if x == 2 || y == 2 {
+        return 2;
+    }
+    return 3;
+}
+
+fn lookup_local(a: write A, src: [u8], s: usize, e: usize) -> i32 {
+    let mut i: usize = a.loc_n;
+    while i > 0usize {
+        i = i - 1usize;
+        if name_eq(src, s, e, a.loc_p0[i], a.loc_p1[i]) {
+            return conv i32 i;
+        }
+    }
+    return -1;
+}
+
+fn loc_push(a: write A, s: usize, e: usize, cp: i32, st0: i32) -> unit {
+    let i: usize = a.loc_n;
+    a.*.loc_p0[i] = s;
+    a.*.loc_p1[i] = e;
+    a.*.loc_copy[i] = cp;
+    a.*.st[i] = st0;
+    a.*.loc_n = i + 1usize;
+    return;
+}
+
+fn push_diag(a: write A, code: i64, s: usize, e: usize) alloc -> unit {
+    push(write a.dcode, code);
+    push(write a.ds, conv i64 s);
+    push(write a.de, conv i64 e);
+    return;
+}
+
+// ---- copy classification (types.rs `is_copy`, over type NODES) --------------
+fn find_decl(pp: read P, head: u32, src: [u8], s: usize, e: usize) -> u32 {
+    let mut cur: u32 = head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_STRUCT || nd.tag == T_ENUM {
+            if name_eq(src, s, e, nd.p0, nd.p1) {
+                return cur;
+            }
+        }
+        cur = nd.nx;
+    }
+    return 0u32;
+}
+
+// Is a declared struct/enum a `copy` type? (op == 1 marks `copy`; a struct with
+// a `drop` hook or any non-copy field/payload is non-copy.)
+fn decl_copy(pp: read P, src: [u8], head: u32, d: u32) -> i32 {
+    let dn: Node = pp.nodes[conv usize d];
+    if dn.op != 1 {
+        return 0;
+    }
+    if dn.tag == T_STRUCT {
+        if dn.c != 0u32 {
+            return 0;
+        }
+        let mut f: u32 = dn.b;
+        while f != 0u32 {
+            let fnn: Node = pp.nodes[conv usize f];
+            if ty_copy(pp, src, head, fnn.a) == 0 {
+                return 0;
+            }
+            f = fnn.nx;
+        }
+        return 1;
+    }
+    let mut v: u32 = dn.b;
+    while v != 0u32 {
+        let vn: Node = pp.nodes[conv usize v];
+        let mut py: u32 = vn.a;
+        while py != 0u32 {
+            let pn: Node = pp.nodes[conv usize py];
+            if ty_copy(pp, src, head, py) == 0 {
+                return 0;
+            }
+            py = pn.nx;
+        }
+        v = vn.nx;
+    }
+    return 1;
+}
+
+fn ty_copy(pp: read P, src: [u8], head: u32, ty: u32) -> i32 {
+    if ty == 0u32 {
+        return 1;
+    }
+    let nd: Node = pp.nodes[conv usize ty];
+    let tg: i32 = nd.tag;
+    if tg == T_SC || tg == T_RAWPTR || tg == T_BORROW || tg == T_SLICE || tg == T_FNPTR {
+        return 1;
+    }
+    if tg == T_BORROWMUT || tg == T_SLICEMUT || tg == T_BOX || tg == T_BOXRESULT {
+        return 0;
+    }
+    if tg == T_ARRAY {
+        return ty_copy(pp, src, head, nd.a);
+    }
+    if tg == T_NAMED {
+        if span_eq(src, nd.p0, nd.p1, b"str") {
+            return 1;
+        }
+        let d: u32 = find_decl(pp, head, src, nd.p0, nd.p1);
+        if d == 0u32 {
+            return 0;
+        }
+        return decl_copy(pp, src, head, d);
+    }
+    return 0;
+}
+
+// The copy-ness of a param, folding in its passing MODE (op): read (1) = a
+// shared borrow (copy); write (2) = an exclusive borrow (non-copy); take/value
+// (0) = the copy-ness of the bare type; out (3) handled at its declaration.
+fn param_copy(pp: read P, src: [u8], head: u32, pm: Node) -> i32 {
+    if pm.op == 1 {
+        return 1;
+    }
+    if pm.op == 2 {
+        return 0;
+    }
+    return ty_copy(pp, src, head, pm.a);
+}
+
+// Infer the copy-ness of an un-annotated `let x = init` from simple init forms
+// (fixtures ANNOTATE anything else, per the ergonomics note).
+fn infer_copy(pp: read P, src: [u8], a: write A, head: u32, init: u32) -> i32 {
+    if init == 0u32 {
+        return 1;
+    }
+    let nd: Node = pp.nodes[conv usize init];
+    let tg: i32 = nd.tag;
+    if tg == T_INT || tg == T_NEGINT || tg == T_BOOL || tg == T_STR || tg == T_BYTES || tg == T_RESULT {
+        return 1;
+    }
+    if tg == T_PAREN {
+        return infer_copy(pp, src, a, head, nd.a);
+    }
+    if tg == T_BIN || tg == T_UNARY {
+        return 1;
+    }
+    if tg == T_ID {
+        let id: i32 = lookup_local(a, src, nd.p0, nd.p1);
+        if id >= 0 {
+            return a.loc_copy[conv usize id];
+        }
+        return 1;
+    }
+    if tg == T_STRUCTLIT || tg == T_ENUMCTOR {
+        let d: u32 = find_decl(pp, head, src, nd.p0, nd.p1);
+        if d == 0u32 {
+            return 0;
+        }
+        return decl_copy(pp, src, head, d);
+    }
+    return 0;
+}
+
+// ---- move/init reporting (init.rs `require_init`) ---------------------------
+fn require_init(a: write A, id: i32, s: usize, e: usize) alloc -> unit {
+    let st: i32 = a.st[conv usize id];
+    if st == 1 {
+        return;
+    }
+    if st == 2 {
+        push_diag(a, 301, s, e);
+        return;
+    }
+    push_diag(a, 304, s, e);
+    return;
+}
+
+// Peel a place expression down to its root `T_ID` node (or 0 if not a simple
+// place). Root-granularity: field/index/deref of a local anchor on the root.
+fn root_of(pp: read P, i: u32) -> u32 {
+    let mut cur: u32 = i;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        let tg: i32 = nd.tag;
+        if tg == T_ID {
+            return cur;
+        }
+        if tg == T_FIELD || tg == T_PAREN || tg == T_INDEX || tg == T_PREFIX || tg == T_UNARY {
+            cur = nd.a;
+        } else {
+            return 0u32;
+        }
+    }
+    return 0u32;
+}
+
+// Use of a place at its root local. ctx 0 = Value (moves a non-copy place after
+// the init check); ctx 1 = Borrow/read-through (init check only, never moves).
+fn place_use(pp: read P, src: [u8], a: write A, idnode: u32, ctx: i32) alloc -> unit {
+    let nd: Node = pp.nodes[conv usize idnode];
+    let id: i32 = lookup_local(a, src, nd.p0, nd.p1);
+    if id < 0 {
+        return;
+    }
+    require_init(a, id, nd.p0, nd.p1);
+    if ctx == 0 {
+        if a.loc_copy[conv usize id] == 0 {
+            a.*.st[conv usize id] = 2;
+        }
+    }
+    return;
+}
+
+// A place used as a borrow/read-through: init check on the root, no move.
+fn borrow_place(pp: read P, src: [u8], a: write A, operand: u32) alloc -> unit {
+    let r: u32 = root_of(pp, operand);
+    if r != 0u32 {
+        place_use(pp, src, a, r, 1);
+        return;
+    }
+    chk_expr(pp, src, a, operand);
+    return;
+}
+
+// ---- the structured dataflow walk (mirrors init.rs over the CFG) ------------
+fn chk_expr(pp: read P, src: [u8], a: write A, i: u32) alloc -> unit {
+    if i == 0u32 {
+        return;
+    }
+    let nd: Node = pp.nodes[conv usize i];
+    let tg: i32 = nd.tag;
+    if tg == T_ID {
+        place_use(pp, src, a, i, 0);
+        return;
+    }
+    if tg == T_INT || tg == T_NEGINT || tg == T_STR || tg == T_BYTES || tg == T_BOOL || tg == T_RESULT || tg == T_CONTINUE {
+        return;
+    }
+    if tg == T_BREAK {
+        a.*.diverged = 1;
+        return;
+    }
+    if tg == T_UNARY {
+        chk_expr(pp, src, a, nd.a);
+        return;
+    }
+    if tg == T_PREFIX {
+        // read/write/deref/clone: a borrow or read-through of the operand place.
+        borrow_place(pp, src, a, nd.a);
+        return;
+    }
+    if tg == T_PAREN || tg == T_TRY {
+        chk_expr(pp, src, a, nd.a);
+        return;
+    }
+    if tg == T_OUT {
+        // `out x`: the place is initialized by the call.
+        let r: u32 = root_of(pp, nd.a);
+        if r != 0u32 {
+            let rn: Node = pp.nodes[conv usize r];
+            let id: i32 = lookup_local(a, src, rn.p0, rn.p1);
+            if id >= 0 {
+                a.*.st[conv usize id] = 1;
+            }
+        }
+        return;
+    }
+    if tg == T_FIELD {
+        // read of a field = read-through of the root (init check, no move).
+        borrow_place(pp, src, a, i);
+        return;
+    }
+    if tg == T_BIN || tg == T_INDEX || tg == T_ARRAYREP {
+        chk_expr(pp, src, a, nd.a);
+        chk_expr(pp, src, a, nd.b);
+        return;
+    }
+    if tg == T_CALL {
+        // callee: a bare fn name resolves to no local (no-op); a fn-pointer
+        // local reads as a copy. Args carry EXPLICIT read/write prefixes that
+        // drive borrow-vs-move, so each arg is a value-context walk.
+        chk_expr(pp, src, a, nd.a);
+        let mut cur: u32 = nd.b;
+        while cur != 0u32 {
+            let sub: Node = pp.nodes[conv usize cur];
+            chk_expr(pp, src, a, cur);
+            cur = sub.nx;
+        }
+        return;
+    }
+    if tg == T_CONV {
+        chk_expr(pp, src, a, nd.b);
+        return;
+    }
+    if tg == T_ARRAYLIT {
+        let mut cur: u32 = nd.a;
+        while cur != 0u32 {
+            let sub: Node = pp.nodes[conv usize cur];
+            chk_expr(pp, src, a, cur);
+            cur = sub.nx;
+        }
+        return;
+    }
+    if tg == T_STRUCTLIT {
+        let mut cur: u32 = nd.a;
+        while cur != 0u32 {
+            let fi: Node = pp.nodes[conv usize cur];
+            chk_expr(pp, src, a, fi.a);
+            cur = fi.nx;
+        }
+        return;
+    }
+    if tg == T_ENUMCTOR {
+        let mut cur: u32 = nd.b;
+        while cur != 0u32 {
+            let sub: Node = pp.nodes[conv usize cur];
+            chk_expr(pp, src, a, cur);
+            cur = sub.nx;
+        }
+        return;
+    }
+    if tg == T_ASSERT {
+        chk_expr(pp, src, a, nd.a);
+        return;
+    }
+    if tg == T_PANIC {
+        chk_expr(pp, src, a, nd.a);
+        a.*.diverged = 1;
+        return;
+    }
+    if tg == T_BLOCK {
+        chk_block(pp, src, a, nd.a);
+        return;
+    }
+    if tg == T_IF {
+        chk_if(pp, src, a, i);
+        return;
+    }
+    if tg == T_MATCH {
+        chk_match(pp, src, a, i);
+        return;
+    }
+    if tg == T_WHILE {
+        chk_loop(pp, src, a, nd.a, nd.b);
+        return;
+    }
+    if tg == T_LOOP || tg == T_WRAPPING || tg == T_SATURATING || tg == T_UNSAFE {
+        chk_loop(pp, src, a, 0u32, nd.a);
+        return;
+    }
+    if tg == T_RETURN {
+        if nd.a != 0u32 {
+            chk_expr(pp, src, a, nd.a);
+        }
+        a.*.diverged = 1;
+        return;
+    }
+    if tg == T_SIZEOF || tg == T_ALIGNOF || tg == T_OFFSETOF || tg == T_PTRNULL || tg == T_CASTPTR || tg == T_ADDRTOPTR {
+        return;
+    }
+    return;
+}
+
+// Bind the value names a match-arm pattern introduces (Init, treated copy so an
+// arm binding is a Read; moving an arm binding is deferred).
+fn bind_pattern(pp: read P, src: [u8], a: write A, i: u32) alloc -> unit {
+    if i == 0u32 {
+        return;
+    }
+    let nd: Node = pp.nodes[conv usize i];
+    if nd.tag == T_BIND {
+        loc_push(a, nd.p0, nd.p1, 1, 1);
+        return;
+    }
+    if nd.tag == T_PVARIANT {
+        let mut cur: u32 = nd.b;
+        while cur != 0u32 {
+            let sub: Node = pp.nodes[conv usize cur];
+            if sub.tag == T_BIND {
+                loc_push(a, sub.p0, sub.p1, 1, 1);
+            }
+            cur = sub.nx;
+        }
+        return;
+    }
+    return;
+}
+
+// if/else: both arms flow from the same in-state; join their out-states. A
+// diverging arm (one that returned) contributes nothing to the join.
+fn chk_if(pp: read P, src: [u8], a: write A, i: u32) alloc -> unit {
+    let nd: Node = pp.nodes[conv usize i];
+    chk_expr(pp, src, a, nd.a);
+    let base: usize = a.loc_n;
+    let snap: [256]i32 = a.st;
+    let sdiv: i32 = a.diverged;
+    chk_expr(pp, src, a, nd.b);
+    let tst: [256]i32 = a.st;
+    let tdiv: i32 = a.diverged;
+    a.*.st = snap;
+    a.*.diverged = sdiv;
+    a.*.loc_n = base;
+    if nd.c != 0u32 {
+        chk_expr(pp, src, a, nd.c);
+    }
+    let est: [256]i32 = a.st;
+    let ediv: i32 = a.diverged;
+    a.*.loc_n = base;
+    if tdiv == 1 && ediv == 1 {
+        a.*.diverged = 1;
+        return;
+    }
+    if tdiv == 1 {
+        a.*.st = est;
+        a.*.diverged = ediv;
+        return;
+    }
+    if ediv == 1 {
+        a.*.st = tst;
+        a.*.diverged = tdiv;
+        return;
+    }
+    let mut k: usize = 0usize;
+    while k < base {
+        a.*.st[k] = join_st(tst[k], est[k]);
+        k = k + 1usize;
+    }
+    a.*.diverged = 0;
+    return;
+}
+
+// match: the scrutinee is inspected (read-through, no consume in the core); each
+// arm flows from the same in-state; non-diverging arms are joined.
+fn chk_match(pp: read P, src: [u8], a: write A, i: u32) alloc -> unit {
+    let nd: Node = pp.nodes[conv usize i];
+    borrow_place(pp, src, a, nd.a);
+    let base: usize = a.loc_n;
+    let snap: [256]i32 = a.st;
+    let sdiv: i32 = a.diverged;
+    let mut acc: [256]i32 = snap;
+    let mut acc_has: i32 = 0;
+    let mut all_div: i32 = 1;
+    let mut cur: u32 = nd.b;
+    while cur != 0u32 {
+        let arm: Node = pp.nodes[conv usize cur];
+        a.*.st = snap;
+        a.*.diverged = sdiv;
+        a.*.loc_n = base;
+        bind_pattern(pp, src, a, arm.a);
+        chk_expr(pp, src, a, arm.b);
+        let adiv: i32 = a.diverged;
+        if adiv == 0 {
+            all_div = 0;
+            if acc_has == 0 {
+                acc = a.st;
+                acc_has = 1;
+            } else {
+                let mut k: usize = 0usize;
+                while k < base {
+                    acc[k] = join_st(acc[k], a.st[k]);
+                    k = k + 1usize;
+                }
+            }
+        }
+        a.*.loc_n = base;
+        cur = arm.nx;
+    }
+    a.*.loc_n = base;
+    if acc_has == 0 {
+        // no arms, or every arm diverged
+        a.*.st = snap;
+        if all_div == 1 {
+            a.*.diverged = 1;
+        } else {
+            a.*.diverged = sdiv;
+        }
+        return;
+    }
+    a.*.st = acc;
+    a.*.diverged = 0;
+    return;
+}
+
+// while/loop: process the guard (if any) and the body once; the post-loop state
+// is the join of the pre-loop (0-iteration) state and the body-out state
+// (conservative; a genuine fixpoint is deferred -- loop-carried move hazards are
+// out of the core, reported in OBL-SELFHOST-ERGO).
+fn chk_loop(pp: read P, src: [u8], a: write A, cond: u32, body: u32) alloc -> unit {
+    if cond != 0u32 {
+        chk_expr(pp, src, a, cond);
+    }
+    let base: usize = a.loc_n;
+    let snap: [256]i32 = a.st;
+    let sdiv: i32 = a.diverged;
+    chk_expr(pp, src, a, body);
+    let bst: [256]i32 = a.st;
+    a.*.st = snap;
+    a.*.diverged = sdiv;
+    a.*.loc_n = base;
+    let mut k: usize = 0usize;
+    while k < base {
+        a.*.st[k] = join_st(snap[k], bst[k]);
+        k = k + 1usize;
+    }
+    return;
+}
+
+// A statement: `let` / `assign` / a bare expression statement.
+fn chk_stmt(pp: read P, src: [u8], a: write A, i: u32) alloc -> unit {
+    let nd: Node = pp.nodes[conv usize i];
+    if nd.tag == T_LET {
+        // The init is evaluated (and may MOVE its RHS place) BEFORE the new local
+        // exists -- so a self-referential `let x = x` resolves the RHS to an
+        // outer binding, matching the oracle.
+        if nd.b != 0u32 {
+            chk_expr(pp, src, a, nd.b);
+        }
+        let mut cp: i32 = 1;
+        if nd.a != 0u32 {
+            cp = ty_copy(pp, src, a.head, nd.a);
+        } else {
+            cp = infer_copy(pp, src, a, a.head, nd.b);
+        }
+        let mut st0: i32 = 0;
+        if nd.b != 0u32 {
+            st0 = 1;
+        }
+        loc_push(a, nd.p0, nd.p1, cp, st0);
+        return;
+    }
+    if nd.tag == T_ASSIGN {
+        // RHS first (it may read the old LHS value), then the LHS whole-binding
+        // reassignment sets it Init.
+        chk_expr(pp, src, a, nd.b);
+        let r: u32 = root_of(pp, nd.a);
+        if r != 0u32 {
+            let rn: Node = pp.nodes[conv usize r];
+            let id: i32 = lookup_local(a, src, rn.p0, rn.p1);
+            if id >= 0 {
+                a.*.st[conv usize id] = 1;
+            }
+        }
+        return;
+    }
+    chk_expr(pp, src, a, i);
+    return;
+}
+
+// A block scopes its statement chain; a `return`/`break` inside stops the rest.
+fn chk_block(pp: read P, src: [u8], a: write A, head: u32) alloc -> unit {
+    let saved: usize = a.loc_n;
+    let mut cur: u32 = head;
+    while cur != 0u32 {
+        if a.diverged == 1 {
+            break;
+        }
+        let sub: Node = pp.nodes[conv usize cur];
+        chk_stmt(pp, src, a, cur);
+        cur = sub.nx;
+    }
+    a.*.loc_n = saved;
+    return;
+}
+
+// ---- item pass --------------------------------------------------------------
+fn analyze_items(pp: read P, src: [u8], a: write A) alloc -> unit {
+    let mut cur: u32 = a.head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_FN {
+            a.*.loc_n = 0usize;
+            a.*.diverged = 0;
+            let mut pcur: u32 = nd.c;
+            while pcur != 0u32 {
+                let pm: Node = pp.nodes[conv usize pcur];
+                let cp: i32 = param_copy(pp, src, a.head, pm);
+                // `out` params (op 3) start Uninit; all others start Init.
+                let mut st0: i32 = 1;
+                if pm.op == 3 {
+                    st0 = 0;
+                }
+                loc_push(a, pm.p0, pm.p1, cp, st0);
+                pcur = pm.nx;
+            }
+            chk_expr(pp, src, a, nd.d);
+        }
+        cur = nd.nx;
+    }
+    return;
+}
+
+// ---- diagnostic dump (canonical: CODE START END, sorted by (code,start,end)) -
+fn emit_code(code: i64) -> unit {
+    trace(69);
+    trace(48 + code / 1000 % 10);
+    trace(48 + code / 100 % 10);
+    trace(48 + code / 10 % 10);
+    trace(48 + code % 10);
+    return;
+}
+
+// Insertion sort the three parallel diagnostic Vecs by (code, start, end).
+fn sort_diags(a: write A) alloc -> unit {
+    let n: usize = len(read a.dcode);
+    let mut i: usize = 1usize;
+    while i < n {
+        let kc: i64 = get(read a.dcode, i).*;
+        let ks: i64 = get(read a.ds, i).*;
+        let ke: i64 = get(read a.de, i).*;
+        let mut j: usize = i;
+        loop {
+            if j == 0usize {
+                break;
+            }
+            let pc: i64 = get(read a.dcode, j - 1usize).*;
+            let ps: i64 = get(read a.ds, j - 1usize).*;
+            let pe: i64 = get(read a.de, j - 1usize).*;
+            let mut gt: bool = false;
+            if pc > kc {
+                gt = true;
+            } else if pc == kc {
+                if ps > ks {
+                    gt = true;
+                } else if ps == ks {
+                    if pe > ke {
+                        gt = true;
+                    }
+                }
+            }
+            if !gt {
+                break;
+            }
+            set(write a.dcode, j, pc);
+            set(write a.ds, j, ps);
+            set(write a.de, j, pe);
+            j = j - 1usize;
+        }
+        set(write a.dcode, j, kc);
+        set(write a.ds, j, ks);
+        set(write a.de, j, ke);
+        i = i + 1usize;
+    }
+    return;
+}
+
+fn dump_diags(a: write A) alloc -> unit {
+    let n: usize = len(read a.dcode);
+    let mut i: usize = 0usize;
+    while i < n {
+        emit_code(get(read a.dcode, i).*);
+        emit_sp();
+        emit_num(conv u64 get(read a.ds, i).*);
+        emit_sp();
+        emit_num(conv u64 get(read a.de, i).*);
+        emit_nl();
+        i = i + 1usize;
+    }
+    return;
+}
+
+// ---- entry ------------------------------------------------------------------
+fn analyze_dump(src: [u8], buf: read Buf) alloc -> unit {
+    let mut bump: Bump = Bump { next: 16777216usize, end: 33554432usize };
+    let al: Alloc = mk_alloc(write bump);
+    let mut p: P = P { nodes: [nnew(0); 2048], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32 };
+    let head: u32 = parse_program(write p, src, buf);
+    let mut a: A = A {
+        head: head,
+        loc_p0: [0usize; 256],
+        loc_p1: [0usize; 256],
+        loc_copy: [0; 256],
+        st: [0; 256],
+        loc_n: 0usize,
+        diverged: 0,
+        dcode: vec_new(read al),
+        ds: vec_new(read al),
+        de: vec_new(read al),
+    };
+    analyze_items(read p, src, write a);
+    sort_diags(write a);
+    dump_diags(write a);
+    return;
+}

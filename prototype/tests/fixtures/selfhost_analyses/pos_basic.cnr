@@ -1,0 +1,19 @@
+// Clean move/init: a non-copy value moved into a binding and used THROUGH the
+// binding; a copy value re-read freely; a borrow that does not consume.
+struct Big { a: i64, b: i64 }
+fn moved_into_binding(x: Big) -> i64 {
+    let y: Big = x;
+    return y.a;
+}
+fn copy_reused(n: i64) -> i64 {
+    let a: i64 = n;
+    let b: i64 = n;
+    return a + b;
+}
+fn peek(v: read Big) -> i64 {
+    return v.a;
+}
+fn borrow_then_use(x: Big) -> Big {
+    let p: i64 = peek(read x);
+    return x;
+}

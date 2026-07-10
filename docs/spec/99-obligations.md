@@ -470,3 +470,72 @@ canonical `CODE start end` dump sorted by (code,start,end) so emission order nee
 oracle's traversal; and filtering the oracle to the covered code families so the differential
 harness self-reports coverage honestly (positive fixtures = empty covered-set, negatives = the
 specific codes).
+
+### Slice 4 addendum — the move/init core of the borrow checker (in Candor, 2026-07-10)
+
+Writing the self-hosted MOVE/INIT analysis (`prototype/selfhost/analyses/analyses.cnr`,
+composed after lexer + parser; gated by DIAGNOSTIC equality vs the Rust oracle's `init.rs`
+over `dataflow.rs`) surfaced four findings. This is the hardest slice — the borrow checker is
+state-heavy (per-place move state + init state) — so the CONTEXT-TUPLE datum was the load-bearing
+question.
+
+(1) **CONTEXT-TUPLE SIZE — the C-ruling 4-5 re-open trigger is NOT tripped even for the
+state-heaviest analysis: THREE threaded views, exactly like slice 3.** Every walk/dataflow
+signature threads `(read P arena, [u8] src, write A state)`. The two read-views are the same
+essential floor (the arena, and the §3.4-forbidden `src`); the third is one MUTABLE aggregate `A`
+that folds ALL of the analysis's state — the per-place flow lattice (`st[]` array), the locals
+table (name spans + copy flags), the item-table root, AND the growable diagnostic buffer. The
+BORROW CHECKER'S STATE-HEAVINESS DOES NOT FORCE 4-5 VIEWS: per-place state aggregates into one
+struct exactly as slice 3's `C` did. The value-snapshot the branch JOIN needs (clone the flow
+state at each if/match, meet, restore) is done by copying the `st[]` FIELD out of `A` as a plain
+`[256]i32` value — no extra threaded view, no separate state param. So the ratified source-threading
+cost holds; the hardest slice confirms the 2-read-view floor rather than breaching it. NOTE: had the
+diagnostic Vec forced a threaded `read Alloc` (see #3), that would have added a 4th view — but Vec's
+allocator is needed only at CONSTRUCTION (in the entry fn), never in the walk, so the walk stays at 3.
+
+(2) **The span-lean arena confines move/init to BARE-IDENTIFIER-use spans: E0301 + E0304 matched;
+E0302 + E0309 out of subset (same boundary as slice 3's E0703).** The oracle's use-of-moved
+(E0301) and read-before-init (E0304) diagnostics attach to the USE SITE; for a bare identifier that
+is the `T_ID` node's stored `p0/p1`, matched EXACTLY (codes + spans) on 11/11 corpus fixtures
+(3 positive/clean, 8 negative), 10 covered diagnostics. But (a) a FIELD/index use (`x.a` of a moved
+`x`) carries the whole-expr composite span (96..99) the arena does not store — only the root `T_ID`
+(96..97) — so field-use diagnostics are excluded and fixtures use bare-id uses; (b) the move-JOIN
+family is synthetic-span: E0302 (move-join disagreement) spans the block `join_span`, E0309
+(needs-drop maybe-init at a drop point) spans the scope-exit/reassign statement — neither carried by
+the span-lean arena. The dataflow JOIN is STILL COMPUTED (Init∪Moved→Moved, Init∪Uninit→MaybeInit),
+so E0301/E0304 stay correct across if/match branches and a conditional move followed by a use is
+caught; only the join-anchored diagnostics are not EMITTED. Same GATE to unlock as slice 3: a
+per-node `(start,end)` span pair reverses the slice-2 span-free decision and turns E0302/E0309 (and
+field-use E0301/E0304) into gate-checkable targets.
+
+(3) **Vec's first self-hosting customer: it fits the append-only diagnostic buffer but is the WRONG
+tool for the value-snapshotted flow state, and its allocator-explicitness (P9) is a viral tax.**
+Measured, not guessed. Vec (`vec_new`/`push`/`get`/`set`/`len`) works and grows past initial
+capacity without re-passing the allocator — so it retired the diagnostic buffer's fixed 512-cap.
+But three frictions: (a) `vec_new(a: read Alloc)` needs an `Alloc` handle, which in a standalone
+program means a ~20-line bump-allocator prelude over a reserved flat-memory window with two `unsafe`
+valves — the analysis carries its own allocator; (b) `push` is `alloc`-effecting, so EVERY function
+in the walk that can emit a diagnostic becomes virally `alloc`-marked (~14 fns here) and `main`
+becomes `alloc`; (c) `get` returns a `borrow T`, so a scalar read is `get(v,i).*` and arithmetic on
+two `get`s is an E0703 borrow-arithmetic error — an insertion sort over the diag Vec is noticeably
+more ceremony than over an array. Crucially, the per-place FLOW STATE stayed a FIXED `[256]i32`
+array precisely because a Vec CANNOT be cheaply cloned at every branch join (the borrow checker's own
+state wants cheap value-copy semantics, which arrays give and an owning, move-only, alloc-marked Vec
+does not — a nice irony for the tool that enforces those semantics). VERDICT: Vec earns its place for
+unbounded append-only OUTPUT; fixed arrays remain correct for snapshotted dataflow state; the P9
+allocator-explicitness is the price and it is viral through the effect system.
+
+(4) **Loop-carried move hazards + owned-scrutinee match-moves are the deferred boundary (slice 5 /
+loans).** The structured walk mirrors the oracle's forward dataflow for straight-line code and
+if/match joins, but handles `while`/`loop` with a SINGLE body-pass + a conservative post-loop join
+(pre-loop ∪ body-out) instead of the oracle's RPO FIXPOINT. This matches the oracle on loops with no
+loop-carried move (positive loops, loops whose body only reads initialized values) but MISSES the
+second E0301 the fixpoint reports when a non-copy move inside a body is re-executed next iteration
+(measured: oracle 2 diags, ours 1). Match scrutinees are treated as non-consuming inspections (fine
+for copy scrutinees; an owned non-copy scrutinee whose arm bindings MOVE it is deferred). The LOAN
+family (E0801-E0809: XOR conflict, move/write-while-borrowed, backward loan-liveness) is deferred
+whole to slice 5 — correctly matching a small move/init core beats drifting on loans, exactly the
+compiler-stage discipline. What WORKED cleanly: reusing the lexer/parser `emit_*`/`span_eq`/`Node`
+arena by concatenation; folding all state into one `A` so branch snapshots are a single array copy;
+and reading the `copy` property directly off the parser's `T_STRUCT/T_ENUM` `op` flag + type nodes
+(the `is_copy` recursion) so move-vs-copy classification needs no separate type-resolution pass.

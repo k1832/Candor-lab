@@ -1,0 +1,20 @@
+// A loop with no move hazard: definite assignment holds on every path.
+fn sum(n: i64) -> i64 {
+    let mut s: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        s = s + i;
+        i = i + 1;
+    }
+    return s;
+}
+fn init_before_loop(n: i64) -> i64 {
+    let base: i64 = 100;
+    let mut acc: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        acc = acc + base;
+        i = i + 1;
+    }
+    return acc;
+}

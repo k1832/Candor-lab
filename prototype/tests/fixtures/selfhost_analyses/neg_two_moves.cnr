@@ -1,0 +1,6 @@
+struct Big { a: i64, b: i64 }
+fn f(x: Big) -> Big {
+    let y: Big = x;
+    let z: Big = x;
+    return x;
+}

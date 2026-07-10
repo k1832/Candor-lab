@@ -1,0 +1,7 @@
+struct Big { a: i64, b: i64 }
+fn f(c: bool, x: Big) -> Big {
+    if c {
+        let y: Big = x;
+    }
+    return x;
+}

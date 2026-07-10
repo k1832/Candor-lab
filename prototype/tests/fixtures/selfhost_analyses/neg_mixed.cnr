@@ -1,0 +1,9 @@
+struct Big { a: i64, b: i64 }
+fn moved(x: Big) -> Big {
+    let y: Big = x;
+    return x;
+}
+fn uninit() -> i64 {
+    let z: i64;
+    return z;
+}

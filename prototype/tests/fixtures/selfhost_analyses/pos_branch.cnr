@@ -1,0 +1,23 @@
+// Definite assignment satisfied on both arms of a conditional.
+fn assign_both(c: bool) -> i64 {
+    let mut x: i64;
+    if c {
+        x = 1;
+    } else {
+        x = 2;
+    }
+    return x;
+}
+enum E { A, B }
+fn match_clean(e: E, n: i64) -> i64 {
+    let mut r: i64 = 0;
+    match e {
+        E::A => {
+            r = n;
+        },
+        E::B => {
+            r = n + 1;
+        },
+    }
+    return r;
+}
