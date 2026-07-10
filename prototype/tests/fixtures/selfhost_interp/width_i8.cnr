@@ -1,0 +1,7 @@
+fn main() -> i64 {
+    let x: i8 = 100i8 + 20i8;
+    if x == 120i8 {
+        return 1i64;
+    }
+    return 0i64;
+}

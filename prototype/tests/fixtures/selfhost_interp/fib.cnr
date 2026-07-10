@@ -1,0 +1,11 @@
+fn fib(n: i64) -> i64 {
+    if n < 2i64 {
+        return n;
+    }
+    return fib(n - 1i64) + fib(n - 2i64);
+}
+fn main() -> i64 {
+    let r: i64 = fib(10i64);
+    trace(r);
+    return r;
+}

@@ -1,0 +1,5 @@
+fn main() -> i64 {
+    let a: u64 = 18446744073709551615u64;
+    trace(a);
+    return 0i64;
+}

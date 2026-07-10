@@ -287,3 +287,16 @@ One lesson per entry, one-line summary first.
   not-rooted branch descends the place chain to its non-place base and walks THAT.
   Lesson: place recursion terminates on the base expression, so peel to the base;
   re-handing the whole node back is a non-decreasing recursive call (2026-07-10).
+
+- **Detecting integer overflow without a wider type: run the op in `wrapping {}`
+  then decide overflow separately.** The self-host scalar interpreter must match
+  the Rust oracle's overflow faults, but the self-host language has no `i128` to
+  widen into (the oracle uses i128, `eval.rs` ty_range/fit). Technique: compute the
+  raw result in a `wrapping { }` block (which cannot fault), then test overflow by
+  arithmetic identity — signed add/sub by operand-sign logic, signed mul by
+  `wrapped/a != b` (special-case MIN*-1), unsigned add by carry (`wrapped < a`),
+  unsigned sub by borrow (`a < b`), unsigned mul by division re-check; narrow types
+  (i8..i32/u8..u32) compute in the i64 base and range-check against the type
+  min/max. u64↔i64 reinterpretation via `wrapping { conv }`. Verified byte-exact vs
+  the oracle. This is the standard trick for any Candor numeric code that can't
+  reach for a wider type (self-interp S1, 2026-07-10). See [[self-host-analyses]].

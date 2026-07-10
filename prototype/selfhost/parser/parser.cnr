@@ -186,6 +186,14 @@ fn mk_bin(p: write P, op: i32, l: u32, r: u32) -> u32 {
     return push_node(p, nd);
 }
 
+fn set_span(p: write P, id: u32, s: usize, en: usize) -> unit {
+    p.*.nodes[conv usize id].p0 = s;
+    p.*.nodes[conv usize id].p1 = en;
+    return;
+}
+fn span_end(p: write P, buf: read Buf) -> usize {
+    return tok_at(buf, p.pos - 1usize).end;
+}
 fn tok_at(buf: read Buf, pos: usize) -> Tok {
     let mut j: usize = pos;
     if j >= buf.n {
@@ -639,12 +647,14 @@ fn parse_delimited(p: write P, src: [u8], buf: read Buf) -> u32 {
 }
 
 fn parse_or(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let blo: usize = tok_at(buf, p.pos).start;
     let mut lhs: u32 = parse_and(p, src, buf);
     loop {
         if ck(p, buf) == 44 {
             adv(p, buf);
             let rhs: u32 = parse_and(p, src, buf);
             lhs = mk_bin(p, OP_OR, lhs, rhs);
+            set_span(p, lhs, blo, span_end(p, buf));
         } else {
             break;
         }
@@ -652,12 +662,14 @@ fn parse_or(p: write P, src: [u8], buf: read Buf) -> u32 {
     return lhs;
 }
 fn parse_and(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let blo: usize = tok_at(buf, p.pos).start;
     let mut lhs: u32 = parse_cmp(p, src, buf);
     loop {
         if ck(p, buf) == 43 {
             adv(p, buf);
             let rhs: u32 = parse_cmp(p, src, buf);
             lhs = mk_bin(p, OP_AND, lhs, rhs);
+            set_span(p, lhs, blo, span_end(p, buf));
         } else {
             break;
         }
@@ -665,6 +677,7 @@ fn parse_and(p: write P, src: [u8], buf: read Buf) -> u32 {
     return lhs;
 }
 fn parse_cmp(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let blo: usize = tok_at(buf, p.pos).start;
     let lhs: u32 = parse_bitor(p, src, buf);
     let k: i32 = ck(p, buf);
     let mut op: i32 = 0;
@@ -686,15 +699,19 @@ fn parse_cmp(p: write P, src: [u8], buf: read Buf) -> u32 {
     }
     adv(p, buf);
     let rhs: u32 = parse_bitor(p, src, buf);
-    return mk_bin(p, op, lhs, rhs);
+    let bn: u32 = mk_bin(p, op, lhs, rhs);
+    set_span(p, bn, blo, span_end(p, buf));
+    return bn;
 }
 fn parse_bitor(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let blo: usize = tok_at(buf, p.pos).start;
     let mut lhs: u32 = parse_bitxor(p, src, buf);
     loop {
         if ck(p, buf) == 38 {
             adv(p, buf);
             let rhs: u32 = parse_bitxor(p, src, buf);
             lhs = mk_bin(p, OP_BITOR, lhs, rhs);
+            set_span(p, lhs, blo, span_end(p, buf));
         } else {
             break;
         }
@@ -702,12 +719,14 @@ fn parse_bitor(p: write P, src: [u8], buf: read Buf) -> u32 {
     return lhs;
 }
 fn parse_bitxor(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let blo: usize = tok_at(buf, p.pos).start;
     let mut lhs: u32 = parse_bitand(p, src, buf);
     loop {
         if ck(p, buf) == 39 {
             adv(p, buf);
             let rhs: u32 = parse_bitand(p, src, buf);
             lhs = mk_bin(p, OP_BITXOR, lhs, rhs);
+            set_span(p, lhs, blo, span_end(p, buf));
         } else {
             break;
         }
@@ -715,12 +734,14 @@ fn parse_bitxor(p: write P, src: [u8], buf: read Buf) -> u32 {
     return lhs;
 }
 fn parse_bitand(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let blo: usize = tok_at(buf, p.pos).start;
     let mut lhs: u32 = parse_shift(p, src, buf);
     loop {
         if ck(p, buf) == 37 {
             adv(p, buf);
             let rhs: u32 = parse_shift(p, src, buf);
             lhs = mk_bin(p, OP_BITAND, lhs, rhs);
+            set_span(p, lhs, blo, span_end(p, buf));
         } else {
             break;
         }
@@ -728,6 +749,7 @@ fn parse_bitand(p: write P, src: [u8], buf: read Buf) -> u32 {
     return lhs;
 }
 fn parse_shift(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let blo: usize = tok_at(buf, p.pos).start;
     let mut lhs: u32 = parse_add(p, src, buf);
     loop {
         let k: i32 = ck(p, buf);
@@ -735,10 +757,12 @@ fn parse_shift(p: write P, src: [u8], buf: read Buf) -> u32 {
             adv(p, buf);
             let rhs: u32 = parse_add(p, src, buf);
             lhs = mk_bin(p, OP_SHL, lhs, rhs);
+            set_span(p, lhs, blo, span_end(p, buf));
         } else if k == 42 {
             adv(p, buf);
             let rhs: u32 = parse_add(p, src, buf);
             lhs = mk_bin(p, OP_SHR, lhs, rhs);
+            set_span(p, lhs, blo, span_end(p, buf));
         } else {
             break;
         }
@@ -746,6 +770,7 @@ fn parse_shift(p: write P, src: [u8], buf: read Buf) -> u32 {
     return lhs;
 }
 fn parse_add(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let blo: usize = tok_at(buf, p.pos).start;
     let mut lhs: u32 = parse_mul(p, src, buf);
     loop {
         let k: i32 = ck(p, buf);
@@ -753,10 +778,12 @@ fn parse_add(p: write P, src: [u8], buf: read Buf) -> u32 {
             adv(p, buf);
             let rhs: u32 = parse_mul(p, src, buf);
             lhs = mk_bin(p, OP_ADD, lhs, rhs);
+            set_span(p, lhs, blo, span_end(p, buf));
         } else if k == 33 {
             adv(p, buf);
             let rhs: u32 = parse_mul(p, src, buf);
             lhs = mk_bin(p, OP_SUB, lhs, rhs);
+            set_span(p, lhs, blo, span_end(p, buf));
         } else {
             break;
         }
@@ -764,6 +791,7 @@ fn parse_add(p: write P, src: [u8], buf: read Buf) -> u32 {
     return lhs;
 }
 fn parse_mul(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let blo: usize = tok_at(buf, p.pos).start;
     let mut lhs: u32 = parse_prefix(p, src, buf);
     loop {
         let k: i32 = ck(p, buf);
@@ -771,14 +799,17 @@ fn parse_mul(p: write P, src: [u8], buf: read Buf) -> u32 {
             adv(p, buf);
             let rhs: u32 = parse_prefix(p, src, buf);
             lhs = mk_bin(p, OP_MUL, lhs, rhs);
+            set_span(p, lhs, blo, span_end(p, buf));
         } else if k == 35 {
             adv(p, buf);
             let rhs: u32 = parse_prefix(p, src, buf);
             lhs = mk_bin(p, OP_DIV, lhs, rhs);
+            set_span(p, lhs, blo, span_end(p, buf));
         } else if k == 36 {
             adv(p, buf);
             let rhs: u32 = parse_prefix(p, src, buf);
             lhs = mk_bin(p, OP_REM, lhs, rhs);
+            set_span(p, lhs, blo, span_end(p, buf));
         } else {
             break;
         }
@@ -804,12 +835,16 @@ fn parse_prefix(p: write P, src: [u8], buf: read Buf) -> u32 {
             let mut nd: Node = nnew(T_NEGINT);
             nd.ival = nt.ival;
             nd.suf = nt.suf;
+            nd.p0 = t.start;
+            nd.p1 = nt.end;
             return push_node(p, nd);
         }
         let inner: u32 = parse_prefix(p, src, buf);
         let mut nd: Node = nnew(T_UNARY);
         nd.op = UN_NEG;
         nd.a = inner;
+        nd.p0 = t.start;
+        nd.p1 = span_end(p, buf);
         return push_node(p, nd);
     }
     if t.kind == 45 {
@@ -818,6 +853,8 @@ fn parse_prefix(p: write P, src: [u8], buf: read Buf) -> u32 {
         let mut nd: Node = nnew(T_UNARY);
         nd.op = UN_NOT;
         nd.a = inner;
+        nd.p0 = t.start;
+        nd.p1 = span_end(p, buf);
         return push_node(p, nd);
     }
     if t.kind == 40 {
@@ -826,6 +863,8 @@ fn parse_prefix(p: write P, src: [u8], buf: read Buf) -> u32 {
         let mut nd: Node = nnew(T_UNARY);
         nd.op = UN_BITNOT;
         nd.a = inner;
+        nd.p0 = t.start;
+        nd.p1 = span_end(p, buf);
         return push_node(p, nd);
     }
     if kw(src, t, b"read") {
@@ -1226,6 +1265,8 @@ fn parse_primary(p: write P, src: [u8], buf: read Buf) -> u32 {
         let mut nd: Node = nnew(T_INT);
         nd.ival = t.ival;
         nd.suf = t.suf;
+        nd.p0 = t.start;
+        nd.p1 = t.end;
         return push_node(p, nd);
     }
     if t.kind == 5 {
@@ -1246,12 +1287,16 @@ fn parse_primary(p: write P, src: [u8], buf: read Buf) -> u32 {
         adv(p, buf);
         let mut nd: Node = nnew(T_BOOL);
         nd.ival = 1u64;
+        nd.p0 = t.start;
+        nd.p1 = t.end;
         return push_node(p, nd);
     }
     if kw(src, t, b"false") {
         adv(p, buf);
         let mut nd: Node = nnew(T_BOOL);
         nd.ival = 0u64;
+        nd.p0 = t.start;
+        nd.p1 = t.end;
         return push_node(p, nd);
     }
     if kw(src, t, b"result") {
@@ -1298,6 +1343,8 @@ fn parse_primary(p: write P, src: [u8], buf: read Buf) -> u32 {
         expect(p, buf, 11);
         let mut nd: Node = nnew(T_PANIC);
         nd.a = e;
+        nd.p0 = t.start;
+        nd.p1 = tok_at(buf, p.pos - 1usize).end;
         return push_node(p, nd);
     }
     if t.kind == 10 {

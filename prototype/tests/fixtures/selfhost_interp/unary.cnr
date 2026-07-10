@@ -1,0 +1,9 @@
+fn main() -> i64 {
+    let x: i64 = 5i64;
+    let y: i64 = -x;
+    let b: bool = false;
+    if !b {
+        return y - 2i64;
+    }
+    return y;
+}

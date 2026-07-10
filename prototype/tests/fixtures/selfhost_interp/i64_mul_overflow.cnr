@@ -1,0 +1,6 @@
+fn main() -> i64 {
+    let a: i64 = 4000000000000i64;
+    let b: i64 = 4000000000i64;
+    let c: i64 = a * b;
+    return c;
+}

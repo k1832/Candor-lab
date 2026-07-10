@@ -916,3 +916,50 @@ release-only gate. The Map/symbol-table adoption remains the planned perf lever.
 gates run the SAME `analyses.cnr`/`analyze_dump` over their own corpora (there are no separate
 loans/effects `.cnr` modules), so the single `borrow_place` fix covers them too — all
 selfhost_{lexer,parser,checker,analyses,loans,effects} harnesses stay byte-exact green.
+
+### S1 — self-INTERPRETING Candor: a scalar tree-walker in Candor (first slice, 2026-07-10)
+
+The first self-interpreting slice: `prototype/selfhost/interp/interp.cnr`, a tree-walking
+SCALAR interpreter WRITTEN IN CANDOR, executes an in-subset Candor program directly over the
+self-hosted parser's Node arena and reproduces the Rust reference interpreter
+(`prototype/src/interp/`) BYTE-EXACT — same `main` return, same `trace` sequence, same fault
+identity (kind + span). Gated by EXECUTION equality in `prototype/tests/selfhost_interp.rs`
+against `run_source_real` over a 24-fixture in-subset corpus (15 returns, 9 faults).
+
+SCOPE (STRICT MVP, P6). Integer (`i8..i64`/`u8..u64`/`usize`/`isize`) + `bool` scalars only;
+annotated `let`/`let mut` + assignment; `if`/`else`; `while`; `loop`+`break`/`continue`;
+`return`; `+ - * / %` with Overflow/DivByZero; comparisons; `&&`/`||` short-circuit; bitwise
+`& | ^` + shifts `<< >>`; unary `-`/`!`; `trace`; `assert`; `panic`; direct non-generic free-fn
+calls (by-value scalars) with recursion. OUT OF SUBSET (later slices S2+): structs/arrays/
+pointers/Box/heap/match/enums/str/slices/generics/conv/contracts/`?`.
+
+VALUE MODEL. A tagged scalar is one `i64` bit-slot plus a width code (1=i8..5=isize, 6=u8..
+10=usize, 11=bool) — NO flat byte memory. Width propagates from `let` annotations, literal
+suffixes, and fn return types the way the oracle threads `expected`. Locals are a flat stack
+keyed by name span with a `cur_base` frame floor; recursion rides interp.cnr's OWN Candor call
+stack (each `call_fn` frame's locals restore the caller). The running `cur_span` is tracked to
+mirror eval.rs exactly, so `assert` reports the LAST leaf evaluated in its condition (not the
+whole condition) and arithmetic faults carry the composite binary span.
+
+i64/u64 OVERFLOW WITHOUT i128 (scoping blocker #3, DISCHARGED). The language has no `i128`, but
+the oracle detects overflow by widening to `i128`. Since interp.cnr is NOT self-checked this
+slice, it uses the FULL language: the raw op is computed inside a `wrapping { }` block (which
+cannot fault), then overflow is decided WITHOUT a wider type — signed add/sub by sign logic
+(operands same/diff sign vs result sign), signed mul by a division re-check (`wrapped / a != b`,
+with the `MIN * -1` case special-cased), unsigned add by carry (`wrapped < a`), unsigned sub by
+borrow (`a < b`), unsigned mul by `wrapped / a != b`; narrow types compute in the 64-bit base and
+range-check against the type's min/max. u64<->i64 bit reinterpretation uses `wrapping { conv }`
+(no transmute). Verified byte-exact against the oracle on i32/i8/u8 overflow, u64 add-carry,
+u64 sub-borrow, and i64 mul-overflow fixtures.
+
+FAULT-SPAN STAMP (reusable, DUMP-INVARIANT). `mk_bin`/literal/unary/panic nodes were span-lean
+(`p0/p1` zeroed). The parser now stamps `T_BIN` (lhs-start..rhs-end, matching the Rust
+`span_from(lo)`), `T_INT`/`T_NEGINT`/`T_BOOL`/`T_UNARY` (token spans), and `T_PANIC` (keyword..`)`).
+The parser S-expr dump renders `p0/p1` only for name/string content, never for these operator/
+literal tags, so all stamps are DUMP-INVARIANT — the lexer/parser/checker/analyses oracle gates
+stay byte-exact. This also pays down the deferred composite-span diagnostics of earlier slices.
+
+WHAT IS GATED / NOT. Gated: interp.cnr's EXECUTION behavior (ret/trace/fault) byte-equal to the
+oracle. NOT gated this slice: interp.cnr under the self-CHECK gates (E0102/E0103 name-res and the
+analyses families) — it is new, larger surface, deferred to a later concern like the earlier
+modules were. No in-subset construct was un-matchable; the whole MVP subset reproduces byte-exact.

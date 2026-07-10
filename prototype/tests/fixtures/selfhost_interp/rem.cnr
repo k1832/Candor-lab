@@ -1,0 +1,4 @@
+fn main() -> i64 {
+    let a: i64 = 17i64;
+    return a % 5i64;
+}

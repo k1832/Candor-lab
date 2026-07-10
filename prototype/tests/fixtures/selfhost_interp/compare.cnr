@@ -1,0 +1,12 @@
+fn main() -> i64 {
+    let a: i64 = 5i64;
+    let b: i64 = 7i64;
+    let mut n: i64 = 0i64;
+    if a < b { n = n + 1i64; }
+    if a <= 5i64 { n = n + 10i64; }
+    if b > a { n = n + 100i64; }
+    if a >= 5i64 { n = n + 1000i64; }
+    if a == 5i64 { n = n + 10000i64; }
+    if a != b { n = n + 100000i64; }
+    return n;
+}

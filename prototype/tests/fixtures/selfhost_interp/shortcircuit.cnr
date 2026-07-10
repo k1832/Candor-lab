@@ -1,0 +1,11 @@
+fn main() -> i64 {
+    let z: i64 = 0i64;
+    let mut n: i64 = 0i64;
+    if (z == 0i64) || (10i64 / z == 1i64) {
+        n = n + 1i64;
+    }
+    if (z != 0i64) && (10i64 / z == 1i64) {
+        n = n + 100i64;
+    }
+    return n;
+}

@@ -1,0 +1,10 @@
+fn main() -> i64 {
+    let x: i64 = 3i64;
+    if x > 5i64 {
+        return 1i64;
+    } else if x > 2i64 {
+        return 2i64;
+    } else {
+        return 3i64;
+    }
+}

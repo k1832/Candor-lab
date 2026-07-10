@@ -1,0 +1,786 @@
+// The FIRST self-interpreting slice of Candor: a tree-walking SCALAR interpreter,
+// WRITTEN IN CANDOR, that executes an in-subset Candor program directly over the
+// self-hosted parser's Node arena and reproduces the Rust reference interpreter's
+// observable result byte-exact -- same `main` return, same `trace` sequence, and
+// same fault identity (kind + composite span). Gated by EXECUTION equality against
+// the Rust oracle (`prototype/src/interp/`) in prototype/tests/selfhost_interp.rs.
+//
+// This is a LIBRARY module composed with the `lexer` and `parser` modules; it
+// IMPORTS their arena/emit vocabulary via the `use` decls below.
+//
+// MVP SUBSET (P6): integer (`i8..i64`/`u8..u64`/`usize`/`isize`) + `bool` scalars;
+// annotated `let`/`let mut` + assignment; `if`/`else`; `while`; `loop`+`break`/
+// `continue`; `return`; `+ - * / %` with Overflow/DivByZero; comparisons; `&&`/`||`
+// short-circuit; bitwise `& | ^` + shifts; unary `-`/`!`; `trace`; `assert`;
+// `panic`; direct non-generic free-fn calls (by-value scalars) with recursion.
+//
+// VALUE MODEL (per scoping): a tagged scalar is an `i64` bit-slot plus a width code
+// (1=i8..5=isize, 6=u8..10=usize, 11=bool); no flat byte memory. There is no `i128`
+// in the language, so i64/u64 overflow is detected WITHOUT a wider type: the raw op
+// is computed in a `wrapping { }` block (which cannot fault) and overflow is then
+// decided by sign logic (signed add/sub/mul) or carry/borrow + a division re-check
+// (unsigned), matching the oracle's i128 widening exactly. `interp.cnr` is NOT
+// self-checked in this slice, so it uses the full language (`wrapping`, `conv`).
+
+use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl};
+use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_SC, T_RET, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT};
+
+// ---- fault kind codes (shared with the Rust harness) ------------------------
+static FK_OVERFLOW: i32 = 0;
+static FK_DIVZERO: i32 = 1;
+static FK_ASSERT: i32 = 2;
+static FK_PANIC: i32 = 3;
+
+// ---- width codes: 1..10 mirror the lexer's suffix codes; 11 = bool; 0 = unit ----
+static W_BOOL: i32 = 11;
+
+// ---- interpreter state ------------------------------------------------------
+// Locals are a flat stack keyed by name span; `cur_base` marks the current call
+// frame's floor (name lookup never sees a caller's locals). Recursion is carried
+// by interp.cnr's OWN Candor call stack -- `call_fn` is a recursive function whose
+// per-frame locals (`base`, saved base/retw) restore the enclosing frame.
+struct E {
+    head: u32,
+    loc_p0: [4096]usize,
+    loc_p1: [4096]usize,
+    loc_val: [4096]i64,
+    loc_w: [4096]i32,
+    loc_n: usize,
+    cur_base: usize,
+    cur_retw: i32,
+    cur_val: i64,
+    cur_w: i32,
+    ret_val: i64,
+    ret_w: i32,
+    arg_val: [16]i64,
+    arg_w: [16]i32,
+    arg_n: usize,
+    trace_out: [1024]i64,
+    trace_n: usize,
+    fault_kind: i32,
+    fault_p0: usize,
+    fault_p1: usize,
+    cur_p0: usize,
+    cur_p1: usize,
+}
+
+// ---- bit-pattern reinterpretation via wrapping conv (no transmute needed) ----
+fn to_u64(x: i64) -> u64 {
+    let mut r: u64 = 0u64;
+    wrapping { r = conv u64 x; }
+    return r;
+}
+fn to_i64b(x: u64) -> i64 {
+    let mut r: i64 = 0;
+    wrapping { r = conv i64 x; }
+    return r;
+}
+
+fn imin() -> i64 { return 0 - 9223372036854775807i64 - 1i64; }
+fn imax() -> i64 { return 9223372036854775807i64; }
+
+// ---- width metadata ----------------------------------------------------------
+fn w_is64(w: i32) -> bool { return w == 4 || w == 5 || w == 9 || w == 10; }
+fn w_signed(w: i32) -> bool { return w >= 1 && w <= 5; }
+fn w_bits(w: i32) -> i32 {
+    if w == 1 || w == 6 { return 8; }
+    if w == 2 || w == 7 { return 16; }
+    if w == 3 || w == 8 { return 32; }
+    return 64;
+}
+fn smin(w: i32) -> i64 {
+    if w == 1 { return 0 - 128i64; }
+    if w == 2 { return 0 - 32768i64; }
+    if w == 3 { return 0 - 2147483648i64; }
+    return imin();
+}
+fn smax(w: i32) -> i64 {
+    if w == 1 { return 127i64; }
+    if w == 2 { return 32767i64; }
+    if w == 3 { return 2147483647i64; }
+    return imax();
+}
+fn umax(w: i32) -> u64 {
+    if w == 6 { return 255u64; }
+    if w == 7 { return 65535u64; }
+    if w == 8 { return 4294967295u64; }
+    return 18446744073709551615u64;
+}
+
+// Reduce a value to a narrow type's bit pattern (mask to width, then re-sign),
+// mirroring the oracle's `fit_bits` for bitwise/shift results. bits <= 32 here.
+fn fit_bits(x: i64, w: i32) -> i64 {
+    let bits: i32 = w_bits(w);
+    let m1: i64 = (1i64 << bits) - 1i64;
+    let mut masked: i64 = x & m1;
+    if w_signed(w) {
+        let half: i64 = 1i64 << (bits - 1i32);
+        if (masked & half) != 0i64 {
+            masked = masked - (1i64 << bits);
+        }
+    }
+    return masked;
+}
+
+// ---- scalar-type name -> width code -----------------------------------------
+fn sc_width(src: [u8], s: usize, en: usize) -> i32 {
+    if span_eq(src, s, en, b"i8") { return 1; }
+    if span_eq(src, s, en, b"i16") { return 2; }
+    if span_eq(src, s, en, b"i32") { return 3; }
+    if span_eq(src, s, en, b"i64") { return 4; }
+    if span_eq(src, s, en, b"isize") { return 5; }
+    if span_eq(src, s, en, b"u8") { return 6; }
+    if span_eq(src, s, en, b"u16") { return 7; }
+    if span_eq(src, s, en, b"u32") { return 8; }
+    if span_eq(src, s, en, b"u64") { return 9; }
+    if span_eq(src, s, en, b"usize") { return 10; }
+    if span_eq(src, s, en, b"bool") { return W_BOOL; }
+    return 0;
+}
+
+fn name_eq(src: [u8], a0: usize, a1: usize, b0: usize, b1: usize) -> bool {
+    if a1 - a0 != b1 - b0 { return false; }
+    let mut i: usize = 0usize;
+    let n: usize = a1 - a0;
+    while i < n {
+        if src[a0 + i] != src[b0 + i] { return false; }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+// ---- item + local resolution -------------------------------------------------
+fn find_main(pp: read P, src: [u8], e: write E) -> u32 {
+    let mut cur: u32 = e.head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_FN && span_eq(src, nd.p0, nd.p1, b"main") {
+            return cur;
+        }
+        cur = nd.nx;
+    }
+    return 0u32;
+}
+fn find_fn(pp: read P, src: [u8], e: write E, s: usize, en: usize) -> u32 {
+    let mut cur: u32 = e.head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_FN && name_eq(src, nd.p0, nd.p1, s, en) {
+            return cur;
+        }
+        cur = nd.nx;
+    }
+    return 0u32;
+}
+// Index of the in-scope local named [s,en), or a count-sized sentinel if absent.
+fn find_local(src: [u8], e: write E, s: usize, en: usize) -> usize {
+    let mut i: usize = e.loc_n;
+    while i > e.cur_base {
+        i = i - 1usize;
+        if name_eq(src, s, en, e.loc_p0[i], e.loc_p1[i]) {
+            return i;
+        }
+    }
+    return e.loc_n;
+}
+fn loc_push(e: write E, s: usize, en: usize, val: i64, w: i32) -> unit {
+    let i: usize = e.loc_n;
+    e.*.loc_p0[i] = s;
+    e.*.loc_p1[i] = en;
+    e.*.loc_val[i] = val;
+    e.*.loc_w[i] = w;
+    e.*.loc_n = i + 1usize;
+    return;
+}
+
+fn set_fault(e: write E, kind: i32, p0: usize, p1: usize) -> unit {
+    e.*.fault_kind = kind;
+    e.*.fault_p0 = p0;
+    e.*.fault_p1 = p1;
+    return;
+}
+
+// The width a literal / operand takes: an explicit suffix wins; otherwise an
+// integer `expected` width; otherwise i64 (code 4). Mirrors the oracle's int_type.
+fn lit_width(suf: i32, exp_w: i32) -> i32 {
+    if suf != 0 { return suf; }
+    if exp_w >= 1 && exp_w <= 10 { return exp_w; }
+    return 4;
+}
+
+// ---- comparisons -------------------------------------------------------------
+fn cmp_op(op: i32, a: i64, b: i64, w: i32) -> i64 {
+    let eq: bool = a == b;
+    if op == OP_EQ { if eq { return 1i64; } return 0i64; }
+    if op == OP_NE { if eq { return 0i64; } return 1i64; }
+    let mut lt: bool = false;
+    if w_signed(w) {
+        lt = a < b;
+    } else {
+        lt = to_u64(a) < to_u64(b);
+    }
+    if op == OP_LT { if lt { return 1i64; } return 0i64; }
+    if op == OP_LE { if lt || eq { return 1i64; } return 0i64; }
+    if op == OP_GT { if !lt && !eq { return 1i64; } return 0i64; }
+    if !lt { return 1i64; }
+    return 0i64;
+}
+
+// ---- signed arithmetic: wrapping compute + sign-based overflow detection -----
+fn arith_signed(op: i32, a: i64, b: i64, w: i32, e: write E, p0: usize, p1: usize) -> i32 {
+    let mn: i64 = smin(w);
+    let mx: i64 = smax(w);
+    if op == OP_DIV {
+        if b == 0i64 { set_fault(e, FK_DIVZERO, p0, p1); return 1; }
+        if b == 0i64 - 1i64 && a == mn { set_fault(e, FK_OVERFLOW, p0, p1); return 1; }
+        let q: i64 = a / b;
+        if q < mn || q > mx { set_fault(e, FK_OVERFLOW, p0, p1); return 1; }
+        e.*.cur_val = q; e.*.cur_w = w; return 0;
+    }
+    if op == OP_REM {
+        if b == 0i64 { set_fault(e, FK_DIVZERO, p0, p1); return 1; }
+        e.*.cur_val = a % b; e.*.cur_w = w; return 0;
+    }
+    let mut wrapped: i64 = 0i64;
+    let mut ov: bool = false;
+    if op == OP_ADD {
+        wrapping { wrapped = a + b; }
+        let sa: bool = a < 0i64;
+        let sb: bool = b < 0i64;
+        let sw: bool = wrapped < 0i64;
+        ov = (sa == sb) && (sw != sa);
+    } else if op == OP_SUB {
+        wrapping { wrapped = a - b; }
+        let sa: bool = a < 0i64;
+        let sb: bool = b < 0i64;
+        let sw: bool = wrapped < 0i64;
+        ov = (sa != sb) && (sw != sa);
+    } else {
+        wrapping { wrapped = a * b; }
+        if a == 0i64 {
+            ov = false;
+        } else if (a == 0i64 - 1i64 && b == imin()) || (b == 0i64 - 1i64 && a == imin()) {
+            ov = true;
+        } else {
+            let chk: i64 = wrapped / a;
+            ov = chk != b;
+        }
+    }
+    if ov { set_fault(e, FK_OVERFLOW, p0, p1); return 1; }
+    if wrapped < mn || wrapped > mx { set_fault(e, FK_OVERFLOW, p0, p1); return 1; }
+    e.*.cur_val = wrapped; e.*.cur_w = w; return 0;
+}
+
+// ---- unsigned arithmetic: wrapping compute in u64 + carry/borrow detection ---
+fn arith_unsigned(op: i32, a: i64, b: i64, w: i32, e: write E, p0: usize, p1: usize) -> i32 {
+    let au: u64 = to_u64(a);
+    let bu: u64 = to_u64(b);
+    let mxu: u64 = umax(w);
+    if op == OP_DIV {
+        if bu == 0u64 { set_fault(e, FK_DIVZERO, p0, p1); return 1; }
+        e.*.cur_val = to_i64b(au / bu); e.*.cur_w = w; return 0;
+    }
+    if op == OP_REM {
+        if bu == 0u64 { set_fault(e, FK_DIVZERO, p0, p1); return 1; }
+        e.*.cur_val = to_i64b(au % bu); e.*.cur_w = w; return 0;
+    }
+    let mut wrapped: u64 = 0u64;
+    let mut ov: bool = false;
+    if op == OP_ADD {
+        wrapping { wrapped = au + bu; }
+        if wrapped < au { ov = true; }
+        if wrapped > mxu { ov = true; }
+    } else if op == OP_SUB {
+        if au < bu {
+            ov = true;
+        } else {
+            wrapping { wrapped = au - bu; }
+            if wrapped > mxu { ov = true; }
+        }
+    } else {
+        wrapping { wrapped = au * bu; }
+        if au != 0u64 {
+            let chk: u64 = wrapped / au;
+            if chk != bu { ov = true; }
+        }
+        if wrapped > mxu { ov = true; }
+    }
+    if ov { set_fault(e, FK_OVERFLOW, p0, p1); return 1; }
+    e.*.cur_val = to_i64b(wrapped); e.*.cur_w = w; return 0;
+}
+
+// ---- bitwise -----------------------------------------------------------------
+fn bit_op(op: i32, a: i64, b: i64, w: i32, e: write E) -> unit {
+    let mut r: i64 = 0i64;
+    if op == OP_BITAND { r = a & b; }
+    else if op == OP_BITOR { r = a | b; }
+    else { r = a ^ b; }
+    if !w_is64(w) { r = fit_bits(r, w); }
+    e.*.cur_val = r; e.*.cur_w = w;
+    return;
+}
+
+// ---- shifts ------------------------------------------------------------------
+fn shift_op(op: i32, a: i64, amt: i64, w: i32, e: write E, p0: usize, p1: usize) -> i32 {
+    if amt < 0i64 { set_fault(e, FK_OVERFLOW, p0, p1); return 1; }
+    let bits: i64 = conv i64 w_bits(w);
+    if amt >= bits { set_fault(e, FK_OVERFLOW, p0, p1); return 1; }
+    let mut r: i64 = 0i64;
+    if op == OP_SHL {
+        if w_is64(w) {
+            if w_signed(w) {
+                wrapping { r = a << amt; }
+            } else {
+                let au: u64 = to_u64(a);
+                let mut ru: u64 = 0u64;
+                wrapping { ru = au << amt; }
+                r = to_i64b(ru);
+            }
+        } else {
+            wrapping { r = a << amt; }
+            r = fit_bits(r, w);
+        }
+    } else {
+        if w_signed(w) {
+            r = a >> amt;
+            if !w_is64(w) { r = fit_bits(r, w); }
+        } else {
+            let au: u64 = to_u64(a);
+            r = to_i64b(au >> amt);
+            if !w_is64(w) { r = fit_bits(r, w); }
+        }
+    }
+    e.*.cur_val = r; e.*.cur_w = w; return 0;
+}
+
+// ---- expression evaluation ---------------------------------------------------
+// Status: 0 normal, 1 fault, 2 return, 3 break, 4 continue. The value of a normal
+// expression is left in E.cur_val / E.cur_w.
+fn eval_expr(pp: read P, src: [u8], e: write E, i: u32, exp_w: i32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let tg: i32 = nd.tag;
+    // Mirror the oracle's running cur_span (set at every eval_value entry). A
+    // fault reads it, so an assert reports the LAST leaf evaluated in its
+    // condition, and a neg-overflow reports its operand -- exactly like eval.rs.
+    e.*.cur_p0 = nd.p0;
+    e.*.cur_p1 = nd.p1;
+    if tg == T_INT {
+        let w: i32 = lit_width(nd.suf, exp_w);
+        e.*.cur_val = to_i64b(nd.ival);
+        e.*.cur_w = w;
+        return 0;
+    }
+    if tg == T_NEGINT {
+        let w: i32 = lit_width(nd.suf, exp_w);
+        let mut v: i64 = 0i64;
+        wrapping { v = 0i64 - conv i64 nd.ival; }
+        e.*.cur_val = v;
+        e.*.cur_w = w;
+        return 0;
+    }
+    if tg == T_BOOL {
+        e.*.cur_val = conv i64 nd.ival;
+        e.*.cur_w = W_BOOL;
+        return 0;
+    }
+    if tg == T_ID {
+        let idx: usize = find_local(src, e, nd.p0, nd.p1);
+        e.*.cur_val = e.loc_val[idx];
+        e.*.cur_w = e.loc_w[idx];
+        return 0;
+    }
+    if tg == T_PAREN {
+        return eval_expr(pp, src, e, nd.a, exp_w);
+    }
+    if tg == T_UNARY {
+        return eval_unary(pp, src, e, i, exp_w);
+    }
+    if tg == T_BIN {
+        return eval_binary(pp, src, e, i, exp_w);
+    }
+    if tg == T_CALL {
+        return eval_call(pp, src, e, i);
+    }
+    if tg == T_BLOCK {
+        return exec_block(pp, src, e, i);
+    }
+    if tg == T_IF {
+        let sc: i32 = eval_expr(pp, src, e, nd.a, W_BOOL);
+        if sc != 0 { return sc; }
+        if e.cur_val != 0i64 {
+            return exec_block(pp, src, e, nd.b);
+        }
+        if nd.c != 0u32 {
+            return eval_expr(pp, src, e, nd.c, 0 - 1i32);
+        }
+        e.*.cur_val = 0i64; e.*.cur_w = 0;
+        return 0;
+    }
+    if tg == T_WHILE {
+        loop {
+            let sc: i32 = eval_expr(pp, src, e, nd.a, W_BOOL);
+            if sc != 0 { return sc; }
+            if e.cur_val == 0i64 { break; }
+            let bs: i32 = exec_block(pp, src, e, nd.b);
+            if bs == 1 || bs == 2 { return bs; }
+            if bs == 3 { break; }
+        }
+        e.*.cur_val = 0i64; e.*.cur_w = 0;
+        return 0;
+    }
+    if tg == T_LOOP {
+        loop {
+            let bs: i32 = exec_block(pp, src, e, nd.a);
+            if bs == 1 || bs == 2 { return bs; }
+            if bs == 3 { break; }
+        }
+        e.*.cur_val = 0i64; e.*.cur_w = 0;
+        return 0;
+    }
+    if tg == T_RETURN {
+        if nd.a != 0u32 {
+            let sc: i32 = eval_expr(pp, src, e, nd.a, e.cur_retw);
+            if sc != 0 { return sc; }
+            e.*.ret_val = e.cur_val;
+            e.*.ret_w = e.cur_retw;
+        } else {
+            e.*.ret_val = 0i64;
+            e.*.ret_w = e.cur_retw;
+        }
+        return 2;
+    }
+    if tg == T_BREAK { return 3; }
+    if tg == T_CONTINUE { return 4; }
+    if tg == T_ASSERT {
+        let sc: i32 = eval_expr(pp, src, e, nd.a, W_BOOL);
+        if sc != 0 { return sc; }
+        if e.cur_val == 0i64 {
+            set_fault(e, FK_ASSERT, e.cur_p0, e.cur_p1);
+            return 1;
+        }
+        e.*.cur_val = 0i64; e.*.cur_w = 0;
+        return 0;
+    }
+    if tg == T_PANIC {
+        set_fault(e, FK_PANIC, nd.p0, nd.p1);
+        return 1;
+    }
+    e.*.cur_val = 0i64; e.*.cur_w = 0;
+    return 0;
+}
+
+fn eval_unary(pp: read P, src: [u8], e: write E, i: u32, exp_w: i32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    if nd.op == UN_NOT {
+        let sc: i32 = eval_expr(pp, src, e, nd.a, W_BOOL);
+        if sc != 0 { return sc; }
+        if e.cur_val == 0i64 { e.*.cur_val = 1i64; } else { e.*.cur_val = 0i64; }
+        e.*.cur_w = W_BOOL;
+        return 0;
+    }
+    let sc: i32 = eval_expr(pp, src, e, nd.a, exp_w);
+    if sc != 0 { return sc; }
+    let a: i64 = e.cur_val;
+    let w: i32 = e.cur_w;
+    if nd.op == UN_NEG {
+        if a == smin(w) {
+            set_fault(e, FK_OVERFLOW, e.cur_p0, e.cur_p1);
+            return 1;
+        }
+        let mut r: i64 = 0i64;
+        wrapping { r = 0i64 - a; }
+        if r < smin(w) || r > smax(w) {
+            set_fault(e, FK_OVERFLOW, e.cur_p0, e.cur_p1);
+            return 1;
+        }
+        e.*.cur_val = r; e.*.cur_w = w;
+        return 0;
+    }
+    // UN_BITNOT: ~a == a ^ -1, then re-fit narrow types.
+    let mut r: i64 = a ^ (0i64 - 1i64);
+    if !w_is64(w) { r = fit_bits(r, w); }
+    e.*.cur_val = r; e.*.cur_w = w;
+    return 0;
+}
+
+fn eval_binary(pp: read P, src: [u8], e: write E, i: u32, exp_w: i32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let op: i32 = nd.op;
+    if op == OP_AND || op == OP_OR {
+        let sc: i32 = eval_expr(pp, src, e, nd.a, W_BOOL);
+        if sc != 0 { return sc; }
+        let lb: bool = e.cur_val != 0i64;
+        let mut res: bool = false;
+        if op == OP_AND {
+            if lb {
+                let sr: i32 = eval_expr(pp, src, e, nd.b, W_BOOL);
+                if sr != 0 { return sr; }
+                res = e.cur_val != 0i64;
+            } else {
+                res = false;
+            }
+        } else {
+            if lb {
+                res = true;
+            } else {
+                let sr: i32 = eval_expr(pp, src, e, nd.b, W_BOOL);
+                if sr != 0 { return sr; }
+                res = e.cur_val != 0i64;
+            }
+        }
+        if res { e.*.cur_val = 1i64; } else { e.*.cur_val = 0i64; }
+        e.*.cur_w = W_BOOL;
+        return 0;
+    }
+    if op == OP_EQ || op == OP_NE || op == OP_LT || op == OP_LE || op == OP_GT || op == OP_GE {
+        let sl: i32 = eval_expr(pp, src, e, nd.a, 0 - 1i32);
+        if sl != 0 { return sl; }
+        let a: i64 = e.cur_val;
+        let w: i32 = e.cur_w;
+        let sr: i32 = eval_expr(pp, src, e, nd.b, w);
+        if sr != 0 { return sr; }
+        let b: i64 = e.cur_val;
+        e.*.cur_val = cmp_op(op, a, b, w);
+        e.*.cur_w = W_BOOL;
+        return 0;
+    }
+    // arithmetic / bitwise / shift
+    let mut exp_int: i32 = 0 - 1i32;
+    if exp_w >= 1 && exp_w <= 10 { exp_int = exp_w; }
+    let sl: i32 = eval_expr(pp, src, e, nd.a, exp_int);
+    if sl != 0 { return sl; }
+    let a: i64 = e.cur_val;
+    let mut sty: i32 = e.cur_w;
+    if exp_int != 0 - 1i32 { sty = exp_int; }
+    if op == OP_SHL || op == OP_SHR {
+        let sr: i32 = eval_expr(pp, src, e, nd.b, 0 - 1i32);
+        if sr != 0 { return sr; }
+        let amt: i64 = e.cur_val;
+        e.*.cur_p0 = nd.p0;
+        e.*.cur_p1 = nd.p1;
+        return shift_op(op, a, amt, sty, e, nd.p0, nd.p1);
+    }
+    let sr: i32 = eval_expr(pp, src, e, nd.b, sty);
+    if sr != 0 { return sr; }
+    let b: i64 = e.cur_val;
+    if op == OP_BITAND || op == OP_BITOR || op == OP_BITXOR {
+        bit_op(op, a, b, sty, e);
+        return 0;
+    }
+    e.*.cur_p0 = nd.p0;
+    e.*.cur_p1 = nd.p1;
+    if w_signed(sty) {
+        return arith_signed(op, a, b, sty, e, nd.p0, nd.p1);
+    }
+    return arith_unsigned(op, a, b, sty, e, nd.p0, nd.p1);
+}
+
+// The width of a function's declared return type (i64 fallback for a missing/unit
+// annotation, matching a scalar `main`).
+fn fn_ret_width(pp: read P, src: [u8], fnid: u32) -> i32 {
+    let fnd: Node = pp.nodes[conv usize fnid];
+    if fnd.e == 0u32 { return 4; }
+    let rt: Node = pp.nodes[conv usize fnd.e];
+    if rt.a == 0u32 { return 4; }
+    let ty: Node = pp.nodes[conv usize rt.a];
+    return sc_width(src, ty.p0, ty.p1);
+}
+
+fn eval_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let callee: Node = pp.nodes[conv usize nd.a];
+    if span_eq(src, callee.p0, callee.p1, b"trace") {
+        let sc: i32 = eval_expr(pp, src, e, nd.b, 4);
+        if sc != 0 { return sc; }
+        let k: usize = e.trace_n;
+        e.*.trace_out[k] = e.cur_val;
+        e.*.trace_n = k + 1usize;
+        e.*.cur_val = 0i64; e.*.cur_w = 0;
+        return 0;
+    }
+    let fnid: u32 = find_fn(pp, src, e, callee.p0, callee.p1);
+    // Evaluate arguments into locals first (a nested call reuses E.arg_*), then
+    // publish them for call_fn, which binds them before any further evaluation.
+    let mut av: [16]i64 = [0i64; 16];
+    let mut aw: [16]i32 = [0; 16];
+    let mut k: usize = 0usize;
+    let mut cur: u32 = nd.b;
+    let params: u32 = pp.nodes[conv usize fnid].c;
+    let mut pcur: u32 = params;
+    while cur != 0u32 {
+        let an: Node = pp.nodes[conv usize cur];
+        let mut pexp: i32 = 0 - 1i32;
+        if pcur != 0u32 {
+            let pm: Node = pp.nodes[conv usize pcur];
+            let pty: Node = pp.nodes[conv usize pm.a];
+            pexp = sc_width(src, pty.p0, pty.p1);
+            pcur = pm.nx;
+        }
+        let sc: i32 = eval_expr(pp, src, e, cur, pexp);
+        if sc != 0 { return sc; }
+        av[k] = e.cur_val;
+        aw[k] = e.cur_w;
+        k = k + 1usize;
+        cur = an.nx;
+    }
+    let mut j: usize = 0usize;
+    while j < k {
+        e.*.arg_val[j] = av[j];
+        e.*.arg_w[j] = aw[j];
+        j = j + 1usize;
+    }
+    e.*.arg_n = k;
+    return call_fn(pp, src, e, fnid);
+}
+
+// Run a function to completion. On entry the arguments live in E.arg_*. Returns 0
+// (normal, result in E.cur_val) or 1 (fault). A `return` inside the body is caught
+// here and turned into a normal result; an implicit fall-off yields 0 (like the
+// oracle's zero-filled unit return).
+fn call_fn(pp: read P, src: [u8], e: write E, fnid: u32) -> i32 {
+    let fnd: Node = pp.nodes[conv usize fnid];
+    let saved_base: usize = e.cur_base;
+    let saved_retw: i32 = e.cur_retw;
+    let base: usize = e.loc_n;
+    e.*.cur_base = base;
+    e.*.cur_retw = fn_ret_width(pp, src, fnid);
+    let mut pcur: u32 = fnd.c;
+    let mut k: usize = 0usize;
+    while pcur != 0u32 {
+        let pm: Node = pp.nodes[conv usize pcur];
+        loc_push(e, pm.p0, pm.p1, e.arg_val[k], e.arg_w[k]);
+        k = k + 1usize;
+        pcur = pm.nx;
+    }
+    let st: i32 = exec_block(pp, src, e, fnd.d);
+    let mut rc: i32 = 0;
+    if st == 1 {
+        rc = 1;
+    } else if st == 2 {
+        e.*.cur_val = e.ret_val;
+        e.*.cur_w = e.ret_w;
+        rc = 0;
+    } else {
+        e.*.cur_val = 0i64;
+        e.*.cur_w = e.cur_retw;
+        rc = 0;
+    }
+    e.*.loc_n = base;
+    e.*.cur_base = saved_base;
+    e.*.cur_retw = saved_retw;
+    return rc;
+}
+
+fn exec_stmt(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    if nd.tag == T_LET {
+        let ty: Node = pp.nodes[conv usize nd.a];
+        let w: i32 = sc_width(src, ty.p0, ty.p1);
+        let mut v: i64 = 0i64;
+        if nd.b != 0u32 {
+            let sc: i32 = eval_expr(pp, src, e, nd.b, w);
+            if sc != 0 { return sc; }
+            v = e.cur_val;
+        }
+        loc_push(e, nd.p0, nd.p1, v, w);
+        return 0;
+    }
+    if nd.tag == T_ASSIGN {
+        let tgt: Node = pp.nodes[conv usize nd.a];
+        let idx: usize = find_local(src, e, tgt.p0, tgt.p1);
+        let w: i32 = e.loc_w[idx];
+        let sc: i32 = eval_expr(pp, src, e, nd.b, w);
+        if sc != 0 { return sc; }
+        e.*.loc_val[idx] = e.cur_val;
+        return 0;
+    }
+    return eval_expr(pp, src, e, i, 0 - 1i32);
+}
+
+fn exec_block(pp: read P, src: [u8], e: write E, blk: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize blk];
+    let base: usize = e.loc_n;
+    let mut st: i32 = 0;
+    let mut cur: u32 = nd.a;
+    while cur != 0u32 {
+        let sn: Node = pp.nodes[conv usize cur];
+        st = exec_stmt(pp, src, e, cur);
+        if st != 0 { break; }
+        cur = sn.nx;
+    }
+    e.*.loc_n = base;
+    return st;
+}
+
+// ---- canonical dump ----------------------------------------------------------
+fn emit_inum(v: i64) -> unit {
+    if v < 0i64 {
+        trace(45);
+        let mut mag: u64 = 0u64;
+        wrapping { mag = conv u64 (0i64 - v); }
+        emit_num(mag);
+    } else {
+        emit_num(conv u64 v);
+    }
+    return;
+}
+
+pub fn interp_dump(src: [u8], buf: read Buf) -> unit {
+    let mut p: P = P { nodes: [nnew(0); 32768], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
+    let head: u32 = parse_program(write p, src, buf);
+    let mut e: E = E {
+        head: head,
+        loc_p0: [0usize; 4096],
+        loc_p1: [0usize; 4096],
+        loc_val: [0i64; 4096],
+        loc_w: [0; 4096],
+        loc_n: 0usize,
+        cur_base: 0usize,
+        cur_retw: 4,
+        cur_val: 0i64,
+        cur_w: 0,
+        ret_val: 0i64,
+        ret_w: 4,
+        arg_val: [0i64; 16],
+        arg_w: [0; 16],
+        arg_n: 0usize,
+        trace_out: [0i64; 1024],
+        trace_n: 0usize,
+        fault_kind: 0 - 1i32,
+        fault_p0: 0usize,
+        fault_p1: 0usize,
+        cur_p0: 0usize,
+        cur_p1: 0usize,
+    };
+    let mainid: u32 = find_main(read p, src, write e);
+    let mut ret: i64 = 0i64;
+    if mainid != 0u32 {
+        e.arg_n = 0usize;
+        let st: i32 = call_fn(read p, src, write e, mainid);
+        ret = e.cur_val;
+    }
+    if e.fault_kind >= 0 {
+        emit_lit(b"FAULT");
+        emit_sp();
+        emit_num(conv u64 e.fault_kind);
+        emit_sp();
+        emit_num(conv u64 e.fault_p0);
+        emit_sp();
+        emit_num(conv u64 e.fault_p1);
+        emit_nl();
+        return;
+    }
+    emit_lit(b"RET");
+    emit_sp();
+    emit_inum(ret);
+    emit_nl();
+    let mut ti: usize = 0usize;
+    while ti < e.trace_n {
+        emit_lit(b"TRACE");
+        emit_sp();
+        emit_inum(e.trace_out[ti]);
+        emit_nl();
+        ti = ti + 1usize;
+    }
+    return;
+}

@@ -1,0 +1,4 @@
+fn main() -> i64 {
+    let x: u8 = 200u8 + 100u8;
+    return 0i64;
+}
