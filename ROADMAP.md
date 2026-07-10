@@ -141,3 +141,25 @@ oracle to differentially test against. B (monomorphizer) is late and optional.
 C (address space) is nearly free (dense arena, no paging). ~6 slices / ~3500-4500
 lines of Candor remain to the whole corpus; the systems-corpus milestone (S6) is
 much nearer.
+
+### Self-interpreting MILESTONE REACHED (2026-07-11)
+
+S1-S6 done: the self-hosted interpreter runs the entire systems-heavy corpus
+(11_1 allocator / 11_2 scheduler / 11_3 mmio / 11_4 parser / 11_5 arena) byte-exact
+against the Rust oracle, plus 66 targeted fixtures — 71 total, covering scalars,
+flat+paged memory, structs/arrays, move/drop with trace-on-drop, enums/match,
+Box/allocator ABI (fn-ptr indirect calls, structural Alloc), rawptr/MMIO/conv.
+Confirmed nothing in the systems corpus needs S7+ (all monomorphic). Each real
+program surfaced and fixed a genuine interp bug (borrow-param-by-value, the
+ret-register/alloc-on-drop clobber, the literal static-region leak, etc.).
+
+Remaining self-interpret tail (the generic library, NOT gated by the milestone):
+- **S7** — slices/str + std Vec/Map/String (fat pointers=16, Vec/Map=40).
+- **S8** — the monomorphizer (blocker B); gates ONLY generic library programs.
+- **S9** — conv-family/contracts close-out (conv itself landed early in S6b).
+
+**Post-milestone fork (open):** continue the interpreter's S7-S9 std/generic tail,
+OR pivot to the next self-hosting TIER — self-lowering to MIR (oracle = the Rust
+MIR interpreter), the stepping stone toward a self-compiler / true native
+bootstrap. The interpreter tier has proven the language can express its own
+execution semantics; MIR-lowering would prove it can express compilation.
