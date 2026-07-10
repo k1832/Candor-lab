@@ -88,6 +88,7 @@ fn is_builtin(src: [u8], s: usize, e: usize) -> bool {
     if span_eq(src, s, e, b"as_str") { return true; }
     if span_eq(src, s, e, b"box") { return true; }
     if span_eq(src, s, e, b"cancelled") { return true; }
+    if span_eq(src, s, e, b"get") { return true; }
     if span_eq(src, s, e, b"is_null") { return true; }
     if span_eq(src, s, e, b"len") { return true; }
     if span_eq(src, s, e, b"ptr_offset") { return true; }
@@ -95,6 +96,7 @@ fn is_builtin(src: [u8], s: usize, e: usize) -> bool {
     if span_eq(src, s, e, b"ptr_to_addr") { return true; }
     if span_eq(src, s, e, b"ptr_write") { return true; }
     if span_eq(src, s, e, b"push") { return true; }
+    if span_eq(src, s, e, b"set") { return true; }
     if span_eq(src, s, e, b"slice_of") { return true; }
     if span_eq(src, s, e, b"slice_of_mut") { return true; }
     if span_eq(src, s, e, b"split_mut") { return true; }
@@ -106,6 +108,7 @@ fn is_builtin(src: [u8], s: usize, e: usize) -> bool {
     if span_eq(src, s, e, b"substr") { return true; }
     if span_eq(src, s, e, b"trace") { return true; }
     if span_eq(src, s, e, b"unbox") { return true; }
+    if span_eq(src, s, e, b"vec_new") { return true; }
     return false;
 }
 

@@ -29,6 +29,8 @@ const PARSER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/parser/parser.cnr"));
 const CHECKER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/checker/checker.cnr"));
+const ANALYSES_SRC: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/analyses/analyses.cnr"));
 
 /// The code families the Candor checker covers this slice.
 const COVERED: &[&str] = &["E0102", "E0103"];
@@ -244,6 +246,82 @@ fn candor_checker_checks_checker_source_clean_via_import_resolution() {
         assert!(
             mine.is_empty(),
             "self-host checker emitted covered diagnostics on clean checker.cnr: {mine:?}"
+        );
+    });
+}
+
+/// Like `module_oracle_dump`, but over an explicit module tree -- so a checked
+/// module that lives BEYOND the lexer+parser+checker set (here `analyses.cnr`,
+/// which imports from lexer+parser) is a REAL member of the tree and has its own
+/// imports resolved by the reference checker.
+fn module_oracle_dump_tree(modules: &[(&str, &str)], src: &str) -> String {
+    let main = candor_main(src);
+    let diags = check_module_tree(modules, &main).expect("oracle checks the module tree");
+    let mut rows: Vec<(String, usize, usize)> = diags
+        .iter()
+        .filter(|d| COVERED.contains(&d.code.as_str()))
+        .map(|d| (d.code.clone(), d.span.start, d.span.end))
+        .collect();
+    rows.sort();
+    let mut out = String::new();
+    for (code, a, b) in rows {
+        out.push_str(&format!("{code} {a} {b}\n"));
+    }
+    out
+}
+
+/// IMPORT-RESOLUTION ISOLATION GATE (third module): the self-hosted checker checks
+/// the self-hosted ANALYSES core's own source -- a NON-LEAF module importing ~70
+/// names from the `lexer` and `parser` modules AND exercising the Vec/collection
+/// builtins `get`/`set`/`vec_new` -- IN ISOLATION, resolving those imports itself
+/// from its `use` decls. It emits an EMPTY covered-diagnostic (E0102/E0103) set,
+/// byte-equal to the MODULE-AWARE reference oracle over the real
+/// lexer+parser+checker+analyses tree.
+///
+/// This is the FOURTH module under the self-check name-resolution fixpoint, and
+/// the first to use the collection builtins -- so the gate proves both the builtin
+/// table extension (`get`/`set`/`vec_new`) and that name resolution scales past the
+/// checker.cnr size without the static-storage collision the interpreter had.
+#[test]
+fn candor_checker_checks_analyses_source_clean_via_import_resolution() {
+    on_big_stack(|| {
+        // The imports are load-bearing: without resolution the non-leaf module's
+        // imported TYPES (Node, P, Buf, ...) are unknown -> E0102, so the clean
+        // assertion below is meaningful, not a leaf-module tautology.
+        let naive = check_source_real(ANALYSES_SRC).expect("oracle parses analyses.cnr");
+        let naive_unknown_types = naive.iter().filter(|d| d.code == "E0102").count();
+        assert!(
+            naive_unknown_types > 0,
+            "single-file check must flag the unresolved imported types (E0102)"
+        );
+
+        // Teeth: a deliberately-broken variant (a param of an unknown type) MUST be
+        // flagged E0102, so the clean assertion below cannot pass vacuously.
+        let broken = format!("{ANALYSES_SRC}\nfn zz_smoke(x: Nonexistent) -> unit {{ return; }}\n");
+        let broken_dump = candor_dump(&broken);
+        assert!(
+            broken_dump.contains("E0102"),
+            "negative smoke: broken analyses source must be flagged E0102, got {broken_dump:?}"
+        );
+
+        // Clean: the self-host checker, resolving analyses.cnr's imports itself,
+        // emits an EMPTY covered set -- byte-equal to the module-aware oracle over
+        // a tree that INCLUDES analyses.cnr (so the reference resolves its imports).
+        let modules = [
+            ("lexer.cnr", LEXER_SRC),
+            ("parser.cnr", PARSER_SRC),
+            ("checker.cnr", CHECKER_SRC),
+            ("analyses.cnr", ANALYSES_SRC),
+        ];
+        let oracle = module_oracle_dump_tree(&modules, ANALYSES_SRC);
+        let mine = candor_dump(ANALYSES_SRC);
+        assert_eq!(
+            mine, oracle,
+            "self-host checker diverged from the module-aware oracle on analyses.cnr"
+        );
+        assert!(
+            mine.is_empty(),
+            "self-host checker emitted covered diagnostics on clean analyses.cnr: {mine:?}"
         );
     });
 }

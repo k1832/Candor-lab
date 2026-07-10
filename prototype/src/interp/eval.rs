@@ -178,6 +178,11 @@ pub struct Interp<'a> {
     frames: Vec<Frame>,
     cur_span: Span,
     trace: Vec<i64>,
+    /// Content-addressed cache of string/byte literal storage: identical literal
+    /// bytes share one static allocation. Literals are immutable read-only views,
+    /// so deduping them is sound and — critically — bounds static growth, which
+    /// otherwise leaks one allocation per evaluation and collides with the stack.
+    literal_cache: HashMap<Vec<u8>, u64>,
 }
 
 impl<'a> Interp<'a> {
@@ -258,6 +263,7 @@ impl<'a> Interp<'a> {
             frames: Vec::new(),
             cur_span: Span::point(0),
             trace: Vec::new(),
+            literal_cache: HashMap::new(),
         }
     }
 
@@ -868,8 +874,15 @@ impl<'a> Interp<'a> {
     /// Materialize a byte run into static storage and return the address of a
     /// fresh `{ptr, len}` fat pointer on the stack. Shared by `str`/`[u8]` literals.
     fn str_literal(&mut self, bytes: &[u8]) -> R<u64> {
-        let base = self.mem.static_alloc(bytes.len().max(1) as u64, 1);
-        self.write_bytes(base, bytes)?;
+        let base = match self.literal_cache.get(bytes) {
+            Some(&addr) => addr,
+            None => {
+                let addr = self.mem.static_alloc(bytes.len().max(1) as u64, 1);
+                self.write_bytes(addr, bytes)?;
+                self.literal_cache.insert(bytes.to_vec(), addr);
+                addr
+            }
+        };
         let a = self.mem.stack_alloc(16, 8);
         self.write_bytes(a, &base.to_le_bytes())?;
         self.write_bytes(a + 8, &(bytes.len() as u64).to_le_bytes())?;

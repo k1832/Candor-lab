@@ -261,3 +261,17 @@ One lesson per entry, one-line summary first.
   this place hold an exclusive borrow" (loan kind) are DIFFERENT properties; a
   borrow reference is non-copy for aliasing yet un-movable — track them apart, or
   every reborrowed `write` param reads as a use-after-move (2026-07-10).
+
+- **Immutable literal storage must be interned, or a literal-heavy program's
+  static region grows into the stack and corrupts live data.** The interpreter's
+  `str_literal` (`src/interp/eval.rs`) `static_alloc`ed fresh bytes on EVERY
+  evaluation of a `b"..."`/`"..."` literal, never dedup/reclaim. Checking the
+  literal-heavy `analyses.cnr` did ~18845 literal evals; static grew from 0x1000
+  past `STACK_BASE` 0x100000 and overwrote `main`'s embedded `src: [u8]` — reads
+  of `src[9173]` flipped 110→115→116 mid-run (the "byte-22600 boundary" red
+  herring: a symptom, not a checker gap). Fix: content-addressed interning
+  (`literal_cache: HashMap<Vec<u8>,u64>`), sound because literals are immutable
+  (observationally invariant — four-engine equivalence stayed green). Lesson: a
+  "checker can't resolve past offset N" symptom on a large embedded-source gate is
+  often a runtime memory-model leak, not a front-end bug — check static/stack
+  collision before extending the checker (2026-07-10).

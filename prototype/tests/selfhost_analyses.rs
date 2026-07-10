@@ -277,3 +277,40 @@ fn candor_analyses_check_checker_source_clean_fixpoint() {
         );
     });
 }
+
+
+/// FIXPOINT GATE: the self-hosted ANALYSES core, run over ITS OWN source
+/// (`analyses.cnr`, a non-leaf module importing ~70 names from lexer+parser and the
+/// first self-host module to use the Vec-backed diagnostic buffer), emits an EMPTY
+/// covered-diagnostic set across ALL its families -- byte-equal to the module-aware
+/// Rust oracle over the real lexer+parser+analyses tree. This closes the analyses
+/// self-check over the third module: the analysis accepts the very source that
+/// implements it.
+#[test]
+fn candor_analyses_check_analyses_source_clean_fixpoint() {
+    on_big_stack(|| {
+        // Teeth: a use-after-move injected into the analyses source MUST fire E0301.
+        let broken = format!("{ANALYSES_SRC}{MOVE_SMOKE}");
+        let broken_dump = candor_dump(&broken);
+        assert!(
+            broken_dump.contains("E0301"),
+            "negative smoke: injected use-after-move must be flagged E0301, got {broken_dump:?}"
+        );
+
+        // Clean: the real analyses.cnr is analyses-clean over EVERY covered family.
+        // The oracle tree already contains analyses.cnr, so the reference checks the
+        // real module (ground truth), not just the generated main.
+        let modules = [
+            ("lexer.cnr", LEXER_SRC),
+            ("parser.cnr", PARSER_SRC),
+            ("analyses.cnr", ANALYSES_SRC),
+        ];
+        let oracle = module_oracle_full(&modules, ANALYSES_SRC);
+        let mine = candor_dump(ANALYSES_SRC);
+        assert_eq!(mine, oracle, "self-host analyses diverged from the oracle on analyses.cnr");
+        assert!(
+            mine.is_empty(),
+            "self-host analyses emitted diagnostics on analyses-clean analyses.cnr: {mine:?}"
+        );
+    });
+}

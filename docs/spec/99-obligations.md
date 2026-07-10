@@ -787,7 +787,7 @@ shifts. All negative fixtures stay byte-exact (selfhost_analyses/loans/effects g
 the loan fixtures move only OWNED `let mut x` locals, never a reference, so no true positive is
 silenced.
 
-### OBL-SELFHOST-ANALYSES-NAMERES (deferred, 2026-07-10) — analyses.cnr is NOT name-res-clean under the self-host CHECKER
+### OBL-SELFHOST-ANALYSES-NAMERES (DISCHARGED 2026-07-10) — analyses.cnr is name-res-clean under the self-host CHECKER
 
 Item scoped for this slice: extend the self-host CHECKER's E0102/E0103 clean gate to a FOURTH
 module, `analyses.cnr`, if it embeds byte-exact. MEASURED: analyses.cnr embeds BYTE-EXACT (7666
@@ -809,3 +809,51 @@ DEFERRED: the analyses.cnr name-res gate is not added; discharging it means teac
 Vec builtin set and resolving cause (2). This is a capability the checker slice deliberately omitted
 (it needed only the builtins lexer/parser use), so per the slice discipline it is logged, not hacked.
 Gate to unlock: extend `checker.cnr`'s builtin table + isolate the line-560 resolution boundary.
+
+RESOLUTION (2026-07-10). analyses.cnr now checks CLEAN (∅ E0102/E0103) under the self-host checker,
+byte-equal to the module-aware oracle. Gate added:
+`prototype/tests/selfhost_checker.rs::candor_checker_checks_analyses_source_clean_via_import_resolution`
+(the FOURTH module under the name-res fixpoint, first to exercise the collection builtins). Teeth
+held: the naive single-file check flags the unresolved imports E0102 (>0), and an injected
+unknown-typed param flags E0102 — so the clean set is non-vacuous. Two causes, as predicted, but
+cause (2) was NOT a checker gap:
+
+(1) `is_builtin` gap — DISCHARGED. Added exactly `get` / `set` / `vec_new` to `checker.cnr`'s
+`is_builtin` (the three collection builtins analyses.cnr actually calls; `map_new` is unused here, so
+NOT added — P6-minimal). All three are genuine builtins in the Rust reference `check_builtin`
+(`src/check/expr.rs`), so the self-host checker's builtin notion still matches the language.
+
+(2) The "byte-22600 boundary" was NOT a checker name-resolution gap — the checker's name resolution
+was already CORRECT. ROOT-CAUSED to an INTERPRETER memory-model leak. `str_literal` (the evaluator
+of every `b"..."` / `"..."` literal, `src/interp/eval.rs`) `static_alloc`s FRESH storage on EVERY
+evaluation and never dedups or reclaims it; static storage grows monotonically from `STATIC_BASE`
+(0x1000) toward `STACK_BASE` (0x100000), where `main`'s embedded `src: [u8]` source array is
+allocated. Checking analyses.cnr evaluates the checker's byte-literal vocabulary (span_eq / is_builtin
+/ is_type_known) so many times that `static_bump` crosses 0x100000 after ~18845 literal allocations
+and `write_bytes` begins overwriting `src` — corrupting the very source the checker is name-resolving.
+The "byte ~22600" boundary is exactly the traversal point at which static crossed the stack; the
+values that leaked into `src` were literal bytes ('n'→'s'→'t'). lexer.cnr / checker.cnr check clean
+only because they evaluate fewer literals and never cross the line. Confirmed by instrumenting
+`str_literal` (18845 allocations at/above STACK_BASE) and by probing `src[9173]` reading 110→115→116
+transiently deep in the traversal. FIX: content-addressed literal interning — a
+`literal_cache: HashMap<Vec<u8>, u64>` on the interpreter maps identical literal bytes to one static
+allocation. Literals are immutable read-only views, so deduping is sound; it bounds static growth to
+the few KB of distinct literals, far below the stack. This is a latent memory-safety fix for ANY
+literal-heavy program, not just the self-host checker. All 580 prior tests stay byte-exact green.
+
+BONUS — analyses.cnr also passes ANALYSES-clean now. Gate added:
+`prototype/tests/selfhost_analyses.rs::candor_analyses_check_analyses_source_clean_fixpoint`
+(the analysis accepts its OWN source; injected use-after-move teeth fire E0301). It tripped TWO NEW
+false-positive patterns (10× spurious E0301), both `ty_copy` mis-classifications fixed minimally:
+(A) T_ARRAY copy-ness recursed on `nd.a` — but the parser stores `nd.a` = size expr, `nd.b` = element
+type, so `[256]i32` (the `snap` match-state snapshot) was read as the copy-ness of the size literal
+→ non-copy → a by-value assign was a false move. Fixed: recurse on `nd.b`.
+(B) an imported struct type (`Node`, read from the arena as `let pm: Node` and passed by value to
+`param_copy`) has no decl in the analysis's local item table, so `ty_copy`'s `find_decl` miss defaulted
+it non-copy → the by-value pass was a false move. Fixed: an unresolvable/imported named type is treated
+as copy (non-moving) — parity with the oracle, which resolves the import; LOCAL types still resolve via
+`find_decl`, so move teeth (the MOVE_SMOKE injected use-after-move on a local struct) are unchanged.
+Both fixes verified by full oracle parity across lexer.cnr / checker.cnr / analyses.cnr clean gates +
+the negative corpus (no lost teeth). Full suite 582 green (580 + 2 new gates), clippy clean. No arena
+change (all targets < 8192, unchanged). Isolation runtimes (release): selfhost_checker 2.9s,
+selfhost_analyses 2.9s.

@@ -312,7 +312,9 @@ fn ty_copy(pp: read P, src: [u8], head: u32, ty: u32) -> i32 {
         return 0;
     }
     if tg == T_ARRAY {
-        return ty_copy(pp, src, head, nd.a);
+        // The parser stores `nd.a` = size expr, `nd.b` = element type; an array's
+        // copy-ness is its element's.
+        return ty_copy(pp, src, head, nd.b);
     }
     if tg == T_NAMED {
         if span_eq(src, nd.p0, nd.p1, b"str") {
@@ -320,7 +322,8 @@ fn ty_copy(pp: read P, src: [u8], head: u32, ty: u32) -> i32 {
         }
         let d: u32 = find_decl(pp, head, src, nd.p0, nd.p1);
         if d == 0u32 {
-            return 0;
+            // Imported/opaque type: no visible decl. Conservatively non-moving.
+            return 1;
         }
         return decl_copy(pp, src, head, d);
     }
