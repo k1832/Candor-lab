@@ -19,7 +19,9 @@ paged pointer/MMIO memory model — and runs the entire systems-heavy corpus (a 
 allocator, an intrusive-list scheduler, MMIO registers, a recursive-descent
 parser, a `Box [4096]Node` arena) byte-exact against the Rust reference:
 `Run{ret, trace}` and fault identity alike, riding the prototype's proven
-four-engine equivalence. Dogfooding on real self-host source and real corpus
+four-engine equivalence. The self-check fixpoint closes over the interpreter too —
+the checker and analyses check `interp.cnr` clean, so Candor checks the very
+program that runs Candor. Dogfooding on real self-host source and real corpus
 programs repeatedly earned its keep — it caught defects the fixture suites had
 missed: a checker/interpreter identity desync, a false use-after-move on
 reborrowed parameters, an array-copy misclassification, an interpreter

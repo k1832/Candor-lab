@@ -163,3 +163,54 @@ OR pivot to the next self-hosting TIER — self-lowering to MIR (oracle = the Ru
 MIR interpreter), the stepping stone toward a self-compiler / true native
 bootstrap. The interpreter tier has proven the language can express its own
 execution semantics; MIR-lowering would prove it can express compilation.
+
+### Self-check fixpoint COMPLETED across all five modules (2026-07-11)
+
+interp.cnr now self-checks too: the self-host checker (E0102/E0103) and analyses
+(move/init, loans, effects, exhaustiveness) check the interpreter's own source
+clean, oracle-matched, with teeth. The fixpoint spans lexer/parser/checker/analyses
+/interp — Candor checks the program that runs Candor. A near-free bonus (no arena
+bump, no new builtins) revealed by a probe correcting a stale "uses unsafe/raw-ptr"
+blocker note.
+
+## Next tier RULED: self-lowering to MIR (2026-07-11)
+
+Direction after the self-interpreting milestone: pivot to SELF-LOWERING TO MIR over
+the interpreter's std/generic tail (S7-S9). Rationale (feasibility scoping): it is
+SMALLER and lower-risk than the interpreter was — the interp's tallest pole (the
+annotation-directed type/layout table, built with no oracle) is already climbed and
+reused wholesale; there is a complete ~2400-line Rust reference (src/mir/build.rs)
+to port; and the gate reuses an independent proven oracle (the Rust MIR interpreter,
+one of the four equivalent engines). Strategic value: it proves Candor can express a
+COMPILATION TRANSFORM (AST -> CFG-based MIR), the first evidence of a
+Candor-expressible compiler middle-end and the on-ramp to dropping the Rust
+bootstrap. S7-S9 only deepens the already-proven execution tier; deferred, not
+abandoned (the systems corpus is monomorphic and needs none of it).
+
+**Gate: executional.** Candor lowers AST -> MIR, serializes it; the Rust harness
+deserializes into a MirProgram, rebuilds Items/consts from the same source, runs the
+Rust MIR interpreter (src/mir/interp.rs), and compares RET/TRACE/FAULT byte-exact to
+the tree-walker oracle — the exact schema the self-interp gate already uses. Rejected
+the structural (byte-compare serialized MIR) gate: it couples two independent
+lowerings at incidental temp/block numbering; two correct lowerings differ there.
+
+**Arc (each slice re-shapes logic the interp already has; type table reused):**
+- **L0 (enabler, SOLO)** — the MIR serialization boundary: a canonical MirProgram wire
+  format + the Rust deserializer + harness, built and proven against HAND-WRITTEN MIR
+  before any Candor lowering exists (closes the loop first). Carries spans (load-bearing
+  for FAULT identity), fault edges, projection offsets, move masks, fn_ptrs, drop_hooks,
+  statics.
+- **L1** — scalar + CFG: the IR-builder + control-flow flattening (if/while/loop/break/
+  continue -> basic blocks + Goto/Branch/Return/Fault), scalar rvalues, fault edges,
+  Trace, Return. The MVP.
+- **L2** — flat aggregates (struct/array Place projections, bounds fault edges).
+- **L3** — move/drop schedule emitted as explicit MIR Drop ops with static move masks.
+- **L4** — enums/match -> tag-switch branch chains.
+- **L5** — Box/alloc ABI + rawptr/fnptr + CallIndirect.
+- **MILESTONE (after L5):** the self-host lowering lowers all five systems programs
+  (11_1..11_5) to MIR, the Rust MIR interp runs them, byte-exact vs the oracle — the
+  analog of the interp's systems-corpus milestone.
+
+Tallest poles (both bounded, testable up front): the serialization boundary (L0, the
+only new infra with no interp analog) and CFG construction (L1-L4, standard mechanics
+with the build.rs reference). No open-ended oracle-less analysis pole this time.
