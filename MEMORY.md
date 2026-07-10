@@ -275,3 +275,15 @@ One lesson per entry, one-line summary first.
   "checker can't resolve past offset N" symptom on a large embedded-source gate is
   often a runtime memory-model leak, not a front-end bug — check static/stack
   collision before extending the checker (2026-07-10).
+
+- **A place-walker that can't root an expression must DESCEND to the expression's
+  non-place base — never re-dispatch the same node to the general expr checker,
+  or you get infinite mutual recursion.** The self-host `borrow_place`, on a field
+  access whose base isn't rooted at a local (`f().field`, base is a call), had
+  `root_of` return 0 and fell through to `chk_expr` on the SAME T_FIELD node →
+  `chk_expr`↔`borrow_place` cycled forever (frame depth past 60000, overflowed even
+  a 1 GiB stack). Surfaced only by parser.cnr (the largest self-host module) — its
+  size wasn't the cause, its `f().field` shape was. Fix (analyses.cnr:439): the
+  not-rooted branch descends the place chain to its non-place base and walks THAT.
+  Lesson: place recursion terminates on the base expression, so peel to the base;
+  re-handing the whole node back is a non-decreasing recursive call (2026-07-10).

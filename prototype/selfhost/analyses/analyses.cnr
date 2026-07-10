@@ -436,14 +436,32 @@ fn place_use(pp: read P, src: [u8], a: write A, idnode: u32, ctx: i32) alloc -> 
     return;
 }
 
-// A place used as a borrow/read-through: init check on the root, no move.
+// A place used as a borrow/read-through: init check on the root, no move. When
+// the place is NOT rooted at a local (a temporary base, e.g. `f().field`), the
+// projection has no local to init-check; walk the base EXPRESSION for its own
+// effects by DESCENDING the place chain to its non-place base rather than
+// re-dispatching this node (which would re-enter `borrow_place` and never
+// terminate on a field-of-non-place).
 fn borrow_place(pp: read P, src: [u8], a: write A, operand: u32) alloc -> unit {
     let r: u32 = root_of(pp, operand);
     if r != 0u32 {
         place_use(pp, src, a, r, 1);
         return;
     }
-    chk_expr(pp, src, a, operand);
+    let mut cur: u32 = operand;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        let tg: i32 = nd.tag;
+        if tg == T_FIELD || tg == T_PAREN || tg == T_PREFIX || tg == T_UNARY {
+            cur = nd.a;
+        } else if tg == T_INDEX {
+            chk_expr(pp, src, a, nd.b);
+            cur = nd.a;
+        } else {
+            chk_expr(pp, src, a, cur);
+            return;
+        }
+    }
     return;
 }
 
@@ -1238,7 +1256,7 @@ fn dump_diags(a: write A) alloc -> unit {
 pub fn analyze_dump(src: [u8], buf: read Buf) alloc -> unit {
     let mut bump: Bump = Bump { next: 16777216usize, end: 33554432usize };
     let al: Alloc = mk_alloc(write bump);
-    let mut p: P = P { nodes: [nnew(0); 8192], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
+    let mut p: P = P { nodes: [nnew(0); 32768], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
     let head: u32 = parse_program(write p, src, buf);
     let mut a: A = A {
         head: head,

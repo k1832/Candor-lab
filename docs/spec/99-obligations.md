@@ -857,3 +857,60 @@ Both fixes verified by full oracle parity across lexer.cnr / checker.cnr / analy
 the negative corpus (no lost teeth). Full suite 582 green (580 + 2 new gates), clippy clean. No arena
 change (all targets < 8192, unchanged). Isolation runtimes (release): selfhost_checker 2.9s,
 selfhost_analyses 2.9s.
+
+### CAPSTONE — parser.cnr under the self-check: all four self-host modules self-check clean (2026-07-10)
+
+The last deferred self-host module, `parser.cnr`, is now under BOTH self-check gates
+(name-res E0102/E0103 and analyses E0301/E0304/E0401/E0601/E0801-4), oracle-matched
+with teeth. All four self-host modules — lexer.cnr, checker.cnr, analyses.cnr,
+parser.cnr — self-check clean.
+
+STEP 1 — THE "HARNESS EMBEDDING CEILING" WAS THE INTERPRETER LITERAL LEAK, NOW GONE.
+The prior BLOCKER entry (parser.cnr "CORRUPTED by the real front-end", self-host lexer
+yielding 11378 tokens vs the oracle's 19703, bytes diverging at byte 1748) was measured
+BEFORE the content-addressed literal-interning fix (commit fde0a92). RE-MEASURED
+post-fix: parser.cnr embeds BYTE-EXACT — the self-host lexer over the embedded 77.7 KB
+`[N]u8` literal yields 19703 tokens == the oracle's 19703 (self-host parse: 11272 arena
+nodes). The corruption was exactly the static-storage-crosses-STACK_BASE leak overwriting
+`main`'s embedded `src[]`, same signature as the analyses.cnr byte-22600 boundary; bounding
+static growth removed it. There was NO real front-end / array-literal / recursion ceiling.
+The BLOCKER above is DISCHARGED.
+
+STEP 2 — ARENAS 8192 -> 32768. parser.cnr's measured 19703 tokens exceed the 8192
+`Buf.toks`/`P.nodes` arenas; grown to 32768 (next power of two above 19703, ~1.66x token /
+~2.9x node headroom over the largest module). Every coupled site moved together: the two
+struct fields (`Buf.toks` lexer.cnr, `P.nodes` parser.cnr), the three `[nnew(0); 32768]`
+P-literals (parser/checker/analyses `*.cnr`), and the six harness Buf-literals
+(selfhost_{lexer,parser,checker,analyses,effects,loans}.rs); the `P.uses` field retained.
+Arena model unchanged ([N]Node, u32 edges, region-free threading). All prior oracle gates
+stay byte-exact green under the larger arenas.
+
+STEP 3 — GATES + ONE REAL FALSE POSITIVE FOUND ON THE LARGEST MODULE.
+`candor_checker_checks_parser_source_clean_via_import_resolution` (selfhost_checker.rs):
+parser.cnr name-resolves clean (∅ E0102/E0103), resolving its `use lexer::{Tok, Buf, ...}`
+imports itself, byte-equal to the module-aware oracle; single-file + injected-unknown teeth.
+This gate passed clean on the first run (no checker false positive).
+`candor_analyses_check_parser_source_clean_fixpoint` (selfhost_analyses.rs): parser.cnr is
+analyses-clean over ALL families (∅), oracle-matched; injected-use-after-move teeth fire E0301.
+This gate FIRST tripped an UNBOUNDED-RECURSION false positive — a genuine latent bug in
+`analyses.cnr` surfaced only by parser.cnr (the other three modules lack the construct):
+`borrow_place` (analyses.cnr), on a field access whose base is NOT rooted at a local
+(`f().field` — a projection off a call temporary, which parser.cnr uses), had `root_of`
+return 0 and fell through to `chk_expr(operand)` on the SAME T_FIELD node, which re-dispatched
+to `borrow_place` on that node — an infinite `chk_expr <-> borrow_place` cycle (confirmed by
+frame-depth instrumentation: climbing unbounded past 60000 frames, overflowing even a 1 GiB
+release stack). MINIMAL FIX: `borrow_place`'s not-rooted-at-a-local branch now DESCENDS the
+place chain to its non-place base and walks THAT base expression (plus index sub-exprs),
+instead of re-dispatching the whole place node. Semantics preserved for genuine non-place
+operands (a bare call still walks once, as before); the loop is broken because a field-of-
+non-place walks its base call, not itself. No teeth weakened, no negative fixture regressed —
+all analyses/loans/effects gates byte-exact green (the negatives move only bare-id locals).
+
+RUNTIMES (debug): selfhost_checker 46s (5 gates incl. parser), selfhost_analyses 38s (5 gates
+incl. parser). parser.cnr's gates dominate (~2.6x checker.cnr; the tree-walk lex+parse+check
+of the 19703-token file). Both run on the existing 256 MiB gate thread — no `#[ignore]`, no
+release-only gate. The Map/symbol-table adoption remains the planned perf lever. Full suite
+584 green (582 + 2 new gates), clippy clean. NOTE: the loans (E0801-4) and effects (E0401)
+gates run the SAME `analyses.cnr`/`analyze_dump` over their own corpora (there are no separate
+loans/effects `.cnr` modules), so the single `borrow_place` fix covers them too — all
+selfhost_{lexer,parser,checker,analyses,loans,effects} harnesses stay byte-exact green.

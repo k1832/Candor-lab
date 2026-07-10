@@ -78,7 +78,7 @@ fn candor_main(src: &str) -> String {
         m.push_str(&format!("{b}u8"));
     }
     m.push_str("];\n");
-    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 8192], n: 0usize };\n");
+    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 32768], n: 0usize };\n");
     m.push_str("    let cnt: usize = lex(slice_of(src), write buf);\n");
     m.push_str("    analyze_dump(slice_of(src), read buf);\n");
     m.push_str("    return conv i64 cnt;\n}\n");
@@ -311,6 +311,43 @@ fn candor_analyses_check_analyses_source_clean_fixpoint() {
         assert!(
             mine.is_empty(),
             "self-host analyses emitted diagnostics on analyses-clean analyses.cnr: {mine:?}"
+        );
+    });
+}
+
+/// FIXPOINT GATE: the self-hosted ANALYSES core, run over the self-hosted PARSER's
+/// own source (`parser.cnr`, the LARGEST self-host module -- ~19703 tokens /
+/// ~11272 self-host nodes, 2.6x checker.cnr), emits an EMPTY covered-diagnostic set
+/// across ALL its families -- byte-equal to the module-aware Rust oracle over the
+/// real lexer+parser+analyses tree. parser.cnr is the module that previously could
+/// not embed (the interpreter literal-leak corrupted its 77.7 KB `[N]u8` literal);
+/// with that leak fixed it embeds byte-exact, bringing the last module under the
+/// analyses self-check. This is the recursive-descent tree-builder analysing itself.
+#[test]
+fn candor_analyses_check_parser_source_clean_fixpoint() {
+    on_big_stack(|| {
+        // Teeth: a use-after-move injected into the parser source MUST fire E0301.
+        let broken = format!("{PARSER_SRC}{MOVE_SMOKE}");
+        let broken_dump = candor_dump(&broken);
+        assert!(
+            broken_dump.contains("E0301"),
+            "negative smoke: injected use-after-move must be flagged E0301, got {broken_dump:?}"
+        );
+
+        // Clean: the real parser.cnr is analyses-clean over EVERY covered family.
+        // The oracle tree already contains parser.cnr, so the reference checks the
+        // real module (ground truth), not just the generated main.
+        let modules = [
+            ("lexer.cnr", LEXER_SRC),
+            ("parser.cnr", PARSER_SRC),
+            ("analyses.cnr", ANALYSES_SRC),
+        ];
+        let oracle = module_oracle_full(&modules, PARSER_SRC);
+        let mine = candor_dump(PARSER_SRC);
+        assert_eq!(mine, oracle, "self-host analyses diverged from the oracle on parser.cnr");
+        assert!(
+            mine.is_empty(),
+            "self-host analyses emitted diagnostics on analyses-clean parser.cnr: {mine:?}"
         );
     });
 }

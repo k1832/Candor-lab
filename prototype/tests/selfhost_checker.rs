@@ -68,7 +68,7 @@ fn candor_main(src: &str) -> String {
         m.push_str(&format!("{b}u8"));
     }
     m.push_str("];\n");
-    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 8192], n: 0usize };\n");
+    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 32768], n: 0usize };\n");
     m.push_str("    let cnt: usize = lex(slice_of(src), write buf);\n");
     m.push_str("    check_dump(slice_of(src), read buf);\n");
     m.push_str("    return conv i64 cnt;\n}\n");
@@ -322,6 +322,57 @@ fn candor_checker_checks_analyses_source_clean_via_import_resolution() {
         assert!(
             mine.is_empty(),
             "self-host checker emitted covered diagnostics on clean analyses.cnr: {mine:?}"
+        );
+    });
+}
+
+/// IMPORT-RESOLUTION ISOLATION GATE (parser.cnr -- the LARGEST self-host module).
+/// The self-hosted checker checks the self-hosted PARSER's own source IN ISOLATION,
+/// resolving its `use lexer::{Tok, Buf, span_eq, ...}` imports itself, and emits an
+/// EMPTY covered-diagnostic (E0102/E0103) set, byte-equal to the MODULE-AWARE
+/// reference oracle over the lexer+parser+checker tree.
+///
+/// parser.cnr is ~19703 tokens / ~11272 self-host nodes -- 2.6x checker.cnr and the
+/// module that previously could not embed at all (the interpreter's literal-leak
+/// static-storage collision corrupted its 77.7 KB `[N]u8` literal, yielding 11378
+/// self-host tokens vs the oracle's 19703). With that leak fixed (content-addressed
+/// literal interning) the embedding is byte-exact, so the last module comes under
+/// the name-res self-check. This is the FIFTH module and the LARGEST.
+#[test]
+fn candor_checker_checks_parser_source_clean_via_import_resolution() {
+    on_big_stack(|| {
+        // The imports are load-bearing: without resolution parser.cnr's imported
+        // TYPES (Tok, Buf) are unknown -> E0102, so the clean assertion below is
+        // meaningful, not a leaf-module tautology.
+        let naive = check_source_real(PARSER_SRC).expect("oracle parses parser.cnr");
+        let naive_unknown_types = naive.iter().filter(|d| d.code == "E0102").count();
+        assert!(
+            naive_unknown_types > 0,
+            "single-file check must flag the unresolved imported types (E0102)"
+        );
+
+        // Teeth: a deliberately-broken variant (a param of an unknown type) MUST be
+        // flagged E0102, so the clean assertion below cannot pass vacuously.
+        let broken = format!("{PARSER_SRC}\nfn zz_smoke(x: Nonexistent) -> unit {{ return; }}\n");
+        let broken_dump = candor_dump(&broken);
+        assert!(
+            broken_dump.contains("E0102"),
+            "negative smoke: broken parser source must be flagged E0102, got {broken_dump:?}"
+        );
+
+        // Clean: the self-host checker, resolving parser.cnr's `use lexer::{..}`
+        // imports itself, emits an EMPTY covered set -- byte-equal to the
+        // module-aware oracle over the lexer+parser+checker tree (which contains
+        // parser.cnr, so the reference resolves its imports).
+        let oracle = module_oracle_dump(PARSER_SRC);
+        let mine = candor_dump(PARSER_SRC);
+        assert_eq!(
+            mine, oracle,
+            "self-host checker diverged from the module-aware oracle on parser.cnr"
+        );
+        assert!(
+            mine.is_empty(),
+            "self-host checker emitted covered diagnostics on clean parser.cnr: {mine:?}"
         );
     });
 }
