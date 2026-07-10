@@ -27,7 +27,7 @@
 // `interp.cnr` is NOT self-checked in this slice, so it uses the full language.
 
 use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl};
-use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_SC, T_RET, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_STRUCT, T_NAMED, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_VARIANT, T_ENUMCTOR, T_MATCH, T_ARM, T_PVARIANT, T_WILD, T_BIND, T_NAME};
+use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_SC, T_RET, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_STRUCT, T_NAMED, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_VARIANT, T_ENUMCTOR, T_MATCH, T_ARM, T_PVARIANT, T_WILD, T_BIND, T_NAME, T_STATIC, T_RAWPTR, T_FNPTR, T_UNSAFE, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL};
 
 // ---- fault kind codes (shared with the Rust harness) ------------------------
 static FK_OVERFLOW: i32 = 0;
@@ -96,6 +96,15 @@ struct E {
     cur_org_b: i32,
     self_p0: usize,
     self_p1: usize,
+    static_p0: [64]usize,
+    static_p1: [64]usize,
+    static_addr: [64]usize,
+    static_w: [64]i32,
+    static_ty: [64]u32,
+    static_init: [64]u32,
+    static_n: usize,
+    alloc_vt_sid: u32,
+    alloc_sid: u32,
 }
 
 // ---- bit-pattern reinterpretation via wrapping conv (no transmute needed) ----
@@ -237,6 +246,74 @@ fn find_enum(pp: read P, src: [u8], e: write E, s: usize, en: usize) -> u32 {
     }
     return 0u32;
 }
+// Index of the static named [s,en), or a count-sized sentinel if absent.
+fn find_static(src: [u8], e: write E, s: usize, en: usize) -> usize {
+    let mut i: usize = 0usize;
+    while i < e.static_n {
+        if name_eq(src, s, en, e.static_p0[i], e.static_p1[i]) { return i; }
+        i = i + 1usize;
+    }
+    return e.static_n;
+}
+// ---- structural Alloc / AllocVtable identification (NEVER by name) -----------
+// Mirrors the oracle's `Interp::new` predicate (src/interp/eval.rs:236-248): the
+// vtable is the struct carrying fn-ptr fields `alloc` AND `free`; the Alloc
+// handle is the struct whose `vt` field is a `rawptr` to that vtable. Computed
+// once at startup (like the oracle). S5a stores the two struct ids as the ABI
+// seam; S5b's `box`/`unbox` resolve `ctx`/`vt`/`alloc`/`free` offsets through
+// `field_off` off these -- so box stays name-agnostic.
+fn field_named_is_fnptr(pp: read P, src: [u8], sid: u32, name: [u8]) -> bool {
+    let snode: Node = pp.nodes[conv usize sid];
+    let mut cur: u32 = snode.b;
+    while cur != 0u32 {
+        let fd: Node = pp.nodes[conv usize cur];
+        if span_eq(src, fd.p0, fd.p1, name) {
+            let fty: Node = pp.nodes[conv usize fd.a];
+            return fty.tag == T_FNPTR;
+        }
+        cur = fd.nx;
+    }
+    return false;
+}
+fn find_alloc_vtable_struct(pp: read P, src: [u8], e: write E) -> u32 {
+    let mut cur: u32 = e.head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_STRUCT {
+            if field_named_is_fnptr(pp, src, cur, b"alloc") && field_named_is_fnptr(pp, src, cur, b"free") {
+                return cur;
+            }
+        }
+        cur = nd.nx;
+    }
+    return 0u32;
+}
+fn find_alloc_struct(pp: read P, src: [u8], e: write E, vtid: u32) -> u32 {
+    if vtid == 0u32 { return 0u32; }
+    let vtn: Node = pp.nodes[conv usize vtid];
+    let mut cur: u32 = e.head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_STRUCT {
+            let mut fc: u32 = nd.b;
+            while fc != 0u32 {
+                let fd: Node = pp.nodes[conv usize fc];
+                if span_eq(src, fd.p0, fd.p1, b"vt") {
+                    let fty: Node = pp.nodes[conv usize fd.a];
+                    if fty.tag == T_RAWPTR {
+                        let inner: Node = pp.nodes[conv usize fty.a];
+                        if (inner.tag == T_NAMED || inner.tag == T_SC) && name_eq(src, inner.p0, inner.p1, vtn.p0, vtn.p1) {
+                            return cur;
+                        }
+                    }
+                }
+                fc = fd.nx;
+            }
+        }
+        cur = nd.nx;
+    }
+    return 0u32;
+}
 // Index of the in-scope local named [s,en), or a count-sized sentinel if absent.
 fn find_local(src: [u8], e: write E, s: usize, en: usize) -> usize {
     let mut i: usize = e.loc_n;
@@ -354,7 +431,20 @@ fn scalar_width(pp: read P, src: [u8], tn: u32) -> i32 {
     if tn == 0u32 { return 0; }
     let nd: Node = pp.nodes[conv usize tn];
     if (nd.tag == T_NAMED || nd.tag == T_SC) { return sc_width(src, nd.p0, nd.p1); }
+    if nd.tag == T_RAWPTR || nd.tag == T_FNPTR { return W_USIZE; }
     return 0;
+}
+// A rawptr / fn-ptr type node carries its pointee type in `.a`. A declared
+// `rawptr T` and the cast_ptr/addr_to_ptr/ptr_null intrinsics all store the
+// pointee in `.a`, so this recovers the pointee type from any rawptr value's
+// `cur_ty` (set when a rawptr scalar is produced).
+fn rawptr_inner(pp: read P, tn: u32) -> u32 {
+    if tn == 0u32 { return 0u32; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_RAWPTR || nd.tag == T_CASTPTR || nd.tag == T_ADDRTOPTR || nd.tag == T_PTRNULL {
+        return nd.a;
+    }
+    return 0u32;
 }
 // The `T_STRUCT` decl node for a struct type descriptor, or 0 if not a struct.
 fn struct_of_ty(pp: read P, src: [u8], e: write E, tn: u32) -> u32 {
@@ -400,6 +490,7 @@ fn ty_size(pp: read P, src: [u8], e: write E, tn: u32) -> usize {
     }
     if nd.tag == T_STRUCT { return struct_size(pp, src, e, tn); }
     if nd.tag == T_ENUM { return enum_size(pp, src, e, tn); }
+    if nd.tag == T_RAWPTR || nd.tag == T_FNPTR { return 8usize; }
     if nd.tag == T_ARRAY {
         let n: usize = array_len_of(pp, nd.a);
         let esz: usize = ty_size(pp, src, e, nd.b);
@@ -422,6 +513,7 @@ fn ty_align(pp: read P, src: [u8], e: write E, tn: u32) -> usize {
     }
     if nd.tag == T_STRUCT { return struct_align(pp, src, e, tn); }
     if nd.tag == T_ENUM { return 8usize; }
+    if nd.tag == T_RAWPTR || nd.tag == T_FNPTR { return 8usize; }
     if nd.tag == T_ARRAY { return ty_align(pp, src, e, nd.b); }
     return 1usize;
 }
@@ -1066,6 +1158,19 @@ fn eval_place(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     }
     if tg == T_ID {
         let idx: usize = find_local(src, e, nd.p0, nd.p1);
+        if idx != e.loc_n {
+            e.*.plc_addr = e.loc_addr[idx];
+            e.*.plc_w = e.loc_w[idx];
+            e.*.plc_ty = e.loc_ty[idx];
+            return 0;
+        }
+        let si: usize = find_static(src, e, nd.p0, nd.p1);
+        if si != e.static_n {
+            e.*.plc_addr = e.static_addr[si];
+            e.*.plc_w = e.static_w[si];
+            e.*.plc_ty = e.static_ty[si];
+            return 0;
+        }
         e.*.plc_addr = e.loc_addr[idx];
         e.*.plc_w = e.loc_w[idx];
         e.*.plc_ty = e.loc_ty[idx];
@@ -1117,6 +1222,7 @@ fn load_place(e: write E) -> i32 {
         let v: i64 = mem_load(e, e.plc_addr, e.plc_w);
         e.*.cur_val = v;
         e.*.cur_w = e.plc_w;
+        e.*.cur_ty = e.plc_ty;
     } else {
         e.*.cur_val = conv i64 e.plc_addr;
         e.*.cur_w = 0;
@@ -1450,20 +1556,50 @@ fn eval_expr(pp: read P, src: [u8], e: write E, i: u32, exp_w: i32) -> i32 {
     }
     if tg == T_ID {
         let idx: usize = find_local(src, e, nd.p0, nd.p1);
-        let w: i32 = e.loc_w[idx];
-        if w != 0 {
-            let v: i64 = mem_load(e, e.loc_addr[idx], w);
-            e.*.cur_val = v;
-            e.*.cur_w = w;
-        } else {
-            e.*.cur_val = conv i64 e.loc_addr[idx];
-            e.*.cur_w = 0;
-            e.*.cur_ty = e.loc_ty[idx];
-            if !is_copy(pp, src, e, e.loc_ty[idx]) {
-                e.*.cur_org = 2;
-                e.*.cur_org_a = idx;
+        if idx != e.loc_n {
+            let w: i32 = e.loc_w[idx];
+            if w != 0 {
+                let v: i64 = mem_load(e, e.loc_addr[idx], w);
+                e.*.cur_val = v;
+                e.*.cur_w = w;
+                e.*.cur_ty = e.loc_ty[idx];
+            } else {
+                e.*.cur_val = conv i64 e.loc_addr[idx];
+                e.*.cur_w = 0;
+                e.*.cur_ty = e.loc_ty[idx];
+                if !is_copy(pp, src, e, e.loc_ty[idx]) {
+                    e.*.cur_org = 2;
+                    e.*.cur_org_a = idx;
+                }
             }
+            return 0;
         }
+        let si: usize = find_static(src, e, nd.p0, nd.p1);
+        if si != e.static_n {
+            let sw: i32 = e.static_w[si];
+            if sw != 0 {
+                e.*.cur_val = mem_load(e, e.static_addr[si], sw);
+                e.*.cur_w = sw;
+                e.*.cur_ty = e.static_ty[si];
+            } else {
+                e.*.cur_val = conv i64 e.static_addr[si];
+                e.*.cur_w = 0;
+                e.*.cur_ty = e.static_ty[si];
+            }
+            return 0;
+        }
+        // A bare name that is neither local nor static resolves to a FUNCTION:
+        // its value is the fn's arena node id (an 8-byte usize fn-ptr), exactly
+        // the oracle's fn-name-as-value (src/interp/eval.rs:722-728).
+        let fid: u32 = find_fn(pp, src, e, nd.p0, nd.p1);
+        if fid != 0u32 {
+            e.*.cur_val = conv i64 fid;
+            e.*.cur_w = W_USIZE;
+            e.*.cur_ty = 0u32;
+            return 0;
+        }
+        e.*.cur_val = 0i64;
+        e.*.cur_w = 0;
         return 0;
     }
     if tg == T_FIELD || tg == T_INDEX {
@@ -1499,6 +1635,34 @@ fn eval_expr(pp: read P, src: [u8], e: write E, i: u32, exp_w: i32) -> i32 {
     }
     if tg == T_MATCH {
         return eval_match(pp, src, e, i);
+    }
+    if tg == T_UNSAFE {
+        // `unsafe "why" { ... }` runs its body block; its raw-pointer ops are
+        // the same primitives, just check-gated (the oracle also just runs it).
+        return exec_block(pp, src, e, nd.a);
+    }
+    if tg == T_CASTPTR {
+        // Reinterpret: keep the address, change the static pointee type. `.b` is
+        // the pointer arg; `.a` (this node) records the new pointee for ptr_read.
+        let sc: i32 = eval_expr(pp, src, e, nd.b, W_USIZE);
+        if sc != 0 { return sc; }
+        e.*.cur_w = W_USIZE;
+        e.*.cur_ty = i;
+        return 0;
+    }
+    if tg == T_ADDRTOPTR {
+        // A usize address literal becomes a rawptr over the SMALL arena.
+        let sc: i32 = eval_expr(pp, src, e, nd.b, W_USIZE);
+        if sc != 0 { return sc; }
+        e.*.cur_w = W_USIZE;
+        e.*.cur_ty = i;
+        return 0;
+    }
+    if tg == T_PTRNULL {
+        e.*.cur_val = 0i64;
+        e.*.cur_w = W_USIZE;
+        e.*.cur_ty = i;
+        return 0;
     }
     if tg == T_PAREN {
         return eval_expr(pp, src, e, nd.a, exp_w);
@@ -1708,8 +1872,7 @@ fn fn_ret_width(pp: read P, src: [u8], fnid: u32) -> i32 {
     if fnd.e == 0u32 { return 4; }
     let rt: Node = pp.nodes[conv usize fnd.e];
     if rt.a == 0u32 { return 4; }
-    let ty: Node = pp.nodes[conv usize rt.a];
-    return sc_width(src, ty.p0, ty.p1);
+    return scalar_width(pp, src, rt.a);
 }
 // The type node of a function's declared return type (0 if none).
 fn fn_ret_tynode(pp: read P, fnid: u32) -> u32 {
@@ -1732,7 +1895,87 @@ fn eval_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
         e.*.cur_org = 0;
         return 0;
     }
-    let fnid: u32 = find_fn(pp, src, e, callee.p0, callee.p1);
+    if span_eq(src, callee.p0, callee.p1, b"addr_of") || span_eq(src, callee.p0, callee.p1, b"addr_of_mut") {
+        let sc: i32 = eval_place(pp, src, e, nd.b);
+        if sc != 0 { return sc; }
+        e.*.cur_val = conv i64 e.plc_addr;
+        e.*.cur_w = W_USIZE;
+        e.*.cur_ty = 0u32;
+        e.*.cur_org = 0;
+        return 0;
+    }
+    if span_eq(src, callee.p0, callee.p1, b"ptr_read") {
+        let sc: i32 = eval_expr(pp, src, e, nd.b, W_USIZE);
+        if sc != 0 { return sc; }
+        let paddr: usize = conv usize to_u64(e.cur_val);
+        let inner: u32 = rawptr_inner(pp, e.cur_ty);
+        let iw: i32 = scalar_width(pp, src, inner);
+        if iw != 0 {
+            e.*.cur_val = mem_load(e, paddr, iw);
+            e.*.cur_w = iw;
+            e.*.cur_ty = inner;
+            e.*.cur_org = 0;
+        } else {
+            let size: usize = ty_size(pp, src, e, inner);
+            let align: usize = ty_align(pp, src, e, inner);
+            let slot: usize = bump_alloc(e, size, align);
+            mem_copy(e, slot, paddr, size);
+            e.*.cur_val = conv i64 slot;
+            e.*.cur_w = 0;
+            e.*.cur_ty = inner;
+            e.*.cur_org = 0;
+            if !is_copy(pp, src, e, inner) {
+                let ti: usize = reg_temp(e, slot, inner);
+                e.*.cur_org = 1;
+                e.*.cur_org_a = ti;
+            }
+        }
+        return 0;
+    }
+    if span_eq(src, callee.p0, callee.p1, b"ptr_write") {
+        let sc: i32 = eval_expr(pp, src, e, nd.b, W_USIZE);
+        if sc != 0 { return sc; }
+        let paddr: usize = conv usize to_u64(e.cur_val);
+        let vnode: Node = pp.nodes[conv usize nd.b];
+        let sc2: i32 = eval_expr(pp, src, e, vnode.nx, 0 - 1i32);
+        if sc2 != 0 { return sc2; }
+        if e.cur_w != 0 {
+            mem_store(e, paddr, e.cur_val, e.cur_w);
+        } else {
+            let vorg: i32 = e.cur_org;
+            let voa: usize = e.cur_org_a;
+            let vob: i32 = e.cur_org_b;
+            let vty: u32 = e.cur_ty;
+            let sa: usize = conv usize e.cur_val;
+            let vsz: usize = ty_size(pp, src, e, vty);
+            mem_copy(e, paddr, sa, vsz);
+            if !is_copy(pp, src, e, vty) {
+                do_consume(e, vorg, voa, vob);
+            }
+        }
+        e.*.cur_val = 0i64;
+        e.*.cur_w = 0;
+        e.*.cur_org = 0;
+        return 0;
+    }
+    if span_eq(src, callee.p0, callee.p1, b"is_null") {
+        let sc: i32 = eval_expr(pp, src, e, nd.b, W_USIZE);
+        if sc != 0 { return sc; }
+        let av: u64 = to_u64(e.cur_val);
+        if av == 0u64 { e.*.cur_val = 1i64; } else { e.*.cur_val = 0i64; }
+        e.*.cur_w = W_BOOL;
+        e.*.cur_org = 0;
+        return 0;
+    }
+    // Direct call (a declared fn) or, when the name is not a fn, an INDIRECT call
+    // through a fn-ptr value: evaluate the callee expression -- which yields the
+    // fn's arena node id -- and call that (the oracle's indirect path, :1604-1610).
+    let mut fnid: u32 = find_fn(pp, src, e, callee.p0, callee.p1);
+    if fnid == 0u32 {
+        let scc: i32 = eval_expr(pp, src, e, nd.a, W_USIZE);
+        if scc != 0 { return scc; }
+        fnid = conv u32 to_u64(e.cur_val);
+    }
     // Evaluate arguments first (a nested call reuses E.arg_*): scalars into arg_val,
     // aggregates as an address in arg_addr (the source temp survives on the bump
     // until call_fn copies it into the callee's by-value param slot).
@@ -2030,6 +2273,55 @@ fn emit_inum(v: i64) -> unit {
     return;
 }
 
+// Static pre-pass (mirrors run_main, src/interp/eval.rs:270-303). Phase 1
+// reserves each `static`'s storage from the bump; phase 2 evaluates every
+// initializer into its slot, resetting the bump between statics so only the
+// static storage (below `static_top`) survives into `main`. Runs before `main`,
+// so a vtable static a fn-ptr program reads is already populated.
+fn run_statics(pp: read P, src: [u8], e: write E) -> unit {
+    let mut scur: u32 = e.head;
+    while scur != 0u32 {
+        let snd: Node = pp.nodes[conv usize scur];
+        if snd.tag == T_STATIC {
+            let tynode: u32 = snd.a;
+            let w: i32 = scalar_width(pp, src, tynode);
+            let size: usize = ty_size(pp, src, e, tynode);
+            let align: usize = ty_align(pp, src, e, tynode);
+            let addr: usize = bump_alloc(e, size, align);
+            let k: usize = e.static_n;
+            e.*.static_p0[k] = snd.p0;
+            e.*.static_p1[k] = snd.p1;
+            e.*.static_addr[k] = addr;
+            e.*.static_w[k] = w;
+            e.*.static_ty[k] = tynode;
+            e.*.static_init[k] = snd.b;
+            e.*.static_n = k + 1usize;
+        }
+        scur = snd.nx;
+    }
+    let static_top: usize = e.stack_bump;
+    let mut sj: usize = 0usize;
+    while sj < e.static_n {
+        let initn: u32 = e.static_init[sj];
+        let addr: usize = e.static_addr[sj];
+        let w: i32 = e.static_w[sj];
+        if w != 0 {
+            let sc: i32 = eval_expr(pp, src, e, initn, w);
+            if sc == 0 { mem_store(e, addr, e.cur_val, w); }
+        } else {
+            let sc: i32 = eval_expr(pp, src, e, initn, 0 - 1i32);
+            if sc == 0 {
+                let size: usize = ty_size(pp, src, e, e.static_ty[sj]);
+                mem_copy(e, addr, conv usize e.cur_val, size);
+            }
+        }
+        e.*.stack_bump = static_top;
+        sj = sj + 1usize;
+    }
+    e.*.tmp_n = 0usize;
+    return;
+}
+
 pub fn interp_dump(src: [u8], buf: read Buf) -> unit {
     let mut p: P = P { nodes: [nnew(0); 32768], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
     let head: u32 = parse_program(write p, src, buf);
@@ -2080,8 +2372,23 @@ pub fn interp_dump(src: [u8], buf: read Buf) -> unit {
         cur_org_b: 0,
         self_p0: 0usize,
         self_p1: 0usize,
+        static_p0: [0usize; 64],
+        static_p1: [0usize; 64],
+        static_addr: [0usize; 64],
+        static_w: [0; 64],
+        static_ty: [0u32; 64],
+        static_init: [0u32; 64],
+        static_n: 0usize,
+        alloc_vt_sid: 0u32,
+        alloc_sid: 0u32,
     };
     set_self_span(src, write e);
+    // Structural Alloc/AllocVtable identification, computed once at startup like
+    // the oracle's `Interp::new`. Stored as the ABI seam S5b's box reads.
+    let avt: u32 = find_alloc_vtable_struct(read p, src, write e);
+    e.alloc_vt_sid = avt;
+    e.alloc_sid = find_alloc_struct(read p, src, write e, avt);
+    run_statics(read p, src, write e);
     let mainid: u32 = find_main(read p, src, write e);
     let mut ret: i64 = 0i64;
     if mainid != 0u32 {

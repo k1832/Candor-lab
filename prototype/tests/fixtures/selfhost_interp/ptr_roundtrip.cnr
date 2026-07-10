@@ -1,0 +1,19 @@
+// S5a: the minimal rawptr surface. Take a raw pointer to a local with
+// `addr_of_mut`, write a value THROUGH it with `ptr_write`, read it back with
+// `ptr_read`, and probe `is_null` / `ptr_null`. The final `return x` proves the
+// pointer aliases the real local (the write landed in `x`'s own storage).
+fn main() -> i64 {
+    let mut x: i64 = 0i64;
+    unsafe "round-trip a value through a raw pointer aliasing a local" {
+        let p: rawptr i64 = addr_of_mut(x);
+        ptr_write(p, 7i64);
+        let y: i64 = ptr_read(p);
+        trace(y);
+        let live: bool = is_null(p);
+        if live { trace(1i64); } else { trace(0i64); }
+        let z: rawptr i64 = ptr_null[i64]();
+        let dead: bool = is_null(z);
+        if dead { trace(1i64); } else { trace(0i64); }
+    }
+    return x;
+}

@@ -1127,3 +1127,65 @@ mark keys on the scrutinee's DIRECT-LOCAL root (`cur_org == 2`), matching S3's o
 constructor-temp scrutinee's partial move is not tracked (out of subset — all fixtures match a
 local). (5) BoxResult (compiler-synthesized, Box-payload variants) is DEFERRED to S5, which reuses
 this enum layout + tag-directed drop. interp.cnr remains NOT self-checked.
+
+### S5a — ALLOCATOR-ABI FOUNDATION in the self-interpreter (fifth slice, part a, 2026-07-11)
+
+The self-interpreter (`prototype/selfhost/interp/interp.cnr`) gains the machinery `box` needs
+but NOT box itself (that is S5b): `rawptr`/`fn`-ptr as scalar values, top-level `static`
+evaluation, fn-name-as-value, INDIRECT calls through a fn-ptr, structural `Alloc`/`AllocVtable`
+identification, and the minimal raw-pointer surface. Same gate
+(`prototype/tests/selfhost_interp.rs`, EXECUTION equality vs `run_source_real`): the corpus grows
+from 50 to 54 fixtures (all returns). Confined to interp.cnr — NO parser change; the parser
+already emits `T_RAWPTR`/`T_FNPTR` types, `T_STATIC`, `T_UNSAFE`, and the `T_CASTPTR`/`T_ADDRTOPTR`/
+`T_PTRNULL` intrinsic nodes. All 50 prior interp fixtures and every lexer/parser/checker/analyses/
+loans/effects self-check gate stay byte-exact (585 suite green, 0 failing; clippy clean).
+
+RAWPTR / FNPTR AS 8-BYTE SCALARS (the R3 prerequisite). `scalar_width` classifies `T_RAWPTR`(17)
+and `T_FNPTR`(22) as an 8-byte, 8-aligned `usize`-coded scalar (and `ty_size`/`ty_align`/
+`fn_ret_width` follow); without this, a `rawptr u8`/`usize`/fn-ptr argument to an indirect call
+mis-routes as an aggregate in `call_fn`. A rawptr VALUE is a plain `u64` address into the flat
+model memory; a fn-ptr VALUE is the callee fn's ARENA NODE ID (the self-interp has no fn-table
+layer, so an indirect call is just `call_fn(pp, src, e, fnid)`) — this differs numerically from the
+oracle's `fn_id_of` index, but a fn-ptr value is never surfaced as an observable, so dumps still
+match byte-exact. A scalar load now carries the place/local's type node in `cur_ty` (harmless for
+plain scalars, which ignore it) so `ptr_read` can recover a rawptr's pointee type via `rawptr_inner`
+(the pointee lives in `.a` of any of `T_RAWPTR`/`T_CASTPTR`/`T_ADDRTOPTR`/`T_PTRNULL`).
+
+FN-NAME-AS-VALUE + STATICS + INDIRECT CALL (mirrors src/interp/eval.rs:722-728, 270-303, 1604-1610).
+`T_ID` resolves a bare name as local, THEN static, THEN function: a fn hit yields the fn's node id
+as an 8-byte usize (fn-name-as-value); `eval_place` gains the same static fallback so `addr_of` of a
+static works. `run_statics` is a two-phase pre-pass (phase 1 reserves each `static`'s bump storage;
+phase 2 evaluates every initializer into its slot, resetting the bump between statics so only the
+static storage below `static_top` survives into `main`), run before `main` so a vtable static a
+fn-ptr program reads is already populated. `eval_call` resolves the callee as a declared fn
+(`find_fn`) or, on a miss, evaluates the callee EXPRESSION to a fn-ptr value and calls that node id —
+the oracle's indirect path; the arg loop then routes by the resolved fn's declared param types.
+
+STRUCTURAL Alloc IDENTIFICATION (mirrors src/interp/eval.rs:236-248, NEVER by name). At startup,
+like the oracle's `Interp::new`, `find_alloc_vtable_struct` finds the struct with fn-ptr fields
+`alloc` AND `free`, and `find_alloc_struct` finds the struct whose `vt` field is a `rawptr` to that
+vtable; the two struct ids are stored on `E` as the ABI seam. (The self-host checker uses
+`Alloc`/`AllocVtable` as its own allocation prelude but carries no structural predicate — that
+predicate lives in the oracle, which this mirrors.) S5a computes+stores them; S5b's box/unbox READ
+them and resolve `ctx`/`vt`/`alloc`/`free` offsets via `field_off` — the documented S5b hook.
+
+MINIMAL RAWPTR SURFACE (mirrors eval.rs builtins + intrinsic exprs). `T_CASTPTR`/`T_ADDRTOPTR`/
+`T_PTRNULL` are address-value producers (reinterpret / usize-to-ptr over the SMALL arena / null=0);
+`addr_of`/`addr_of_mut`, `ptr_read`, `ptr_write`, `is_null` are `T_CALL` builtins dispatched by
+callee name. `ptr_read` loads a scalar pointee into the register or copies an aggregate pointee to a
+fresh bump slot (registering a non-copy temp like a call return); `ptr_write` stores a scalar or
+`mem_copy`s an aggregate through the address (consuming a non-copy source). `T_UNSAFE` runs its body
+block (the ops are the same primitives, just check-gated). Fixtures: `static_fnptr_indirect_call`
+(fn-name-as-value + static eval + indirect call through a fn-ptr-valued local and static field),
+`ptr_roundtrip` (addr_of/ptr_write/ptr_read a local + is_null/ptr_null; the return proves the
+pointer aliases the local), `cast_ptr_read` (cast_ptr as address-reinterpret then a 1-byte
+ptr_read), and `alloc_abi` (a full bump `AllocVtable`/`Alloc`/`Bump` mirroring analyses.cnr:
+main reads the `alloc` fn-ptr out of the vtable and INDIRECT-CALLs `alloc(ctx,size,align)` twice
+over the internal `[8192,16384)` window, proving ctx threading, the bump advancing, and usable
+in-arena pointers — the whole ABI foundation end-to-end, WITHOUT box).
+
+DEFERRED to S5b (clean seams left, none implemented here): `box`/`unbox`/`BoxResult` and
+Box-deref/alloc-on-drop. Absolute addresses differ from the oracle (16384-byte SMALL arena vs the
+oracle's 256 MiB space; DENSE/high-address memory is S6), but only VALUES are observable so dumps
+stay byte-exact. interp.cnr remains NOT self-checked (it uses the full language, incl. `unsafe` and
+the raw-pointer intrinsics).

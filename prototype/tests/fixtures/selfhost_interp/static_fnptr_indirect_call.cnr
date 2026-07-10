@@ -1,0 +1,18 @@
+// S5a: fn-name-as-value + static-item evaluation + indirect call. `dbl` is stored
+// as a fn-ptr inside the `OPS` static; `inc` is taken as a fn-ptr value into a
+// local. Both are invoked INDIRECTLY (callee is a fn-ptr-valued local, not a
+// declared-fn name), so this exercises the whole fn-ptr ABI without any box.
+fn dbl(x: i64) -> i64 { return x * 2i64; }
+fn inc(x: i64) -> i64 { return x + 1i64; }
+
+struct Ops { f: fn(i64) -> i64 }
+static OPS: Ops = Ops { f: dbl };
+
+fn main() -> i64 {
+    let g: fn(i64) -> i64 = OPS.f;
+    let a: i64 = g(20i64);
+    trace(a);
+    let h: fn(i64) -> i64 = inc;
+    let b: i64 = h(a);
+    return b;
+}

@@ -164,6 +164,12 @@ const CORPUS: &[(&str, Shape)] = &[
     ("match_bind_multi.cnr", Ret),
     ("enum_result_shape.cnr", Ret),
     ("enum_drop_payload.cnr", Ret),
+    // ---- S5a: ALLOCATOR-ABI FOUNDATION (rawptr/fnptr scalars, statics,
+    // fn-name-as-value, indirect calls, structural Alloc, minimal rawptr surface) ----
+    ("static_fnptr_indirect_call.cnr", Ret),
+    ("ptr_roundtrip.cnr", Ret),
+    ("cast_ptr_read.cnr", Ret),
+    ("alloc_abi.cnr", Ret),
 ];
 
 fn read_fixture(rel: &str) -> String {

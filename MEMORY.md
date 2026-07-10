@@ -337,3 +337,31 @@ One lesson per entry, one-line summary first.
   "inconsistent move state at join". Make every arm move consistently (all bind a
   payload, or use a single wildcard arm) or the fixture never reaches the interp.
   (self-interp S4, 2026-07-10). See [[self-host-analyses]].
+
+- **Self-interp S5a (allocator-ABI foundation): a fn-ptr value is the fn's ARENA
+  NODE ID, rawptr ops need `unsafe`, and rawptr/fnptr must be 8-byte scalars
+  everywhere including `fn_ret_width`.** Porting the box prerequisites: (1) The
+  self-interp has no fn-table, so fn-name-as-value yields the fn's parser node id
+  and an indirect call is just `call_fn(pp,src,e,fnid)` — this differs numerically
+  from the oracle's `fn_id_of` index, but a fn-ptr value is NEVER surfaced as a
+  RET/TRACE observable, so dumps stay byte-exact. Likewise absolute addresses
+  differ (16384-byte SMALL arena vs the oracle's 256 MiB space) yet only VALUES
+  are observable — surface a value written/read THROUGH a pointer, never an address
+  (no `ptr_to_addr` in-subset), and both engines agree. (2) Classify `T_RAWPTR`(17)
+  and `T_FNPTR`(22) as an 8-byte usize scalar in `scalar_width` AND `ty_size`/
+  `ty_align` AND `fn_ret_width` — the last is easy to miss: a `-> rawptr u8` fn
+  whose return width stays 0 delivers its result on the aggregate channel (`cur_w
+  == 0`) and the caller mis-reads it. To let `ptr_read` recover a pointee type,
+  make a scalar load carry the place/local type in `cur_ty` (harmless — plain
+  scalars ignore it) and read the pointee from `.a` of any rawptr-shaped node
+  (`rawptr_inner` over T_RAWPTR/T_CASTPTR/T_ADDRTOPTR/T_PTRNULL). (3) FIXTURE TRAP:
+  raw-pointer ops (addr_of/ptr_read/ptr_write/cast_ptr/addr_to_ptr/ptr_null; NOT
+  is_null) are E0501 outside an `unsafe "why" {}` block, so fixtures need real
+  unsafe blocks and the interp must handle `T_UNSAFE` (run the body). `unsafe`
+  types as `unit` and yields no value — surface results via `return` from inside or
+  by assigning an outer `let mut`. And `out` is a reserved keyword — never a
+  binding name. (4) Identify Alloc/AllocVtable STRUCTURALLY at startup (vtable =
+  struct with `alloc`+`free` fn-ptr fields; handle = struct whose `vt` is a rawptr
+  to it), mirroring the oracle's `Interp::new`, NOT the checker (which only uses
+  Alloc as its own prelude, no predicate) — this is the S5b box seam.
+  (self-interp S5a, 2026-07-11). See [[self-host-analyses]].

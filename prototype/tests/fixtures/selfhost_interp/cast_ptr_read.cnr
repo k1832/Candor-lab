@@ -1,0 +1,17 @@
+// S5a: `cast_ptr` as an address-reinterpret. Take a pointer to a struct, retype
+// it to `rawptr u8` (same address, new pointee type), then `ptr_read` its first
+// byte -- which is `Pair.a` at offset 0.
+struct Pair { a: u8, b: u8 }
+
+fn main() -> i64 {
+    let mut pr: Pair = Pair { a: 65u8, b: 66u8 };
+    let mut res: i64 = 0i64;
+    unsafe "reinterpret a struct's address as a byte view and read its first byte" {
+        let base: rawptr Pair = addr_of_mut(pr);
+        let bytep: rawptr u8 = cast_ptr[u8](base);
+        let first: u8 = ptr_read(bytep);
+        if first == 65u8 { res = 65i64; } else { res = 0i64; }
+    }
+    trace(res);
+    return res;
+}

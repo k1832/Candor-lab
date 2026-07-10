@@ -1,0 +1,55 @@
+// S5a: the allocator ABI end-to-end, WITHOUT box. A minimal bump allocator
+// (mirroring selfhost/analyses/analyses.cnr) exposes an `AllocVtable` static of
+// fn-ptrs; the `Alloc` handle pairs a `ctx` rawptr with a `vt` rawptr to it.
+// `main` reads the `alloc` fn-ptr out of the vtable and INDIRECT-CALLs it twice,
+// proving ctx threading, the bump advancing, and a usable in-arena pointer --
+// the whole ABI foundation box will later sit on. The SMALL arena window is
+// [8192, 16384), internal to the 16384-byte model memory.
+struct AllocVtable {
+    alloc: fn(rawptr u8, usize, usize) -> rawptr u8,
+    free: fn(rawptr u8, rawptr u8, usize, usize) -> unit,
+}
+struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize }
+
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live Bump whose [next,end) window is this arena's alone" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let aligned: usize = (b.next + align - 1usize) / align * align;
+        if aligned + size > b.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    return;
+}
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+
+fn main() -> i64 {
+    let mut st: Bump = Bump { next: 8192usize, end: 16384usize };
+    let mut total: i64 = 0i64;
+    unsafe "drive the allocator ABI directly via an indirect vtable call, no box" {
+        let ctxp: rawptr u8 = cast_ptr[u8](addr_of_mut(st));
+        let vtp: rawptr AllocVtable = addr_of(BUMP_VT);
+        let al: Alloc = Alloc { ctx: ctxp, vt: vtp };
+        let vt: AllocVtable = ptr_read(al.vt);
+        let f: fn(rawptr u8, usize, usize) -> rawptr u8 = vt.alloc;
+        let p: rawptr u8 = f(al.ctx, 8usize, 8usize);
+        if is_null(p) { return 0 - 1i64; }
+        let pi: rawptr i64 = cast_ptr[i64](p);
+        ptr_write(pi, 123i64);
+        let got1: i64 = ptr_read(pi);
+        trace(got1);
+        let q: rawptr u8 = f(al.ctx, 8usize, 8usize);
+        if is_null(q) { return 0 - 2i64; }
+        let qi: rawptr i64 = cast_ptr[i64](q);
+        ptr_write(qi, 456i64);
+        let got2: i64 = ptr_read(qi);
+        trace(got2);
+        total = got1 + got2;
+    }
+    return total;
+}
