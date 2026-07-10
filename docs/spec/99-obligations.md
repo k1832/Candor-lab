@@ -440,6 +440,8 @@ item `nx`-chain (O(n), n tiny) from a root index stored in `C`. VERDICT for the 
 hardest slice so far threads 2 read-views on the majority of signatures — under the 4-5 trigger.
 The ratified source-threading cost holds; no re-open warranted by this slice.
 
+> **Perf addendum (2026-07-10):** the checker's name resolution is now **Map-backed** (std hash `Map`, O(1) `contains`). One setup pass (`build_symbols`) registers imported names + declared struct/enum names into a `known_types` Map and imported names + declared fn/static names into a `known_values` Map; `is_type_known`/`is_value_known` answer by `contains` instead of the former per-occurrence O(names×items) `nx`-chain + import-chain scans. SET semantics answer identically to the scan (duplicate names are idempotent), so diagnostics are byte-exact; the `C` struct gained the two `Map` fields and `check_dump` an `Alloc` handle (a bump prelude, dropped with `C`). Output-invariant; parser.cnr self-check gate 47s→36s debug. Locals stay a linear stack (few, scoped); the analyses slice's own scans are the next lever.
+
 (2) **The span-lean slice-2 arena confines the checker to NAME-TOKEN-span diagnostics.** Slice 2
 excluded spans from its canonical AST (differential target = tree shape), so the arena `Node`
 stores only NAME-token spans (`p0/p1`) for identifiers/types/fields and NO span at all for

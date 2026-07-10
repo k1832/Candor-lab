@@ -55,10 +55,12 @@ fn oracle_dump(src: &str) -> String {
 
 /// Generate the root `main.cnr`: it `use`s the lexer module's `Buf`/`mk`/`lex`
 /// and the checker module's `check_dump`, embeds `src`, lexes then check-dumps it.
+/// `main` is `alloc` because `check_dump` builds Map-backed symbol tables (the
+/// allocator-explicit `map_new`), whose effect is viral through the call.
 fn candor_main(src: &str) -> String {
     let bytes = src.as_bytes();
     let mut m = String::from(
-        "use lexer::{Buf, mk, lex};\nuse checker::{check_dump};\n\nfn main() -> i64 {\n",
+        "use lexer::{Buf, mk, lex};\nuse checker::{check_dump};\n\nfn main() alloc -> i64 {\n",
     );
     m.push_str(&format!("    let src: [{}]u8 = [", bytes.len()));
     for (i, b) in bytes.iter().enumerate() {

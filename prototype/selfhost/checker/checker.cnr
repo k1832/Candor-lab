@@ -29,6 +29,38 @@
 use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl};
 use parser::{Node, P, nnew, parse_program, emit_lit, T_USE, T_FN, T_STRUCT, T_ENUM, T_STATIC, T_NAMED, T_APP, T_ARRAY, T_SLICE, T_SLICEMUT, T_RAWPTR, T_BOX, T_BOXRESULT, T_BORROW, T_BORROWMUT, T_FNPTR, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_STR, T_BYTES, T_BOOL, T_ID, T_UNARY, T_PREFIX, T_BIN, T_CALL, T_OUT, T_FIELD, T_INDEX, T_CONV, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, T_ENUMCTOR, T_BLOCK, T_IF, T_MATCH, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_RESULT, T_PAREN, T_TRY, T_UNSAFE, T_WRAPPING, T_SATURATING, T_SIZEOF, T_ALIGNOF, T_OFFSETOF, T_FIELDPTR, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_BIND, T_PVARIANT};
 
+// ---- allocator prelude (to obtain the `Alloc` handle the symbol-table `Map`s
+// require). A bump arena over a reserved flat-memory window, identical in shape
+// to the analyses slice's prelude; module qualification keeps it distinct from
+// `analyses::Alloc` when both modules share a tree.
+struct AllocVtable {
+    alloc: fn(rawptr u8, usize, usize) -> rawptr u8,
+    free: fn(rawptr u8, rawptr u8, usize, usize) -> unit,
+}
+struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize }
+
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live Bump whose [next,end) window is reserved to this arena alone; the carved block stays inside the window" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let aligned: usize = (b.next + align - 1usize) / align * align;
+        if aligned + size > b.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    return;
+}
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+fn mk_alloc(state: write Bump) -> Alloc {
+    unsafe "the Bump window and BUMP_VT outlive every Map key copy this handle serves for the whole check run" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) };
+    }
+}
+
 // ---- checker state ----------------------------------------------------------
 struct C {
     head: u32,
@@ -40,6 +72,12 @@ struct C {
     ds: [512]usize,
     de: [512]usize,
     dn: usize,
+    // Map-backed symbol tables (SET semantics; value is an unused 0 sentinel).
+    // `known_types` = imported names + declared struct/enum names; `known_values`
+    // = imported names + declared fn/static names. O(1) `contains` replaces the
+    // former linear item-table + import-chain scans on every name occurrence.
+    known_types: Map[i64],
+    known_values: Map[i64],
 }
 
 // ---- small helpers ----------------------------------------------------------
@@ -88,9 +126,12 @@ fn is_builtin(src: [u8], s: usize, e: usize) -> bool {
     if span_eq(src, s, e, b"as_str") { return true; }
     if span_eq(src, s, e, b"box") { return true; }
     if span_eq(src, s, e, b"cancelled") { return true; }
+    if span_eq(src, s, e, b"contains") { return true; }
     if span_eq(src, s, e, b"get") { return true; }
+    if span_eq(src, s, e, b"insert") { return true; }
     if span_eq(src, s, e, b"is_null") { return true; }
     if span_eq(src, s, e, b"len") { return true; }
+    if span_eq(src, s, e, b"map_new") { return true; }
     if span_eq(src, s, e, b"ptr_offset") { return true; }
     if span_eq(src, s, e, b"ptr_read") { return true; }
     if span_eq(src, s, e, b"ptr_to_addr") { return true; }
@@ -112,53 +153,53 @@ fn is_builtin(src: [u8], s: usize, e: usize) -> bool {
     return false;
 }
 
-// A name brought into scope by a `use` import (design 0008 3). The parser
-// collects `use` decls into `p.uses`, a chain of T_USE nodes each heading a
-// T_NAME chain of the imported binding names. An imported name resolves as BOTH
-// a known type and a known value here: this slice's arena does not record which
-// module the name is a type or a value in, and registering into both sets is
-// sound for the no-false-positive goal (a clean module never over-flags).
-fn is_imported(pp: read P, src: [u8], c: write C, s: usize, e: usize) -> bool {
+// Populate the Map-backed symbol tables in ONE setup pass, before the item
+// passes run. An imported name (a `use` binding) registers as BOTH a known type
+// and a known value: this slice's arena does not record which module the name is
+// a type or value in, and over-registering is sound for the no-false-positive
+// goal (a clean module never over-flags) -- exactly the union the former
+// `is_imported` linear chain scan answered. Declared struct/enum names register
+// as known types; declared fn/static names as known values. Duplicate names are
+// idempotent under the SET semantics (a re-insert overwrites the same 0
+// sentinel), matching the linear scan's "any match => true".
+fn build_symbols(pp: read P, src: [u8], c: write C) alloc -> unit {
     let mut u: u32 = c.uhead;
     while u != 0u32 {
         let un: Node = pp.nodes[conv usize u];
         let mut nm: u32 = un.a;
         while nm != 0u32 {
             let nn: Node = pp.nodes[conv usize nm];
-            if name_eq(src, s, e, nn.p0, nn.p1) {
-                return true;
-            }
+            insert(write c.known_types, subslice(src, nn.p0, nn.p1), 0);
+            insert(write c.known_values, subslice(src, nn.p0, nn.p1), 0);
             nm = nn.nx;
         }
         u = un.nx;
-    }
-    return false;
-}
-
-// A known TYPE name: the compiler-known types + any declared struct/enum.
-fn is_type_known(pp: read P, src: [u8], c: write C, s: usize, e: usize) -> bool {
-    if span_eq(src, s, e, b"str") { return true; }
-    if span_eq(src, s, e, b"Cancel") { return true; }
-    if span_eq(src, s, e, b"Utf8Res") { return true; }
-    if span_eq(src, s, e, b"String") { return true; }
-    if is_imported(pp, src, c, s, e) {
-        return true;
     }
     let mut cur: u32 = c.head;
     while cur != 0u32 {
         let nd: Node = pp.nodes[conv usize cur];
         if nd.tag == T_STRUCT || nd.tag == T_ENUM {
-            if name_eq(src, s, e, nd.p0, nd.p1) {
-                return true;
-            }
+            insert(write c.known_types, subslice(src, nd.p0, nd.p1), 0);
+        }
+        if nd.tag == T_FN || nd.tag == T_STATIC {
+            insert(write c.known_values, subslice(src, nd.p0, nd.p1), 0);
         }
         cur = nd.nx;
     }
-    return false;
+    return;
+}
+
+// A known TYPE name: the compiler-known types + any declared struct/enum.
+fn is_type_known(src: [u8], c: write C, s: usize, e: usize) -> bool {
+    if span_eq(src, s, e, b"str") { return true; }
+    if span_eq(src, s, e, b"Cancel") { return true; }
+    if span_eq(src, s, e, b"Utf8Res") { return true; }
+    if span_eq(src, s, e, b"String") { return true; }
+    return contains(read c.known_types, subslice(src, s, e));
 }
 
 // A known VALUE name: an in-scope local/param, or any declared fn/static.
-fn is_value_known(pp: read P, src: [u8], c: write C, s: usize, e: usize) -> bool {
+fn is_value_known(src: [u8], c: write C, s: usize, e: usize) -> bool {
     let mut i: usize = 0usize;
     while i < c.loc_n {
         if name_eq(src, s, e, c.loc_p0[i], c.loc_p1[i]) {
@@ -166,20 +207,7 @@ fn is_value_known(pp: read P, src: [u8], c: write C, s: usize, e: usize) -> bool
         }
         i = i + 1usize;
     }
-    if is_imported(pp, src, c, s, e) {
-        return true;
-    }
-    let mut cur: u32 = c.head;
-    while cur != 0u32 {
-        let nd: Node = pp.nodes[conv usize cur];
-        if nd.tag == T_FN || nd.tag == T_STATIC {
-            if name_eq(src, s, e, nd.p0, nd.p1) {
-                return true;
-            }
-        }
-        cur = nd.nx;
-    }
-    return false;
+    return contains(read c.known_values, subslice(src, s, e));
 }
 
 // ---- E0102: resolve a TYPE node, flagging unknown Named types ---------------
@@ -190,7 +218,7 @@ fn resolve_type(pp: read P, src: [u8], c: write C, i: u32) -> unit {
     let nd: Node = pp.nodes[conv usize i];
     let tg: i32 = nd.tag;
     if tg == T_NAMED {
-        if !is_type_known(pp, src, c, nd.p0, nd.p1) {
+        if !is_type_known(src, c, nd.p0, nd.p1) {
             push_diag(c, 102, nd.p0, nd.p1);
         }
         return;
@@ -260,7 +288,7 @@ fn chk_expr(pp: read P, src: [u8], c: write C, i: u32) -> unit {
     let nd: Node = pp.nodes[conv usize i];
     let tg: i32 = nd.tag;
     if tg == T_ID {
-        if !is_value_known(pp, src, c, nd.p0, nd.p1) {
+        if !is_value_known(src, c, nd.p0, nd.p1) {
             push_diag(c, 103, nd.p0, nd.p1);
         }
         return;
@@ -559,7 +587,9 @@ fn dump_diags(c: write C) -> unit {
 }
 
 // ---- entry ------------------------------------------------------------------
-pub fn check_dump(src: [u8], buf: read Buf) -> unit {
+pub fn check_dump(src: [u8], buf: read Buf) alloc -> unit {
+    let mut bump: Bump = Bump { next: 16777216usize, end: 33554432usize };
+    let al: Alloc = mk_alloc(write bump);
     let mut p: P = P { nodes: [nnew(0); 32768], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
     let head: u32 = parse_program(write p, src, buf);
     let uh: u32 = p.uses;
@@ -573,7 +603,10 @@ pub fn check_dump(src: [u8], buf: read Buf) -> unit {
         ds: [0usize; 512],
         de: [0usize; 512],
         dn: 0usize,
+        known_types: map_new(read al),
+        known_values: map_new(read al),
     };
+    build_symbols(read p, src, write c);
     resolve_decl_types(read p, src, write c);
     check_bodies(read p, src, write c);
     sort_diags(write c);
