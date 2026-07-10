@@ -8,7 +8,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use candor_proto::{run_dir, RunResult};
+use candor_proto::{check_dir, diag::Diag, run_dir, RunResult};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -26,6 +26,25 @@ pub fn run_module_tree(modules: &[(&str, &str)], main_cnr: &str) -> RunResult {
     }
     std::fs::write(dir.join("main.cnr"), main_cnr).expect("write main.cnr");
     let result = run_dir(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+/// Materialize `modules` plus the generated `main.cnr` into a fresh temp dir and
+/// run the MODULE-AWARE reference checker (`check_dir`) over the tree, returning
+/// its diagnostics. Unlike the single-file `check_source_real`, this resolves the
+/// tree's `use` imports before checking, so a non-leaf module's imported names are
+/// known -- the correct oracle for the import-resolution isolation gate.
+pub fn check_module_tree(modules: &[(&str, &str)], main_cnr: &str) -> Result<Vec<Diag>, Diag> {
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("selfhost_check_{}_{id}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp module dir");
+    for (name, src) in modules {
+        std::fs::write(dir.join(name), src).unwrap_or_else(|e| panic!("write {name}: {e}"));
+    }
+    std::fs::write(dir.join("main.cnr"), main_cnr).expect("write main.cnr");
+    let result = check_dir(&dir);
     let _ = std::fs::remove_dir_all(&dir);
     result
 }

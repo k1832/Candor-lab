@@ -27,11 +27,12 @@
 // views is the irreducible context for a checker over a borrow-view source.
 
 use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl};
-use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_STRUCT, T_ENUM, T_STATIC, T_NAMED, T_APP, T_ARRAY, T_SLICE, T_SLICEMUT, T_RAWPTR, T_BOX, T_BOXRESULT, T_BORROW, T_BORROWMUT, T_FNPTR, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_STR, T_BYTES, T_BOOL, T_ID, T_UNARY, T_PREFIX, T_BIN, T_CALL, T_OUT, T_FIELD, T_INDEX, T_CONV, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, T_ENUMCTOR, T_BLOCK, T_IF, T_MATCH, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_RESULT, T_PAREN, T_TRY, T_UNSAFE, T_WRAPPING, T_SATURATING, T_SIZEOF, T_ALIGNOF, T_OFFSETOF, T_FIELDPTR, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_BIND, T_PVARIANT};
+use parser::{Node, P, nnew, parse_program, emit_lit, T_USE, T_FN, T_STRUCT, T_ENUM, T_STATIC, T_NAMED, T_APP, T_ARRAY, T_SLICE, T_SLICEMUT, T_RAWPTR, T_BOX, T_BOXRESULT, T_BORROW, T_BORROWMUT, T_FNPTR, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_STR, T_BYTES, T_BOOL, T_ID, T_UNARY, T_PREFIX, T_BIN, T_CALL, T_OUT, T_FIELD, T_INDEX, T_CONV, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, T_ENUMCTOR, T_BLOCK, T_IF, T_MATCH, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_RESULT, T_PAREN, T_TRY, T_UNSAFE, T_WRAPPING, T_SATURATING, T_SIZEOF, T_ALIGNOF, T_OFFSETOF, T_FIELDPTR, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_BIND, T_PVARIANT};
 
 // ---- checker state ----------------------------------------------------------
 struct C {
     head: u32,
+    uhead: u32,
     loc_p0: [512]usize,
     loc_p1: [512]usize,
     loc_n: usize,
@@ -108,12 +109,38 @@ fn is_builtin(src: [u8], s: usize, e: usize) -> bool {
     return false;
 }
 
+// A name brought into scope by a `use` import (design 0008 3). The parser
+// collects `use` decls into `p.uses`, a chain of T_USE nodes each heading a
+// T_NAME chain of the imported binding names. An imported name resolves as BOTH
+// a known type and a known value here: this slice's arena does not record which
+// module the name is a type or a value in, and registering into both sets is
+// sound for the no-false-positive goal (a clean module never over-flags).
+fn is_imported(pp: read P, src: [u8], c: write C, s: usize, e: usize) -> bool {
+    let mut u: u32 = c.uhead;
+    while u != 0u32 {
+        let un: Node = pp.nodes[conv usize u];
+        let mut nm: u32 = un.a;
+        while nm != 0u32 {
+            let nn: Node = pp.nodes[conv usize nm];
+            if name_eq(src, s, e, nn.p0, nn.p1) {
+                return true;
+            }
+            nm = nn.nx;
+        }
+        u = un.nx;
+    }
+    return false;
+}
+
 // A known TYPE name: the compiler-known types + any declared struct/enum.
 fn is_type_known(pp: read P, src: [u8], c: write C, s: usize, e: usize) -> bool {
     if span_eq(src, s, e, b"str") { return true; }
     if span_eq(src, s, e, b"Cancel") { return true; }
     if span_eq(src, s, e, b"Utf8Res") { return true; }
     if span_eq(src, s, e, b"String") { return true; }
+    if is_imported(pp, src, c, s, e) {
+        return true;
+    }
     let mut cur: u32 = c.head;
     while cur != 0u32 {
         let nd: Node = pp.nodes[conv usize cur];
@@ -135,6 +162,9 @@ fn is_value_known(pp: read P, src: [u8], c: write C, s: usize, e: usize) -> bool
             return true;
         }
         i = i + 1usize;
+    }
+    if is_imported(pp, src, c, s, e) {
+        return true;
     }
     let mut cur: u32 = c.head;
     while cur != 0u32 {
@@ -527,10 +557,12 @@ fn dump_diags(c: write C) -> unit {
 
 // ---- entry ------------------------------------------------------------------
 pub fn check_dump(src: [u8], buf: read Buf) -> unit {
-    let mut p: P = P { nodes: [nnew(0); 4096], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32 };
+    let mut p: P = P { nodes: [nnew(0); 8192], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
     let head: u32 = parse_program(write p, src, buf);
+    let uh: u32 = p.uses;
     let mut c: C = C {
         head: head,
+        uhead: uh,
         loc_p0: [0usize; 512],
         loc_p1: [0usize; 512],
         loc_n: 0usize,

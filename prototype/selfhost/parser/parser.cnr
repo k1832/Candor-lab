@@ -45,7 +45,7 @@ pub copy struct Node {
 }
 
 pub struct P {
-    nodes: [4096]Node,
+    nodes: [8192]Node,
     n: u32,
     pos: usize,
     no_struct: i32,
@@ -54,12 +54,14 @@ pub struct P {
     mmode: i32,
     mreg: u32,
     mty: u32,
+    uses: u32,
 }
 
 pub static T_FN: i32 = 1;
 pub static T_STRUCT: i32 = 2;
 pub static T_ENUM: i32 = 3;
 pub static T_STATIC: i32 = 4;
+pub static T_USE: i32 = 5;
 pub static T_SC: i32 = 10;
 pub static T_NAMED: i32 = 11;
 pub static T_APP: i32 = 12;
@@ -1967,13 +1969,88 @@ fn parse_item(p: write P, src: [u8], buf: read Buf) -> u32 {
     return 0u32;
 }
 
-// Parse the whole program: returns the head of the item chain (via nx).
+// Parse a `use path::{a, b};` (or `use path::name;`) import (design 0008 3),
+// building a T_USE node whose `a` edge heads a T_NAME chain of the IMPORTED
+// binding names. `use`/`pub` are contextual (identifier tokens, not keywords),
+// matching the Rust reference lexer/parser, so they are recognized by `ids`.
+fn parse_use(p: write P, src: [u8], buf: read Buf) -> u32 {
+    adv(p, buf);
+    let mut lastseg: Tok = tok_at(buf, p.pos);
+    adv(p, buf);
+    let mut nhead: u32 = 0u32;
+    let mut ntail: u32 = 0u32;
+    let mut grouped: bool = false;
+    loop {
+        if ck(p, buf) != 21 {
+            break;
+        }
+        adv(p, buf);
+        if ck(p, buf) == 12 {
+            adv(p, buf);
+            grouped = true;
+            loop {
+                if ck(p, buf) == 13 {
+                    break;
+                }
+                let nt: Tok = tok_at(buf, p.pos);
+                adv(p, buf);
+                let nn: u32 = mk_name(p, nt.start, nt.end);
+                if nhead == 0u32 {
+                    nhead = nn;
+                } else {
+                    set_next(p, ntail, nn);
+                }
+                ntail = nn;
+                if !eat(p, buf, 16) {
+                    break;
+                }
+            }
+            expect(p, buf, 13);
+            break;
+        }
+        lastseg = tok_at(buf, p.pos);
+        adv(p, buf);
+    }
+    if !grouped {
+        nhead = mk_name(p, lastseg.start, lastseg.end);
+    }
+    expect(p, buf, 19);
+    let mut nd: Node = nnew(T_USE);
+    nd.a = nhead;
+    return push_node(p, nd);
+}
+
+// Parse the whole program: returns the head of the item chain (via nx). `use`
+// imports are collected into a SEPARATE chain whose head is stored in `p.uses`
+// (mirroring the Rust reference's `mod_uses` side channel), so the item chain
+// the AST dump walks stays free of import nodes -- keeping the dump byte-exact
+// against the oracle, which likewise excludes `use` decls from `Program.items`.
 pub fn parse_program(p: write P, src: [u8], buf: read Buf) -> u32 {
     let mut head: u32 = 0u32;
     let mut tail: u32 = 0u32;
+    let mut uhead: u32 = 0u32;
+    let mut utail: u32 = 0u32;
     loop {
         if ck(p, buf) == 99 {
             break;
+        }
+        // Item-preamble `pub` (design 0008 2) is a contextual visibility marker;
+        // it affects only cross-module visibility, not this module's AST shape,
+        // so it is consumed and dropped -- matching the oracle's discarded `_vis`.
+        let pt: Tok = tok_at(buf, p.pos);
+        if ids(src, pt, b"pub") {
+            adv(p, buf);
+        }
+        let ut: Tok = tok_at(buf, p.pos);
+        if ids(src, ut, b"use") {
+            let u: u32 = parse_use(p, src, buf);
+            if uhead == 0u32 {
+                uhead = u;
+            } else {
+                set_next(p, utail, u);
+            }
+            utail = u;
+            continue;
         }
         let it: u32 = parse_item(p, src, buf);
         if it != 0u32 {
@@ -1985,6 +2062,7 @@ pub fn parse_program(p: write P, src: [u8], buf: read Buf) -> u32 {
             tail = it;
         }
     }
+    p.*.uses = uhead;
     return head;
 }
 
@@ -2827,7 +2905,7 @@ fn emit_regions_inline(p: write P, src: [u8], head: u32) -> unit {
 }
 
 pub fn parse_dump(src: [u8], buf: read Buf) -> unit {
-    let mut p: P = P { nodes: [nnew(0); 4096], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32 };
+    let mut p: P = P { nodes: [nnew(0); 8192], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
     let head: u32 = parse_program(write p, src, buf);
     emit_lit(b"(program");
     emit_children(write p, src, head);

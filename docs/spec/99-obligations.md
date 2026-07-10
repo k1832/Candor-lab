@@ -700,3 +700,59 @@ pass through ONE test — no name special-case. A focused checker test proves it
 and a non-handle struct passed to `vec_new` still gets E0703. With the checker fixed, the
 analyses/loans/effects harnesses were converted from `include_str!` concatenation to the module-tree
 loader (`run_module_tree`), completing the split — all six slices are now modular.
+
+### Import resolution — the self-host CHECKER checks a NON-LEAF module clean in isolation (2026-07-10)
+
+Step 3-continued of self-checking self-hosting: `use`/`pub` import resolution added to the
+self-host front-end so a module can be checked IN ISOLATION with its imported names resolved,
+instead of concatenating sources. Payoff gate added to `prototype/tests/selfhost_checker.rs`
+(`candor_checker_checks_checker_source_clean_via_import_resolution`): the self-host checker checks
+`selfhost/checker/checker.cnr` — a NON-LEAF module that imports names from BOTH the `lexer` and
+`parser` modules (`use lexer::{Buf, span_eq, ...}; use parser::{Node, P, T_FN, ...}`) — and emits
+an EMPTY E0102/E0103 set, byte-equal to the MODULE-AWARE reference oracle (`check_dir` over the
+lexer+parser+checker tree). Contrast the leaf-module `lexer.cnr` fixpoint gate: that module has no
+imports, so it checks clean trivially; checker.cnr resolves ~70 imported names to check clean.
+
+ORACLE-TOKEN-PARITY RESOLUTION (the subtlety resolved before coding): the Rust reference lexer
+(`src/real/token.rs::real_keyword_from_str`) does NOT list `use`/`pub` — they lex as IDENTIFIERS,
+and the reference PARSER recognizes them CONTEXTUALLY at item-leading position (`at_ident("pub")`/
+`at_ident("use")`, collecting `use` decls into the `mod_uses` side channel, dropping `pub` into a
+discarded `_vis` vector). So the self-host lexer needed NO change — it already leaves `use`/`pub` as
+IDENT (kind 1), matching the reference byte-exact; inventing keyword tokens would have BROKEN token
+parity. Resolution lives at the PARSER level from identifier tokens (via the existing `ids` helper).
+
+PARSER: `use path::{a, b};` / `use path::name;` parses into a `T_USE` node whose `a` edge heads a
+T_NAME chain of the imported binding names; `pub` is consumed as a visibility marker and dropped.
+The `use` nodes are collected into a SEPARATE chain stored in a new `P.uses` field (mirroring the
+reference's `mod_uses` side channel), NOT the item chain the AST S-expr dump walks — so the parser
+dump stays byte-exact against the oracle, which likewise excludes `use` decls from `Program.items`
+(the oracle's `_uses` is discarded by the S-expr renderer). No reference-dump change was needed.
+
+CHECKER: after `parse_program`, `P.uses` is read into `C.uhead`; `is_type_known` and
+`is_value_known` each scan the imported-name chain (`is_imported`), registering every imported name
+as BOTH a known type and a known value (sound for the clean-source no-false-positive goal; the
+span-lean arena does not record which module a name is a type-vs-value in). `pub fn`/`pub struct`
+still register their own names normally (visibility is cross-module only).
+
+BLOCKER — parser.cnr is NOT isolation-checkable via this harness (harness embedding ceiling, NOT a
+front-end limit and NOT related to import resolution): the module-tree harness embeds the checked
+source as a `[N]u8` array literal in a generated `main.cnr`. checker.cnr (19.5 KB -> ~107 KB main)
+embeds and lexes byte-exact; parser.cnr (77.7 KB -> ~465 KB main) is CORRUPTED by the real
+front-end when it parses that giant literal — the interpreter sees len==77660 but the embedded bytes
+diverge from the file at byte 1748 (self-host lexer yields 11378 tokens vs the oracle's 19703), so
+its self-host parse derails. checker.cnr is the correct isolation target regardless: it is a genuine
+non-leaf module importing from two modules and exercises richer import resolution than parser.cnr
+(which imports only from lexer). Reaching parser.cnr-scale isolation needs a harness that feeds
+source without a giant array literal (out of scope here).
+
+ARENA CAPACITY: `checker.cnr` measures 4011 tokens / 2432 self-host arena nodes; `lexer.cnr` 3690 /
+2389. Both `Buf.toks` (lexer.cnr) and `P.nodes` (parser.cnr) grown 4096 -> **8192** (comfortable ~2x
+token / ~3.4x node headroom over the ~4k-token self-host files that are checked in isolation),
+sized to the measured target rather than the unreachable parser.cnr. Every coupled site moved
+together: the `Buf.toks`/`P.nodes` struct fields, the three `[nnew(0); 8192]` P-literals
+(parser/checker/analyses `*.cnr`), and the six harness-generated `main.cnr` Buf-literals
+(selfhost_{lexer,parser,checker,analyses,effects,loans}.rs). A new `P.uses: u32` field threads the
+use-chain head; all three P-literals updated. The arena model is UNCHANGED ([N]Node, u32 edges,
+region-free view threading). All prior selfhost oracle gates stay byte-exact green under the larger
+arenas + the new field. Isolation-gate runtime ~7.7s (lex+parse+check of the 4011-token file, twice,
+with the checker's linear name scans); the Map/symbol-table adoption remains the planned perf lever.

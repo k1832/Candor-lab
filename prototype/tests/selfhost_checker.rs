@@ -21,7 +21,7 @@ use candor_proto::check_source_real;
 use candor_proto::RunResult;
 
 mod selfhost_modtree;
-use selfhost_modtree::{run_module_tree, trace_text};
+use selfhost_modtree::{check_module_tree, run_module_tree, trace_text};
 
 const LEXER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/lexer/lexer.cnr"));
@@ -66,7 +66,7 @@ fn candor_main(src: &str) -> String {
         m.push_str(&format!("{b}u8"));
     }
     m.push_str("];\n");
-    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 4096], n: 0usize };\n");
+    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 8192], n: 0usize };\n");
     m.push_str("    let cnt: usize = lex(slice_of(src), write buf);\n");
     m.push_str("    check_dump(slice_of(src), read buf);\n");
     m.push_str("    return conv i64 cnt;\n}\n");
@@ -170,6 +170,80 @@ fn candor_checker_checks_lexer_source_clean_fixpoint() {
         assert!(
             mine.is_empty(),
             "self-host checker emitted covered diagnostics on clean lexer.cnr: {mine:?}"
+        );
+    });
+}
+
+/// Render the MODULE-AWARE oracle's diagnostics (from `check_dir` over the
+/// lexer+parser+checker tree, which resolves `use` imports before checking) in
+/// the same canonical schema as `oracle_dump`, filtered to the covered families.
+fn module_oracle_dump(src: &str) -> String {
+    let main = candor_main(src);
+    let modules = [
+        ("lexer.cnr", LEXER_SRC),
+        ("parser.cnr", PARSER_SRC),
+        ("checker.cnr", CHECKER_SRC),
+    ];
+    let diags = check_module_tree(&modules, &main).expect("oracle checks the module tree");
+    let mut rows: Vec<(String, usize, usize)> = diags
+        .iter()
+        .filter(|d| COVERED.contains(&d.code.as_str()))
+        .map(|d| (d.code.clone(), d.span.start, d.span.end))
+        .collect();
+    rows.sort();
+    let mut out = String::new();
+    for (code, a, b) in rows {
+        out.push_str(&format!("{code} {a} {b}\n"));
+    }
+    out
+}
+
+/// IMPORT-RESOLUTION ISOLATION GATE (the payoff): the self-hosted checker checks
+/// the self-hosted CHECKER's own source -- a NON-LEAF module that imports names
+/// from BOTH the `lexer` and `parser` modules -- IN ISOLATION, resolving those
+/// imports itself from its `use` decls (the parser's `T_USE` nodes -> the
+/// checker's imported-name registration). It emits an EMPTY covered-diagnostic
+/// (E0102/E0103) set, byte-equal to the MODULE-AWARE reference oracle.
+///
+/// The naive single-file oracle (`check_source_real`, no import resolution) flags
+/// every imported type as E0102 -- asserted below -- so this gate proves real
+/// import resolution, not a leaf module trivially checking clean (contrast the
+/// `lexer.cnr` fixpoint gate above, whose leaf module has nothing to resolve).
+#[test]
+fn candor_checker_checks_checker_source_clean_via_import_resolution() {
+    on_big_stack(|| {
+        // The imports really are load-bearing: without resolution the non-leaf
+        // module's imported TYPES (Node, P, Buf, ...) are unknown -> E0102. This
+        // makes the clean assertion below meaningful, not a leaf-module tautology.
+        let naive = check_source_real(CHECKER_SRC).expect("oracle parses checker.cnr");
+        let naive_unknown_types =
+            naive.iter().filter(|d| d.code == "E0102").count();
+        assert!(
+            naive_unknown_types > 0,
+            "single-file check must flag the unresolved imported types (E0102)"
+        );
+
+        // Teeth: a deliberately-broken variant (a param of an unknown type) MUST be
+        // flagged E0102, so the clean assertion below cannot pass vacuously.
+        let broken = format!("{CHECKER_SRC}\nfn zz_smoke(x: Nonexistent) -> unit {{ return; }}\n");
+        let broken_dump = candor_dump(&broken);
+        assert!(
+            broken_dump.contains("E0102"),
+            "negative smoke: broken checker source must be flagged E0102, got {broken_dump:?}"
+        );
+
+        // Clean: the self-host checker, resolving checker.cnr's `use lexer::{..}` /
+        // `use parser::{..}` imports itself, emits an EMPTY covered set -- byte-equal
+        // to the module-aware oracle (both resolve the imports and find it clean).
+        let oracle = module_oracle_dump(CHECKER_SRC);
+        let mine = candor_dump(CHECKER_SRC);
+        assert_eq!(
+            mine, oracle,
+            "self-host checker diverged from the module-aware oracle on checker.cnr"
+        );
+        assert!(
+            mine.is_empty(),
+            "self-host checker emitted covered diagnostics on clean checker.cnr: {mine:?}"
         );
     });
 }
