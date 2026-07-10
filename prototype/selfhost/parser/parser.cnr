@@ -1,0 +1,2821 @@
+// The SECOND self-hosted slice of Candor: a PARSER for the real (`.cnr`) surface
+// syntax, WRITTEN IN CANDOR, consuming the self-hosted lexer's `Buf` of `Tok`
+// (slice 1) and producing an AST in a fixed NODE ARENA. Gated by AST
+// S-expression equality against the Rust oracle (`prototype/src/real/parser.rs`
+// via `ast.rs`). Spec: docs/spec/02-grammar.md.
+//
+// This file is a LIBRARY, always CONCATENATED AFTER lexer.cnr (the harness in
+// prototype/tests/selfhost_parser.rs composes lexer + parser + a generated
+// `main`). It REUSES lexer.cnr's `Tok`, `Buf`, `span_eq`, and the `emit_*`/
+// `trace` dump sink; it does NOT redefine them.
+//
+// AST REPRESENTATION (the arena-basket idiom, no Box recursion): every AST node
+// is one `Node` (a tag + operator/flags + child INDICES + an optional source
+// span for names/literals + an `nx` sibling link) stored in a fixed `[N]Node`
+// arena addressed by `u32`. Child EDGES are indices, never pointers; LISTS
+// (params, args, stmts, fields, variants, arms) are intrusive singly-linked
+// chains through `nx`. Index 0 is the NIL/absent node; the arena fills from 1.
+//
+// STRUCTURE: recursive descent for items/types/statements/patterns; a
+// precedence-climbing ladder (parse_or -> ... -> parse_prefix -> parse_postfix)
+// realizing the spec 02 §6.1 Pratt precedence table for expressions.
+//
+// DUMP: `parse_dump(src, buf)` parses then renders the arena as a deterministic,
+// SPAN-FREE S-expression through `trace` (spans are excluded from the canonical
+// form by design; the differential target is the tree SHAPE, which both parsers
+// must agree on). See the schema in the harness's oracle renderer.
+
+// ---- node arena -------------------------------------------------------------
+copy struct Node {
+    tag: i32,
+    op: i32,
+    a: u32,
+    b: u32,
+    c: u32,
+    d: u32,
+    e: u32,
+    nx: u32,
+    ival: u64,
+    suf: i32,
+    p0: usize,
+    p1: usize,
+}
+
+struct P {
+    nodes: [2048]Node,
+    n: u32,
+    pos: usize,
+    no_struct: i32,
+    dreg: u32,
+    dtp: u32,
+    mmode: i32,
+    mreg: u32,
+    mty: u32,
+}
+
+static T_FN: i32 = 1;
+static T_STRUCT: i32 = 2;
+static T_ENUM: i32 = 3;
+static T_STATIC: i32 = 4;
+static T_SC: i32 = 10;
+static T_NAMED: i32 = 11;
+static T_APP: i32 = 12;
+static T_PROJ: i32 = 13;
+static T_ARRAY: i32 = 14;
+static T_SLICE: i32 = 15;
+static T_SLICEMUT: i32 = 16;
+static T_RAWPTR: i32 = 17;
+static T_BOX: i32 = 18;
+static T_BOXRESULT: i32 = 19;
+static T_BORROW: i32 = 20;
+static T_BORROWMUT: i32 = 21;
+static T_FNPTR: i32 = 22;
+static T_LET: i32 = 30;
+static T_ASSIGN: i32 = 31;
+static T_INT: i32 = 40;
+static T_NEGINT: i32 = 41;
+static T_STR: i32 = 42;
+static T_BYTES: i32 = 43;
+static T_BOOL: i32 = 44;
+static T_ID: i32 = 45;
+static T_UNARY: i32 = 46;
+static T_PREFIX: i32 = 47;
+static T_BIN: i32 = 48;
+static T_CALL: i32 = 49;
+static T_OUT: i32 = 50;
+static T_FIELD: i32 = 51;
+static T_INDEX: i32 = 52;
+static T_CONV: i32 = 53;
+static T_ARRAYLIT: i32 = 54;
+static T_ARRAYREP: i32 = 55;
+static T_STRUCTLIT: i32 = 56;
+static T_ENUMCTOR: i32 = 57;
+static T_BLOCK: i32 = 58;
+static T_IF: i32 = 59;
+static T_MATCH: i32 = 60;
+static T_LOOP: i32 = 61;
+static T_WHILE: i32 = 62;
+static T_RETURN: i32 = 63;
+static T_BREAK: i32 = 64;
+static T_CONTINUE: i32 = 65;
+static T_ASSERT: i32 = 66;
+static T_PANIC: i32 = 67;
+static T_RESULT: i32 = 68;
+static T_PAREN: i32 = 69;
+static T_TRY: i32 = 70;
+static T_GENERICVAL: i32 = 71;
+static T_UNSAFE: i32 = 72;
+static T_WRAPPING: i32 = 73;
+static T_SATURATING: i32 = 74;
+static T_FOR: i32 = 75;
+static T_SIZEOF: i32 = 76;
+static T_ALIGNOF: i32 = 77;
+static T_OFFSETOF: i32 = 78;
+static T_FIELDPTR: i32 = 79;
+static T_CASTPTR: i32 = 80;
+static T_ADDRTOPTR: i32 = 81;
+static T_PTRNULL: i32 = 82;
+static T_WILD: i32 = 90;
+static T_BIND: i32 = 91;
+static T_PVARIANT: i32 = 92;
+static T_PARAM: i32 = 100;
+static T_SFIELD: i32 = 101;
+static T_VARIANT: i32 = 102;
+static T_ARM: i32 = 103;
+static T_FINIT: i32 = 104;
+static T_TPARAM: i32 = 105;
+static T_FPPARAM: i32 = 106;
+static T_NAME: i32 = 107;
+static T_RET: i32 = 111;
+
+static OP_ADD: i32 = 1;
+static OP_SUB: i32 = 2;
+static OP_MUL: i32 = 3;
+static OP_DIV: i32 = 4;
+static OP_REM: i32 = 5;
+static OP_EQ: i32 = 6;
+static OP_NE: i32 = 7;
+static OP_LT: i32 = 8;
+static OP_LE: i32 = 9;
+static OP_GT: i32 = 10;
+static OP_GE: i32 = 11;
+static OP_AND: i32 = 12;
+static OP_OR: i32 = 13;
+static OP_BITAND: i32 = 14;
+static OP_BITOR: i32 = 15;
+static OP_BITXOR: i32 = 16;
+static OP_SHL: i32 = 17;
+static OP_SHR: i32 = 18;
+static UN_NEG: i32 = 1;
+static UN_NOT: i32 = 2;
+static UN_BITNOT: i32 = 3;
+static PF_DEREF: i32 = 1;
+static PF_READ: i32 = 2;
+static PF_WRITE: i32 = 3;
+static PF_CLONE: i32 = 4;
+
+fn nnew(tag: i32) -> Node {
+    return Node { tag: tag, op: 0, a: 0u32, b: 0u32, c: 0u32, d: 0u32, e: 0u32, nx: 0u32, ival: 0u64, suf: 0, p0: 0usize, p1: 0usize };
+}
+fn push_node(p: write P, nd: Node) -> u32 {
+    let i: u32 = p.n;
+    p.*.nodes[conv usize i] = nd;
+    p.*.n = i + 1u32;
+    return i;
+}
+fn set_next(p: write P, prev: u32, cur: u32) -> unit {
+    p.*.nodes[conv usize prev].nx = cur;
+    return;
+}
+fn mk_name(p: write P, s: usize, e: usize) -> u32 {
+    let mut nd: Node = nnew(T_NAME);
+    nd.p0 = s;
+    nd.p1 = e;
+    return push_node(p, nd);
+}
+fn mk_bin(p: write P, op: i32, l: u32, r: u32) -> u32 {
+    let mut nd: Node = nnew(T_BIN);
+    nd.op = op;
+    nd.a = l;
+    nd.b = r;
+    return push_node(p, nd);
+}
+
+fn tok_at(buf: read Buf, pos: usize) -> Tok {
+    let mut j: usize = pos;
+    if j >= buf.n {
+        j = buf.n - 1usize;
+    }
+    return buf.toks[j];
+}
+fn ck(p: write P, buf: read Buf) -> i32 {
+    return tok_at(buf, p.pos).kind;
+}
+fn kk(p: write P, buf: read Buf, off: usize) -> i32 {
+    return tok_at(buf, p.pos + off).kind;
+}
+fn adv(p: write P, buf: read Buf) -> unit {
+    if p.pos + 1usize < buf.n {
+        p.*.pos = p.pos + 1usize;
+    }
+    return;
+}
+fn eat(p: write P, buf: read Buf, k: i32) -> bool {
+    if tok_at(buf, p.pos).kind == k {
+        adv(p, buf);
+        return true;
+    }
+    return false;
+}
+fn expect(p: write P, buf: read Buf, k: i32) -> unit {
+    if tok_at(buf, p.pos).kind == k {
+        adv(p, buf);
+    }
+    return;
+}
+fn kw(src: [u8], t: Tok, lit: [u8]) -> bool {
+    if t.kind != 2 {
+        return false;
+    }
+    return span_eq(src, t.start, t.end, lit);
+}
+fn ids(src: [u8], t: Tok, lit: [u8]) -> bool {
+    if t.kind != 1 {
+        return false;
+    }
+    return span_eq(src, t.start, t.end, lit);
+}
+fn starts_expr(k: i32) -> bool {
+    if k == 19 {
+        return false;
+    }
+    if k == 16 {
+        return false;
+    }
+    if k == 11 {
+        return false;
+    }
+    if k == 13 {
+        return false;
+    }
+    if k == 15 {
+        return false;
+    }
+    if k == 99 {
+        return false;
+    }
+    return true;
+}
+fn starts_type(src: [u8], buf: read Buf, pos: usize) -> bool {
+    let t: Tok = tok_at(buf, pos);
+    if t.kind == 3 {
+        return true;
+    }
+    if t.kind == 1 {
+        return true;
+    }
+    if t.kind == 14 {
+        return true;
+    }
+    if kw(src, t, b"rawptr") {
+        return true;
+    }
+    if kw(src, t, b"Box") {
+        return true;
+    }
+    if kw(src, t, b"BoxResult") {
+        return true;
+    }
+    if kw(src, t, b"read") {
+        return true;
+    }
+    if kw(src, t, b"write") {
+        return true;
+    }
+    if kw(src, t, b"fn") {
+        return true;
+    }
+    return false;
+}
+
+// ---- types (spec 02 §3) -----------------------------------------------------
+fn parse_type(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let t: Tok = tok_at(buf, p.pos);
+    if t.kind == 3 {
+        adv(p, buf);
+        let mut nd: Node = nnew(T_SC);
+        nd.p0 = t.start;
+        nd.p1 = t.end;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"rawptr") {
+        adv(p, buf);
+        let inner: u32 = parse_type(p, src, buf);
+        let mut nd: Node = nnew(T_RAWPTR);
+        nd.a = inner;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"Box") {
+        adv(p, buf);
+        let inner: u32 = parse_type(p, src, buf);
+        let mut nd: Node = nnew(T_BOX);
+        nd.a = inner;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"BoxResult") {
+        adv(p, buf);
+        let inner: u32 = parse_type(p, src, buf);
+        let mut nd: Node = nnew(T_BOXRESULT);
+        nd.a = inner;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"read") || kw(src, t, b"write") {
+        let excl: bool = kw(src, t, b"write");
+        adv(p, buf);
+        return parse_borrow_body(p, src, buf, excl);
+    }
+    if kw(src, t, b"fn") {
+        return parse_fnptr_type(p, src, buf);
+    }
+    if t.kind == 14 {
+        return parse_bracket_type(p, src, buf);
+    }
+    if t.kind == 1 {
+        adv(p, buf);
+        if ck(p, buf) == 21 {
+            adv(p, buf);
+            let at: Tok = tok_at(buf, p.pos);
+            adv(p, buf);
+            let an: u32 = mk_name(p, at.start, at.end);
+            let mut nd: Node = nnew(T_PROJ);
+            nd.p0 = t.start;
+            nd.p1 = t.end;
+            nd.a = an;
+            return push_node(p, nd);
+        }
+        if ck(p, buf) == 14 {
+            adv(p, buf);
+            let mut head: u32 = 0u32;
+            let mut tail: u32 = 0u32;
+            loop {
+                if ck(p, buf) == 15 {
+                    break;
+                }
+                let ar: u32 = parse_type(p, src, buf);
+                if head == 0u32 {
+                    head = ar;
+                } else {
+                    set_next(p, tail, ar);
+                }
+                tail = ar;
+                if !eat(p, buf, 16) {
+                    break;
+                }
+            }
+            expect(p, buf, 15);
+            let mut nd: Node = nnew(T_APP);
+            nd.p0 = t.start;
+            nd.p1 = t.end;
+            nd.a = head;
+            return push_node(p, nd);
+        }
+        let mut nd: Node = nnew(T_NAMED);
+        nd.p0 = t.start;
+        nd.p1 = t.end;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"self") {
+        adv(p, buf);
+        if ck(p, buf) == 21 {
+            adv(p, buf);
+            let at: Tok = tok_at(buf, p.pos);
+            adv(p, buf);
+            let an: u32 = mk_name(p, at.start, at.end);
+            let mut nd: Node = nnew(T_PROJ);
+            nd.p0 = t.start;
+            nd.p1 = t.end;
+            nd.a = an;
+            return push_node(p, nd);
+        }
+        let mut nd: Node = nnew(T_NAMED);
+        nd.p0 = t.start;
+        nd.p1 = t.end;
+        return push_node(p, nd);
+    }
+    adv(p, buf);
+    let mut nd: Node = nnew(T_NAMED);
+    nd.p0 = t.start;
+    nd.p1 = t.end;
+    return push_node(p, nd);
+}
+
+fn parse_bracket_type(p: write P, src: [u8], buf: read Buf) -> u32 {
+    expect(p, buf, 14);
+    let t: Tok = tok_at(buf, p.pos);
+    if t.kind == 4 {
+        adv(p, buf);
+        let mut sz: Node = nnew(T_INT);
+        sz.ival = t.ival;
+        sz.suf = t.suf;
+        let size: u32 = push_node(p, sz);
+        expect(p, buf, 15);
+        let elem: u32 = parse_type(p, src, buf);
+        let mut nd: Node = nnew(T_ARRAY);
+        nd.a = size;
+        nd.b = elem;
+        return push_node(p, nd);
+    }
+    if t.kind == 1 && kk(p, buf, 1usize) == 15 && starts_type(src, buf, p.pos + 2usize) {
+        adv(p, buf);
+        let mut sz: Node = nnew(T_ID);
+        sz.p0 = t.start;
+        sz.p1 = t.end;
+        let size: u32 = push_node(p, sz);
+        expect(p, buf, 15);
+        let elem: u32 = parse_type(p, src, buf);
+        let mut nd: Node = nnew(T_ARRAY);
+        nd.a = size;
+        nd.b = elem;
+        return push_node(p, nd);
+    }
+    let elem: u32 = parse_type(p, src, buf);
+    expect(p, buf, 15);
+    let mut nd: Node = nnew(T_SLICE);
+    nd.a = elem;
+    return push_node(p, nd);
+}
+
+fn wrap_borrow(p: write P, excl: bool, inner: u32) -> u32 {
+    let mut tag: i32 = T_BORROW;
+    if excl {
+        tag = T_BORROWMUT;
+    }
+    let mut nd: Node = nnew(tag);
+    nd.a = inner;
+    return push_node(p, nd);
+}
+
+fn parse_borrow_body(p: write P, src: [u8], buf: read Buf, excl: bool) -> u32 {
+    p.*.mreg = 0u32;
+    if ck(p, buf) == 14 {
+        adv(p, buf);
+        let t: Tok = tok_at(buf, p.pos);
+        if t.kind == 4 {
+            adv(p, buf);
+            let mut sz: Node = nnew(T_INT);
+            sz.ival = t.ival;
+            sz.suf = t.suf;
+            let size: u32 = push_node(p, sz);
+            expect(p, buf, 15);
+            let elem: u32 = parse_type(p, src, buf);
+            let mut arr: Node = nnew(T_ARRAY);
+            arr.a = size;
+            arr.b = elem;
+            let ai: u32 = push_node(p, arr);
+            return wrap_borrow(p, excl, ai);
+        }
+        if t.kind == 1 && kk(p, buf, 1usize) == 15 {
+            if kk(p, buf, 2usize) == 14 {
+                let rn: u32 = mk_name(p, t.start, t.end);
+                adv(p, buf);
+                expect(p, buf, 15);
+                expect(p, buf, 14);
+                let elem: u32 = parse_type(p, src, buf);
+                expect(p, buf, 15);
+                p.*.mreg = rn;
+                let mut tag: i32 = T_SLICE;
+                if excl {
+                    tag = T_SLICEMUT;
+                }
+                let mut nd: Node = nnew(tag);
+                nd.a = elem;
+                return push_node(p, nd);
+            }
+            if starts_type(src, buf, p.pos + 2usize) {
+                let rn: u32 = mk_name(p, t.start, t.end);
+                adv(p, buf);
+                expect(p, buf, 15);
+                let ty: u32 = parse_type(p, src, buf);
+                p.*.mreg = rn;
+                return wrap_borrow(p, excl, ty);
+            }
+        }
+        let elem: u32 = parse_type(p, src, buf);
+        expect(p, buf, 15);
+        let mut tag: i32 = T_SLICE;
+        if excl {
+            tag = T_SLICEMUT;
+        }
+        let mut nd: Node = nnew(tag);
+        nd.a = elem;
+        return push_node(p, nd);
+    }
+    let ty: u32 = parse_type(p, src, buf);
+    return wrap_borrow(p, excl, ty);
+}
+
+fn parse_fnptr_type(p: write P, src: [u8], buf: read Buf) -> u32 {
+    expect(p, buf, 2);
+    expect(p, buf, 10);
+    let mut head: u32 = 0u32;
+    let mut tail: u32 = 0u32;
+    loop {
+        if ck(p, buf) == 11 {
+            break;
+        }
+        let fp: u32 = parse_fnptr_param(p, src, buf);
+        if head == 0u32 {
+            head = fp;
+        } else {
+            set_next(p, tail, fp);
+        }
+        tail = fp;
+        if !eat(p, buf, 16) {
+            break;
+        }
+    }
+    expect(p, buf, 11);
+    let mut flags: i32 = 0;
+    let ta: Tok = tok_at(buf, p.pos);
+    if ids(src, ta, b"alloc") {
+        adv(p, buf);
+        flags = flags + 1;
+    }
+    let tf: Tok = tok_at(buf, p.pos);
+    if ids(src, tf, b"foreign") {
+        adv(p, buf);
+        flags = flags + 2;
+    }
+    expect(p, buf, 22);
+    let ret: u32 = parse_type(p, src, buf);
+    let mut nd: Node = nnew(T_FNPTR);
+    nd.a = head;
+    nd.b = ret;
+    nd.op = flags;
+    return push_node(p, nd);
+}
+
+fn parse_fnptr_param(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let mut namestart: usize = 0usize;
+    let mut nameend: usize = 0usize;
+    let mut hasname: u32 = 0u32;
+    if ck(p, buf) == 1 && kk(p, buf, 1usize) == 20 {
+        let nt: Tok = tok_at(buf, p.pos);
+        namestart = nt.start;
+        nameend = nt.end;
+        hasname = 1u32;
+        adv(p, buf);
+        adv(p, buf);
+    }
+    parse_mode_and_type(p, src, buf);
+    let mut nd: Node = nnew(T_FPPARAM);
+    nd.p0 = namestart;
+    nd.p1 = nameend;
+    nd.d = hasname;
+    nd.op = p.mmode;
+    nd.b = p.mreg;
+    nd.a = p.mty;
+    return push_node(p, nd);
+}
+
+fn parse_mode_and_type(p: write P, src: [u8], buf: read Buf) -> unit {
+    let t: Tok = tok_at(buf, p.pos);
+    if kw(src, t, b"take") {
+        adv(p, buf);
+        let ty: u32 = parse_type(p, src, buf);
+        p.*.mmode = 0;
+        p.*.mreg = 0u32;
+        p.*.mty = ty;
+        return;
+    }
+    if kw(src, t, b"out") {
+        adv(p, buf);
+        let ty: u32 = parse_type(p, src, buf);
+        p.*.mmode = 3;
+        p.*.mreg = 0u32;
+        p.*.mty = ty;
+        return;
+    }
+    if kw(src, t, b"read") || kw(src, t, b"write") {
+        let excl: bool = kw(src, t, b"write");
+        adv(p, buf);
+        let ty: u32 = parse_borrow_body(p, src, buf, excl);
+        let region: u32 = p.mreg;
+        let tg: i32 = p.nodes[conv usize ty].tag;
+        if tg == T_SLICE || tg == T_SLICEMUT {
+            p.*.mmode = 0;
+            p.*.mreg = region;
+            p.*.mty = ty;
+            return;
+        }
+        if tg == T_BORROW {
+            let inner: u32 = p.nodes[conv usize ty].a;
+            p.*.mmode = 1;
+            p.*.mreg = region;
+            p.*.mty = inner;
+            return;
+        }
+        if tg == T_BORROWMUT {
+            let inner: u32 = p.nodes[conv usize ty].a;
+            p.*.mmode = 2;
+            p.*.mreg = region;
+            p.*.mty = inner;
+            return;
+        }
+        p.*.mmode = 1;
+        p.*.mreg = region;
+        p.*.mty = ty;
+        return;
+    }
+    let ty: u32 = parse_type(p, src, buf);
+    p.*.mmode = 0;
+    p.*.mreg = 0u32;
+    p.*.mty = ty;
+    return;
+}
+
+// ---- expressions: precedence ladder (spec 02 §6.1 table) --------------------
+fn parse_expr(p: write P, src: [u8], buf: read Buf) -> u32 {
+    return parse_or(p, src, buf);
+}
+fn parse_expr_ns(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let saved: i32 = p.no_struct;
+    p.*.no_struct = 1;
+    let r: u32 = parse_or(p, src, buf);
+    p.*.no_struct = saved;
+    return r;
+}
+fn parse_delimited(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let saved: i32 = p.no_struct;
+    p.*.no_struct = 0;
+    let r: u32 = parse_or(p, src, buf);
+    p.*.no_struct = saved;
+    return r;
+}
+
+fn parse_or(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let mut lhs: u32 = parse_and(p, src, buf);
+    loop {
+        if ck(p, buf) == 44 {
+            adv(p, buf);
+            let rhs: u32 = parse_and(p, src, buf);
+            lhs = mk_bin(p, OP_OR, lhs, rhs);
+        } else {
+            break;
+        }
+    }
+    return lhs;
+}
+fn parse_and(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let mut lhs: u32 = parse_cmp(p, src, buf);
+    loop {
+        if ck(p, buf) == 43 {
+            adv(p, buf);
+            let rhs: u32 = parse_cmp(p, src, buf);
+            lhs = mk_bin(p, OP_AND, lhs, rhs);
+        } else {
+            break;
+        }
+    }
+    return lhs;
+}
+fn parse_cmp(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let lhs: u32 = parse_bitor(p, src, buf);
+    let k: i32 = ck(p, buf);
+    let mut op: i32 = 0;
+    if k == 26 {
+        op = OP_EQ;
+    } else if k == 27 {
+        op = OP_NE;
+    } else if k == 29 {
+        op = OP_LE;
+    } else if k == 31 {
+        op = OP_GE;
+    } else if k == 28 {
+        op = OP_LT;
+    } else if k == 30 {
+        op = OP_GT;
+    }
+    if op == 0 {
+        return lhs;
+    }
+    adv(p, buf);
+    let rhs: u32 = parse_bitor(p, src, buf);
+    return mk_bin(p, op, lhs, rhs);
+}
+fn parse_bitor(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let mut lhs: u32 = parse_bitxor(p, src, buf);
+    loop {
+        if ck(p, buf) == 38 {
+            adv(p, buf);
+            let rhs: u32 = parse_bitxor(p, src, buf);
+            lhs = mk_bin(p, OP_BITOR, lhs, rhs);
+        } else {
+            break;
+        }
+    }
+    return lhs;
+}
+fn parse_bitxor(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let mut lhs: u32 = parse_bitand(p, src, buf);
+    loop {
+        if ck(p, buf) == 39 {
+            adv(p, buf);
+            let rhs: u32 = parse_bitand(p, src, buf);
+            lhs = mk_bin(p, OP_BITXOR, lhs, rhs);
+        } else {
+            break;
+        }
+    }
+    return lhs;
+}
+fn parse_bitand(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let mut lhs: u32 = parse_shift(p, src, buf);
+    loop {
+        if ck(p, buf) == 37 {
+            adv(p, buf);
+            let rhs: u32 = parse_shift(p, src, buf);
+            lhs = mk_bin(p, OP_BITAND, lhs, rhs);
+        } else {
+            break;
+        }
+    }
+    return lhs;
+}
+fn parse_shift(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let mut lhs: u32 = parse_add(p, src, buf);
+    loop {
+        let k: i32 = ck(p, buf);
+        if k == 41 {
+            adv(p, buf);
+            let rhs: u32 = parse_add(p, src, buf);
+            lhs = mk_bin(p, OP_SHL, lhs, rhs);
+        } else if k == 42 {
+            adv(p, buf);
+            let rhs: u32 = parse_add(p, src, buf);
+            lhs = mk_bin(p, OP_SHR, lhs, rhs);
+        } else {
+            break;
+        }
+    }
+    return lhs;
+}
+fn parse_add(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let mut lhs: u32 = parse_mul(p, src, buf);
+    loop {
+        let k: i32 = ck(p, buf);
+        if k == 32 {
+            adv(p, buf);
+            let rhs: u32 = parse_mul(p, src, buf);
+            lhs = mk_bin(p, OP_ADD, lhs, rhs);
+        } else if k == 33 {
+            adv(p, buf);
+            let rhs: u32 = parse_mul(p, src, buf);
+            lhs = mk_bin(p, OP_SUB, lhs, rhs);
+        } else {
+            break;
+        }
+    }
+    return lhs;
+}
+fn parse_mul(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let mut lhs: u32 = parse_prefix(p, src, buf);
+    loop {
+        let k: i32 = ck(p, buf);
+        if k == 34 {
+            adv(p, buf);
+            let rhs: u32 = parse_prefix(p, src, buf);
+            lhs = mk_bin(p, OP_MUL, lhs, rhs);
+        } else if k == 35 {
+            adv(p, buf);
+            let rhs: u32 = parse_prefix(p, src, buf);
+            lhs = mk_bin(p, OP_DIV, lhs, rhs);
+        } else if k == 36 {
+            adv(p, buf);
+            let rhs: u32 = parse_prefix(p, src, buf);
+            lhs = mk_bin(p, OP_REM, lhs, rhs);
+        } else {
+            break;
+        }
+    }
+    return lhs;
+}
+
+fn skip_prefix_region(p: write P, buf: read Buf) -> unit {
+    if ck(p, buf) == 14 && kk(p, buf, 1usize) == 1 && kk(p, buf, 2usize) == 15 {
+        adv(p, buf);
+        adv(p, buf);
+        adv(p, buf);
+    }
+    return;
+}
+fn parse_prefix(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let t: Tok = tok_at(buf, p.pos);
+    if t.kind == 33 {
+        adv(p, buf);
+        let nt: Tok = tok_at(buf, p.pos);
+        if nt.kind == 4 {
+            adv(p, buf);
+            let mut nd: Node = nnew(T_NEGINT);
+            nd.ival = nt.ival;
+            nd.suf = nt.suf;
+            return push_node(p, nd);
+        }
+        let inner: u32 = parse_prefix(p, src, buf);
+        let mut nd: Node = nnew(T_UNARY);
+        nd.op = UN_NEG;
+        nd.a = inner;
+        return push_node(p, nd);
+    }
+    if t.kind == 45 {
+        adv(p, buf);
+        let inner: u32 = parse_prefix(p, src, buf);
+        let mut nd: Node = nnew(T_UNARY);
+        nd.op = UN_NOT;
+        nd.a = inner;
+        return push_node(p, nd);
+    }
+    if t.kind == 40 {
+        adv(p, buf);
+        let inner: u32 = parse_prefix(p, src, buf);
+        let mut nd: Node = nnew(T_UNARY);
+        nd.op = UN_BITNOT;
+        nd.a = inner;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"read") {
+        adv(p, buf);
+        skip_prefix_region(p, buf);
+        let inner: u32 = parse_prefix(p, src, buf);
+        let mut nd: Node = nnew(T_PREFIX);
+        nd.op = PF_READ;
+        nd.a = inner;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"write") {
+        adv(p, buf);
+        skip_prefix_region(p, buf);
+        let inner: u32 = parse_prefix(p, src, buf);
+        let mut nd: Node = nnew(T_PREFIX);
+        nd.op = PF_WRITE;
+        nd.a = inner;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"clone") {
+        adv(p, buf);
+        let inner: u32 = parse_prefix(p, src, buf);
+        let mut nd: Node = nnew(T_PREFIX);
+        nd.op = PF_CLONE;
+        nd.a = inner;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"conv") {
+        adv(p, buf);
+        let st: Tok = tok_at(buf, p.pos);
+        adv(p, buf);
+        let mut scn: Node = nnew(T_SC);
+        scn.p0 = st.start;
+        scn.p1 = st.end;
+        let ty: u32 = push_node(p, scn);
+        let operand: u32 = parse_prefix(p, src, buf);
+        let mut nd: Node = nnew(T_CONV);
+        nd.a = ty;
+        nd.b = operand;
+        return push_node(p, nd);
+    }
+    return parse_prop(p, src, buf);
+}
+
+fn parse_prop(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let mut e: u32 = parse_postfix(p, src, buf);
+    loop {
+        if ck(p, buf) == 24 {
+            adv(p, buf);
+            let mut nd: Node = nnew(T_TRY);
+            nd.a = e;
+            e = push_node(p, nd);
+        } else {
+            break;
+        }
+    }
+    return e;
+}
+
+fn parse_arg_list(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let saved: i32 = p.no_struct;
+    p.*.no_struct = 0;
+    let mut head: u32 = 0u32;
+    let mut tail: u32 = 0u32;
+    loop {
+        if ck(p, buf) == 11 {
+            break;
+        }
+        let t: Tok = tok_at(buf, p.pos);
+        let mut arg: u32 = 0u32;
+        if kw(src, t, b"out") || ids(src, t, b"out") {
+            adv(p, buf);
+            let place: u32 = parse_or(p, src, buf);
+            let mut nd: Node = nnew(T_OUT);
+            nd.a = place;
+            arg = push_node(p, nd);
+        } else {
+            arg = parse_or(p, src, buf);
+        }
+        if head == 0u32 {
+            head = arg;
+        } else {
+            set_next(p, tail, arg);
+        }
+        tail = arg;
+        if !eat(p, buf, 16) {
+            break;
+        }
+    }
+    p.*.no_struct = saved;
+    return head;
+}
+
+fn parse_postfix(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let mut e: u32 = parse_primary(p, src, buf);
+    loop {
+        let k: i32 = ck(p, buf);
+        if k == 18 {
+            adv(p, buf);
+            let mut nd: Node = nnew(T_PREFIX);
+            nd.op = PF_DEREF;
+            nd.a = e;
+            e = push_node(p, nd);
+        } else if k == 10 {
+            adv(p, buf);
+            let args: u32 = parse_arg_list(p, src, buf);
+            expect(p, buf, 11);
+            let mut nd: Node = nnew(T_CALL);
+            nd.a = e;
+            nd.b = args;
+            e = push_node(p, nd);
+        } else if k == 14 {
+            adv(p, buf);
+            let idx: u32 = parse_delimited(p, src, buf);
+            expect(p, buf, 15);
+            let mut nd: Node = nnew(T_INDEX);
+            nd.a = e;
+            nd.b = idx;
+            e = push_node(p, nd);
+        } else if k == 17 {
+            adv(p, buf);
+            let ft: Tok = tok_at(buf, p.pos);
+            adv(p, buf);
+            let mut nd: Node = nnew(T_FIELD);
+            nd.a = e;
+            nd.p0 = ft.start;
+            nd.p1 = ft.end;
+            e = push_node(p, nd);
+        } else {
+            break;
+        }
+    }
+    return e;
+}
+
+// ---- block-like expressions (spec 02 §5.2, §6.9, §8) ------------------------
+fn at_block_like(p: write P, src: [u8], buf: read Buf) -> bool {
+    let t: Tok = tok_at(buf, p.pos);
+    if t.kind == 12 {
+        return true;
+    }
+    if kw(src, t, b"if") {
+        return true;
+    }
+    if kw(src, t, b"match") {
+        return true;
+    }
+    if kw(src, t, b"loop") {
+        return true;
+    }
+    if kw(src, t, b"while") {
+        return true;
+    }
+    if kw(src, t, b"unsafe") {
+        return true;
+    }
+    if kw(src, t, b"wrapping") {
+        return true;
+    }
+    if kw(src, t, b"saturating") {
+        return true;
+    }
+    return false;
+}
+
+fn parse_block_like(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let t: Tok = tok_at(buf, p.pos);
+    if t.kind == 12 {
+        return parse_block(p, src, buf);
+    }
+    if kw(src, t, b"if") {
+        return parse_if(p, src, buf);
+    }
+    if kw(src, t, b"match") {
+        return parse_match(p, src, buf);
+    }
+    if kw(src, t, b"loop") {
+        adv(p, buf);
+        let blk: u32 = parse_block(p, src, buf);
+        let mut nd: Node = nnew(T_LOOP);
+        nd.a = blk;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"while") {
+        adv(p, buf);
+        let cond: u32 = parse_expr_ns(p, src, buf);
+        let blk: u32 = parse_block(p, src, buf);
+        let mut nd: Node = nnew(T_WHILE);
+        nd.a = cond;
+        nd.b = blk;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"wrapping") {
+        adv(p, buf);
+        let blk: u32 = parse_block(p, src, buf);
+        let mut nd: Node = nnew(T_WRAPPING);
+        nd.a = blk;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"saturating") {
+        adv(p, buf);
+        let blk: u32 = parse_block(p, src, buf);
+        let mut nd: Node = nnew(T_SATURATING);
+        nd.a = blk;
+        return push_node(p, nd);
+    }
+    // unsafe
+    adv(p, buf);
+    let st: Tok = tok_at(buf, p.pos);
+    adv(p, buf);
+    let blk: u32 = parse_block(p, src, buf);
+    let mut nd: Node = nnew(T_UNSAFE);
+    nd.p0 = st.p0;
+    nd.p1 = st.p1;
+    nd.a = blk;
+    return push_node(p, nd);
+}
+
+fn parse_if(p: write P, src: [u8], buf: read Buf) -> u32 {
+    expect(p, buf, 2);
+    let cond: u32 = parse_expr_ns(p, src, buf);
+    let thenb: u32 = parse_block(p, src, buf);
+    let mut elsee: u32 = 0u32;
+    let et: Tok = tok_at(buf, p.pos);
+    if kw(src, et, b"else") {
+        adv(p, buf);
+        let nt: Tok = tok_at(buf, p.pos);
+        if kw(src, nt, b"if") {
+            elsee = parse_if(p, src, buf);
+        } else {
+            elsee = parse_block(p, src, buf);
+        }
+    }
+    let mut nd: Node = nnew(T_IF);
+    nd.a = cond;
+    nd.b = thenb;
+    nd.c = elsee;
+    return push_node(p, nd);
+}
+
+fn parse_match(p: write P, src: [u8], buf: read Buf) -> u32 {
+    expect(p, buf, 2);
+    let scrut: u32 = parse_expr_ns(p, src, buf);
+    expect(p, buf, 12);
+    let mut head: u32 = 0u32;
+    let mut tail: u32 = 0u32;
+    loop {
+        let k: i32 = ck(p, buf);
+        if k == 13 || k == 99 {
+            break;
+        }
+        let pat: u32 = parse_pattern(p, src, buf);
+        expect(p, buf, 23);
+        let mut body: u32 = 0u32;
+        if at_block_like(p, src, buf) {
+            body = parse_block_like(p, src, buf);
+        } else {
+            body = parse_expr(p, src, buf);
+        }
+        let mut arm: Node = nnew(T_ARM);
+        arm.a = pat;
+        arm.b = body;
+        let ai: u32 = push_node(p, arm);
+        if head == 0u32 {
+            head = ai;
+        } else {
+            set_next(p, tail, ai);
+        }
+        tail = ai;
+        let _c: bool = eat(p, buf, 16);
+    }
+    expect(p, buf, 13);
+    let mut nd: Node = nnew(T_MATCH);
+    nd.a = scrut;
+    nd.b = head;
+    return push_node(p, nd);
+}
+
+fn parse_opt_ctor_args(p: write P, src: [u8], buf: read Buf) -> u32 {
+    if ck(p, buf) == 10 {
+        adv(p, buf);
+        let args: u32 = parse_arg_list(p, src, buf);
+        expect(p, buf, 11);
+        return args;
+    }
+    return 0u32;
+}
+
+fn parse_array_literal(p: write P, src: [u8], buf: read Buf) -> u32 {
+    expect(p, buf, 14);
+    let saved: i32 = p.no_struct;
+    p.*.no_struct = 0;
+    if ck(p, buf) == 15 {
+        adv(p, buf);
+        p.*.no_struct = saved;
+        let mut nd: Node = nnew(T_ARRAYLIT);
+        nd.a = 0u32;
+        return push_node(p, nd);
+    }
+    let first: u32 = parse_or(p, src, buf);
+    if ck(p, buf) == 19 {
+        adv(p, buf);
+        let size: u32 = parse_or(p, src, buf);
+        expect(p, buf, 15);
+        p.*.no_struct = saved;
+        let mut nd: Node = nnew(T_ARRAYREP);
+        nd.a = first;
+        nd.b = size;
+        return push_node(p, nd);
+    }
+    let mut head: u32 = first;
+    let mut tail: u32 = first;
+    loop {
+        if !eat(p, buf, 16) {
+            break;
+        }
+        if ck(p, buf) == 15 {
+            break;
+        }
+        let el: u32 = parse_or(p, src, buf);
+        set_next(p, tail, el);
+        tail = el;
+    }
+    expect(p, buf, 15);
+    p.*.no_struct = saved;
+    let mut nd: Node = nnew(T_ARRAYLIT);
+    nd.a = head;
+    return push_node(p, nd);
+}
+
+fn parse_struct_lit(p: write P, src: [u8], buf: read Buf, ns: usize, ne: usize) -> u32 {
+    expect(p, buf, 12);
+    let saved: i32 = p.no_struct;
+    p.*.no_struct = 0;
+    let mut head: u32 = 0u32;
+    let mut tail: u32 = 0u32;
+    loop {
+        if ck(p, buf) == 13 {
+            break;
+        }
+        let ft: Tok = tok_at(buf, p.pos);
+        adv(p, buf);
+        expect(p, buf, 20);
+        let val: u32 = parse_or(p, src, buf);
+        let mut fi: Node = nnew(T_FINIT);
+        fi.p0 = ft.start;
+        fi.p1 = ft.end;
+        fi.a = val;
+        let fii: u32 = push_node(p, fi);
+        if head == 0u32 {
+            head = fii;
+        } else {
+            set_next(p, tail, fii);
+        }
+        tail = fii;
+        if !eat(p, buf, 16) {
+            break;
+        }
+    }
+    p.*.no_struct = saved;
+    expect(p, buf, 13);
+    let mut nd: Node = nnew(T_STRUCTLIT);
+    nd.p0 = ns;
+    nd.p1 = ne;
+    nd.a = head;
+    return push_node(p, nd);
+}
+
+fn parse_intrinsic_ty(p: write P, src: [u8], buf: read Buf, tag: i32) -> u32 {
+    adv(p, buf);
+    expect(p, buf, 14);
+    let ty: u32 = parse_type(p, src, buf);
+    expect(p, buf, 15);
+    expect(p, buf, 10);
+    let args: u32 = parse_arg_list(p, src, buf);
+    expect(p, buf, 11);
+    let mut nd: Node = nnew(tag);
+    nd.a = ty;
+    nd.b = args;
+    return push_node(p, nd);
+}
+
+fn parse_primary(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let t: Tok = tok_at(buf, p.pos);
+    if t.kind == 4 {
+        adv(p, buf);
+        let mut nd: Node = nnew(T_INT);
+        nd.ival = t.ival;
+        nd.suf = t.suf;
+        return push_node(p, nd);
+    }
+    if t.kind == 5 {
+        adv(p, buf);
+        let mut nd: Node = nnew(T_STR);
+        nd.p0 = t.p0;
+        nd.p1 = t.p1;
+        return push_node(p, nd);
+    }
+    if t.kind == 6 {
+        adv(p, buf);
+        let mut nd: Node = nnew(T_BYTES);
+        nd.p0 = t.p0;
+        nd.p1 = t.p1;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"true") {
+        adv(p, buf);
+        let mut nd: Node = nnew(T_BOOL);
+        nd.ival = 1u64;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"false") {
+        adv(p, buf);
+        let mut nd: Node = nnew(T_BOOL);
+        nd.ival = 0u64;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"result") {
+        adv(p, buf);
+        return push_node(p, nnew(T_RESULT));
+    }
+    if kw(src, t, b"self") {
+        adv(p, buf);
+        let mut nd: Node = nnew(T_ID);
+        nd.p0 = t.start;
+        nd.p1 = t.end;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"break") {
+        adv(p, buf);
+        return push_node(p, nnew(T_BREAK));
+    }
+    if kw(src, t, b"continue") {
+        adv(p, buf);
+        return push_node(p, nnew(T_CONTINUE));
+    }
+    if kw(src, t, b"return") {
+        adv(p, buf);
+        let mut nd: Node = nnew(T_RETURN);
+        if starts_expr(ck(p, buf)) {
+            let e: u32 = parse_expr(p, src, buf);
+            nd.a = e;
+        }
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"assert") {
+        adv(p, buf);
+        expect(p, buf, 10);
+        let e: u32 = parse_delimited(p, src, buf);
+        expect(p, buf, 11);
+        let mut nd: Node = nnew(T_ASSERT);
+        nd.a = e;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"panic") {
+        adv(p, buf);
+        expect(p, buf, 10);
+        let e: u32 = parse_delimited(p, src, buf);
+        expect(p, buf, 11);
+        let mut nd: Node = nnew(T_PANIC);
+        nd.a = e;
+        return push_node(p, nd);
+    }
+    if t.kind == 10 {
+        adv(p, buf);
+        let inner: u32 = parse_delimited(p, src, buf);
+        expect(p, buf, 11);
+        let mut nd: Node = nnew(T_PAREN);
+        nd.a = inner;
+        return push_node(p, nd);
+    }
+    if t.kind == 14 {
+        return parse_array_literal(p, src, buf);
+    }
+    if t.kind == 12 {
+        return parse_block(p, src, buf);
+    }
+    if kw(src, t, b"if") || kw(src, t, b"match") || kw(src, t, b"loop") || kw(src, t, b"while") || kw(src, t, b"unsafe") || kw(src, t, b"wrapping") || kw(src, t, b"saturating") {
+        return parse_block_like(p, src, buf);
+    }
+    if kw(src, t, b"sizeof") {
+        adv(p, buf);
+        expect(p, buf, 10);
+        let ty: u32 = parse_type(p, src, buf);
+        expect(p, buf, 11);
+        let mut nd: Node = nnew(T_SIZEOF);
+        nd.a = ty;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"alignof") {
+        adv(p, buf);
+        expect(p, buf, 10);
+        let ty: u32 = parse_type(p, src, buf);
+        expect(p, buf, 11);
+        let mut nd: Node = nnew(T_ALIGNOF);
+        nd.a = ty;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"offsetof") {
+        adv(p, buf);
+        expect(p, buf, 10);
+        let ty: u32 = parse_type(p, src, buf);
+        expect(p, buf, 16);
+        let ft: Tok = tok_at(buf, p.pos);
+        adv(p, buf);
+        expect(p, buf, 11);
+        let mut nd: Node = nnew(T_OFFSETOF);
+        nd.a = ty;
+        nd.p0 = ft.start;
+        nd.p1 = ft.end;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"field_ptr") {
+        adv(p, buf);
+        expect(p, buf, 10);
+        let e: u32 = parse_expr(p, src, buf);
+        expect(p, buf, 16);
+        let ft: Tok = tok_at(buf, p.pos);
+        adv(p, buf);
+        expect(p, buf, 11);
+        let mut nd: Node = nnew(T_FIELDPTR);
+        nd.a = e;
+        nd.p0 = ft.start;
+        nd.p1 = ft.end;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"cast_ptr") {
+        return parse_intrinsic_ty(p, src, buf, T_CASTPTR);
+    }
+    if kw(src, t, b"addr_to_ptr") {
+        return parse_intrinsic_ty(p, src, buf, T_ADDRTOPTR);
+    }
+    if kw(src, t, b"ptr_null") {
+        adv(p, buf);
+        expect(p, buf, 14);
+        let ty: u32 = parse_type(p, src, buf);
+        expect(p, buf, 15);
+        expect(p, buf, 10);
+        let _a: u32 = parse_arg_list(p, src, buf);
+        expect(p, buf, 11);
+        let mut nd: Node = nnew(T_PTRNULL);
+        nd.a = ty;
+        return push_node(p, nd);
+    }
+    if kw(src, t, b"BoxResult") {
+        adv(p, buf);
+        expect(p, buf, 21);
+        let vt: Tok = tok_at(buf, p.pos);
+        adv(p, buf);
+        let vn: u32 = mk_name(p, vt.start, vt.end);
+        let args: u32 = parse_opt_ctor_args(p, src, buf);
+        let mut nd: Node = nnew(T_ENUMCTOR);
+        nd.p0 = t.start;
+        nd.p1 = t.end;
+        nd.a = vn;
+        nd.b = args;
+        return push_node(p, nd);
+    }
+    if t.kind == 1 {
+        if kk(p, buf, 1usize) == 21 && kk(p, buf, 2usize) == 14 {
+            adv(p, buf);
+            adv(p, buf);
+            adv(p, buf);
+            let mut head: u32 = 0u32;
+            let mut tail: u32 = 0u32;
+            loop {
+                if ck(p, buf) == 15 {
+                    break;
+                }
+                let ar: u32 = parse_type(p, src, buf);
+                if head == 0u32 {
+                    head = ar;
+                } else {
+                    set_next(p, tail, ar);
+                }
+                tail = ar;
+                if !eat(p, buf, 16) {
+                    break;
+                }
+            }
+            expect(p, buf, 15);
+            let mut nd: Node = nnew(T_GENERICVAL);
+            nd.p0 = t.start;
+            nd.p1 = t.end;
+            nd.a = head;
+            return push_node(p, nd);
+        }
+        if kk(p, buf, 1usize) == 21 {
+            adv(p, buf);
+            adv(p, buf);
+            let vt: Tok = tok_at(buf, p.pos);
+            adv(p, buf);
+            let vn: u32 = mk_name(p, vt.start, vt.end);
+            let args: u32 = parse_opt_ctor_args(p, src, buf);
+            let mut nd: Node = nnew(T_ENUMCTOR);
+            nd.p0 = t.start;
+            nd.p1 = t.end;
+            nd.a = vn;
+            nd.b = args;
+            return push_node(p, nd);
+        }
+        if p.no_struct == 0 && kk(p, buf, 1usize) == 12 {
+            adv(p, buf);
+            return parse_struct_lit(p, src, buf, t.start, t.end);
+        }
+        adv(p, buf);
+        let mut nd: Node = nnew(T_ID);
+        nd.p0 = t.start;
+        nd.p1 = t.end;
+        return push_node(p, nd);
+    }
+    // Fallback: consume and emit an id node (keeps parsing total on odd input).
+    adv(p, buf);
+    let mut nd: Node = nnew(T_ID);
+    nd.p0 = t.start;
+    nd.p1 = t.end;
+    return push_node(p, nd);
+}
+
+// ---- patterns (spec 02 §7) --------------------------------------------------
+fn parse_opt_pattern_args(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let mut head: u32 = 0u32;
+    let mut tail: u32 = 0u32;
+    if ck(p, buf) == 10 {
+        adv(p, buf);
+        loop {
+            if ck(p, buf) == 11 {
+                break;
+            }
+            let sub: u32 = parse_pattern(p, src, buf);
+            if head == 0u32 {
+                head = sub;
+            } else {
+                set_next(p, tail, sub);
+            }
+            tail = sub;
+            if !eat(p, buf, 16) {
+                break;
+            }
+        }
+        expect(p, buf, 11);
+    }
+    return head;
+}
+
+fn parse_pattern(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let t: Tok = tok_at(buf, p.pos);
+    if kw(src, t, b"BoxResult") {
+        adv(p, buf);
+        expect(p, buf, 21);
+        let vt: Tok = tok_at(buf, p.pos);
+        adv(p, buf);
+        let vn: u32 = mk_name(p, vt.start, vt.end);
+        let sub: u32 = parse_opt_pattern_args(p, src, buf);
+        let mut nd: Node = nnew(T_PVARIANT);
+        nd.p0 = t.start;
+        nd.p1 = t.end;
+        nd.a = vn;
+        nd.b = sub;
+        return push_node(p, nd);
+    }
+    if t.kind == 1 {
+        if span_eq(src, t.start, t.end, b"_") {
+            adv(p, buf);
+            return push_node(p, nnew(T_WILD));
+        }
+        if kk(p, buf, 1usize) == 21 {
+            adv(p, buf);
+            adv(p, buf);
+            let vt: Tok = tok_at(buf, p.pos);
+            adv(p, buf);
+            let vn: u32 = mk_name(p, vt.start, vt.end);
+            let sub: u32 = parse_opt_pattern_args(p, src, buf);
+            let mut nd: Node = nnew(T_PVARIANT);
+            nd.p0 = t.start;
+            nd.p1 = t.end;
+            nd.a = vn;
+            nd.b = sub;
+            return push_node(p, nd);
+        }
+        adv(p, buf);
+        let mut nd: Node = nnew(T_BIND);
+        nd.p0 = t.start;
+        nd.p1 = t.end;
+        return push_node(p, nd);
+    }
+    adv(p, buf);
+    return push_node(p, nnew(T_WILD));
+}
+
+// ---- statements & blocks (spec 02 §5) ---------------------------------------
+fn parse_block(p: write P, src: [u8], buf: read Buf) -> u32 {
+    expect(p, buf, 12);
+    let mut head: u32 = 0u32;
+    let mut tail: u32 = 0u32;
+    loop {
+        let k: i32 = ck(p, buf);
+        if k == 13 || k == 99 {
+            break;
+        }
+        let st: u32 = parse_stmt(p, src, buf);
+        if head == 0u32 {
+            head = st;
+        } else {
+            set_next(p, tail, st);
+        }
+        tail = st;
+    }
+    expect(p, buf, 13);
+    let mut nd: Node = nnew(T_BLOCK);
+    nd.a = head;
+    return push_node(p, nd);
+}
+
+fn parse_let(p: write P, src: [u8], buf: read Buf) -> u32 {
+    expect(p, buf, 2);
+    let mut mutf: i32 = 0;
+    let mt: Tok = tok_at(buf, p.pos);
+    if kw(src, mt, b"mut") {
+        adv(p, buf);
+        mutf = 1;
+    }
+    let nt: Tok = tok_at(buf, p.pos);
+    adv(p, buf);
+    let mut ty: u32 = 0u32;
+    if ck(p, buf) == 20 {
+        adv(p, buf);
+        ty = parse_type(p, src, buf);
+    }
+    let mut init: u32 = 0u32;
+    if ck(p, buf) == 25 {
+        adv(p, buf);
+        init = parse_expr(p, src, buf);
+    }
+    expect(p, buf, 19);
+    let mut nd: Node = nnew(T_LET);
+    nd.op = mutf;
+    nd.p0 = nt.start;
+    nd.p1 = nt.end;
+    nd.a = ty;
+    nd.b = init;
+    return push_node(p, nd);
+}
+
+fn parse_for(p: write P, src: [u8], buf: read Buf) -> u32 {
+    adv(p, buf);
+    let pat: u32 = parse_pattern(p, src, buf);
+    adv(p, buf);
+    let operand: u32 = parse_expr_ns(p, src, buf);
+    let body: u32 = parse_block(p, src, buf);
+    let mut nd: Node = nnew(T_FOR);
+    nd.a = pat;
+    nd.b = operand;
+    nd.c = body;
+    return push_node(p, nd);
+}
+
+fn parse_stmt(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let t: Tok = tok_at(buf, p.pos);
+    if kw(src, t, b"let") {
+        return parse_let(p, src, buf);
+    }
+    if ids(src, t, b"for") {
+        return parse_for(p, src, buf);
+    }
+    if at_block_like(p, src, buf) {
+        return parse_block_like(p, src, buf);
+    }
+    let e: u32 = parse_expr(p, src, buf);
+    if ck(p, buf) == 25 {
+        adv(p, buf);
+        let val: u32 = parse_expr(p, src, buf);
+        expect(p, buf, 19);
+        let mut nd: Node = nnew(T_ASSIGN);
+        nd.a = e;
+        nd.b = val;
+        return push_node(p, nd);
+    }
+    expect(p, buf, 19);
+    return e;
+}
+
+// ---- items (spec 02 §2, §4) -------------------------------------------------
+// Sets p.dreg (regions head) and p.dtp (type-params head).
+fn parse_decl_brackets(p: write P, src: [u8], buf: read Buf) -> unit {
+    p.*.dreg = 0u32;
+    p.*.dtp = 0u32;
+    let mut rhead: u32 = 0u32;
+    let mut rtail: u32 = 0u32;
+    let mut thead: u32 = 0u32;
+    let mut ttail: u32 = 0u32;
+    if ck(p, buf) == 14 {
+        adv(p, buf);
+        loop {
+            if ck(p, buf) == 15 {
+                break;
+            }
+            let t: Tok = tok_at(buf, p.pos);
+            if ids(src, t, b"region") {
+                adv(p, buf);
+                let rt: Tok = tok_at(buf, p.pos);
+                adv(p, buf);
+                let rn: u32 = mk_name(p, rt.start, rt.end);
+                if rhead == 0u32 {
+                    rhead = rn;
+                } else {
+                    set_next(p, rtail, rn);
+                }
+                rtail = rn;
+            } else {
+                let nt: Tok = tok_at(buf, p.pos);
+                adv(p, buf);
+                let mut bhead: u32 = 0u32;
+                let mut btail: u32 = 0u32;
+                if ck(p, buf) == 20 {
+                    adv(p, buf);
+                    loop {
+                        let bt: Tok = tok_at(buf, p.pos);
+                        let bn: u32 = mk_name(p, bt.start, bt.end);
+                        adv(p, buf);
+                        if bhead == 0u32 {
+                            bhead = bn;
+                        } else {
+                            set_next(p, btail, bn);
+                        }
+                        btail = bn;
+                        if !eat(p, buf, 32) {
+                            break;
+                        }
+                    }
+                }
+                let mut tp: Node = nnew(T_TPARAM);
+                tp.p0 = nt.start;
+                tp.p1 = nt.end;
+                tp.a = bhead;
+                let tpi: u32 = push_node(p, tp);
+                if thead == 0u32 {
+                    thead = tpi;
+                } else {
+                    set_next(p, ttail, tpi);
+                }
+                ttail = tpi;
+            }
+            if !eat(p, buf, 16) {
+                break;
+            }
+        }
+        expect(p, buf, 15);
+    }
+    p.*.dreg = rhead;
+    p.*.dtp = thead;
+    return;
+}
+
+fn parse_ret_ty(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let t: Tok = tok_at(buf, p.pos);
+    if kw(src, t, b"read") || kw(src, t, b"write") {
+        let excl: bool = kw(src, t, b"write");
+        adv(p, buf);
+        let ty: u32 = parse_borrow_body(p, src, buf, excl);
+        let region: u32 = p.mreg;
+        let tg: i32 = p.nodes[conv usize ty].tag;
+        let mut bk: i32 = 0;
+        let mut inner: u32 = ty;
+        if tg == T_BORROW {
+            bk = 1;
+            inner = p.nodes[conv usize ty].a;
+        } else if tg == T_BORROWMUT {
+            bk = 2;
+            inner = p.nodes[conv usize ty].a;
+        }
+        let mut nd: Node = nnew(T_RET);
+        nd.op = bk;
+        nd.b = region;
+        nd.a = inner;
+        return push_node(p, nd);
+    }
+    let ty: u32 = parse_type(p, src, buf);
+    let mut nd: Node = nnew(T_RET);
+    nd.op = 0;
+    nd.b = 0u32;
+    nd.a = ty;
+    return push_node(p, nd);
+}
+
+fn parse_param(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let nt: Tok = tok_at(buf, p.pos);
+    adv(p, buf);
+    expect(p, buf, 20);
+    parse_mode_and_type(p, src, buf);
+    let mut nd: Node = nnew(T_PARAM);
+    nd.p0 = nt.start;
+    nd.p1 = nt.end;
+    nd.op = p.mmode;
+    nd.b = p.mreg;
+    nd.a = p.mty;
+    return push_node(p, nd);
+}
+
+fn parse_fn(p: write P, src: [u8], buf: read Buf) -> u32 {
+    expect(p, buf, 2);
+    let nt: Tok = tok_at(buf, p.pos);
+    adv(p, buf);
+    parse_decl_brackets(p, src, buf);
+    let regions: u32 = p.dreg;
+    let tparams: u32 = p.dtp;
+    expect(p, buf, 10);
+    let mut phead: u32 = 0u32;
+    let mut ptail: u32 = 0u32;
+    loop {
+        if ck(p, buf) == 11 {
+            break;
+        }
+        let pm: u32 = parse_param(p, src, buf);
+        if phead == 0u32 {
+            phead = pm;
+        } else {
+            set_next(p, ptail, pm);
+        }
+        ptail = pm;
+        if !eat(p, buf, 16) {
+            break;
+        }
+    }
+    expect(p, buf, 11);
+    let mut flags: i32 = 0;
+    loop {
+        let st: Tok = tok_at(buf, p.pos);
+        if ids(src, st, b"alloc") {
+            adv(p, buf);
+            flags = flags + 1;
+        } else if ids(src, st, b"foreign") {
+            adv(p, buf);
+            flags = flags + 2;
+        } else if kw(src, st, b"requires") {
+            adv(p, buf);
+            expect(p, buf, 10);
+            let _e: u32 = parse_delimited(p, src, buf);
+            expect(p, buf, 11);
+        } else if kw(src, st, b"ensures") {
+            adv(p, buf);
+            expect(p, buf, 10);
+            let _e: u32 = parse_delimited(p, src, buf);
+            expect(p, buf, 11);
+        } else {
+            break;
+        }
+    }
+    let mut ret: u32 = 0u32;
+    if ck(p, buf) == 22 {
+        adv(p, buf);
+        ret = parse_ret_ty(p, src, buf);
+    }
+    let body: u32 = parse_block(p, src, buf);
+    let mut nd: Node = nnew(T_FN);
+    nd.p0 = nt.start;
+    nd.p1 = nt.end;
+    nd.op = flags;
+    nd.a = tparams;
+    nd.b = regions;
+    nd.c = phead;
+    nd.d = body;
+    nd.e = ret;
+    return push_node(p, nd);
+}
+
+fn parse_struct(p: write P, src: [u8], buf: read Buf, copyf: i32) -> u32 {
+    expect(p, buf, 2);
+    let nt: Tok = tok_at(buf, p.pos);
+    adv(p, buf);
+    parse_decl_brackets(p, src, buf);
+    let tparams: u32 = p.dtp;
+    expect(p, buf, 12);
+    let mut fhead: u32 = 0u32;
+    let mut ftail: u32 = 0u32;
+    loop {
+        if ck(p, buf) == 13 {
+            break;
+        }
+        let ft: Tok = tok_at(buf, p.pos);
+        adv(p, buf);
+        expect(p, buf, 20);
+        let fty: u32 = parse_type(p, src, buf);
+        let mut fd: Node = nnew(T_SFIELD);
+        fd.p0 = ft.start;
+        fd.p1 = ft.end;
+        fd.a = fty;
+        let fi: u32 = push_node(p, fd);
+        if fhead == 0u32 {
+            fhead = fi;
+        } else {
+            set_next(p, ftail, fi);
+        }
+        ftail = fi;
+        if !eat(p, buf, 16) {
+            break;
+        }
+    }
+    expect(p, buf, 13);
+    let mut drophook: u32 = 0u32;
+    let dt: Tok = tok_at(buf, p.pos);
+    if kw(src, dt, b"drop") {
+        adv(p, buf);
+        expect(p, buf, 10);
+        expect(p, buf, 2);
+        expect(p, buf, 2);
+        expect(p, buf, 11);
+        drophook = parse_block(p, src, buf);
+    }
+    let mut nd: Node = nnew(T_STRUCT);
+    nd.op = copyf;
+    nd.p0 = nt.start;
+    nd.p1 = nt.end;
+    nd.a = tparams;
+    nd.b = fhead;
+    nd.c = drophook;
+    return push_node(p, nd);
+}
+
+fn parse_enum(p: write P, src: [u8], buf: read Buf, copyf: i32) -> u32 {
+    expect(p, buf, 2);
+    let nt: Tok = tok_at(buf, p.pos);
+    adv(p, buf);
+    parse_decl_brackets(p, src, buf);
+    let tparams: u32 = p.dtp;
+    expect(p, buf, 12);
+    let mut vhead: u32 = 0u32;
+    let mut vtail: u32 = 0u32;
+    loop {
+        if ck(p, buf) == 13 {
+            break;
+        }
+        let mut okf: i32 = 0;
+        let ot: Tok = tok_at(buf, p.pos);
+        if ids(src, ot, b"ok") && kk(p, buf, 1usize) == 1 {
+            adv(p, buf);
+            okf = 1;
+        }
+        let vt: Tok = tok_at(buf, p.pos);
+        adv(p, buf);
+        let mut pyhead: u32 = 0u32;
+        let mut pytail: u32 = 0u32;
+        if ck(p, buf) == 10 {
+            adv(p, buf);
+            loop {
+                if ck(p, buf) == 11 {
+                    break;
+                }
+                let pty: u32 = parse_type(p, src, buf);
+                if pyhead == 0u32 {
+                    pyhead = pty;
+                } else {
+                    set_next(p, pytail, pty);
+                }
+                pytail = pty;
+                if !eat(p, buf, 16) {
+                    break;
+                }
+            }
+            expect(p, buf, 11);
+        }
+        let mut vd: Node = nnew(T_VARIANT);
+        vd.op = okf;
+        vd.p0 = vt.start;
+        vd.p1 = vt.end;
+        vd.a = pyhead;
+        let vi: u32 = push_node(p, vd);
+        if vhead == 0u32 {
+            vhead = vi;
+        } else {
+            set_next(p, vtail, vi);
+        }
+        vtail = vi;
+        if !eat(p, buf, 16) {
+            break;
+        }
+    }
+    expect(p, buf, 13);
+    let mut nd: Node = nnew(T_ENUM);
+    nd.op = copyf;
+    nd.p0 = nt.start;
+    nd.p1 = nt.end;
+    nd.a = tparams;
+    nd.b = vhead;
+    return push_node(p, nd);
+}
+
+fn parse_static(p: write P, src: [u8], buf: read Buf) -> u32 {
+    expect(p, buf, 2);
+    let nt: Tok = tok_at(buf, p.pos);
+    adv(p, buf);
+    expect(p, buf, 20);
+    let ty: u32 = parse_type(p, src, buf);
+    expect(p, buf, 25);
+    let val: u32 = parse_expr(p, src, buf);
+    expect(p, buf, 19);
+    let mut nd: Node = nnew(T_STATIC);
+    nd.p0 = nt.start;
+    nd.p1 = nt.end;
+    nd.a = ty;
+    nd.b = val;
+    return push_node(p, nd);
+}
+
+fn parse_item(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let mut copyf: i32 = 0;
+    let ct: Tok = tok_at(buf, p.pos);
+    if kw(src, ct, b"copy") {
+        adv(p, buf);
+        copyf = 1;
+    }
+    let t: Tok = tok_at(buf, p.pos);
+    if kw(src, t, b"struct") {
+        return parse_struct(p, src, buf, copyf);
+    }
+    if kw(src, t, b"enum") {
+        return parse_enum(p, src, buf, copyf);
+    }
+    if kw(src, t, b"fn") {
+        return parse_fn(p, src, buf);
+    }
+    if kw(src, t, b"static") {
+        return parse_static(p, src, buf);
+    }
+    // Fallback: skip an unrecognized token to avoid an infinite loop.
+    adv(p, buf);
+    return 0u32;
+}
+
+// Parse the whole program: returns the head of the item chain (via nx).
+fn parse_program(p: write P, src: [u8], buf: read Buf) -> u32 {
+    let mut head: u32 = 0u32;
+    let mut tail: u32 = 0u32;
+    loop {
+        if ck(p, buf) == 99 {
+            break;
+        }
+        let it: u32 = parse_item(p, src, buf);
+        if it != 0u32 {
+            if head == 0u32 {
+                head = it;
+            } else {
+                set_next(p, tail, it);
+            }
+            tail = it;
+        }
+    }
+    return head;
+}
+
+// ---- canonical S-expression dump (bytes through `trace`) --------------------
+fn emit_lit(s: [u8]) -> unit {
+    let mut i: usize = 0usize;
+    while i < len(s) {
+        trace(conv i64 s[i]);
+        i = i + 1usize;
+    }
+    return;
+}
+fn emit_mode(m: i32) -> unit {
+    if m == 0 {
+        emit_lit(b"take");
+    } else if m == 1 {
+        emit_lit(b"read");
+    } else if m == 2 {
+        emit_lit(b"write");
+    } else {
+        emit_lit(b"out");
+    }
+    return;
+}
+fn emit_bk(b: i32) -> unit {
+    if b == 1 {
+        emit_lit(b"read");
+    } else if b == 2 {
+        emit_lit(b"write");
+    } else {
+        emit_lit(b"none");
+    }
+    return;
+}
+fn emit_binop(op: i32) -> unit {
+    if op == OP_ADD {
+        emit_lit(b"add");
+    } else if op == OP_SUB {
+        emit_lit(b"sub");
+    } else if op == OP_MUL {
+        emit_lit(b"mul");
+    } else if op == OP_DIV {
+        emit_lit(b"div");
+    } else if op == OP_REM {
+        emit_lit(b"rem");
+    } else if op == OP_EQ {
+        emit_lit(b"eq");
+    } else if op == OP_NE {
+        emit_lit(b"ne");
+    } else if op == OP_LT {
+        emit_lit(b"lt");
+    } else if op == OP_LE {
+        emit_lit(b"le");
+    } else if op == OP_GT {
+        emit_lit(b"gt");
+    } else if op == OP_GE {
+        emit_lit(b"ge");
+    } else if op == OP_AND {
+        emit_lit(b"and");
+    } else if op == OP_OR {
+        emit_lit(b"or");
+    } else if op == OP_BITAND {
+        emit_lit(b"bitand");
+    } else if op == OP_BITOR {
+        emit_lit(b"bitor");
+    } else if op == OP_BITXOR {
+        emit_lit(b"bitxor");
+    } else if op == OP_SHL {
+        emit_lit(b"shl");
+    } else {
+        emit_lit(b"shr");
+    }
+    return;
+}
+fn emit_unop(op: i32) -> unit {
+    if op == UN_NEG {
+        emit_lit(b"neg");
+    } else if op == UN_NOT {
+        emit_lit(b"not");
+    } else {
+        emit_lit(b"bitnot");
+    }
+    return;
+}
+fn emit_prefixop(op: i32) -> unit {
+    if op == PF_DEREF {
+        emit_lit(b"deref");
+    } else if op == PF_READ {
+        emit_lit(b"read");
+    } else if op == PF_WRITE {
+        emit_lit(b"write");
+    } else {
+        emit_lit(b"clone");
+    }
+    return;
+}
+fn emit_region(p: write P, src: [u8], reg: u32) -> unit {
+    emit_sp();
+    if reg == 0u32 {
+        trace(95);
+    } else {
+        let nd: Node = p.nodes[conv usize reg];
+        emit_bytes(src, nd.p0, nd.p1);
+    }
+    return;
+}
+fn emit_children(p: write P, src: [u8], head: u32) -> unit {
+    let mut i: u32 = head;
+    while i != 0u32 {
+        emit_sp();
+        emit_node(p, src, i);
+        let nd: Node = p.nodes[conv usize i];
+        i = nd.nx;
+    }
+    return;
+}
+fn emit_name_chain(p: write P, src: [u8], head: u32) -> unit {
+    let mut i: u32 = head;
+    while i != 0u32 {
+        let nd: Node = p.nodes[conv usize i];
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        i = nd.nx;
+    }
+    return;
+}
+fn emit_wrap(p: write P, src: [u8], key: [u8], head: u32) -> unit {
+    trace(40);
+    emit_lit(key);
+    emit_children(p, src, head);
+    trace(41);
+    return;
+}
+
+fn emit_node(p: write P, src: [u8], i: u32) -> unit {
+    let nd: Node = p.nodes[conv usize i];
+    let tg: i32 = nd.tag;
+    // ---- items ----
+    if tg == T_FN {
+        emit_lit(b"(fn");
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        emit_sp();
+        emit_wrap(p, src, b"tparams", nd.a);
+        emit_sp();
+        emit_regions_inline(p, src, nd.b);
+        emit_sp();
+        emit_wrap(p, src, b"params", nd.c);
+        emit_lit(b" (sig");
+        emit_sp();
+        if (nd.op & 1) != 0 {
+            emit_lit(b"alloc");
+        } else {
+            trace(45);
+        }
+        emit_sp();
+        if (nd.op & 2) != 0 {
+            emit_lit(b"foreign");
+        } else {
+            trace(45);
+        }
+        trace(41);
+        emit_sp();
+        if nd.e == 0u32 {
+            emit_lit(b"none");
+        } else {
+            emit_node(p, src, nd.e);
+        }
+        emit_sp();
+        emit_node(p, src, nd.d);
+        trace(41);
+        return;
+    }
+    if tg == T_STRUCT {
+        emit_lit(b"(struct");
+        emit_sp();
+        if nd.op != 0 {
+            emit_lit(b"copy");
+        } else {
+            trace(45);
+        }
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        emit_sp();
+        emit_wrap(p, src, b"tparams", nd.a);
+        emit_sp();
+        emit_wrap(p, src, b"fields", nd.b);
+        emit_sp();
+        if nd.c == 0u32 {
+            trace(45);
+        } else {
+            emit_node(p, src, nd.c);
+        }
+        trace(41);
+        return;
+    }
+    if tg == T_ENUM {
+        emit_lit(b"(enum");
+        emit_sp();
+        if nd.op != 0 {
+            emit_lit(b"copy");
+        } else {
+            trace(45);
+        }
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        emit_sp();
+        emit_wrap(p, src, b"tparams", nd.a);
+        emit_sp();
+        emit_wrap(p, src, b"variants", nd.b);
+        trace(41);
+        return;
+    }
+    if tg == T_STATIC {
+        emit_lit(b"(static");
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        emit_sp();
+        emit_node(p, src, nd.a);
+        emit_sp();
+        emit_node(p, src, nd.b);
+        trace(41);
+        return;
+    }
+    // ---- helper list nodes ----
+    if tg == T_TPARAM {
+        emit_lit(b"(tp");
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        emit_name_chain(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_PARAM {
+        emit_lit(b"(param");
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        emit_sp();
+        emit_mode(nd.op);
+        emit_region(p, src, nd.b);
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_RET {
+        emit_lit(b"(ret");
+        emit_sp();
+        emit_bk(nd.op);
+        emit_region(p, src, nd.b);
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_SFIELD {
+        emit_lit(b"(sfield");
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_VARIANT {
+        emit_lit(b"(variant");
+        emit_sp();
+        if nd.op != 0 {
+            emit_lit(b"ok");
+        } else {
+            trace(45);
+        }
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        emit_children(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_ARM {
+        emit_lit(b"(arm");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        emit_sp();
+        emit_node(p, src, nd.b);
+        trace(41);
+        return;
+    }
+    if tg == T_FINIT {
+        emit_lit(b"(finit");
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_FPPARAM {
+        emit_lit(b"(fpparam");
+        emit_sp();
+        if nd.d != 0u32 {
+            emit_bytes(src, nd.p0, nd.p1);
+        } else {
+            trace(95);
+        }
+        emit_sp();
+        emit_mode(nd.op);
+        emit_region(p, src, nd.b);
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    // ---- types ----
+    if tg == T_SC {
+        emit_lit(b"(sc");
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        trace(41);
+        return;
+    }
+    if tg == T_NAMED {
+        emit_lit(b"(named");
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        trace(41);
+        return;
+    }
+    if tg == T_APP {
+        emit_lit(b"(app");
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        emit_children(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_PROJ {
+        emit_lit(b"(proj");
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        emit_sp();
+        let an: Node = p.nodes[conv usize nd.a];
+        emit_bytes(src, an.p0, an.p1);
+        trace(41);
+        return;
+    }
+    if tg == T_ARRAY {
+        emit_lit(b"(array");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        emit_sp();
+        emit_node(p, src, nd.b);
+        trace(41);
+        return;
+    }
+    if tg == T_SLICE {
+        emit_lit(b"(slice");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_SLICEMUT {
+        emit_lit(b"(slicemut");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_RAWPTR {
+        emit_lit(b"(rawptr");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_BOX {
+        emit_lit(b"(box");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_BOXRESULT {
+        emit_lit(b"(boxresult");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_BORROW {
+        emit_lit(b"(borrow");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_BORROWMUT {
+        emit_lit(b"(borrowmut");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_FNPTR {
+        emit_lit(b"(fnptr");
+        emit_sp();
+        emit_wrap(p, src, b"fpparams", nd.a);
+        emit_sp();
+        if (nd.op & 1) != 0 {
+            emit_lit(b"alloc");
+        } else {
+            trace(45);
+        }
+        emit_sp();
+        if (nd.op & 2) != 0 {
+            emit_lit(b"foreign");
+        } else {
+            trace(45);
+        }
+        emit_sp();
+        emit_node(p, src, nd.b);
+        trace(41);
+        return;
+    }
+    // ---- statements ----
+    if tg == T_LET {
+        emit_lit(b"(let");
+        emit_sp();
+        if nd.op != 0 {
+            emit_lit(b"mut");
+        } else {
+            trace(45);
+        }
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        emit_sp();
+        if nd.a == 0u32 {
+            trace(45);
+        } else {
+            emit_node(p, src, nd.a);
+        }
+        emit_sp();
+        if nd.b == 0u32 {
+            trace(45);
+        } else {
+            emit_node(p, src, nd.b);
+        }
+        trace(41);
+        return;
+    }
+    if tg == T_ASSIGN {
+        emit_lit(b"(assign");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        emit_sp();
+        emit_node(p, src, nd.b);
+        trace(41);
+        return;
+    }
+    // ---- expressions ----
+    if tg == T_INT {
+        emit_lit(b"(int");
+        emit_sp();
+        emit_num(nd.ival);
+        emit_sp();
+        emit_num(conv u64 nd.suf);
+        trace(41);
+        return;
+    }
+    if tg == T_NEGINT {
+        emit_lit(b"(negint");
+        emit_sp();
+        emit_num(nd.ival);
+        emit_sp();
+        emit_num(conv u64 nd.suf);
+        trace(41);
+        return;
+    }
+    if tg == T_STR {
+        emit_lit(b"(str");
+        emit_sp();
+        emit_num(decoded_len(src, nd.p0, nd.p1));
+        emit_decoded(src, nd.p0, nd.p1);
+        trace(41);
+        return;
+    }
+    if tg == T_BYTES {
+        emit_lit(b"(bytes");
+        emit_sp();
+        emit_num(decoded_len(src, nd.p0, nd.p1));
+        emit_decoded(src, nd.p0, nd.p1);
+        trace(41);
+        return;
+    }
+    if tg == T_BOOL {
+        emit_lit(b"(bool");
+        emit_sp();
+        emit_num(nd.ival);
+        trace(41);
+        return;
+    }
+    if tg == T_ID {
+        emit_lit(b"(id");
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        trace(41);
+        return;
+    }
+    if tg == T_UNARY {
+        emit_lit(b"(unary");
+        emit_sp();
+        emit_unop(nd.op);
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_PREFIX {
+        emit_lit(b"(prefix");
+        emit_sp();
+        emit_prefixop(nd.op);
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_BIN {
+        emit_lit(b"(bin");
+        emit_sp();
+        emit_binop(nd.op);
+        emit_sp();
+        emit_node(p, src, nd.a);
+        emit_sp();
+        emit_node(p, src, nd.b);
+        trace(41);
+        return;
+    }
+    if tg == T_CALL {
+        emit_lit(b"(call");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        emit_children(p, src, nd.b);
+        trace(41);
+        return;
+    }
+    if tg == T_OUT {
+        emit_lit(b"(out");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_FIELD {
+        emit_lit(b"(field");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        trace(41);
+        return;
+    }
+    if tg == T_INDEX {
+        emit_lit(b"(index");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        emit_sp();
+        emit_node(p, src, nd.b);
+        trace(41);
+        return;
+    }
+    if tg == T_CONV {
+        emit_lit(b"(conv");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        emit_sp();
+        emit_node(p, src, nd.b);
+        trace(41);
+        return;
+    }
+    if tg == T_ARRAYLIT {
+        emit_lit(b"(arraylit");
+        emit_children(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_ARRAYREP {
+        emit_lit(b"(arrayrep");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        emit_sp();
+        emit_node(p, src, nd.b);
+        trace(41);
+        return;
+    }
+    if tg == T_STRUCTLIT {
+        emit_lit(b"(structlit");
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        emit_children(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_ENUMCTOR {
+        emit_lit(b"(enumctor");
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        emit_sp();
+        let vn: Node = p.nodes[conv usize nd.a];
+        emit_bytes(src, vn.p0, vn.p1);
+        emit_children(p, src, nd.b);
+        trace(41);
+        return;
+    }
+    if tg == T_BLOCK {
+        emit_lit(b"(block");
+        emit_children(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_IF {
+        emit_lit(b"(if");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        emit_sp();
+        emit_node(p, src, nd.b);
+        emit_sp();
+        if nd.c == 0u32 {
+            trace(45);
+        } else {
+            emit_node(p, src, nd.c);
+        }
+        trace(41);
+        return;
+    }
+    if tg == T_MATCH {
+        emit_lit(b"(match");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        emit_children(p, src, nd.b);
+        trace(41);
+        return;
+    }
+    if tg == T_LOOP {
+        emit_lit(b"(loop");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_WHILE {
+        emit_lit(b"(while");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        emit_sp();
+        emit_node(p, src, nd.b);
+        trace(41);
+        return;
+    }
+    if tg == T_RETURN {
+        emit_lit(b"(return");
+        if nd.a != 0u32 {
+            emit_sp();
+            emit_node(p, src, nd.a);
+        }
+        trace(41);
+        return;
+    }
+    if tg == T_BREAK {
+        emit_lit(b"(break)");
+        return;
+    }
+    if tg == T_CONTINUE {
+        emit_lit(b"(continue)");
+        return;
+    }
+    if tg == T_ASSERT {
+        emit_lit(b"(assert");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_PANIC {
+        emit_lit(b"(panic");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_RESULT {
+        emit_lit(b"(result)");
+        return;
+    }
+    if tg == T_PAREN {
+        emit_lit(b"(paren");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_TRY {
+        emit_lit(b"(try");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_GENERICVAL {
+        emit_lit(b"(genericval");
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        emit_children(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_UNSAFE {
+        emit_lit(b"(unsafe");
+        emit_sp();
+        emit_num(decoded_len(src, nd.p0, nd.p1));
+        emit_decoded(src, nd.p0, nd.p1);
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_WRAPPING {
+        emit_lit(b"(wrapping");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_SATURATING {
+        emit_lit(b"(saturating");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_FOR {
+        emit_lit(b"(for");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        emit_sp();
+        emit_node(p, src, nd.b);
+        emit_sp();
+        emit_node(p, src, nd.c);
+        trace(41);
+        return;
+    }
+    if tg == T_SIZEOF {
+        emit_lit(b"(sizeof");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_ALIGNOF {
+        emit_lit(b"(alignof");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    if tg == T_OFFSETOF {
+        emit_lit(b"(offsetof");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        trace(41);
+        return;
+    }
+    if tg == T_FIELDPTR {
+        emit_lit(b"(fieldptr");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        trace(41);
+        return;
+    }
+    if tg == T_CASTPTR {
+        emit_lit(b"(castptr");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        emit_children(p, src, nd.b);
+        trace(41);
+        return;
+    }
+    if tg == T_ADDRTOPTR {
+        emit_lit(b"(addrtoptr");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        emit_children(p, src, nd.b);
+        trace(41);
+        return;
+    }
+    if tg == T_PTRNULL {
+        emit_lit(b"(ptrnull");
+        emit_sp();
+        emit_node(p, src, nd.a);
+        trace(41);
+        return;
+    }
+    // ---- patterns ----
+    if tg == T_WILD {
+        emit_lit(b"(wild)");
+        return;
+    }
+    if tg == T_BIND {
+        emit_lit(b"(bind");
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        trace(41);
+        return;
+    }
+    if tg == T_PVARIANT {
+        emit_lit(b"(pvariant");
+        emit_sp();
+        emit_bytes(src, nd.p0, nd.p1);
+        emit_sp();
+        let vn: Node = p.nodes[conv usize nd.a];
+        emit_bytes(src, vn.p0, vn.p1);
+        emit_children(p, src, nd.b);
+        trace(41);
+        return;
+    }
+    emit_lit(b"(?)");
+    return;
+}
+
+// `(regions ...)` needs a bare name chain, not node children.
+fn emit_regions_inline(p: write P, src: [u8], head: u32) -> unit {
+    trace(40);
+    emit_lit(b"regions");
+    emit_name_chain(p, src, head);
+    trace(41);
+    return;
+}
+
+fn parse_dump(src: [u8], buf: read Buf) -> unit {
+    let mut p: P = P { nodes: [nnew(0); 2048], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32 };
+    let head: u32 = parse_program(write p, src, buf);
+    emit_lit(b"(program");
+    emit_children(write p, src, head);
+    trace(41);
+    emit_nl();
+    return;
+}

@@ -379,3 +379,31 @@ is a hard keyword the self-lexer must dodge as an identifier; (6) write-path buf
 read-path buf.f deref asymmetry is error-prone. Items (1)/(3) point at the region-bearing-fields
 and text-in-core questions; (2) at a std Vec; (4) at a std map + the deferred Chars/byte-match.
 This is the P19/dogfooding signal the self-hosting arc exists to produce.
+### Slice 2 addendum — the parser (recursive descent in Candor, 2026-07-10)
+
+Writing the self-hosted PARSER surfaced seven MORE frictions, distinct from the lexer's (a
+recursive tree-builder stresses different edges than an iterative scanner), ranked by bite: (1)
+no sum type / no Box-recursive AST — a self-referential tree must be a fixed `[N]Node` ARENA
+addressed by `u32`, with every child edge a `u32` slot and every list an intrusive `nx` sibling
+chain (the arena-basket idiom); this is the dominant structural tax and caps tree size. (2) ONE
+return value per fn — `decl_brackets` (regions+tparams) and mode/type parsing (mode+region+type)
+must smuggle their multiple results through SCRATCH FIELDS on the parser struct, an aliasing-prone
+side channel `out`-params would fix. (3) `match` has no integer/literal patterns (only
+wildcard/binding/variant), so the AST-tag DISPATCH in the dumper is a ~100-branch `if nd.tag == T_X`
+else-if ladder instead of a `match` — the same wart the lexer's keyword ladder hit, now on tags.
+(4) DEEP recursion overflows the default (~2 MiB) test-thread stack: the precedence ladder is ~13
+fn-frames deep per primary and each interpreter frame is heavy, so the gate must run on a 256 MiB
+thread (the iterative lexer never hit this — a recursive-descent program pays a runtime-stack tax
+the tree-walker amplifies). (5) hard keywords cannot be locals — `drop` as a variable name is a
+parse error (renamed to `drophook`); the keyword set leaks into the self-author's identifier space,
+compounding the slice-1 `out` friction. (6) no generics-over-borrow and no fn-pointers taking a
+`write` param — the Rust oracle's one `binary_left(next_fn, ops)` helper cannot be written, so all
+~10 precedence levels are hand-expanded into near-identical functions. (7) `p.*.f = g(p, ...)`
+(store into a field of the same `write`-borrowed struct from a call that also borrows it) is a
+two-phase-borrow hazard, forcing a `let tmp = g(p, ..); p.*.f = tmp;` temp at EVERY arena-alloc
+site — ubiquitous ceremony. Items (1)/(2) point at a language sum-type/AST story and `out`-value
+ergonomics; (3) at literal match patterns; (4) at guaranteed tail/heap recursion or a bigger
+default stack; (6) at higher-order over borrows. What WORKED cleanly: reusing the lexer's helpers
+by CONCATENATION (span_eq, emit_*), threading `(write P, [u8], read Buf)` through mutual recursion
+via automatic write-param reborrow, and a SPAN-FREE canonical S-expression as the differential
+target (excluding spans sidesteps span-arithmetic divergence and keeps the gate on tree SHAPE).
