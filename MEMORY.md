@@ -416,3 +416,26 @@ One lesson per entry, one-line summary first.
   The dropped `init` bitmap was write-only in the self-host (no guard). Cost: paging
   adds ~0.12 s/fixture (~25%), the oracle's per-fixture 512 KiB `pages` zero-init.
   (self-interp S6a, 2026-07-11). See [[self-host-analyses]].
+
+- **Self-lowering L4 (enums+match): a scalar move/copy-bind must emit `Store(place
+  local, Load)` not `Assign(local, Load)`, and enum-payload moves need a SYNTHETIC
+  `_i` path segment in the move mask.** Two byte-exactness points for the `match`
+  lowering in `selfhost/lower/lower.cnr` (both reused by L5 BoxResult): (1) build.rs
+  copy-binds a wordy payload with `StatementKind::Store(Place::local(l), Load{..})`,
+  NOT `Assign(l, Load)` — the two execute identically (a local scalar store), so the
+  execution gate stays green either way, but `serialize(mir::build …)` carries the
+  extra `(place l (proj))` nesting; matching it is what makes the wire byte-identical
+  modulo spans. (2) A consuming match that move-binds a non-copy payload marks the
+  scrutinee's `_i` sub-path moved so its tag-directed enum `Drop` prunes it (no
+  double-drop); that path segment is the SYNTHETIC name `_i` (build.rs
+  `format!("_{i}")`), not a source-byte span, so the move-mask side table needs a
+  parallel `syn` flag (>=0 = payload index, emitted as `"_N"`; -1 = a real source
+  span) — `seg_is_prefix` must compare the syn tag, or two synthetic `_0`/`_1` with
+  empty spans compare equal via `name_eq`. VERIFICATION METHOD (reusable): the gate is
+  EXECUTION equality (RET/TRACE/FAULT), but to confirm structural fidelity, whitespace-
+  tokenize both wires and count diffs where BOTH tokens are numeric (`trim '-' && all
+  ascii_digit`, incl. digits glued to trailing `)`) = inert spans; any non-numeric diff
+  = a real structural gap. After the Store fix, all 6 S4 fixtures showed 0 structural
+  diffs. Enums carry no drop hook — enum drop is WHOLLY the interp's tag-directed
+  `drop_value`; the lowerer emits one `Drop` per needs-drop enum local (self-lower L4,
+  2026-07-11).

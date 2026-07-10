@@ -1679,3 +1679,91 @@ each struct `drop` hook to a MIR function, mirroring `src/mir/build.rs`.
   sorted order, hence 0 wire diff here).
 
 Additive: new S3 gate green in isolation (44/44 lower fixtures); clippy clean.
+
+
+---
+
+## OBL-L4-ENUM-MATCH — self-lowering, fourth slice: ENUMS and MATCH to MIR (2026-07-11)
+
+L4 extends `selfhost/lower/lower.cnr` from structs/arrays to user ENUMS and `match`:
+enum layout, the `T_ENUMCTOR` tag+payload store, and the `match` tag-switch branch
+chain, plus the consuming-match / tag-directed enum-drop interaction with L3. Ports
+`src/mir/build.rs` `lower_enum_ctor`/`lower_match`/`lower_match_arm` and reuses the
+S4 enum layout of `selfhost/interp/interp.cnr`. Plain user enums only — `BoxResult`
+(a synthesized enum with a Box payload) is L5.
+
+- ENUM LAYOUT (ported from interp.cnr / `src/interp/layout.rs`): `{tag:u64@0,
+  payload@8}`; the payload is laid out struct-style (declared order, natural
+  alignment) from offset 8; `enum_size = round_up(8 + max padded-payload, 8)`, align
+  8 always; tag = the variant's 0-based DECLARED index. The payload chain is a raw
+  type-node `nx`-chain (each node IS a field's type), so it reuses the L2 field-walk.
+  `find_enum`/`enum_id_of`/`enum_size`/`variant_by_index`/`variant_index_by_name`/
+  `variant_payload_off`/`variant_payload_ty` are added, and `ty_size`/`ty_align`/
+  `needs_drop_ty`/`is_copy_ty` route `T_NAMED`-that-is-an-enum (and bare `T_ENUM`)
+  through them.
+
+- T_ENUMCTOR (mirrors build.rs `lower_enum_ctor`): allocate nothing new — write into
+  the destination place (a `let`/return slot). Store the variant tag as a `u64`
+  const at field 0, then `lower_into` each argument at its `variant_payload_off`. A
+  scalar payload stores; an aggregate payload (e.g. a struct-literal `Noisy { … }`)
+  recurses through the existing L2 aggregate machinery.
+
+- T_MATCH branch-chain CFG (mirrors build.rs `lower_match`, statement position): read
+  the tag ONCE into a `u64` temp (`(load (place root (proj … (field 0 (scalar
+  u64)))) (scalar u64))`), create the `join` block FIRST, then per VARIANT arm emit a
+  `Cmp eq (oplocal tag) (const idx u64)` into a bool temp, `Branch` into a fresh
+  `arm_bb` else a fresh `next_bb`, lower the arm in `arm_bb`, `Goto join`, then
+  `switch_to next_bb` (the fall-through test chain). A WILDCARD/BINDING arm is the
+  unconditional tail (bind nothing, `Goto join`, stop). A non-exhaustive tail faults
+  (`Panic`), mirroring the oracle's "no matching arm" (unreachable for a checked
+  exhaustive match, but emitted). Block-creation order (join, then arm/next per
+  variant) and the Cmp/Branch/Load shapes match build.rs BYTE-FOR-BYTE.
+
+- PAYLOAD BINDS (mirrors build.rs `lower_match_arm`): each arm binds its sub-patterns
+  in a fresh drop-scope (so the arm-scope drop fires AFTER the body, before `Goto
+  join`). `T_WILD` binds nothing; `T_BIND` binds by payload index. A COPY payload
+  copies — a wordy scalar via `(store (place loc (proj)) (load <payload place> ty))`,
+  a non-wordy aggregate via `CopyVal`. A NON-COPY payload of an OWNED scrutinee
+  MOVE-binds: `CopyVal` into a fresh local + mark the scrutinee's `_i` sub-path moved.
+  (Nested variant sub-patterns are out of subset — flagged E-unsupported, none
+  needed.)
+
+- CONSUMING-MATCH + ENUM DROP (the L3 interaction): the move-mask gains a SYNTHETIC
+  `_i` segment kind (`mv_seg_syn`), emitted in the `Drop` op's `(moved (path "_i"))`
+  mask, so a bound-and-moved payload is pruned from the scrutinee's later drop. Enums
+  carry NO hook: `needs_drop_ty` returns true iff a variant payload needs drop, and
+  the scrutinee's `Drop` is resolved TAG-DIRECTED by the interp (`drop_enum` reads the
+  live tag, drops the active variant's payloads in reverse, honoring the move mask) —
+  the lowerer emits ONE `Drop` per needs-drop enum local; the tag-directed resolution
+  lives in the interp, unchanged.
+
+- GATE (`prototype/tests/selfhost_lower.rs`, 6 S4 fixtures added to the corpus): each
+  runs `lower.cnr` → wire → `deserialize` → `mir::interp::run` → byte-exact RET/TRACE/
+  FAULT vs `run_source_real`. PROVEN EXECUTION byte-exact on all 6 — enum_construct_match
+  (tag write + tag-switch + scalar payload bind + branch chain), match_wildcard (unit
+  variants + wildcard tail), enum_multi_variant (mixed-width payload offsets i16@8/
+  i64@16), match_bind_multi (three-payload binds → TRACE 10/20/30), enum_result_shape
+  (enum by-value return via the caller-return-slot ABI, then matched), and
+  enum_drop_payload (the load-bearing drop-order signal: TRACE 1, then the moved
+  payload's hook 7 at arm-scope exit, then 2, then the un-consumed `some(Noisy)`
+  scrutinee's tag-directed drop 8; the `Two::a`-moved `_0` is pruned so it does NOT
+  double-drop). All 44 prior L1+L2+L3 fixtures remain byte-exact (50 total).
+
+- FINDING (extends OBL-L3-DROP-SCHEDULE, benign): the emitted enum tag store, payload
+  offsets/types, the tag-read Load, the Cmp/Branch chain, arm block IDs, payload-bind
+  Stores/CopyVals, the `(moved (path "_i"))` synthetic paths, and every enum local's
+  `drop_obligation` flag are byte-identical to `serialize(mir::build …)` (0 structural
+  diffs across all 6 fixtures). The ONLY wire diffs remain the SAME inert span-only
+  differences the L1/L2/L3 lowering exhibits (the self-host parser records name-only/
+  glued spans where the Rust AST carries full-expression spans) — none load-bearing
+  (no S4 fixture faults). No branch-chain, payload-bind, or consuming-drop wire gap.
+
+- DEFERRED: value-producing `match` (`let x = match … { => expr }`, arm result into a
+  dst place) — build.rs supports it via `lower_into`, but no S4 gate fixture exercises
+  it (all six are statement-position with block bodies), so it is left unimplemented
+  rather than shipped untested; a place-with-index/field or call scrutinee (fixtures
+  use plain-local scrutinees); nested variant sub-patterns and guards (out of the
+  interp's S4 subset too); `BoxResult` (L5b — a synthesized enum over a Box payload).
+
+Additive: new S4 gate green in isolation (50/50 lower fixtures); full suite 589/589
+green (0 failing); clippy clean.

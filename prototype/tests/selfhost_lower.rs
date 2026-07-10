@@ -185,6 +185,16 @@ const CORPUS: &[(&str, Shape)] = &[
     ("drop_break.cnr", Ret),
     ("drop_nested.cnr", Ret),
     ("drop_param.cnr", Ret),
+    // S4 ENUMS + MATCH: enum layout (tag@0/payload@8), the T_ENUMCTOR store, the
+    // match tag-switch branch chain, payload binds, and the consuming-match /
+    // tag-directed enum-drop L3 interaction (enum_drop_payload's TRACE order is
+    // the load-bearing signal).
+    ("enum_construct_match.cnr", Ret),
+    ("match_wildcard.cnr", Ret),
+    ("enum_multi_variant.cnr", Ret),
+    ("match_bind_multi.cnr", Ret),
+    ("enum_result_shape.cnr", Ret),
+    ("enum_drop_payload.cnr", Ret),
 ];
 
 fn read_fixture(rel: &str) -> String {
@@ -224,7 +234,7 @@ fn candor_lowering_execution_equal_to_oracle_over_scalar_subset() {
         }
         assert!(rets > 0 && faults > 0, "corpus must exercise both returns and faults");
         eprintln!(
-            "selfhost lower (L1+L2+L3): {}/{} fixtures lower -> deserialize -> interp byte-exact vs oracle ({} returns, {} faults)",
+            "selfhost lower (L1+L2+L3+L4): {}/{} fixtures lower -> deserialize -> interp byte-exact vs oracle ({} returns, {} faults)",
             CORPUS.len(),
             CORPUS.len(),
             rets,
@@ -232,4 +242,5 @@ fn candor_lowering_execution_equal_to_oracle_over_scalar_subset() {
         );
     });
 }
+
 
