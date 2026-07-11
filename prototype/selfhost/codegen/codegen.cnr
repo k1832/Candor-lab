@@ -25,8 +25,8 @@
 // is NOT self-checked in this slice, so it uses the full language.
 
 use lexer::{Buf, span_eq};
-use parser::{Node, P, nnew, parse_program, T_FN, T_PARAM, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, T_NAMED, T_SC, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_FIELD, T_INDEX, T_STRUCTLIT, T_ARRAYLIT, T_ARRAYREP, T_FINIT, T_STRUCT};
-use layout::{ty_size, ty_align, struct_size, struct_align, field_off, field_ty, struct_of_ty, array_len_of, needs_drop, is_copy};
+use parser::{Node, P, nnew, parse_program, T_FN, T_PARAM, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, T_NAMED, T_SC, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_FIELD, T_INDEX, T_STRUCTLIT, T_ARRAYLIT, T_ARRAYREP, T_FINIT, T_STRUCT, T_ENUMCTOR, T_MATCH, T_PVARIANT, T_WILD, T_BIND};
+use layout::{ty_size, ty_align, struct_size, struct_align, field_off, field_ty, struct_of_ty, array_len_of, needs_drop, is_copy, enum_size, enum_of_ty, variant_by_index, variant_index_by_name, variant_payload_off, variant_payload_ty};
 
 // rt_fault kind codes (src/backend/lower.rs kind_code / aot_runtime.c kind_name).
 static FK_OVERFLOW: i32 = 0;
@@ -78,6 +78,7 @@ struct C {
     mv_seg_count: [256]usize,
     mv_seg_p0: [512]usize,
     mv_seg_p1: [512]usize,
+    mv_seg_syn: [512]i32,
     mv_seg_n: usize,
     mv_n: usize,
     loop_depth: [64]usize,
@@ -326,11 +327,43 @@ fn field_moved(c: write C, src: [u8], id: i32, fp0: usize, fp1: usize) -> bool {
     while k < c.mv_n {
         if c.mv_local[k] == id && c.mv_seg_count[k] == 1usize {
             let sg: usize = c.mv_seg_start[k];
-            if name_eq(src, c.mv_seg_p0[sg], c.mv_seg_p1[sg], fp0, fp1) { return true; }
+            if c.mv_seg_syn[sg] < 0 && name_eq(src, c.mv_seg_p0[sg], c.mv_seg_p1[sg], fp0, fp1) { return true; }
         }
         k = k + 1usize;
     }
     return false;
+}
+// Whether a one-level enum-payload sub-path (`<local>._idx`) is marked moved. The
+// dual of field_moved for the index-named payload segments a consuming match records.
+fn payload_moved(c: write C, id: i32, idx: i32) -> bool {
+    let mut k: usize = 0usize;
+    while k < c.mv_n {
+        if c.mv_local[k] == id && c.mv_seg_count[k] == 1usize {
+            let sg: usize = c.mv_seg_start[k];
+            if c.mv_seg_syn[sg] == idx { return true; }
+        }
+        k = k + 1usize;
+    }
+    return false;
+}
+// Record the scrutinee's payload sub-path `<scrut>._idx` moved (an owned-match move-
+// bind), so the scrutinee's tag-directed enum drop prunes that field (mirrors
+// lower.cnr mark_moved_payload).
+fn mark_moved_payload(c: write C, pp: read P, src: [u8], scrut: u32, idx: i32) -> unit {
+    let seg_start: usize = c.mv_seg_n;
+    let root: i32 = collect_path(c, pp, src, scrut);
+    if root < 0 { c.*.mv_seg_n = seg_start; return; }
+    let sg: usize = c.mv_seg_n;
+    c.*.mv_seg_p0[sg] = 0usize;
+    c.*.mv_seg_p1[sg] = 0usize;
+    c.*.mv_seg_syn[sg] = idx;
+    c.*.mv_seg_n = sg + 1usize;
+    let k: usize = c.mv_n;
+    c.*.mv_local[k] = root;
+    c.*.mv_seg_start[k] = seg_start;
+    c.*.mv_seg_count[k] = c.mv_seg_n - seg_start;
+    c.*.mv_n = k + 1usize;
+    return;
 }
 // The (owned-local id, one-level field path) a place names, appending segments to
 // the seg pool; -1 for a non-trackable operand (temp, literal, index, call result).
@@ -348,6 +381,7 @@ fn collect_path(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
         let sg: usize = c.mv_seg_n;
         c.*.mv_seg_p0[sg] = nd.p0;
         c.*.mv_seg_p1[sg] = nd.p1;
+        c.*.mv_seg_syn[sg] = 0i32 - 1i32;
         c.*.mv_seg_n = sg + 1usize;
         return root;
     }
@@ -380,7 +414,11 @@ fn drop_hook_call(c: write C, src: [u8], sp0: usize, sp1: usize, off_slot: i32) 
 // at the root value) enables the one-level partial-move field skip.
 fn emit_drop_at(c: write C, pp: read P, src: [u8], off_slot: i32, ty: u32, locid: i32) -> unit {
     let sid: u32 = struct_of_ty(pp, src, c.head, ty);
-    if sid == 0u32 { return; }
+    if sid == 0u32 {
+        let eid: u32 = enum_of_ty(pp, src, c.head, ty);
+        if eid != 0u32 { emit_enum_drop(c, pp, src, off_slot, eid, locid); }
+        return;
+    }
     let snode: Node = pp.nodes[conv usize sid];
     if snode.c != 0u32 {
         drop_hook_call(c, src, snode.p0, snode.p1, off_slot);
@@ -414,6 +452,61 @@ fn emit_drop_at(c: write C, pp: read P, src: [u8], off_slot: i32, ty: u32, locid
             emit_drop_at(c, pp, src, fslot, fty, 0i32 - 1i32);
         }
     }
+    return;
+}
+// Tag-directed enum drop: read the tag@0, then a runtime switch that, for the active
+// variant, drops its needs-drop payload fields in REVERSE, skipping any field a
+// consuming match marked moved. Enums carry no drop hook (mirrors interp drop_variant_rev).
+fn emit_enum_drop(c: write C, pp: read P, src: [u8], off_slot: i32, eid: u32, locid: i32) -> unit {
+    reload_rax(c, off_slot);
+    emit_load_flat(c, 9);
+    let tag_slot: i32 = spill(c);
+    let done: i32 = newlbl(c);
+    let enode: Node = pp.nodes[conv usize eid];
+    let mut vc: u32 = enode.b;
+    let mut vidx: i32 = 0;
+    while vc != 0u32 {
+        let vd: Node = pp.nodes[conv usize vc];
+        let mut nf: i32 = 0;
+        let mut fcur: u32 = vd.a;
+        while fcur != 0u32 { nf = nf + 1i32; fcur = pp.nodes[conv usize fcur].nx; }
+        let mut anydrop: bool = false;
+        let mut ck: i32 = 0;
+        while ck < nf {
+            let fty: u32 = variant_payload_ty(pp, vc, ck);
+            let mut skip: bool = false;
+            if locid >= 0 && payload_moved(c, locid, ck) { skip = true; }
+            if !skip && needs_drop(pp, src, c.head, fty) { anydrop = true; }
+            ck = ck + 1i32;
+        }
+        if anydrop {
+            let nextl: i32 = newlbl(c);
+            reload_rax(c, tag_slot);
+            bc(c, 9); bs(c, b"cmpq $"); bn(c, conv u64 vidx); bs(c, b", %rax"); bc(c, 10);
+            bc(c, 9); bs(c, b"jne "); blabel_ref(c, nextl); bc(c, 10);
+            let mut idx: i32 = nf;
+            while idx > 0i32 {
+                idx = idx - 1i32;
+                let fty2: u32 = variant_payload_ty(pp, vc, idx);
+                let mut skip2: bool = false;
+                if locid >= 0 && payload_moved(c, locid, idx) { skip2 = true; }
+                if !skip2 && needs_drop(pp, src, c.head, fty2) {
+                    let off: usize = variant_payload_off(pp, src, c.head, vc, idx);
+                    reload_rax(c, off_slot);
+                    if off != 0usize {
+                        bc(c, 9); bs(c, b"addq $"); bn(c, conv u64 off); bs(c, b", %rax"); bc(c, 10);
+                    }
+                    let fslot: i32 = spill(c);
+                    emit_drop_at(c, pp, src, fslot, fty2, 0i32 - 1i32);
+                }
+            }
+            bc(c, 9); bs(c, b"jmp "); blabel_ref(c, done); bc(c, 10);
+            blabel_def(c, nextl);
+        }
+        vidx = vidx + 1i32;
+        vc = vd.nx;
+    }
+    blabel_def(c, done);
     return;
 }
 fn emit_drop_local(c: write C, pp: read P, src: [u8], id: i32) -> unit {
@@ -693,6 +786,7 @@ fn gen_agg(c: write C, pp: read P, src: [u8], i: u32, exp_ty: u32) -> u32 {
     c.*.cur_p0 = nd.p0;
     c.*.cur_p1 = nd.p1;
     if nd.tag == T_PAREN { return gen_agg(c, pp, src, nd.a, exp_ty); }
+    if nd.tag == T_ENUMCTOR { return gen_enum_ctor(c, pp, src, i, exp_ty); }
     if nd.tag == T_STRUCTLIT { return gen_struct_lit(c, pp, src, i, exp_ty); }
     if nd.tag == T_ARRAYLIT { return gen_array_lit(c, pp, src, i, exp_ty); }
     if nd.tag == T_ARRAYREP { return gen_array_rep(c, pp, src, i, exp_ty); }
@@ -705,6 +799,44 @@ fn gen_agg(c: write C, pp: read P, src: [u8], i: u32, exp_ty: u32) -> u32 {
     }
     c.*.err = 1;
     return 0u32;
+}
+// T_ENUMCTOR: rt_stack_alloc the enum, write the u64 tag@0 (the variant's declared
+// index), then store/copy each payload argument at its variant_payload_off. Leaves the
+// enum's flat offset in %rax (aggregate convention); mirrors lower.cnr lower_enum_ctor.
+fn gen_enum_ctor(c: write C, pp: read P, src: [u8], i: u32, exp_ty: u32) -> u32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let eid: u32 = enum_of_ty(pp, src, c.head, exp_ty);
+    if eid == 0u32 { c.*.err = 1; return 0u32; }
+    let vname: Node = pp.nodes[conv usize nd.a];
+    let idx: i32 = variant_index_by_name(pp, src, eid, vname.p0, vname.p1);
+    if idx < 0 { c.*.err = 1; return 0u32; }
+    let vid: u32 = variant_by_index(pp, eid, idx);
+    let size: usize = enum_size(pp, src, c.head, eid);
+    let align: usize = ty_align(pp, src, c.head, exp_ty);
+    emit_alloc(c, size, align);
+    let baseslot: i32 = spill(c);
+    emit_const(c, conv u64 idx, 0);
+    emit_store_flat(c, 9, baseslot, 0usize);
+    let mut argc: u32 = nd.b;
+    let mut k: i32 = 0;
+    while argc != 0u32 {
+        let pty: u32 = variant_payload_ty(pp, vid, k);
+        let off: usize = variant_payload_off(pp, src, c.head, vid, k);
+        let pw: i32 = scalar_width(pp, src, pty);
+        if pw != 0 {
+            let _v: i32 = gen_value(c, pp, src, argc, pw);
+            emit_canon(c, pw);
+            emit_store_flat(c, pw, baseslot, off);
+        } else {
+            let _t: u32 = gen_agg(c, pp, src, argc, pty);
+            emit_copy_to(c, baseslot, off, ty_size(pp, src, c.head, pty));
+        }
+        k = k + 1i32;
+        argc = pp.nodes[conv usize argc].nx;
+    }
+    reload_rax(c, baseslot);
+    c.*.cur_agg_ty = exp_ty;
+    return exp_ty;
 }
 fn gen_struct_lit(c: write C, pp: read P, src: [u8], i: u32, exp_ty: u32) -> u32 {
     let nd: Node = pp.nodes[conv usize i];
@@ -881,6 +1013,7 @@ fn gen_value(c: write C, pp: read P, src: [u8], i: u32, exp_w: i32) -> i32 {
         bc(c, 10);
         return 12;
     }
+    if nd.tag == T_MATCH { let _s: i32 = gen_match(c, pp, src, i); return 12; }
     if nd.tag == T_ASSERT { let _s: i32 = gen_assert(c, pp, src, i); return 12; }
     if nd.tag == T_PANIC {
         emit_fault(c, FK_PANIC, nd.p0, nd.p1);
@@ -1307,6 +1440,117 @@ fn gen_call(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
     return 12;
 }
 
+// One match arm: bind the matched variant's payload sub-patterns in a fresh drop-scope
+// (scalar copy loads the value; an aggregate payload byte-copies into a fresh local; a
+// non-copy payload additionally marks the scrutinee's `_i` path moved and registers the
+// bound local for drop), emit the arm body, then drop the arm scope. `idx < 0` (a
+// wildcard/binding arm) binds nothing, mirroring lower.cnr lower_match_arm.
+fn gen_match_arm(c: write C, pp: read P, src: [u8], arm: u32, scrut: u32, scrut_slot: i32, eid: u32, idx: i32) -> unit {
+    let an: Node = pp.nodes[conv usize arm];
+    let pat: Node = pp.nodes[conv usize an.a];
+    let bsave: usize = c.bnd_n;
+    scope_push(c);
+    if idx >= 0 && pat.tag == T_PVARIANT {
+        let vid: u32 = variant_by_index(pp, eid, idx);
+        let mut sp: u32 = pat.b;
+        let mut i: i32 = 0;
+        while sp != 0u32 {
+            let spn: Node = pp.nodes[conv usize sp];
+            if spn.tag == T_PVARIANT {
+                c.*.err = 1;
+                scope_pop_drops(c, pp, src);
+                c.*.bnd_n = bsave;
+                return;
+            }
+            if spn.tag != T_WILD {
+                let pty: u32 = variant_payload_ty(pp, vid, i);
+                let off: usize = variant_payload_off(pp, src, c.head, vid, i);
+                let w: i32 = scalar_width(pp, src, pty);
+                if w != 0 {
+                    let loc: i32 = newslot(c);
+                    reload_rax(c, scrut_slot);
+                    if off != 0usize {
+                        bc(c, 9); bs(c, b"addq $"); bn(c, conv u64 off); bs(c, b", %rax"); bc(c, 10);
+                    }
+                    emit_load_flat(c, w);
+                    store_slot(c, loc);
+                    bind(c, spn.p0, spn.p1, loc, w, pty, 0i32 - 1i32);
+                } else {
+                    let size: usize = ty_size(pp, src, c.head, pty);
+                    let al: usize = ty_align(pp, src, c.head, pty);
+                    let loc: i32 = newslot(c);
+                    emit_alloc(c, size, al);
+                    store_slot(c, loc);
+                    reload_rax(c, scrut_slot);
+                    if off != 0usize {
+                        bc(c, 9); bs(c, b"addq $"); bn(c, conv u64 off); bs(c, b", %rax"); bc(c, 10);
+                    }
+                    emit_copy_to(c, loc, 0usize, size);
+                    let mut lid: i32 = 0i32 - 1i32;
+                    if !is_copy(pp, src, c.head, pty) {
+                        mark_moved_payload(c, pp, src, scrut, i);
+                        if needs_drop(pp, src, c.head, pty) {
+                            lid = reg_dloc(c, loc, pty);
+                        }
+                    }
+                    bind(c, spn.p0, spn.p1, loc, 0, pty, lid);
+                }
+            }
+            i = i + 1i32;
+            sp = spn.nx;
+        }
+    }
+    let _sc: i32 = gen_value(c, pp, src, an.b, 0i32 - 1i32);
+    scope_pop_drops(c, pp, src);
+    c.*.bnd_n = bsave;
+    return;
+}
+// T_MATCH: resolve the scrutinee place to its flat offset, read the tag@0 once, then a
+// per-arm test chain -- a variant arm compares the tag and `jne`s past its arm block
+// (first-match order); a wildcard/binding arm is the unconditional tail. Each arm jumps
+// to the shared join; a non-exhaustive tail faults (Panic). Mirrors lower.cnr
+// lower_match_full's Cmp/Branch shape.
+fn gen_match(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let scrut: u32 = nd.a;
+    let stn: u32 = gen_place_addr(c, pp, src, scrut);
+    let scrut_slot: i32 = spill(c);
+    let eid: u32 = enum_of_ty(pp, src, c.head, stn);
+    if eid == 0u32 { c.*.err = 1; return 12; }
+    reload_rax(c, scrut_slot);
+    emit_load_flat(c, 9);
+    let tag_slot: i32 = spill(c);
+    let join: i32 = newlbl(c);
+    let mut test_open: i32 = 1;
+    let mut arm: u32 = nd.b;
+    while arm != 0u32 {
+        if test_open == 0 { break; }
+        let an: Node = pp.nodes[conv usize arm];
+        let pat: Node = pp.nodes[conv usize an.a];
+        if pat.tag == T_WILD || pat.tag == T_BIND {
+            gen_match_arm(c, pp, src, arm, scrut, scrut_slot, eid, 0i32 - 1i32);
+            bc(c, 9); bs(c, b"jmp "); blabel_ref(c, join); bc(c, 10);
+            test_open = 0;
+        } else {
+            let vname: Node = pp.nodes[conv usize pat.a];
+            let vidx: i32 = variant_index_by_name(pp, src, eid, vname.p0, vname.p1);
+            if vidx < 0 { c.*.err = 1; return 12; }
+            let nextl: i32 = newlbl(c);
+            reload_rax(c, tag_slot);
+            bc(c, 9); bs(c, b"cmpq $"); bn(c, conv u64 vidx); bs(c, b", %rax"); bc(c, 10);
+            bc(c, 9); bs(c, b"jne "); blabel_ref(c, nextl); bc(c, 10);
+            gen_match_arm(c, pp, src, arm, scrut, scrut_slot, eid, vidx);
+            bc(c, 9); bs(c, b"jmp "); blabel_ref(c, join); bc(c, 10);
+            blabel_def(c, nextl);
+        }
+        arm = an.nx;
+    }
+    if test_open != 0 {
+        emit_fault(c, FK_PANIC, nd.p0, nd.p1);
+    }
+    blabel_def(c, join);
+    return 12;
+}
 fn gen_if(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
     let _cw: i32 = gen_value(c, pp, src, nd.a, W_BOOL);
@@ -1711,6 +1955,7 @@ pub fn codegen_dump(src: [u8], buf: read Buf) -> unit {
         mv_seg_count: [0usize; 256],
         mv_seg_p0: [0usize; 512],
         mv_seg_p1: [0usize; 512],
+        mv_seg_syn: [0i32 - 1i32; 512],
         mv_seg_n: 0usize,
         mv_n: 0usize,
         loop_depth: [0usize; 64],

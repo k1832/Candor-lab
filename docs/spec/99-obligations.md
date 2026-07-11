@@ -2534,3 +2534,62 @@ runtime helper; the hook call is a plain SysV `call`).
 DEFERRED (later native slices): drop for arrays-of-drop / enums / box / collections
 (no N3 fixture exercises them), reassignment-drop of an owned aggregate (the move
 mask reassign path is unexercised by the corpus), and a register allocator.
+
+## N4 — the native self-compile tier's FOURTH slice: ENUMS + MATCH codegen (tag-switch jump chain + tag-directed enum drop), byte-exact vs the oracle (2026-07-12)
+
+The fourth native slice extends `prototype/selfhost/codegen/codegen.cnr` to emit
+ENUM CONSTRUCTION and MATCH as x86-64 asm, matching the tree-walking oracle
+(`run_source_real`) byte-exact. It MIRRORS `selfhost/lower/lower.cnr`'s L4
+(`lower_enum_ctor`/`lower_match_full`/`lower_match_arm`) but lowers directly to
+machine instructions. Gated by the new `..._over_enum_subset` test in
+`prototype/tests/selfhost_codegen.rs`; the N1 scalar, N2 aggregate, and N3 drop
+gates stay green.
+
+ENUM CONSTRUCTION (`gen_enum_ctor`, mirrors `lower_enum_ctor`): `T_ENUMCTOR`
+resolves the enum by `enum_of_ty` and the variant index by name, `rt_stack_alloc`s
+`enum_size` bytes (align 8), writes the u64 tag @0 (the variant's declared index),
+then stores each scalar payload / byte-copies each aggregate payload at its
+`variant_payload_off`. It leaves the enum's flat offset in %rax (the N2 aggregate
+convention), so let/return/arg copy the full enum size (padded tail zeroed by
+`rt_stack_alloc`). All enum layout comes from `layout.cnr` (`enum_size`,
+`variant_by_index`, `variant_index_by_name`, `variant_payload_off`,
+`variant_payload_ty`, `enum_of_ty`) — no layout logic copied into codegen.cnr.
+
+MATCH (`gen_match`/`gen_match_arm`, mirrors `lower_match_full`/`lower_match_arm`):
+resolve the scrutinee place to its flat offset, read the tag @0 once, then a per-arm
+test chain — a `T_PVARIANT` arm `cmpq $idx`s the tag and `jne`s past its arm block
+(first-match, source order); a `T_WILD`/`T_BIND` arm is the unconditional tail. Each
+arm jumps to the shared join; a non-exhaustive tail faults (Panic). Payload
+sub-patterns bind in a fresh drop-scope: a scalar copies via `emit_load_flat` at
+`scrut+off`; an aggregate payload byte-copies (`rt_copy`) into a fresh flat-memory
+local. `T_WILD` binds nothing; nested variant sub-patterns are out of subset (the
+oracle faults on them too).
+
+CONSUMING-MATCH + TAG-DIRECTED ENUM DROP (the N3 interaction): a bound NON-COPY
+payload additionally marks the scrutinee's `_i` payload path moved (a new synthetic
+index segment `mv_seg_syn` in the move mask, the dual of N3's name-keyed
+`field_moved` — `payload_moved`) and registers the bound local for drop, so it drops
+at arm-scope exit and the scrutinee's own drop prunes that field. `emit_drop_at`
+gains an enum branch (`emit_enum_drop`): read the tag @0, then a runtime switch that,
+for the active variant, drops its needs-drop payload fields in REVERSE (skipping
+`payload_moved` fields), recursing through `emit_drop_at`. Enums carry no drop hook,
+so this is the whole of enum drop — the asm dual of interp `drop_variant_rev`.
+
+GATE / VERIFICATION (isolation): `selfhost_codegen` green — N4: 6 enum/match
+programs codegen -> assemble -> link -> run byte-exact to `run_source_real`:
+enum_construct_match (construct + tag-switch + scalar payload bind, RET 5),
+match_wildcard (default-arm tail, RET 2), enum_multi_variant (mixed payload
+shapes/offsets `two(i16,i64)`, RET 100), match_bind_multi (3 scalar binds, trace
+[10,20,30]), enum_result_shape (enum by-value return from a fn, RET 35), and — the
+load-bearing drop-order case — enum_drop_payload (trace [1,7,2,8]: e1's `a(n)` arm
+moves the Noisy payload into `n` which drops at arm-scope exit [7], the consumed
+field pruned from e1's drop; e2's `_` arm leaves the payload, dropped tag-directed at
+return [8]). N1 (29 scalar) + N2 (12 aggregate) + N3 (8 drop) stay byte-exact.
+clippy clean. NO edits to `interp.cnr`/`lower.cnr`/`mono.cnr`/`layout.cnr`/
+`src/backend/*` — contained to `codegen.cnr` + its gate. `aot_runtime.c` reused
+UNCHANGED (enum construction/match/drop need no new runtime helper).
+
+DEFERRED (later native slices): value-producing match into a result slot and
+whole-scrutinee `T_BIND` arms (no N4 fixture exercises them; `gen_match` leaves the
+arm result in %rax and, like lower.cnr, does not bind a whole-scrutinee name),
+materialized (call/ctor) scrutinees, and BoxResult/`?` (N5).

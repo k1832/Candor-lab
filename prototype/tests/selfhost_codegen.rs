@@ -373,3 +373,41 @@ fn candor_native_codegen_equal_to_oracle_over_drop_subset() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// N4: ENUMS + MATCH. The S4 enum fixtures mirror lower.cnr's L4: enum construction
+// (u64 tag@0 + payload store/copy), the match tag-switch jump chain (first-match,
+// payload binds), and the consuming-match / tag-directed enum drop N3 interaction.
+// enum_drop_payload's trace-on-drop ORDER is load-bearing. Each codegen -> .s -> cc +
+// aot_runtime.c -> run, compared byte-exact to run_source_real.
+// ---------------------------------------------------------------------------
+
+agg_fixture!(ENUM_CONSTRUCT_MATCH, "enum_construct_match.cnr");
+agg_fixture!(MATCH_WILDCARD, "match_wildcard.cnr");
+agg_fixture!(ENUM_MULTI_VARIANT, "enum_multi_variant.cnr");
+agg_fixture!(MATCH_BIND_MULTI, "match_bind_multi.cnr");
+agg_fixture!(ENUM_RESULT_SHAPE, "enum_result_shape.cnr");
+agg_fixture!(ENUM_DROP_PAYLOAD, "enum_drop_payload.cnr");
+
+const ENUM_OK: &[&str] = &[
+    ENUM_CONSTRUCT_MATCH,
+    MATCH_WILDCARD,
+    ENUM_MULTI_VARIANT,
+    MATCH_BIND_MULTI,
+    ENUM_RESULT_SHAPE,
+    ENUM_DROP_PAYLOAD,
+];
+
+#[test]
+fn candor_native_codegen_equal_to_oracle_over_enum_subset() {
+    assert!(cc_available(), "cc/linker unavailable: cannot assemble+link the emitted .s");
+    on_big_stack(|| {
+        for (i, src) in ENUM_OK.iter().enumerate() {
+            assert_native_eq_oracle(src, true, &format!("enum_ok{i}"));
+        }
+        eprintln!(
+            "selfhost codegen (N4): {} enum/match programs codegen -> assemble -> link -> run byte-exact vs oracle (tag-switch jump chain + tag-directed enum drop)",
+            ENUM_OK.len()
+        );
+    });
+}
