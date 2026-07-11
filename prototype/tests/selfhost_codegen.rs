@@ -26,6 +26,8 @@ const PARSER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/parser/parser.cnr"));
 const CODEGEN_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/codegen/codegen.cnr"));
+const LAYOUT_SRC: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/layout/layout.cnr"));
 
 #[derive(Debug, PartialEq, Eq)]
 enum Outcome {
@@ -108,6 +110,7 @@ fn candor_asm(src: &str) -> String {
     let modules = [
         ("lexer.cnr", LEXER_SRC),
         ("parser.cnr", PARSER_SRC),
+        ("layout.cnr", LAYOUT_SRC),
         ("codegen.cnr", CODEGEN_SRC),
     ];
     match run_module_tree(&modules, &main) {
@@ -260,6 +263,69 @@ fn candor_native_codegen_equal_to_oracle_over_scalar_subset() {
             OK.len() + FAULTS.len(),
             OK.len(),
             FAULTS.len()
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// N2: flat aggregates (structs + arrays). The S2 aggregate fixtures — struct
+// field read/write, nested structs, struct by-value params/returns, array
+// literals (listed + repeat), index read/write, arrays-of-structs / structs-of-
+// arrays, and the array Bounds fault (kind + span byte-exact). Each codegen ->
+// .s -> cc + aot_runtime.c -> run, compared to run_source_real.
+// ---------------------------------------------------------------------------
+
+macro_rules! agg_fixture {
+    ($konst:ident, $file:literal) => {
+        const $konst: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/selfhost_interp/",
+            $file
+        ));
+    };
+}
+agg_fixture!(STRUCT_FIELD, "struct_field.cnr");
+agg_fixture!(NESTED_STRUCT, "nested_struct.cnr");
+agg_fixture!(FIELD_ASSIGN, "field_assign.cnr");
+agg_fixture!(STRUCT_PARAM_RET, "struct_param_ret.cnr");
+agg_fixture!(STRUCT_MIXED_WIDTH, "struct_mixed_width.cnr");
+agg_fixture!(ARRAY_INDEX, "array_index.cnr");
+agg_fixture!(ARRAY_REPEAT, "array_repeat.cnr");
+agg_fixture!(INDEX_ASSIGN, "index_assign.cnr");
+agg_fixture!(ARRAY_OF_STRUCTS, "array_of_structs.cnr");
+agg_fixture!(STRUCT_WITH_ARRAY, "struct_with_array.cnr");
+agg_fixture!(AGGREGATE_MIXED, "aggregate_mixed.cnr");
+agg_fixture!(ARRAY_BOUNDS, "array_bounds.cnr");
+
+const AGG_OK: &[&str] = &[
+    STRUCT_FIELD,
+    NESTED_STRUCT,
+    FIELD_ASSIGN,
+    STRUCT_PARAM_RET,
+    STRUCT_MIXED_WIDTH,
+    ARRAY_INDEX,
+    ARRAY_REPEAT,
+    INDEX_ASSIGN,
+    ARRAY_OF_STRUCTS,
+    STRUCT_WITH_ARRAY,
+    AGGREGATE_MIXED,
+];
+
+#[test]
+fn candor_native_codegen_equal_to_oracle_over_aggregate_subset() {
+    assert!(cc_available(), "cc/linker unavailable: cannot assemble+link the emitted .s");
+    on_big_stack(|| {
+        for (i, src) in AGG_OK.iter().enumerate() {
+            assert_native_eq_oracle(src, true, &format!("agg_ok{i}"));
+        }
+        // The array Bounds fault: kind + span (the base array's span) byte-exact.
+        let o = oracle_src(ARRAY_BOUNDS, true);
+        assert!(matches!(o, Outcome::Fault { .. }), "expected a bounds fault:\n{ARRAY_BOUNDS}");
+        assert_native_eq_oracle(ARRAY_BOUNDS, true, "agg_bounds");
+        eprintln!(
+            "selfhost codegen (N2): {} flat-aggregate programs codegen -> assemble -> link -> run byte-exact vs oracle ({} OK, 1 bounds fault)",
+            AGG_OK.len() + 1,
+            AGG_OK.len()
         );
     });
 }

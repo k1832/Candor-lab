@@ -2421,3 +2421,63 @@ new `codegen.cnr` + its gate. Runtime: `selfhost_codegen` ~19s.
 
 DEFERRED (later native slices): a register allocator (the all-on-stack model is the
 MVP), and structs/arrays/enums/box/pointers/drop/concurrency codegen (N2–N5).
+
+## N2 — the native self-compile tier's SECOND slice: flat aggregates (structs + arrays) codegen, byte-exact vs the oracle (2026-07-12)
+
+The second native slice extends `prototype/selfhost/codegen/codegen.cnr` to emit
+x86-64 asm for FLAT (copy) STRUCTS and ARRAYS, matching the tree-walking oracle
+(`run_source_real`) byte-exact. Gated by `prototype/tests/selfhost_codegen.rs`
+(the new `..._over_aggregate_subset` test); the N1 scalar gate stays green.
+
+MEMORY MODEL SHIFT (mirroring `src/backend/lower.rs`): N1's scalars stayed in
+native `%rbp` stack slots (no address is observed). AGGREGATES instead live in the
+FLAT MEMORY region: an aggregate local/temp is `rt_stack_alloc(size, align)`'d and
+its VALUE flows as a Candor OFFSET (`%rax`), exactly as an aggregate MIR place does.
+A scalar leaf at a place is loaded/stored at `MEM_BASE + offset` — a
+`movabsq $0x200000000000` folded into a scratch reg, then a sized mov through it,
+the asm twin of `lower.rs::host_addr`. An aggregate local keeps BOTH a `%rbp` slot
+(holding its 8-byte offset, spilled/reloaded as a scalar) and its flat storage.
+
+CONSTRUCTS:
+- Struct literal: `emit_alloc` then write each DECL-ORDER field at `field_off`
+  (scalar -> sized store; aggregate field -> `rt_copy`). Field read `s.f` resolves
+  a flat offset (`gen_place_addr`, base offset + `field_off`) then a sized load;
+  field assign stores there. Nested structs recurse.
+- Arrays: `[a,b,...]` and `[e;N]` (unrolled at codegen time; count is the type's
+  static `array_len`). Index read/assign resolve `base + i*stride`; the Bounds
+  fault (`i >= len`) emits `cmpq $n,%rax; jb ok; call rt_fault(2 /*bounds*/, s, e)`.
+- Struct by-value fn param/return: an aggregate ARG is passed as its offset
+  (pointer); the callee `rt_stack_alloc`s its own local and `rt_copy`s the bytes in
+  (by-value, mirroring `lower.rs`'s aggregate-param prologue). An aggregate RETURN
+  leaves the result's offset in `%rax`; the caller `rt_copy`s from it. All copies
+  are byte copies (`rt_copy`) — sound because N2 is COPY aggregates (no drop yet).
+
+BOUNDS SPAN (byte-exact): the oracle's `eval_place` evaluates the index, then the
+BASE place, then bounds-checks with `cur_span` — so the reported span is the BASE
+ROOT's span, NOT the index's (confirmed via `run_source_real`: `a[3]` faults at
+`a`'s span `61..62`, not `3`). `gen_place_addr` mirrors the eval order, so the
+`cur_p0/cur_p1` left by the base resolution IS the fault span.
+
+LAYOUT REUSE: codegen `use`s `layout::{ty_size, ty_align, struct_size,
+struct_align, field_off, field_ty, struct_of_ty, array_len_of}` for ALL
+sizes/offsets — no layout logic is copied into codegen.cnr. The one derived value
+is the array element STRIDE = `ty_size([N]T) / array_len` (layout exposes no
+`stride_of`; computed here from exported sizes — see GAP).
+
+GATE / VERIFICATION (isolation): `selfhost_codegen` green — N2: 12 flat-aggregate
+programs (11 OK: struct_field, nested_struct, field_assign, struct_param_ret,
+struct_mixed_width, array_index, array_repeat, index_assign, array_of_structs,
+struct_with_array, aggregate_mixed; + 1 Bounds fault: array_bounds) codegen ->
+assemble -> link -> run byte-exact to `run_source_real`; N1: 29 scalar programs
+stay byte-exact. The gate's module tree now also materializes `layout.cnr`.
+clippy clean. NO edits to `interp.cnr`/`lower.cnr`/`mono.cnr`/`layout.cnr`/
+`src/backend/*` — contained to `codegen.cnr` + its gate.
+
+GAP (reported, not worked around): `layout.cnr` exposes no `stride_of(ty)` =
+`round_up(ty_size, ty_align)`; codegen derives the array stride as
+`ty_size([N]T)/array_len` from exported functions instead of duplicating the
+round-up. A future `pub fn stride_of` in layout.cnr would let index/array codegen
+(and any element-stride consumer) call it directly.
+
+DEFERRED (later native slices): enums/box/pointers, DROP glue for non-copy
+aggregates, slices/collections, and a register allocator.

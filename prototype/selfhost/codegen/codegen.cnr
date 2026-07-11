@@ -25,7 +25,8 @@
 // is NOT self-checked in this slice, so it uses the full language.
 
 use lexer::{Buf, span_eq};
-use parser::{Node, P, nnew, parse_program, T_FN, T_PARAM, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, T_NAMED, T_SC, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT};
+use parser::{Node, P, nnew, parse_program, T_FN, T_PARAM, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, T_NAMED, T_SC, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_FIELD, T_INDEX, T_STRUCTLIT, T_ARRAYLIT, T_ARRAYREP, T_FINIT};
+use layout::{ty_size, ty_align, struct_size, struct_align, field_off, field_ty, struct_of_ty, array_len_of};
 
 // rt_fault kind codes (src/backend/lower.rs kind_code / aot_runtime.c kind_name).
 static FK_OVERFLOW: i32 = 0;
@@ -34,6 +35,10 @@ static FK_CONVLOSS: i32 = 3;
 static FK_ASSERT: i32 = 4;
 static FK_PANIC: i32 = 7;
 static W_BOOL: i32 = 11;
+static W_AGG: i32 = 30;
+static W_USIZE: i32 = 10;
+static FK_BOUNDS: i32 = 2;
+static MEM_BASE: u64 = 35184372088832u64;
 
 struct C {
     head: u32,
@@ -43,6 +48,7 @@ struct C {
     bnd_p1: [1024]usize,
     bnd_slot: [1024]i32,
     bnd_w: [1024]i32,
+    bnd_ty: [1024]u32,
     bnd_n: usize,
     slot_next: usize,
     slot_max: usize,
@@ -51,11 +57,14 @@ struct C {
     loop_n: usize,
     lbl: i32,
     ret_w: i32,
+    ret_ty: u32,
     regime: i32,
     cur_p0: usize,
     cur_p1: usize,
+    cur_agg_ty: u32,
     luk_slot: i32,
     luk_w: i32,
+    luk_ty: u32,
     err: i32,
 }
 
@@ -217,12 +226,13 @@ fn smin_of(w: i32) -> i64 {
 }
 
 // ---- bindings (innermost-first, block-scoped by bnd_n save/restore) ----------
-fn bind(c: write C, p0: usize, p1: usize, s: i32, w: i32) -> unit {
+fn bind(c: write C, p0: usize, p1: usize, s: i32, w: i32, ty: u32) -> unit {
     let k: usize = c.bnd_n;
     c.*.bnd_p0[k] = p0;
     c.*.bnd_p1[k] = p1;
     c.*.bnd_slot[k] = s;
     c.*.bnd_w[k] = w;
+    c.*.bnd_ty[k] = ty;
     c.*.bnd_n = k + 1usize;
     return;
 }
@@ -244,6 +254,7 @@ fn lookup(c: write C, src: [u8], p0: usize, p1: usize) -> i32 {
         if name_eq(src, p0, p1, c.bnd_p0[i], c.bnd_p1[i]) {
             c.*.luk_w = c.bnd_w[i];
             c.*.luk_slot = c.bnd_slot[i];
+            c.*.luk_ty = c.bnd_ty[i];
             return c.bnd_slot[i];
         }
     }
@@ -355,6 +366,249 @@ fn emit_range_check(c: write C, w: i32, kind: i32, s: usize, e: usize) -> unit {
     return;
 }
 
+// ---- flat-memory aggregates (structs/arrays): live in the FLAT MEMORY region
+// (rt_stack_alloc'd; addresses are MEM_BASE + candor_offset, mirroring lower.rs).
+// A scalar VALUE flows through %rax as N1; an aggregate VALUE flows through %rax as
+// its flat OFFSET (Candor address). Field/index resolve to a flat offset; a scalar
+// leaf is loaded/stored at MEM_BASE + offset. -------------------------------------
+fn is_agg_ty(pp: read P, src: [u8], head: u32, tn: u32) -> bool {
+    if tn == 0u32 { return false; }
+    if scalar_width(pp, src, tn) != 0 { return false; }
+    return ty_size(pp, src, head, tn) > 0usize;
+}
+// Padded element stride of `[N]T` = size / N (reuses layout's ty_size + array_len;
+// layout.cnr exposes no stride_of, so it is derived here from exported sizes).
+fn arr_stride(pp: read P, src: [u8], head: u32, arr_ty: u32) -> usize {
+    let arrnd: Node = pp.nodes[conv usize arr_ty];
+    let n: usize = array_len_of(pp, arrnd.a);
+    if n == 0usize { return 0usize; }
+    return ty_size(pp, src, head, arr_ty) / n;
+}
+fn find_finit_cg(pp: read P, src: [u8], flist: u32, fs: usize, fen: usize) -> u32 {
+    let mut cur: u32 = flist;
+    while cur != 0u32 {
+        let fi: Node = pp.nodes[conv usize cur];
+        if name_eq(src, fs, fen, fi.p0, fi.p1) { return cur; }
+        cur = fi.nx;
+    }
+    return 0u32;
+}
+// rt_stack_alloc(size, align) -> %rax = the fresh flat offset.
+fn emit_alloc(c: write C, size: usize, align: usize) -> unit {
+    bc(c, 9); bs(c, b"movl $"); bn(c, conv u64 size); bs(c, b", %edi"); bc(c, 10);
+    bc(c, 9); bs(c, b"movl $"); bn(c, conv u64 align); bs(c, b", %esi"); bc(c, 10);
+    bi(c, b"call rt_stack_alloc");
+    return;
+}
+// Load the scalar at flat offset (%rax) into %rax, extended per width (load_scalar).
+fn emit_load_flat(c: write C, w: i32) -> unit {
+    bc(c, 9); bs(c, b"movabsq $"); bn(c, MEM_BASE); bs(c, b", %rcx"); bc(c, 10);
+    bi(c, b"addq %rcx, %rax");
+    let b: i32 = bits_of(w);
+    let sg: i32 = signedw(w);
+    bc(c, 9);
+    if b == 64 { bs(c, b"movq (%rax), %rax"); }
+    else if b == 8 { if sg != 0 { bs(c, b"movsbq (%rax), %rax"); } else { bs(c, b"movzbq (%rax), %rax"); } }
+    else if b == 16 { if sg != 0 { bs(c, b"movswq (%rax), %rax"); } else { bs(c, b"movzwq (%rax), %rax"); } }
+    else { if sg != 0 { bs(c, b"movslq (%rax), %rax"); } else { bs(c, b"movl (%rax), %eax"); } }
+    bc(c, 10);
+    return;
+}
+// Store %rax (canonical value) at MEM_BASE + [off_slot] + disp, low `w` bytes.
+fn emit_store_flat(c: write C, w: i32, off_slot: i32, disp: usize) -> unit {
+    bc(c, 9); bs(c, b"movq "); bslot(c, off_slot); bs(c, b", %rcx"); bc(c, 10);
+    bc(c, 9); bs(c, b"movabsq $"); bn(c, MEM_BASE); bs(c, b", %rdx"); bc(c, 10);
+    bi(c, b"addq %rdx, %rcx");
+    let b: i32 = bits_of(w);
+    bc(c, 9);
+    if b == 8 { bs(c, b"movb %al, "); }
+    else if b == 16 { bs(c, b"movw %ax, "); }
+    else if b == 32 { bs(c, b"movl %eax, "); }
+    else { bs(c, b"movq %rax, "); }
+    if disp != 0usize { bn(c, conv u64 disp); }
+    bs(c, b"(%rcx)");
+    bc(c, 10);
+    return;
+}
+// rt_copy(dst = [base_slot] + disp, src = %rax, size).
+fn emit_copy_to(c: write C, base_slot: i32, disp: usize, size: usize) -> unit {
+    bi(c, b"movq %rax, %rsi");
+    bc(c, 9); bs(c, b"movq "); bslot(c, base_slot); bs(c, b", %rdi"); bc(c, 10);
+    if disp != 0usize { bc(c, 9); bs(c, b"addq $"); bn(c, conv u64 disp); bs(c, b", %rdi"); bc(c, 10); }
+    bc(c, 9); bs(c, b"movl $"); bn(c, conv u64 size); bs(c, b", %edx"); bc(c, 10);
+    bi(c, b"call rt_copy");
+    return;
+}
+// rt_copy(dst = [dst_slot], src = [src_slot], size).
+fn emit_copy_from(c: write C, dst_slot: i32, src_slot: i32, size: usize) -> unit {
+    bc(c, 9); bs(c, b"movq "); bslot(c, dst_slot); bs(c, b", %rdi"); bc(c, 10);
+    bc(c, 9); bs(c, b"movq "); bslot(c, src_slot); bs(c, b", %rsi"); bc(c, 10);
+    bc(c, 9); bs(c, b"movl $"); bn(c, conv u64 size); bs(c, b", %edx"); bc(c, 10);
+    bi(c, b"call rt_copy");
+    return;
+}
+// Resolve a place to its flat OFFSET in %rax; return the place's type node. Mirrors
+// interp.cnr eval_place: index evaluates its index THEN its base, and the Bounds
+// fault reports the base root's span (cur_p0/cur_p1 left by the base resolution).
+fn gen_place_addr(c: write C, pp: read P, src: [u8], i: u32) -> u32 {
+    let nd: Node = pp.nodes[conv usize i];
+    c.*.cur_p0 = nd.p0;
+    c.*.cur_p1 = nd.p1;
+    if nd.tag == T_PAREN { return gen_place_addr(c, pp, src, nd.a); }
+    if nd.tag == T_ID {
+        let s: i32 = lookup(c, src, nd.p0, nd.p1);
+        if s < 0 { c.*.err = 1; return 0u32; }
+        reload_rax(c, s);
+        return c.luk_ty;
+    }
+    if nd.tag == T_FIELD {
+        let bt: u32 = gen_place_addr(c, pp, src, nd.a);
+        let sid: u32 = struct_of_ty(pp, src, c.head, bt);
+        let off: usize = field_off(pp, src, c.head, sid, nd.p0, nd.p1);
+        let fty: u32 = field_ty(pp, src, sid, nd.p0, nd.p1);
+        if off > 0usize {
+            bc(c, 9); bs(c, b"addq $"); bn(c, conv u64 off); bs(c, b", %rax"); bc(c, 10);
+        }
+        return fty;
+    }
+    if nd.tag == T_INDEX {
+        let _iw: i32 = gen_value(c, pp, src, nd.b, W_USIZE);
+        let idxslot: i32 = spill(c);
+        let bt: u32 = gen_place_addr(c, pp, src, nd.a);
+        let baseslot: i32 = spill(c);
+        let arrnd: Node = pp.nodes[conv usize bt];
+        let n: usize = array_len_of(pp, arrnd.a);
+        let stride: usize = arr_stride(pp, src, c.head, bt);
+        reload_rax(c, idxslot);
+        bc(c, 9); bs(c, b"cmpq $"); bn(c, conv u64 n); bs(c, b", %rax"); bc(c, 10);
+        fault_unless(c, b"jb", FK_BOUNDS, c.cur_p0, c.cur_p1);
+        bc(c, 9); bs(c, b"imulq $"); bn(c, conv u64 stride); bs(c, b", %rax, %rax"); bc(c, 10);
+        bc(c, 9); bs(c, b"movq "); bslot(c, baseslot); bs(c, b", %rcx"); bc(c, 10);
+        bi(c, b"addq %rcx, %rax");
+        return arrnd.b;
+    }
+    c.*.err = 1;
+    return 0u32;
+}
+// Evaluate an AGGREGATE-valued expression: leave its flat offset in %rax, set
+// cur_agg_ty, and return its type node. `exp_ty` supplies the type for literals.
+fn gen_agg(c: write C, pp: read P, src: [u8], i: u32, exp_ty: u32) -> u32 {
+    let nd: Node = pp.nodes[conv usize i];
+    c.*.cur_p0 = nd.p0;
+    c.*.cur_p1 = nd.p1;
+    if nd.tag == T_PAREN { return gen_agg(c, pp, src, nd.a, exp_ty); }
+    if nd.tag == T_STRUCTLIT { return gen_struct_lit(c, pp, src, i, exp_ty); }
+    if nd.tag == T_ARRAYLIT { return gen_array_lit(c, pp, src, i, exp_ty); }
+    if nd.tag == T_ARRAYREP { return gen_array_rep(c, pp, src, i, exp_ty); }
+    if nd.tag == T_ID || nd.tag == T_FIELD || nd.tag == T_INDEX {
+        return gen_place_addr(c, pp, src, i);
+    }
+    if nd.tag == T_CALL {
+        let _w: i32 = gen_call(c, pp, src, i);
+        return c.cur_agg_ty;
+    }
+    c.*.err = 1;
+    return 0u32;
+}
+fn gen_struct_lit(c: write C, pp: read P, src: [u8], i: u32, exp_ty: u32) -> u32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let sid: u32 = struct_of_ty(pp, src, c.head, exp_ty);
+    let size: usize = struct_size(pp, src, c.head, sid);
+    let align: usize = struct_align(pp, src, c.head, sid);
+    emit_alloc(c, size, align);
+    let baseslot: i32 = spill(c);
+    let snode: Node = pp.nodes[conv usize sid];
+    let mut fcur: u32 = snode.b;
+    while fcur != 0u32 {
+        let fdef: Node = pp.nodes[conv usize fcur];
+        let fty: u32 = fdef.a;
+        let off: usize = field_off(pp, src, c.head, sid, fdef.p0, fdef.p1);
+        let finit: u32 = find_finit_cg(pp, src, nd.a, fdef.p0, fdef.p1);
+        if finit != 0u32 {
+            let fin: Node = pp.nodes[conv usize finit];
+            let fw: i32 = scalar_width(pp, src, fty);
+            if fw != 0 {
+                let _v: i32 = gen_value(c, pp, src, fin.a, fw);
+                emit_canon(c, fw);
+                emit_store_flat(c, fw, baseslot, off);
+            } else {
+                let _t: u32 = gen_agg(c, pp, src, fin.a, fty);
+                emit_copy_to(c, baseslot, off, ty_size(pp, src, c.head, fty));
+            }
+        }
+        fcur = fdef.nx;
+    }
+    reload_rax(c, baseslot);
+    c.*.cur_agg_ty = exp_ty;
+    return exp_ty;
+}
+fn gen_array_lit(c: write C, pp: read P, src: [u8], i: u32, exp_ty: u32) -> u32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let arrnd: Node = pp.nodes[conv usize exp_ty];
+    let elem: u32 = arrnd.b;
+    let esz: usize = ty_size(pp, src, c.head, elem);
+    let stride: usize = arr_stride(pp, src, c.head, exp_ty);
+    let ew: i32 = scalar_width(pp, src, elem);
+    let size: usize = ty_size(pp, src, c.head, exp_ty);
+    let align: usize = ty_align(pp, src, c.head, exp_ty);
+    emit_alloc(c, size, align);
+    let baseslot: i32 = spill(c);
+    let mut k: usize = 0usize;
+    let mut cur: u32 = nd.a;
+    while cur != 0u32 {
+        let cn: Node = pp.nodes[conv usize cur];
+        if ew != 0 {
+            let _v: i32 = gen_value(c, pp, src, cur, ew);
+            emit_canon(c, ew);
+            emit_store_flat(c, ew, baseslot, k * stride);
+        } else {
+            let _t: u32 = gen_agg(c, pp, src, cur, elem);
+            emit_copy_to(c, baseslot, k * stride, esz);
+        }
+        k = k + 1usize;
+        cur = cn.nx;
+    }
+    reload_rax(c, baseslot);
+    c.*.cur_agg_ty = exp_ty;
+    return exp_ty;
+}
+fn gen_array_rep(c: write C, pp: read P, src: [u8], i: u32, exp_ty: u32) -> u32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let arrnd: Node = pp.nodes[conv usize exp_ty];
+    let elem: u32 = arrnd.b;
+    let esz: usize = ty_size(pp, src, c.head, elem);
+    let stride: usize = arr_stride(pp, src, c.head, exp_ty);
+    let ew: i32 = scalar_width(pp, src, elem);
+    let n: usize = array_len_of(pp, arrnd.a);
+    let size: usize = ty_size(pp, src, c.head, exp_ty);
+    let align: usize = ty_align(pp, src, c.head, exp_ty);
+    emit_alloc(c, size, align);
+    let baseslot: i32 = spill(c);
+    if ew != 0 {
+        let _v: i32 = gen_value(c, pp, src, nd.a, ew);
+        emit_canon(c, ew);
+        let valslot: i32 = spill(c);
+        let mut k: usize = 0usize;
+        while k < n {
+            reload_rax(c, valslot);
+            emit_store_flat(c, ew, baseslot, k * stride);
+            k = k + 1usize;
+        }
+    } else {
+        let _t: u32 = gen_agg(c, pp, src, nd.a, elem);
+        let valslot: i32 = spill(c);
+        let mut k: usize = 0usize;
+        while k < n {
+            reload_rax(c, valslot);
+            emit_copy_to(c, baseslot, k * stride, esz);
+            k = k + 1usize;
+        }
+    }
+    reload_rax(c, baseslot);
+    c.*.cur_agg_ty = exp_ty;
+    return exp_ty;
+}
+
 // ---- forward declarations via mutual recursion -------------------------------
 fn gen_value(c: write C, pp: read P, src: [u8], i: u32, exp_w: i32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
@@ -381,6 +635,13 @@ fn gen_value(c: write C, pp: read P, src: [u8], i: u32, exp_w: i32) -> i32 {
         }
         c.*.err = 1;
         return 4;
+    }
+    if nd.tag == T_FIELD || nd.tag == T_INDEX {
+        let pty: u32 = gen_place_addr(c, pp, src, i);
+        let w: i32 = scalar_width(pp, src, pty);
+        if w != 0 { emit_load_flat(c, w); return w; }
+        c.*.cur_agg_ty = pty;
+        return W_AGG;
     }
     if nd.tag == T_UNARY { return gen_unary(c, pp, src, i, exp_w); }
     if nd.tag == T_BIN { return gen_binary(c, pp, src, i, exp_w); }
@@ -809,8 +1070,13 @@ fn gen_call(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
     let mut argc: u32 = nd.b;
     let mut parc: u32 = fnnd.c;
     while argc != 0u32 {
-        let pw: i32 = scalar_width(pp, src, pp.nodes[conv usize parc].a);
-        let _aw: i32 = gen_value(c, pp, src, argc, pw);
+        let pty: u32 = pp.nodes[conv usize parc].a;
+        let pw: i32 = scalar_width(pp, src, pty);
+        if pw != 0 {
+            let _aw: i32 = gen_value(c, pp, src, argc, pw);
+        } else {
+            let _at: u32 = gen_agg(c, pp, src, argc, pty);
+        }
         argslots[na] = spill(c);
         na = na + 1usize;
         argc = pp.nodes[conv usize argc].nx;
@@ -834,8 +1100,12 @@ fn gen_call(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
         j = j + 1usize;
     }
     bc(c, 10);
-    if retw == 0 { return 12; }
-    return retw;
+    if retw != 0 { return retw; }
+    if retn != 0u32 && ty_size(pp, src, c.head, retn) > 0usize {
+        c.*.cur_agg_ty = retn;
+        return W_AGG;
+    }
+    return 12;
 }
 
 fn gen_if(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
@@ -929,8 +1199,15 @@ fn emit_epilogue(c: write C) -> unit {
 fn gen_return(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
     if nd.a != 0u32 {
-        let _w: i32 = gen_value(c, pp, src, nd.a, c.ret_w);
-        emit_canon(c, c.ret_w);
+        if c.ret_w != 0 {
+            let _w: i32 = gen_value(c, pp, src, nd.a, c.ret_w);
+            emit_canon(c, c.ret_w);
+        } else if c.ret_ty != 0u32 && ty_size(pp, src, c.head, c.ret_ty) > 0usize {
+            let _t: u32 = gen_agg(c, pp, src, nd.a, c.ret_ty);
+        } else {
+            let _w: i32 = gen_value(c, pp, src, nd.a, c.ret_w);
+            emit_canon(c, c.ret_w);
+        }
     } else {
         bi(c, b"xorl %eax, %eax");
     }
@@ -942,6 +1219,19 @@ fn gen_stmt(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
     if nd.tag == T_LET {
         let tn: u32 = nd.a;
+        if is_agg_ty(pp, src, c.head, tn) {
+            let size: usize = ty_size(pp, src, c.head, tn);
+            let align: usize = ty_align(pp, src, c.head, tn);
+            let s: i32 = newslot(c);
+            emit_alloc(c, size, align);
+            store_slot(c, s);
+            if nd.b != 0u32 {
+                let _t: u32 = gen_agg(c, pp, src, nd.b, tn);
+                emit_copy_to(c, s, 0usize, size);
+            }
+            bind(c, nd.p0, nd.p1, s, 0, tn);
+            return 0;
+        }
         let mut w: i32 = scalar_width(pp, src, tn);
         let s: i32 = newslot(c);
         if nd.b != 0u32 {
@@ -950,17 +1240,37 @@ fn gen_stmt(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
             emit_canon(c, w);
             store_slot(c, s);
         }
-        bind(c, nd.p0, nd.p1, s, w);
+        bind(c, nd.p0, nd.p1, s, w, tn);
         return 0;
     }
     if nd.tag == T_ASSIGN {
         let place: Node = pp.nodes[conv usize nd.a];
-        let slot: i32 = lookup(c, src, place.p0, place.p1);
-        let w: i32 = c.luk_w;
-        if slot < 0 { c.*.err = 1; return 1; }
-        let _vw: i32 = gen_value(c, pp, src, nd.b, w);
-        emit_canon(c, w);
-        store_slot(c, slot);
+        if place.tag == T_ID {
+            let slot: i32 = lookup(c, src, place.p0, place.p1);
+            if slot < 0 { c.*.err = 1; return 1; }
+            let w: i32 = c.luk_w;
+            if w != 0 {
+                let _vw: i32 = gen_value(c, pp, src, nd.b, w);
+                emit_canon(c, w);
+                store_slot(c, slot);
+                return 0;
+            }
+            let aty: u32 = c.luk_ty;
+            let _t: u32 = gen_agg(c, pp, src, nd.b, aty);
+            emit_copy_to(c, slot, 0usize, ty_size(pp, src, c.head, aty));
+            return 0;
+        }
+        let pty: u32 = gen_place_addr(c, pp, src, nd.a);
+        let pw: i32 = scalar_width(pp, src, pty);
+        let pslot: i32 = spill(c);
+        if pw != 0 {
+            let _vw: i32 = gen_value(c, pp, src, nd.b, pw);
+            emit_canon(c, pw);
+            emit_store_flat(c, pw, pslot, 0usize);
+            return 0;
+        }
+        let _t: u32 = gen_agg(c, pp, src, nd.b, pty);
+        emit_copy_to(c, pslot, 0usize, ty_size(pp, src, c.head, pty));
         return 0;
     }
     let _r: i32 = gen_value(c, pp, src, i, 0i32 - 1i32);
@@ -991,14 +1301,19 @@ fn gen_fn(c: write C, pp: read P, src: [u8], fnid: u32) -> unit {
     let mut retn: u32 = 0u32;
     if nd.e != 0u32 { retn = pp.nodes[conv usize nd.e].a; }
     c.*.ret_w = scalar_width(pp, src, retn);
+    c.*.ret_ty = retn;
     // params: slot per param (in declaration order), bound to their names.
+    let mut pslots: [16]i32 = [0i32; 16];
+    let mut ptys: [16]u32 = [0u32; 16];
     let mut pc: u32 = nd.c;
     let mut np: usize = 0usize;
     while pc != 0u32 {
         let pn: Node = pp.nodes[conv usize pc];
         let pw: i32 = scalar_width(pp, src, pn.a);
         let s: i32 = newslot(c);
-        bind(c, pn.p0, pn.p1, s, pw);
+        bind(c, pn.p0, pn.p1, s, pw, pn.a);
+        pslots[np] = s;
+        ptys[np] = pn.a;
         np = np + 1usize;
         pc = pn.nx;
     }
@@ -1009,9 +1324,26 @@ fn gen_fn(c: write C, pp: read P, src: [u8], fnid: u32) -> unit {
         bs(c, b"movq ");
         emit_arg_reg(c, k);
         bs(c, b", ");
-        bslot(c, conv i32 k);
+        bslot(c, pslots[k]);
         bc(c, 10);
         k = k + 1usize;
+    }
+    // Aggregate params arrive as a pointer (the caller's Candor offset); copy the
+    // bytes into a fresh flat-memory local so the callee owns its by-value copy
+    // (mirrors lower.rs's aggregate-param prologue).
+    let mut k2: usize = 0usize;
+    while k2 < np {
+        let pty: u32 = ptys[k2];
+        if is_agg_ty(pp, src, c.head, pty) {
+            let size: usize = ty_size(pp, src, c.head, pty);
+            let align: usize = ty_align(pp, src, c.head, pty);
+            reload_rax(c, pslots[k2]);
+            let ctmp: i32 = spill(c);
+            emit_alloc(c, size, align);
+            store_slot(c, pslots[k2]);
+            emit_copy_from(c, pslots[k2], ctmp, size);
+        }
+        k2 = k2 + 1usize;
     }
     let _b: i32 = gen_block(c, pp, src, nd.d);
     // implicit return (unit / fall-through): _0 defaults to 0.
@@ -1088,6 +1420,7 @@ pub fn codegen_dump(src: [u8], buf: read Buf) -> unit {
         bnd_p1: [0usize; 1024],
         bnd_slot: [0i32; 1024],
         bnd_w: [0i32; 1024],
+        bnd_ty: [0u32; 1024],
         bnd_n: 0usize,
         slot_next: 0usize,
         slot_max: 0usize,
@@ -1096,11 +1429,14 @@ pub fn codegen_dump(src: [u8], buf: read Buf) -> unit {
         loop_n: 0usize,
         lbl: 0,
         ret_w: 4,
+        ret_ty: 0u32,
         regime: 0,
         cur_p0: 0usize,
         cur_p1: 0usize,
+        cur_agg_ty: 0u32,
         luk_slot: 0,
         luk_w: 0,
+        luk_ty: 0u32,
         err: 0,
     };
     // header: entry alias jumps to the compiled `main`.
