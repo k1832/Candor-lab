@@ -214,3 +214,32 @@ lowerings at incidental temp/block numbering; two correct lowerings differ there
 Tallest poles (both bounded, testable up front): the serialization boundary (L0, the
 only new infra with no interp analog) and CFG construction (L1-L4, standard mechanics
 with the build.rs reference). No open-ended oracle-less analysis pole this time.
+
+### Self-lowering to MIR MILESTONE REACHED (2026-07-11)
+
+L0-L6 done: the Candor-written lowering (selfhost/lower/lower.cnr) lowers all five
+systems-corpus programs (11_1..11_5) to MIR, executed by the Rust MIR interpreter
+byte-exact vs the tree-walker oracle — plus 66 targeted fixtures (71 total).
+Covers scalars+CFG, aggregates, the move/drop schedule as explicit MIR Drop ops,
+enums/match as tag-switch chains, and the full Box/alloc ABI (fn-ptr indirect
+calls, statics, rawptr intrinsics, alloc-on-drop) + byte-strings/slices/borrow
+params. Emitted wire is byte-identical to serialize(mir::build) modulo inert
+parser-span diffs on non-observable statements. Every program monomorphic; nothing
+needed beyond L1-L6. The gate: Candor lowers -> serialize -> Rust deserialize ->
+mir::interp::run -> byte-exact, reusing L0's proven serialization boundary.
+
+**THREE self-hosting tiers now closed over the same systems corpus:**
+- self-CHECK (all 5 self-host modules, incl. interp.cnr) — oracle-matched diagnostics
+- self-INTERPRET (interp.cnr runs the corpus) — oracle-matched Run{ret,trace}+faults
+- self-LOWER to MIR (lower.cnr compiles the corpus to MIR) — oracle-matched execution
+
+**Remaining tails (none gated by the milestone):**
+- Interpreter S7-S9 and Lowering L7+: the std/generic library (slices/str done for the
+  corpus subset; Vec/Map/String + the monomorphizer remain) — the generic tail, still
+  cleanly separable (the systems corpus is monomorphic).
+- Self-lowering interp.cnr/lower.cnr themselves (a deeper fixpoint), as interp.cnr
+  already self-checks.
+- The final tier: self-COMPILE to native (AST->MIR->native codegen in Candor / a
+  ported backend) — the true native bootstrap that removes the Rust dependency. This
+  is where a real code generator (Cranelift is Rust-only) must be ported or written;
+  the largest remaining undertaking, still a horizon.

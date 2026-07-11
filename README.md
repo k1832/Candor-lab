@@ -5,9 +5,20 @@ authorship: memory-safe, explicit where meaning lives, locally verifiable, with
 source-declared semantics and a compiler built as a conversation partner rather
 than a gatekeeper.
 
-**Status: the first-version scope is complete and RUNNING, and Candor both
-checks *and runs* its own kind of program.** Two self-hosting fixpoints are
-closed. **Self-checking:** the self-hosted front-end — written in Candor —
+**Status: the first-version scope is complete and RUNNING, and Candor
+checks, runs, *and compiles* its own kind of program.** Three self-hosting
+tiers are closed — the same systems-heavy corpus (a bump allocator, an
+intrusive-list scheduler, MMIO registers, a recursive-descent parser, a
+`Box [4096]Node` arena) is checked, executed, and lowered to compiler IR, each
+by Candor-written tooling verified byte-exact against the Rust reference.
+**Self-lowering:** a Candor-written lowering (`lower.cnr`) translates the parsed
+AST to the compiler's MIR — flattening structured control flow to a basic-block
+CFG, allocating temps, emitting the move/drop schedule and fault edges as explicit
+IR — and the Rust MIR interpreter (one of the four proven-equivalent engines) runs
+that MIR to the same `Run{ret, trace}` and fault identity as the tree-walker, over
+the entire corpus. It is the first evidence Candor can express a compiler
+middle-end, not just execution. Two self-checking / self-interpreting fixpoints sit
+beneath it. **Self-checking:** the self-hosted front-end — written in Candor —
 name-resolves *and* runs its full analysis core (move/init, the borrow checker's
 XOR loans, the alloc-effect partition, match exhaustiveness) over its own source
 (`lexer.cnr`, `parser.cnr`, `checker.cnr`, `analyses.cnr`), each module checked in
