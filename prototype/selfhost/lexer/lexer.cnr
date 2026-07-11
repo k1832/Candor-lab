@@ -28,7 +28,7 @@ pub copy struct Tok {
 }
 
 pub struct Buf {
-    toks: [32768]Tok,
+    toks: [49152]Tok,
     n: usize,
 }
 

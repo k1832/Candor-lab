@@ -80,7 +80,7 @@ fn candor_main(src: &str) -> String {
         m.push_str(&format!("{b}u8"));
     }
     m.push_str("];\n");
-    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 32768], n: 0usize };\n");
+    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 49152], n: 0usize };\n");
     m.push_str("    let cnt: usize = lex(slice_of(src), write buf);\n");
     m.push_str("    analyze_dump(slice_of(src), read buf);\n");
     m.push_str("    return conv i64 cnt;\n}\n");
@@ -356,7 +356,7 @@ fn candor_analyses_check_parser_source_clean_fixpoint() {
 
 /// FIXPOINT GATE: the self-hosted ANALYSES core, run over the self-hosted
 /// INTERPRETER's own source (`interp.cnr`, the LARGEST self-host module --
-/// ~3721 lines / ~32712 tokens, a thin ~56-token margin under the 32768 arena cap),
+/// ~3721 lines / ~32712 tokens, under the 49152 arena cap raised by F-ARENA-CAP),
 /// emits an EMPTY covered-diagnostic set across ALL
 /// its families -- byte-equal to the module-aware Rust oracle over the real
 /// lexer+parser+analyses+interp tree. This is the SIXTH -- and final -- module

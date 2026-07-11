@@ -247,8 +247,13 @@ fn find_needle(src: [u8], needle: [u8]) -> usize {
     return n;
 }
 fn synth_boxresults(p: write P, src: [u8]) -> unit {
-    let boxed0: usize = find_needle(src, b"boxed");
-    let oom0: usize = find_needle(src, b"oom");
+    let srclen: usize = len(src);
+    let mut boxed0: usize = find_needle(src, b"boxed");
+    let mut boxed1: usize = boxed0 + 5usize;
+    if boxed1 > srclen { boxed0 = 0usize; boxed1 = 0usize; }
+    let mut oom0: usize = find_needle(src, b"oom");
+    let mut oom1: usize = oom0 + 3usize;
+    if oom1 > srclen { oom0 = 0usize; oom1 = 0usize; }
     let n0: u32 = p.n;
     let mut i: u32 = 1u32;
     while i < n0 {
@@ -259,11 +264,11 @@ fn synth_boxresults(p: write P, src: [u8]) -> unit {
             let boxid: u32 = inode(p, bn);
             let mut vo: Node = nnew(T_VARIANT);
             vo.p0 = oom0;
-            vo.p1 = oom0 + 3usize;
+            vo.p1 = oom1;
             let oomid: u32 = inode(p, vo);
             let mut vb: Node = nnew(T_VARIANT);
             vb.p0 = boxed0;
-            vb.p1 = boxed0 + 5usize;
+            vb.p1 = boxed1;
             vb.a = boxid;
             vb.nx = oomid;
             let boxedid: u32 = inode(p, vb);
@@ -282,18 +287,23 @@ fn synth_boxresults(p: write P, src: [u8]) -> unit {
 // oracle deriving the result type from the value: the boxed payload's inner type
 // rides `e.gen_inner`, set at each box; size (32) is inner-independent.
 fn synth_generic_boxresult(p: write P, src: [u8], e: write E) -> unit {
-    let boxed0: usize = find_needle(src, b"boxed");
-    let oom0: usize = find_needle(src, b"oom");
+    let srclen: usize = len(src);
+    let mut boxed0: usize = find_needle(src, b"boxed");
+    let mut boxed1: usize = boxed0 + 5usize;
+    if boxed1 > srclen { boxed0 = 0usize; boxed1 = 0usize; }
+    let mut oom0: usize = find_needle(src, b"oom");
+    let mut oom1: usize = oom0 + 3usize;
+    if oom1 > srclen { oom0 = 0usize; oom1 = 0usize; }
     let mut bn: Node = nnew(T_BOX);
     bn.a = 0u32;
     let boxid: u32 = inode(p, bn);
     let mut vo: Node = nnew(T_VARIANT);
     vo.p0 = oom0;
-    vo.p1 = oom0 + 3usize;
+    vo.p1 = oom1;
     let oomid: u32 = inode(p, vo);
     let mut vb: Node = nnew(T_VARIANT);
     vb.p0 = boxed0;
-    vb.p1 = boxed0 + 5usize;
+    vb.p1 = boxed1;
     vb.a = boxid;
     vb.nx = oomid;
     let boxedid: u32 = inode(p, vb);
@@ -3601,7 +3611,7 @@ fn run_statics(pp: read P, src: [u8], e: write E) -> unit {
 }
 
 pub fn interp_dump(src: [u8], buf: read Buf) -> unit {
-    let mut p: P = P { nodes: [nnew(0); 32768], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
+    let mut p: P = P { nodes: [nnew(0); 49152], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
     let head: u32 = parse_program(write p, src, buf);
     mono_program(write p, src, head);
     let mut e: E = E {

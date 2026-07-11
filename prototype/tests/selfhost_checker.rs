@@ -74,7 +74,7 @@ fn candor_main(src: &str) -> String {
         m.push_str(&format!("{b}u8"));
     }
     m.push_str("];\n");
-    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 32768], n: 0usize };\n");
+    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 49152], n: 0usize };\n");
     m.push_str("    let cnt: usize = lex(slice_of(src), write buf);\n");
     m.push_str("    check_dump(slice_of(src), read buf);\n");
     m.push_str("    return conv i64 cnt;\n}\n");
@@ -392,9 +392,9 @@ fn candor_checker_checks_parser_source_clean_via_import_resolution() {
 /// interp.cnr is the largest self-host module (~3721 lines / ~32712 tokens after the
 /// I-std collection port) and the SIXTH -- and final -- module to come under the
 /// name-resolution self-check, closing the checker fixpoint across every self-host
-/// module. It fits the harness arenas (~32712 tokens < the 32768 token buffer / node
-/// arena) -- but the margin is now THIN (~56 tokens); further interp.cnr growth will
-/// need the [32768] arena raised (or interp.cnr split) or this gate faults loudly.
+/// module. It fits the harness arenas (~32712 tokens < the 49152 token buffer / node
+/// arena, raised from 32768 by OBL-QUALITY-REVIEW / F-ARENA-CAP for real headroom;
+/// the module-split / Vec-backed-arena fix stays deferred).
 #[test]
 fn candor_checker_checks_interp_source_clean_via_import_resolution() {
     on_big_stack(|| {

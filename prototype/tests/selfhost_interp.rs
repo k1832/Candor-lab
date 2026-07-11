@@ -78,7 +78,7 @@ fn candor_main(src: &str) -> String {
         m.push_str(&format!("{b}u8"));
     }
     m.push_str("];\n");
-    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 32768], n: 0usize };\n");
+    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 49152], n: 0usize };\n");
     m.push_str("    let cnt: usize = lex(slice_of(src), write buf);\n");
     m.push_str("    interp_dump(slice_of(src), read buf);\n");
     m.push_str("    return conv i64 cnt;\n}\n");
@@ -211,6 +211,9 @@ const CORPUS: &[(&str, Shape)] = &[
     ("vec_struct_drop.cnr", Ret),
     ("map_insert_contains_get.cnr", Ret),
     ("vec_get_oob_fault.cnr", Fault),
+    // F-LAYOUT-DRIFT: a Vec field inside a struct; offsetof of the following scalar
+    // field proves the interp/lower ty_size agree on the Vec field's 40-byte size.
+    ("struct_with_vec.cnr", Ret),
 ];
 
 fn read_fixture(rel: &str) -> String {

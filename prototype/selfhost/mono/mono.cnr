@@ -213,6 +213,17 @@ fn subst_lookup(m: write M, src: [u8], s: usize, en: usize) -> u32 {
     }
     return 0u32;
 }
+// True iff `name` is a type-param of the active env (regardless of its binding),
+// so clone_subst can distinguish an UNBOUND type-param (in env, bound to 0) from a
+// plain nominal type (not in env) and fail loud on the former.
+fn env_has(m: write M, src: [u8], s: usize, en: usize) -> bool {
+    let mut i: usize = m.env_n;
+    while i > 0usize {
+        i = i - 1usize;
+        if name_eq_m(src, m.env_p0[i], m.env_p1[i], s, en) { return true; }
+    }
+    return false;
+}
 
 // Plain deep copy of a (ground) type subtree; the root's `nx` is cleared so the
 // caller can re-link the occurrence into its list.
@@ -242,6 +253,10 @@ fn clone_subst(p: write P, src: [u8], m: write M, id: u32) -> u32 {
             p.*.nodes[conv usize fresh].nx = sib;
             return fresh;
         }
+        // A name that IS a type-param of this instance (in the env) but is bound to
+        // 0 was left unbound by inference. Substituting it would silently emit an
+        // instance referencing the free type-param. Fail loud instead (F-MONO-SILENT).
+        if env_has(m, src, nd.p0, nd.p1) { panic("mono: unbound type parameter"); }
     }
     let mut c: Node = nd;
     c.a = clone_subst(p, src, m, nd.a);

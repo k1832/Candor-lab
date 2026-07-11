@@ -105,7 +105,7 @@ fn candor_main(src: &str) -> String {
         m.push_str(&format!("{b}u8"));
     }
     m.push_str("];\n");
-    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 32768], n: 0usize };\n");
+    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 49152], n: 0usize };\n");
     m.push_str("    let cnt: usize = lex(slice_of(src), write buf);\n");
     m.push_str("    lower_dump(slice_of(src), read buf);\n");
     m.push_str("    return conv i64 cnt;\n}\n");
@@ -252,6 +252,10 @@ const CORPUS: &[(&str, Shape)] = &[
     ("vec_struct_drop.cnr", Ret),
     ("map_insert_contains_get.cnr", Ret),
     ("vec_get_oob_fault.cnr", Fault),
+    // F-LAYOUT-DRIFT regression: a Vec field inside a struct forces struct_size to
+    // size the Vec (40, not 0), so the following scalar field's offset matches the
+    // oracle. Before the ty_size fix this diverged.
+    ("struct_with_vec.cnr", Ret),
 ];
 
 fn read_fixture(rel: &str) -> String {

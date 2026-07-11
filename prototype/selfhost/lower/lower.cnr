@@ -240,9 +240,16 @@ fn ty_size(pp: read P, src: [u8], head: u32, tn: u32) -> usize {
     if tn == 0u32 { return 0usize; }
     let nd: Node = pp.nodes[conv usize tn];
     if nd.tag == T_APP && nd.b != 0u32 { return ty_size(pp, src, head, nd.b); }
+    // Compiler-known std `Vec[T]`/`Map[V]`: five u64 words {buf,len,cap,ctx,vt}.
+    if nd.tag == T_APP {
+        if span_eq(src, nd.p0, nd.p1, b"Vec") || span_eq(src, nd.p0, nd.p1, b"Map") { return 40usize; }
+    }
+    if nd.tag == T_STR { return 16usize; }
     if nd.tag == T_NAMED || nd.tag == T_SC {
         let w: i32 = sc_width(src, nd.p0, nd.p1);
         if w != 0 { return w_size(w); }
+        if span_eq(src, nd.p0, nd.p1, b"String") { return 40usize; }
+        if span_eq(src, nd.p0, nd.p1, b"str") { return 16usize; }
         let sid: u32 = find_struct(pp, src, head, nd.p0, nd.p1);
         if sid != 0u32 { return struct_size(pp, src, head, sid); }
         let eid: u32 = find_enum(pp, src, head, nd.p0, nd.p1);
@@ -267,9 +274,15 @@ fn ty_align(pp: read P, src: [u8], head: u32, tn: u32) -> usize {
     if tn == 0u32 { return 1usize; }
     let nd: Node = pp.nodes[conv usize tn];
     if nd.tag == T_APP && nd.b != 0u32 { return ty_align(pp, src, head, nd.b); }
+    if nd.tag == T_APP {
+        if span_eq(src, nd.p0, nd.p1, b"Vec") || span_eq(src, nd.p0, nd.p1, b"Map") { return 8usize; }
+    }
+    if nd.tag == T_STR { return 8usize; }
     if nd.tag == T_NAMED || nd.tag == T_SC {
         let w: i32 = sc_width(src, nd.p0, nd.p1);
         if w != 0 { return w_size(w); }
+        if span_eq(src, nd.p0, nd.p1, b"String") { return 8usize; }
+        if span_eq(src, nd.p0, nd.p1, b"str") { return 8usize; }
         let sid: u32 = find_struct(pp, src, head, nd.p0, nd.p1);
         if sid != 0u32 { return struct_align(pp, src, head, sid); }
         if find_enum(pp, src, head, nd.p0, nd.p1) != 0u32 { return 8usize; }
@@ -4609,7 +4622,7 @@ fn mat_lookup(m: write M, scrut: u32) -> i32 {
 }
 
 pub fn lower_dump(src: [u8], buf: read Buf) -> unit {
-    let mut p: P = P { nodes: [nnew(0); 32768], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
+    let mut p: P = P { nodes: [nnew(0); 49152], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
     let head: u32 = parse_program(write p, src, buf);
     mono_program(write p, src, head);
     let mut m: M = M {

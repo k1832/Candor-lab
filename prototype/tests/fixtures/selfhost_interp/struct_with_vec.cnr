@@ -1,0 +1,9 @@
+// F-LAYOUT-DRIFT regression: a struct whose first field is a `Vec[i64]` (40 bytes,
+// 8-aligned) followed by a scalar. `offsetof(Holder, tag)` must be 40 -- the Vec
+// field's size. If lower's ty_size sized the Vec field as 0 (the drift bug), `tag`
+// would land at offset 0 and the emitted MIR would diverge from the oracle.
+struct Holder { v: Vec[i64], tag: i64 }
+fn main() -> i64 {
+    let off: usize = offsetof(Holder, tag);
+    return conv i64 off;
+}

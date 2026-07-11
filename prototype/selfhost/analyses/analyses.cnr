@@ -1254,9 +1254,9 @@ fn dump_diags(a: write A) alloc -> unit {
 
 // ---- entry ------------------------------------------------------------------
 pub fn analyze_dump(src: [u8], buf: read Buf) alloc -> unit {
-    let mut bump: Bump = Bump { next: 16777216usize, end: 33554432usize };
+    let mut bump: Bump = Bump { next: 100663296usize, end: 251658240usize };
     let al: Alloc = mk_alloc(write bump);
-    let mut p: P = P { nodes: [nnew(0); 32768], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
+    let mut p: P = P { nodes: [nnew(0); 49152], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
     let head: u32 = parse_program(write p, src, buf);
     let mut a: A = A {
         head: head,

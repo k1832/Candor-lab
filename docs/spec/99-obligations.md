@@ -2126,3 +2126,41 @@ verified separately. Findings, with disposition:
   four-engine gate. Soften the doc language, or add 11_* to the four-engine gate.
 - **F-TEST-DEDUP:** fault_code/dump_ok/on_big_stack/CORPUS are copy-pasted across 5+ gate files and
   fault_code has drifted (6 vs 10 arms). Hoist into selfhost_modtree/mod.rs.
+
+### Addressed — OBL-QUALITY-REVIEW fix-now batch (Opus 4.8, 2026-07-11)
+
+The four fix-now findings are resolved; each verified per-gate in isolation, byte-exact.
+
+- **F-LAYOUT-DRIFT — FIXED.** `selfhost/lower/lower.cnr` `ty_size`/`ty_align` now handle the
+  compiler-known collections exactly as `interp.cnr`/`src/interp/layout.rs`: `Vec`/`Map`/`String`
+  = 40 (align 8), `str`/`T_STR`/slice = 16 (align 8), `Box` = 24, `BoxResult` = 32. Regression
+  fixture `tests/fixtures/selfhost_interp/struct_with_vec.cnr` (`struct Holder { v: Vec[i64],
+  tag: i64 }`, returns `offsetof(Holder, tag)`): the Vec field forces `field_off` to size the Vec,
+  so `tag` lands at 40, matching the oracle. Pre-fix lower sized the Vec at 0 -> `tag`@0 -> RET 0
+  vs oracle RET 40 (would FAIL). Added to `selfhost_lower` (86/86) and `selfhost_interp` CORPUS.
+- **F-MONO-SILENT — FIXED (fail-loud).** `mono.cnr` `clone_subst` now distinguishes an unbound
+  type-param (a `T_NAMED` whose name IS in the active env but bound to 0) from a plain nominal via
+  a new `env_has` helper, and `panic("mono: unbound type parameter")` on the unbound case instead
+  of silently emitting an unsubstituted `T_NAMED`. The 8 generic fixtures all infer, so the path is
+  never hit and they stay byte-exact. (No dedicated uninferable fixture: the front-end rejects the
+  obvious constructions before mono runs; the fail-loud mechanism + the 8 passing fixtures cover it.)
+- **F-FIND-NEEDLE — FIXED.** `interp.cnr` `synth_boxresults`/`synth_generic_boxresult` now bound the
+  `find_needle` result: when "boxed"/"oom" is absent the synthesized variant span is clamped to an
+  in-bounds empty `[0,0)` span (mirroring `synth_scw`'s `pos < len(src)` guard) instead of a span
+  running past the buffer. Byte-exact (e.g. `box_drop_frees.cnr` has no "oom" substring and never
+  read that span anyway).
+- **F-ARENA-CAP — FIXED (stopgap).** Node arena / token buffer raised 32768 -> **49152** (+50%,
+  ~16k headroom over interp.cnr's ~32712 tokens). Grew every coupled site: `parser.cnr` `P.nodes`
+  `[N]Node` + `lexer.cnr` `Buf.toks` `[N]Tok` array types; the `[nnew(0); N]` P-literals in
+  parser/checker/analyses/interp/lower (mono allocates no P); the `[mk(..); N]` Buf literals in
+  tests/selfhost_{lexer,parser,checker,analyses,effects,loans,interp,lower}.rs; and the stale
+  "~56-token margin" doc comments in selfhost_checker.rs / selfhost_analyses.rs. Node is 64 bytes,
+  so `[49152]Node` = 3 MiB per P frame. COUPLED CONSEQUENCE: the bigger stack arrays pushed the
+  interp memory-model's simulated stack (grows up from 1 MiB) into the checker/analyses tools' own
+  bump-allocator window (was [16 MiB, 32 MiB)), corrupting their symbol Maps -> spurious E0103 on
+  interp.cnr's second-half fns. Fixed by moving that tool-internal window to [96 MiB, 240 MiB)
+  (checker.cnr / analyses.cnr `check_dump`/entry; ~80 MiB stack headroom, 144 MiB Map space, all
+  under 256 MiB MAX_ADDR; addresses never appear in the diagnostic dump, so dump-invariant). The
+  checker/analyses self-checks (which lex interp.cnr into the arena) then pass without overflow.
+  The real fix (module-split interp.cnr / Vec-backed arena) stays deferred
+  (F-LAYOUT-EXTRACT / token-cap obligation). Capacity-only; every gate byte-exact.

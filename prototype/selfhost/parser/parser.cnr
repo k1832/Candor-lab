@@ -45,7 +45,7 @@ pub copy struct Node {
 }
 
 pub struct P {
-    nodes: [32768]Node,
+    nodes: [49152]Node,
     n: u32,
     pos: usize,
     no_struct: i32,
@@ -2952,7 +2952,7 @@ fn emit_regions_inline(p: write P, src: [u8], head: u32) -> unit {
 }
 
 pub fn parse_dump(src: [u8], buf: read Buf) -> unit {
-    let mut p: P = P { nodes: [nnew(0); 32768], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
+    let mut p: P = P { nodes: [nnew(0); 49152], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
     let head: u32 = parse_program(write p, src, buf);
     emit_lit(b"(program");
     emit_children(write p, src, head);
