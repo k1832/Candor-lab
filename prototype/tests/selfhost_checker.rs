@@ -27,6 +27,8 @@ const LEXER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/lexer/lexer.cnr"));
 const PARSER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/parser/parser.cnr"));
+const LAYOUT_SRC: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/layout/layout.cnr"));
 const CHECKER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/checker/checker.cnr"));
 const ANALYSES_SRC: &str =
@@ -425,6 +427,7 @@ fn candor_checker_checks_interp_source_clean_via_import_resolution() {
             ("parser.cnr", PARSER_SRC),
             ("checker.cnr", CHECKER_SRC),
             ("mono.cnr", MONO_SRC),
+            ("layout.cnr", LAYOUT_SRC),
             ("interp.cnr", INTERP_SRC),
         ];
         let oracle = module_oracle_dump_tree(&modules, INTERP_SRC);

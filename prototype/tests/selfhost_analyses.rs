@@ -35,6 +35,8 @@ const LEXER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/lexer/lexer.cnr"));
 const PARSER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/parser/parser.cnr"));
+const LAYOUT_SRC: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/layout/layout.cnr"));
 const ANALYSES_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/analyses/analyses.cnr"));
 const CHECKER_SRC: &str =
@@ -381,6 +383,7 @@ fn candor_analyses_check_interp_source_clean_fixpoint() {
             ("lexer.cnr", LEXER_SRC),
             ("parser.cnr", PARSER_SRC),
             ("analyses.cnr", ANALYSES_SRC),
+            ("layout.cnr", LAYOUT_SRC),
             ("interp.cnr", INTERP_SRC),
         ];
         let oracle = module_oracle_full(&modules, INTERP_SRC);

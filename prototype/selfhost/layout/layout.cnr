@@ -1,0 +1,461 @@
+// The SHARED layout / type-property core of the self-host compiler: the SINGLE
+// source of truth for how a Candor type is sized, aligned, and laid out over the
+// flat byte-memory model, plus its copyability and drop obligation. Extracted
+// (F-LAYOUT-EXTRACT) from the near-verbatim copies that had lived in interp.cnr
+// (the tree-walking interpreter) and lower.cnr (the MIR lowering), which had
+// ALREADY DIVERGED once (F-LAYOUT-DRIFT: lower mis-sized Vec/Map/String/str/Box).
+// A third consumer (native codegen at N2) would compound the risk, so the logic
+// lives here ONCE and both consumers `use` it.
+//
+// PURITY: every function is pure over `(read P pp /*the parser node arena*/,
+// [u8] src /*the source bytes for name spans*/, u32 head /*the item-list root*/,
+// ...)`. It only READS the arena and walks the item `nx`-chain from `head` to
+// resolve nominal struct/enum types -- no mutable interpreter/lowering state. The
+// interpreter threads `e.head`; the lowering threads its raw item-list root; both
+// land on this identical signature.
+//
+// ABI (the collection/str/Box shape, defined ONCE here, mirroring the Rust
+// reference src/interp/layout.rs + src/mir/layout.rs): Vec/Map/String = 40 bytes
+// (five u64 words {buf,len,cap,ctx,vt}), str/slice = 16 (ptr+len), Box = 24,
+// BoxResult = 32; all align 8. Enum layout is {tag: u64 @0, payload @8}, size
+// round_up(8 + max padded payload, 8), align 8, tag = the variant's 0-based
+// declared index.
+//
+// This is a LIBRARY module imported by interp.cnr (which is self-checked), so it
+// JOINS the self-check module tree and is itself checkable self-host Candor.
+
+use lexer::{span_eq};
+use parser::{Node, P, T_APP, T_STR, T_NAMED, T_SC, T_STRUCT, T_ENUM, T_RAWPTR, T_FNPTR, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT, T_BOX, T_BOXRESULT, T_ARRAY, T_INT};
+
+static W_BOOL: i32 = 11;
+static W_USIZE: i32 = 10;
+
+// ---- module-local scalar/util helpers (the per-module concatenation idiom;
+// interp.cnr / lower.cnr keep their own copies for their non-layout uses) -------
+fn w_size(w: i32) -> usize {
+    if w == 1 || w == 6 || w == W_BOOL { return 1usize; }
+    if w == 2 || w == 7 { return 2usize; }
+    if w == 3 || w == 8 { return 4usize; }
+    return 8usize;
+}
+fn round_up_us(x: usize, a: usize) -> usize {
+    if a <= 1usize { return x; }
+    return ((x + a - 1usize) / a) * a;
+}
+fn sc_width(src: [u8], s: usize, en: usize) -> i32 {
+    if span_eq(src, s, en, b"i8") { return 1; }
+    if span_eq(src, s, en, b"i16") { return 2; }
+    if span_eq(src, s, en, b"i32") { return 3; }
+    if span_eq(src, s, en, b"i64") { return 4; }
+    if span_eq(src, s, en, b"isize") { return 5; }
+    if span_eq(src, s, en, b"u8") { return 6; }
+    if span_eq(src, s, en, b"u16") { return 7; }
+    if span_eq(src, s, en, b"u32") { return 8; }
+    if span_eq(src, s, en, b"u64") { return 9; }
+    if span_eq(src, s, en, b"usize") { return 10; }
+    if span_eq(src, s, en, b"bool") { return W_BOOL; }
+    return 0;
+}
+fn name_eq(src: [u8], a0: usize, a1: usize, b0: usize, b1: usize) -> bool {
+    if a1 - a0 != b1 - b0 { return false; }
+    let mut i: usize = 0usize;
+    let n: usize = a1 - a0;
+    while i < n {
+        if src[a0 + i] != src[b0 + i] { return false; }
+        i = i + 1usize;
+    }
+    return true;
+}
+// Scalar-or-pointer width code (nonzero == word-sized scalar/pointer/borrow). Used
+// only by is_copy/needs_drop below to short-circuit the scalar/pointer cases; kept
+// internal so a consumer's own scalar_width (which may differ for its own uses) is
+// undisturbed.
+fn scalar_width(pp: read P, src: [u8], tn: u32) -> i32 {
+    if tn == 0u32 { return 0; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if (nd.tag == T_NAMED || nd.tag == T_SC) { return sc_width(src, nd.p0, nd.p1); }
+    if nd.tag == T_RAWPTR || nd.tag == T_FNPTR { return W_USIZE; }
+    if nd.tag == T_BORROW || nd.tag == T_BORROWMUT { return W_USIZE; }
+    return 0;
+}
+
+// ---- item-list lookups (walk the `nx`-chain from `head`) ---------------------
+fn find_struct(pp: read P, src: [u8], head: u32, s: usize, en: usize) -> u32 {
+    let mut cur: u32 = head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_STRUCT && name_eq(src, nd.p0, nd.p1, s, en) { return cur; }
+        cur = nd.nx;
+    }
+    return 0u32;
+}
+fn find_enum(pp: read P, src: [u8], head: u32, s: usize, en: usize) -> u32 {
+    let mut cur: u32 = head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_ENUM && name_eq(src, nd.p0, nd.p1, s, en) { return cur; }
+        cur = nd.nx;
+    }
+    return 0u32;
+}
+// The `T_STRUCT` decl node for a type descriptor, or 0 if not a struct.
+pub fn struct_of_ty(pp: read P, src: [u8], head: u32, tn: u32) -> u32 {
+    if tn == 0u32 { return 0u32; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_APP && nd.b != 0u32 { return struct_of_ty(pp, src, head, nd.b); }
+    if nd.tag == T_STRUCT { return tn; }
+    if (nd.tag == T_NAMED || nd.tag == T_SC) {
+        if sc_width(src, nd.p0, nd.p1) != 0 { return 0u32; }
+        return find_struct(pp, src, head, nd.p0, nd.p1);
+    }
+    return 0u32;
+}
+// The `T_ENUM` decl node for a type descriptor, or 0 if not an enum. A `T_BOXRESULT`
+// annotation routes to its synthetic `{ boxed(Box T), oom }` enum (stored in `.c`).
+pub fn enum_of_ty(pp: read P, src: [u8], head: u32, tn: u32) -> u32 {
+    if tn == 0u32 { return 0u32; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_APP && nd.b != 0u32 { return enum_of_ty(pp, src, head, nd.b); }
+    if nd.tag == T_BOXRESULT { return nd.c; }
+    if nd.tag == T_ENUM { return tn; }
+    if (nd.tag == T_NAMED || nd.tag == T_SC) {
+        if sc_width(src, nd.p0, nd.p1) != 0 { return 0u32; }
+        return find_enum(pp, src, head, nd.p0, nd.p1);
+    }
+    return 0u32;
+}
+
+// ---- compiler-known std collection recognizers (mirror the oracle's Type::App
+// "Vec"/"Map" special-cases and the synthesized nominal `String`) ---------------
+pub fn is_vec_ty(pp: read P, src: [u8], tn: u32) -> bool {
+    if tn == 0u32 { return false; }
+    let nd: Node = pp.nodes[conv usize tn];
+    return nd.tag == T_APP && span_eq(src, nd.p0, nd.p1, b"Vec");
+}
+pub fn is_map_ty(pp: read P, src: [u8], tn: u32) -> bool {
+    if tn == 0u32 { return false; }
+    let nd: Node = pp.nodes[conv usize tn];
+    return nd.tag == T_APP && span_eq(src, nd.p0, nd.p1, b"Map");
+}
+pub fn is_string_ty(pp: read P, src: [u8], tn: u32) -> bool {
+    if tn == 0u32 { return false; }
+    let nd: Node = pp.nodes[conv usize tn];
+    return nd.tag == T_NAMED && span_eq(src, nd.p0, nd.p1, b"String");
+}
+// The element/value type node of a Vec/Map App (the sole type argument).
+pub fn coll_elem_ty(pp: read P, tn: u32) -> u32 {
+    let nd: Node = pp.nodes[conv usize tn];
+    return nd.a;
+}
+pub fn array_len_of(pp: read P, sn: u32) -> usize {
+    let nd: Node = pp.nodes[conv usize sn];
+    if nd.tag == T_INT { return conv usize nd.ival; }
+    // Named lengths (`[N]T` with a `static` N) need a const table -> S3+.
+    return 0usize;
+}
+
+// ---- size / align over the arena AST -----------------------------------------
+pub fn ty_size(pp: read P, src: [u8], head: u32, tn: u32) -> usize {
+    if tn == 0u32 { return 0usize; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_APP && nd.b != 0u32 { return ty_size(pp, src, head, nd.b); }
+    // Compiler-known std `Vec[T]`/`Map[V]`: five u64 words {buf,len,cap,ctx,vt}.
+    if nd.tag == T_APP {
+        if span_eq(src, nd.p0, nd.p1, b"Vec") || span_eq(src, nd.p0, nd.p1, b"Map") { return 40usize; }
+    }
+    if nd.tag == T_STR { return 16usize; }
+    if (nd.tag == T_NAMED || nd.tag == T_SC) {
+        let w: i32 = sc_width(src, nd.p0, nd.p1);
+        if w != 0 { return w_size(w); }
+        if span_eq(src, nd.p0, nd.p1, b"String") { return 40usize; }
+        if span_eq(src, nd.p0, nd.p1, b"str") { return 16usize; }
+        let sid: u32 = find_struct(pp, src, head, nd.p0, nd.p1);
+        if sid != 0u32 { return struct_size(pp, src, head, sid); }
+        let eid: u32 = find_enum(pp, src, head, nd.p0, nd.p1);
+        if eid != 0u32 { return enum_size(pp, src, head, eid); }
+        return 0usize;
+    }
+    if nd.tag == T_STRUCT { return struct_size(pp, src, head, tn); }
+    if nd.tag == T_ENUM { return enum_size(pp, src, head, tn); }
+    if nd.tag == T_RAWPTR || nd.tag == T_FNPTR { return 8usize; }
+    if nd.tag == T_BORROW || nd.tag == T_BORROWMUT { return 8usize; }
+    if nd.tag == T_SLICE || nd.tag == T_SLICEMUT { return 16usize; }
+    if nd.tag == T_BOX { return 24usize; }
+    if nd.tag == T_BOXRESULT { return 32usize; }
+    if nd.tag == T_ARRAY {
+        let n: usize = array_len_of(pp, nd.a);
+        let esz: usize = ty_size(pp, src, head, nd.b);
+        let eal: usize = ty_align(pp, src, head, nd.b);
+        return round_up_us(esz, eal) * n;
+    }
+    return 0usize;
+}
+pub fn ty_align(pp: read P, src: [u8], head: u32, tn: u32) -> usize {
+    if tn == 0u32 { return 1usize; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_APP && nd.b != 0u32 { return ty_align(pp, src, head, nd.b); }
+    if nd.tag == T_APP {
+        if span_eq(src, nd.p0, nd.p1, b"Vec") || span_eq(src, nd.p0, nd.p1, b"Map") { return 8usize; }
+    }
+    if nd.tag == T_STR { return 8usize; }
+    if (nd.tag == T_NAMED || nd.tag == T_SC) {
+        let w: i32 = sc_width(src, nd.p0, nd.p1);
+        if w != 0 { return w_size(w); }
+        if span_eq(src, nd.p0, nd.p1, b"String") { return 8usize; }
+        if span_eq(src, nd.p0, nd.p1, b"str") { return 8usize; }
+        let sid: u32 = find_struct(pp, src, head, nd.p0, nd.p1);
+        if sid != 0u32 { return struct_align(pp, src, head, sid); }
+        let eid: u32 = find_enum(pp, src, head, nd.p0, nd.p1);
+        if eid != 0u32 { return 8usize; }
+        return 1usize;
+    }
+    if nd.tag == T_STRUCT { return struct_align(pp, src, head, tn); }
+    if nd.tag == T_ENUM { return 8usize; }
+    if nd.tag == T_RAWPTR || nd.tag == T_FNPTR { return 8usize; }
+    if nd.tag == T_BORROW || nd.tag == T_BORROWMUT { return 8usize; }
+    if nd.tag == T_SLICE || nd.tag == T_SLICEMUT { return 8usize; }
+    if nd.tag == T_BOX || nd.tag == T_BOXRESULT { return 8usize; }
+    if nd.tag == T_ARRAY { return ty_align(pp, src, head, nd.b); }
+    return 1usize;
+}
+pub fn struct_size(pp: read P, src: [u8], head: u32, sid: u32) -> usize {
+    if sid == 0u32 { return 0usize; }
+    let snode: Node = pp.nodes[conv usize sid];
+    let mut off: usize = 0usize;
+    let mut align: usize = 1usize;
+    let mut cur: u32 = snode.b;
+    while cur != 0u32 {
+        let fd: Node = pp.nodes[conv usize cur];
+        let a: usize = ty_align(pp, src, head, fd.a);
+        if a > align { align = a; }
+        off = round_up_us(off, a);
+        off = off + ty_size(pp, src, head, fd.a);
+        cur = fd.nx;
+    }
+    return round_up_us(off, align);
+}
+pub fn struct_align(pp: read P, src: [u8], head: u32, sid: u32) -> usize {
+    if sid == 0u32 { return 1usize; }
+    let snode: Node = pp.nodes[conv usize sid];
+    let mut align: usize = 1usize;
+    let mut cur: u32 = snode.b;
+    while cur != 0u32 {
+        let fd: Node = pp.nodes[conv usize cur];
+        let a: usize = ty_align(pp, src, head, fd.a);
+        if a > align { align = a; }
+        cur = fd.nx;
+    }
+    return align;
+}
+// Byte offset of field [fs,fen) within struct `sid` (declared-order layout).
+pub fn field_off(pp: read P, src: [u8], head: u32, sid: u32, fs: usize, fen: usize) -> usize {
+    if sid == 0u32 { return 0usize; }
+    let snode: Node = pp.nodes[conv usize sid];
+    let mut off: usize = 0usize;
+    let mut cur: u32 = snode.b;
+    while cur != 0u32 {
+        let fd: Node = pp.nodes[conv usize cur];
+        let a: usize = ty_align(pp, src, head, fd.a);
+        off = round_up_us(off, a);
+        if name_eq(src, fs, fen, fd.p0, fd.p1) { return off; }
+        off = off + ty_size(pp, src, head, fd.a);
+        cur = fd.nx;
+    }
+    return 0usize;
+}
+// Byte offset of the field named by a byte-string LITERAL within struct `sid`
+// (name-agnostic ABI resolution: box/unbox find `ctx`/`vt`/`alloc`/`free` here).
+pub fn field_off_lit(pp: read P, src: [u8], head: u32, sid: u32, name: [u8]) -> usize {
+    if sid == 0u32 { return 0usize; }
+    let snode: Node = pp.nodes[conv usize sid];
+    let mut off: usize = 0usize;
+    let mut cur: u32 = snode.b;
+    while cur != 0u32 {
+        let fd: Node = pp.nodes[conv usize cur];
+        let a: usize = ty_align(pp, src, head, fd.a);
+        off = round_up_us(off, a);
+        if span_eq(src, fd.p0, fd.p1, name) { return off; }
+        off = off + ty_size(pp, src, head, fd.a);
+        cur = fd.nx;
+    }
+    return 0usize;
+}
+// Type node of field [fs,fen) within struct `sid`.
+pub fn field_ty(pp: read P, src: [u8], sid: u32, fs: usize, fen: usize) -> u32 {
+    if sid == 0u32 { return 0u32; }
+    let snode: Node = pp.nodes[conv usize sid];
+    let mut cur: u32 = snode.b;
+    while cur != 0u32 {
+        let fd: Node = pp.nodes[conv usize cur];
+        if name_eq(src, fs, fen, fd.p0, fd.p1) { return fd.a; }
+        cur = fd.nx;
+    }
+    return 0u32;
+}
+
+// ---- enum layout: {tag:u64@0, payload@8}, laid out struct-style from offset 8 --
+pub fn payload_size(pp: read P, src: [u8], head: u32, plist: u32) -> usize {
+    let mut off: usize = 0usize;
+    let mut align: usize = 1usize;
+    let mut cur: u32 = plist;
+    while cur != 0u32 {
+        let tn: Node = pp.nodes[conv usize cur];
+        let a: usize = ty_align(pp, src, head, cur);
+        if a > align { align = a; }
+        off = round_up_us(off, a);
+        off = off + ty_size(pp, src, head, cur);
+        cur = tn.nx;
+    }
+    return round_up_us(off, align);
+}
+pub fn enum_size(pp: read P, src: [u8], head: u32, eid: u32) -> usize {
+    if eid == 0u32 { return 0usize; }
+    let enode: Node = pp.nodes[conv usize eid];
+    let mut max: usize = 0usize;
+    let mut cur: u32 = enode.b;
+    while cur != 0u32 {
+        let vd: Node = pp.nodes[conv usize cur];
+        let psz: usize = payload_size(pp, src, head, vd.a);
+        if psz > max { max = psz; }
+        cur = vd.nx;
+    }
+    return round_up_us(8usize + max, 8usize);
+}
+// The `T_VARIANT` node at 0-based declared index `idx`, or 0 if out of range.
+pub fn variant_by_index(pp: read P, eid: u32, idx: i32) -> u32 {
+    let enode: Node = pp.nodes[conv usize eid];
+    let mut cur: u32 = enode.b;
+    let mut k: i32 = 0;
+    while cur != 0u32 {
+        if k == idx { return cur; }
+        let vd: Node = pp.nodes[conv usize cur];
+        k = k + 1i32;
+        cur = vd.nx;
+    }
+    return 0u32;
+}
+// 0-based declared index of the variant named [s,en), or -1 if absent.
+pub fn variant_index_by_name(pp: read P, src: [u8], eid: u32, s: usize, en: usize) -> i32 {
+    let enode: Node = pp.nodes[conv usize eid];
+    let mut cur: u32 = enode.b;
+    let mut k: i32 = 0;
+    while cur != 0u32 {
+        let vd: Node = pp.nodes[conv usize cur];
+        if name_eq(src, vd.p0, vd.p1, s, en) { return k; }
+        k = k + 1i32;
+        cur = vd.nx;
+    }
+    return 0 - 1i32;
+}
+// Offset (from the enum base, INCLUDING the u64 tag) of payload field `i`.
+pub fn variant_payload_off(pp: read P, src: [u8], head: u32, vid: u32, i: i32) -> usize {
+    let vd: Node = pp.nodes[conv usize vid];
+    let mut off: usize = 0usize;
+    let mut k: i32 = 0;
+    let mut cur: u32 = vd.a;
+    while cur != 0u32 {
+        let tn: Node = pp.nodes[conv usize cur];
+        let a: usize = ty_align(pp, src, head, cur);
+        off = round_up_us(off, a);
+        if k == i { return 8usize + off; }
+        off = off + ty_size(pp, src, head, cur);
+        k = k + 1i32;
+        cur = tn.nx;
+    }
+    return 8usize;
+}
+// Type node of payload field `i` of variant `vid`, or 0 if absent.
+pub fn variant_payload_ty(pp: read P, vid: u32, i: i32) -> u32 {
+    let vd: Node = pp.nodes[conv usize vid];
+    let mut k: i32 = 0;
+    let mut cur: u32 = vd.a;
+    while cur != 0u32 {
+        if k == i { return cur; }
+        let tn: Node = pp.nodes[conv usize cur];
+        k = k + 1i32;
+        cur = tn.nx;
+    }
+    return 0u32;
+}
+
+// ---- copyability + drop obligation (ported from src/types.rs is_copy/needs_drop) ----
+// A struct is `copy` iff it carries the `copy` marker (T_STRUCT.op), declares no
+// drop hook (T_STRUCT.c == 0), and every field is copy. Scalars/pointers/arrays-of-
+// copy are copy. A struct NEEDS drop iff it has a hook or transitively holds a
+// needs-drop field. Compiler-known collections are owning (never copy, always drop).
+pub fn is_copy(pp: read P, src: [u8], head: u32, tn: u32) -> bool {
+    if tn == 0u32 { return true; }
+    if is_vec_ty(pp, src, tn) || is_map_ty(pp, src, tn) || is_string_ty(pp, src, tn) { return false; }
+    if scalar_width(pp, src, tn) != 0 { return true; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_BOX || nd.tag == T_BOXRESULT { return false; }
+    if nd.tag == T_ARRAY { return is_copy(pp, src, head, nd.b); }
+    let sid: u32 = struct_of_ty(pp, src, head, tn);
+    if sid != 0u32 {
+        let snode: Node = pp.nodes[conv usize sid];
+        if snode.op == 0 { return false; }
+        if snode.c != 0u32 { return false; }
+        let mut cur: u32 = snode.b;
+        while cur != 0u32 {
+            let fd: Node = pp.nodes[conv usize cur];
+            if !is_copy(pp, src, head, fd.a) { return false; }
+            cur = fd.nx;
+        }
+        return true;
+    }
+    let eid: u32 = enum_of_ty(pp, src, head, tn);
+    if eid != 0u32 {
+        let enode: Node = pp.nodes[conv usize eid];
+        if enode.op == 0 { return false; }
+        let mut vc: u32 = enode.b;
+        while vc != 0u32 {
+            let vd: Node = pp.nodes[conv usize vc];
+            let mut pc: u32 = vd.a;
+            while pc != 0u32 {
+                let pn: Node = pp.nodes[conv usize pc];
+                if !is_copy(pp, src, head, pc) { return false; }
+                pc = pn.nx;
+            }
+            vc = vd.nx;
+        }
+        return true;
+    }
+    return true;
+}
+pub fn needs_drop(pp: read P, src: [u8], head: u32, tn: u32) -> bool {
+    if tn == 0u32 { return false; }
+    if is_vec_ty(pp, src, tn) || is_map_ty(pp, src, tn) || is_string_ty(pp, src, tn) { return true; }
+    if scalar_width(pp, src, tn) != 0 { return false; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_BOX || nd.tag == T_BOXRESULT { return true; }
+    if nd.tag == T_ARRAY { return needs_drop(pp, src, head, nd.b); }
+    let sid: u32 = struct_of_ty(pp, src, head, tn);
+    if sid != 0u32 {
+        let snode: Node = pp.nodes[conv usize sid];
+        if snode.c != 0u32 { return true; }
+        let mut cur: u32 = snode.b;
+        while cur != 0u32 {
+            let fd: Node = pp.nodes[conv usize cur];
+            if needs_drop(pp, src, head, fd.a) { return true; }
+            cur = fd.nx;
+        }
+        return false;
+    }
+    let eid: u32 = enum_of_ty(pp, src, head, tn);
+    if eid != 0u32 {
+        let enode: Node = pp.nodes[conv usize eid];
+        let mut vc: u32 = enode.b;
+        while vc != 0u32 {
+            let vd: Node = pp.nodes[conv usize vc];
+            let mut pc: u32 = vd.a;
+            while pc != 0u32 {
+                let pn: Node = pp.nodes[conv usize pc];
+                if needs_drop(pp, src, head, pc) { return true; }
+                pc = pn.nx;
+            }
+            vc = vd.nx;
+        }
+        return false;
+    }
+    return false;
+}

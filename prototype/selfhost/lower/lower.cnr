@@ -27,6 +27,7 @@
 use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl, emit_bytes, decoded_len};
 use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_PARAM, T_SC, T_NAMED, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, T_STRUCT, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, T_STR, T_BYTES, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_ENUMCTOR, T_MATCH, T_PVARIANT, T_WILD, T_BIND, T_VARIANT, T_ARM, T_NAME, T_STATIC, T_RAWPTR, T_BOX, T_BOXRESULT, T_FNPTR, T_FPPARAM, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT, T_APP, T_GENERICVAL, T_IMPL, T_TRY};
 use mono::{mono_program};
+use layout::{ty_size, ty_align, field_off, field_ty, variant_by_index, variant_index_by_name, variant_payload_off, variant_payload_ty, struct_of_ty, enum_of_ty, is_copy, needs_drop, is_vec_ty, is_map_ty, is_string_ty, coll_elem_ty, array_len_of};
 
 // ---- fault kind codes (the wire keyword table in serial.rs) -----------------
 static FK_OVERFLOW: i32 = 0;
@@ -216,339 +217,10 @@ fn round_up_us(x: usize, a: usize) -> usize {
     if a <= 1usize { return x; }
     return ((x + a - 1usize) / a) * a;
 }
-fn find_struct(pp: read P, src: [u8], head: u32, s: usize, en: usize) -> u32 {
-    let mut cur: u32 = head;
-    while cur != 0u32 {
-        let nd: Node = pp.nodes[conv usize cur];
-        if nd.tag == T_STRUCT && name_eq(src, s, en, nd.p0, nd.p1) { return cur; }
-        cur = nd.nx;
-    }
-    return 0u32;
-}
-// The T_STRUCT decl node for a type descriptor, or 0 if not a struct.
-fn struct_id_of(pp: read P, src: [u8], head: u32, tn: u32) -> u32 {
-    if tn == 0u32 { return 0u32; }
-    let nd: Node = pp.nodes[conv usize tn];
-    if nd.tag == T_APP && nd.b != 0u32 { return struct_id_of(pp, src, head, nd.b); }
-    if nd.tag == T_STRUCT { return tn; }
-    if nd.tag == T_NAMED || nd.tag == T_SC {
-        if sc_width(src, nd.p0, nd.p1) != 0 { return 0u32; }
-        return find_struct(pp, src, head, nd.p0, nd.p1);
-    }
-    return 0u32;
-}
-fn array_len_of(pp: read P, sn: u32) -> usize {
-    let nd: Node = pp.nodes[conv usize sn];
-    if nd.tag == T_INT { return conv usize nd.ival; }
-    return 0usize;
-}
-fn ty_size(pp: read P, src: [u8], head: u32, tn: u32) -> usize {
-    if tn == 0u32 { return 0usize; }
-    let nd: Node = pp.nodes[conv usize tn];
-    if nd.tag == T_APP && nd.b != 0u32 { return ty_size(pp, src, head, nd.b); }
-    // Compiler-known std `Vec[T]`/`Map[V]`: five u64 words {buf,len,cap,ctx,vt}.
-    if nd.tag == T_APP {
-        if span_eq(src, nd.p0, nd.p1, b"Vec") || span_eq(src, nd.p0, nd.p1, b"Map") { return 40usize; }
-    }
-    if nd.tag == T_STR { return 16usize; }
-    if nd.tag == T_NAMED || nd.tag == T_SC {
-        let w: i32 = sc_width(src, nd.p0, nd.p1);
-        if w != 0 { return w_size(w); }
-        if span_eq(src, nd.p0, nd.p1, b"String") { return 40usize; }
-        if span_eq(src, nd.p0, nd.p1, b"str") { return 16usize; }
-        let sid: u32 = find_struct(pp, src, head, nd.p0, nd.p1);
-        if sid != 0u32 { return struct_size(pp, src, head, sid); }
-        let eid: u32 = find_enum(pp, src, head, nd.p0, nd.p1);
-        if eid != 0u32 { return enum_size(pp, src, head, eid); }
-        return 0usize;
-    }
-    if nd.tag == T_STRUCT { return struct_size(pp, src, head, tn); }
-    if nd.tag == T_ENUM { return enum_size(pp, src, head, tn); }
-    if nd.tag == T_ARRAY {
-        let n: usize = array_len_of(pp, nd.a);
-        let esz: usize = ty_size(pp, src, head, nd.b);
-        let eal: usize = ty_align(pp, src, head, nd.b);
-        return round_up_us(esz, eal) * n;
-    }
-    if nd.tag == T_RAWPTR || nd.tag == T_FNPTR || nd.tag == T_BORROW || nd.tag == T_BORROWMUT { return 8usize; }
-    if nd.tag == T_BOX { return 24usize; }
-    if nd.tag == T_BOXRESULT { return 32usize; }
-    if nd.tag == T_SLICE || nd.tag == T_SLICEMUT { return 16usize; }
-    return 0usize;
-}
-fn ty_align(pp: read P, src: [u8], head: u32, tn: u32) -> usize {
-    if tn == 0u32 { return 1usize; }
-    let nd: Node = pp.nodes[conv usize tn];
-    if nd.tag == T_APP && nd.b != 0u32 { return ty_align(pp, src, head, nd.b); }
-    if nd.tag == T_APP {
-        if span_eq(src, nd.p0, nd.p1, b"Vec") || span_eq(src, nd.p0, nd.p1, b"Map") { return 8usize; }
-    }
-    if nd.tag == T_STR { return 8usize; }
-    if nd.tag == T_NAMED || nd.tag == T_SC {
-        let w: i32 = sc_width(src, nd.p0, nd.p1);
-        if w != 0 { return w_size(w); }
-        if span_eq(src, nd.p0, nd.p1, b"String") { return 8usize; }
-        if span_eq(src, nd.p0, nd.p1, b"str") { return 8usize; }
-        let sid: u32 = find_struct(pp, src, head, nd.p0, nd.p1);
-        if sid != 0u32 { return struct_align(pp, src, head, sid); }
-        if find_enum(pp, src, head, nd.p0, nd.p1) != 0u32 { return 8usize; }
-        return 1usize;
-    }
-    if nd.tag == T_STRUCT { return struct_align(pp, src, head, tn); }
-    if nd.tag == T_ENUM { return 8usize; }
-    if nd.tag == T_ARRAY { return ty_align(pp, src, head, nd.b); }
-    if nd.tag == T_RAWPTR || nd.tag == T_FNPTR || nd.tag == T_BORROW || nd.tag == T_BORROWMUT || nd.tag == T_BOX || nd.tag == T_BOXRESULT || nd.tag == T_SLICE || nd.tag == T_SLICEMUT { return 8usize; }
-    return 1usize;
-}
-fn struct_size(pp: read P, src: [u8], head: u32, sid: u32) -> usize {
-    if sid == 0u32 { return 0usize; }
-    let snode: Node = pp.nodes[conv usize sid];
-    let mut off: usize = 0usize;
-    let mut align: usize = 1usize;
-    let mut cur: u32 = snode.b;
-    while cur != 0u32 {
-        let fd: Node = pp.nodes[conv usize cur];
-        let a: usize = ty_align(pp, src, head, fd.a);
-        if a > align { align = a; }
-        off = round_up_us(off, a);
-        off = off + ty_size(pp, src, head, fd.a);
-        cur = fd.nx;
-    }
-    return round_up_us(off, align);
-}
-fn struct_align(pp: read P, src: [u8], head: u32, sid: u32) -> usize {
-    if sid == 0u32 { return 1usize; }
-    let snode: Node = pp.nodes[conv usize sid];
-    let mut align: usize = 1usize;
-    let mut cur: u32 = snode.b;
-    while cur != 0u32 {
-        let fd: Node = pp.nodes[conv usize cur];
-        let a: usize = ty_align(pp, src, head, fd.a);
-        if a > align { align = a; }
-        cur = fd.nx;
-    }
-    return align;
-}
-fn field_off(pp: read P, src: [u8], head: u32, sid: u32, fs: usize, fen: usize) -> usize {
-    if sid == 0u32 { return 0usize; }
-    let snode: Node = pp.nodes[conv usize sid];
-    let mut off: usize = 0usize;
-    let mut cur: u32 = snode.b;
-    while cur != 0u32 {
-        let fd: Node = pp.nodes[conv usize cur];
-        let a: usize = ty_align(pp, src, head, fd.a);
-        off = round_up_us(off, a);
-        if name_eq(src, fs, fen, fd.p0, fd.p1) { return off; }
-        off = off + ty_size(pp, src, head, fd.a);
-        cur = fd.nx;
-    }
-    return 0usize;
-}
-fn field_ty(pp: read P, src: [u8], sid: u32, fs: usize, fen: usize) -> u32 {
-    if sid == 0u32 { return 0u32; }
-    let snode: Node = pp.nodes[conv usize sid];
-    let mut cur: u32 = snode.b;
-    while cur != 0u32 {
-        let fd: Node = pp.nodes[conv usize cur];
-        if name_eq(src, fs, fen, fd.p0, fd.p1) { return fd.a; }
-        cur = fd.nx;
-    }
-    return 0u32;
-}
 fn stride_of(pp: read P, src: [u8], head: u32, elem: u32) -> usize {
     return round_up_us(ty_size(pp, src, head, elem), ty_align(pp, src, head, elem));
 }
-// ---- enum layout (ported from interp.cnr / src/interp/layout.rs) --------------
-// Enum layout: {tag:u64@0, payload@8}; the payload is laid out struct-style
-// (declared order, natural alignment) from offset 8; enum size = round_up(8 + max
-// padded payload, 8); enum align = 8 always; tag = the variant's 0-based declared
-// index. The payload chain is a raw type-node `nx`-chain (each node IS a field's
-// type), generalizing the S2 struct-field layout.
-fn find_enum(pp: read P, src: [u8], head: u32, s: usize, en: usize) -> u32 {
-    let mut cur: u32 = head;
-    while cur != 0u32 {
-        let nd: Node = pp.nodes[conv usize cur];
-        if nd.tag == T_ENUM && name_eq(src, s, en, nd.p0, nd.p1) { return cur; }
-        cur = nd.nx;
-    }
-    return 0u32;
-}
-// The `T_ENUM` decl node for a type descriptor (a `T_NAMED` local/param type or a
-// bare enum decl node from a constructor), or 0 if not an enum.
-fn enum_id_of(pp: read P, src: [u8], head: u32, tn: u32) -> u32 {
-    if tn == 0u32 { return 0u32; }
-    let nd: Node = pp.nodes[conv usize tn];
-    if nd.tag == T_APP && nd.b != 0u32 { return enum_id_of(pp, src, head, nd.b); }
-    if nd.tag == T_ENUM { return tn; }
-    if nd.tag == T_NAMED || nd.tag == T_SC {
-        if sc_width(src, nd.p0, nd.p1) != 0 { return 0u32; }
-        return find_enum(pp, src, head, nd.p0, nd.p1);
-    }
-    return 0u32;
-}
-fn payload_size(pp: read P, src: [u8], head: u32, plist: u32) -> usize {
-    let mut off: usize = 0usize;
-    let mut align: usize = 1usize;
-    let mut cur: u32 = plist;
-    while cur != 0u32 {
-        let tn: Node = pp.nodes[conv usize cur];
-        let a: usize = ty_align(pp, src, head, cur);
-        if a > align { align = a; }
-        off = round_up_us(off, a);
-        off = off + ty_size(pp, src, head, cur);
-        cur = tn.nx;
-    }
-    return round_up_us(off, align);
-}
-fn enum_size(pp: read P, src: [u8], head: u32, eid: u32) -> usize {
-    if eid == 0u32 { return 0usize; }
-    let enode: Node = pp.nodes[conv usize eid];
-    let mut max: usize = 0usize;
-    let mut cur: u32 = enode.b;
-    while cur != 0u32 {
-        let vd: Node = pp.nodes[conv usize cur];
-        let psz: usize = payload_size(pp, src, head, vd.a);
-        if psz > max { max = psz; }
-        cur = vd.nx;
-    }
-    return round_up_us(8usize + max, 8usize);
-}
-fn variant_by_index(pp: read P, eid: u32, idx: i32) -> u32 {
-    let enode: Node = pp.nodes[conv usize eid];
-    let mut cur: u32 = enode.b;
-    let mut k: i32 = 0;
-    while cur != 0u32 {
-        if k == idx { return cur; }
-        let vd: Node = pp.nodes[conv usize cur];
-        k = k + 1i32;
-        cur = vd.nx;
-    }
-    return 0u32;
-}
-fn variant_index_by_name(pp: read P, src: [u8], eid: u32, s: usize, en: usize) -> i32 {
-    let enode: Node = pp.nodes[conv usize eid];
-    let mut cur: u32 = enode.b;
-    let mut k: i32 = 0;
-    while cur != 0u32 {
-        let vd: Node = pp.nodes[conv usize cur];
-        if name_eq(src, vd.p0, vd.p1, s, en) { return k; }
-        k = k + 1i32;
-        cur = vd.nx;
-    }
-    return 0 - 1i32;
-}
-// Offset from the enum base (INCLUDING the u64 tag) of payload field `i`.
-fn variant_payload_off(pp: read P, src: [u8], head: u32, vid: u32, i: i32) -> usize {
-    let vd: Node = pp.nodes[conv usize vid];
-    let mut off: usize = 0usize;
-    let mut k: i32 = 0;
-    let mut cur: u32 = vd.a;
-    while cur != 0u32 {
-        let tn: Node = pp.nodes[conv usize cur];
-        let a: usize = ty_align(pp, src, head, cur);
-        off = round_up_us(off, a);
-        if k == i { return 8usize + off; }
-        off = off + ty_size(pp, src, head, cur);
-        k = k + 1i32;
-        cur = tn.nx;
-    }
-    return 8usize;
-}
-fn variant_payload_ty(pp: read P, vid: u32, i: i32) -> u32 {
-    let vd: Node = pp.nodes[conv usize vid];
-    let mut k: i32 = 0;
-    let mut cur: u32 = vd.a;
-    while cur != 0u32 {
-        if k == i { return cur; }
-        let tn: Node = pp.nodes[conv usize cur];
-        k = k + 1i32;
-        cur = tn.nx;
-    }
-    return 0u32;
-}
 
-// Drop obligation / copyability (ported from interp.cnr needs_drop/is_copy). A
-// struct NEEDS drop iff it has a hook (T_STRUCT.c != 0) or a needs-drop field; it
-// is COPY iff marked `copy`, has no hook, and every field is copy. Scalars are
-// copy/inert; arrays follow their element. Enums/box are out of the L3 subset.
-fn needs_drop_ty(pp: read P, src: [u8], head: u32, tn: u32) -> bool {
-    if tn == 0u32 { return false; }
-    if scalar_width(pp, src, tn) != 0 { return false; }
-    // Compiler-known std collections are owning (allocator-bearing): always drop.
-    if tn_is_vec(pp, src, tn) || tn_is_map(pp, src, tn) || tn_is_string(pp, src, tn) { return true; }
-    let nd: Node = pp.nodes[conv usize tn];
-    if nd.tag == T_BOX || nd.tag == T_BOXRESULT { return true; }
-    if nd.tag == T_RAWPTR || nd.tag == T_FNPTR || nd.tag == T_BORROW || nd.tag == T_BORROWMUT || nd.tag == T_SLICE || nd.tag == T_SLICEMUT { return false; }
-    if nd.tag == T_ARRAY { return needs_drop_ty(pp, src, head, nd.b); }
-    let sid: u32 = struct_id_of(pp, src, head, tn);
-    if sid != 0u32 {
-        let snode: Node = pp.nodes[conv usize sid];
-        if snode.c != 0u32 { return true; }
-        let mut cur: u32 = snode.b;
-        while cur != 0u32 {
-            let fd: Node = pp.nodes[conv usize cur];
-            if needs_drop_ty(pp, src, head, fd.a) { return true; }
-            cur = fd.nx;
-        }
-        return false;
-    }
-    let eid: u32 = enum_id_of(pp, src, head, tn);
-    if eid != 0u32 {
-        let enode: Node = pp.nodes[conv usize eid];
-        let mut vc: u32 = enode.b;
-        while vc != 0u32 {
-            let vd: Node = pp.nodes[conv usize vc];
-            let mut pc: u32 = vd.a;
-            while pc != 0u32 {
-                if needs_drop_ty(pp, src, head, pc) { return true; }
-                pc = pp.nodes[conv usize pc].nx;
-            }
-            vc = vd.nx;
-        }
-        return false;
-    }
-    return false;
-}
-fn is_copy_ty(pp: read P, src: [u8], head: u32, tn: u32) -> bool {
-    if tn == 0u32 { return true; }
-    if scalar_width(pp, src, tn) != 0 { return true; }
-    // Compiler-known std collections own a heap buffer: never copy.
-    if tn_is_vec(pp, src, tn) || tn_is_map(pp, src, tn) || tn_is_string(pp, src, tn) { return false; }
-    let nd: Node = pp.nodes[conv usize tn];
-    if nd.tag == T_BOX || nd.tag == T_BOXRESULT { return false; }
-    if nd.tag == T_RAWPTR || nd.tag == T_FNPTR || nd.tag == T_BORROW || nd.tag == T_BORROWMUT { return true; }
-    if nd.tag == T_ARRAY { return is_copy_ty(pp, src, head, nd.b); }
-    let sid: u32 = struct_id_of(pp, src, head, tn);
-    if sid != 0u32 {
-        let snode: Node = pp.nodes[conv usize sid];
-        if snode.op == 0 { return false; }
-        if snode.c != 0u32 { return false; }
-        let mut cur: u32 = snode.b;
-        while cur != 0u32 {
-            let fd: Node = pp.nodes[conv usize cur];
-            if !is_copy_ty(pp, src, head, fd.a) { return false; }
-            cur = fd.nx;
-        }
-        return true;
-    }
-    let eid: u32 = enum_id_of(pp, src, head, tn);
-    if eid != 0u32 {
-        let enode: Node = pp.nodes[conv usize eid];
-        if enode.op == 0 { return false; }
-        let mut vc: u32 = enode.b;
-        while vc != 0u32 {
-            let vd: Node = pp.nodes[conv usize vc];
-            let mut pc: u32 = vd.a;
-            while pc != 0u32 {
-                if !is_copy_ty(pp, src, head, pc) { return false; }
-                pc = pp.nodes[conv usize pc].nx;
-            }
-            vc = vd.nx;
-        }
-        return true;
-    }
-    return true;
-}
 
 // A word-sized (8-byte, single-operand) type: scalar/bool, rawptr, fnptr, borrow.
 fn is_wordy_tn(pp: read P, src: [u8], tn: u32) -> bool {
@@ -1402,7 +1074,7 @@ fn emit_drop(pp: read P, src: [u8], m: write M, id: i32) -> unit {
     if m.loc_ptr[conv usize id] != 0 { return; }
     let mut nd: i32 = 0;
     if m.loc_box[conv usize id] != 0 { nd = 1; }
-    else if needs_drop_ty(pp, src, m.head, m.loc_tn[conv usize id]) { nd = 1; }
+    else if needs_drop(pp, src, m.head, m.loc_tn[conv usize id]) { nd = 1; }
     if nd == 0 { return; }
     if whole_moved(m, id) { return; }
     st_drop(src, m, id);
@@ -1541,9 +1213,9 @@ fn find_from_impl(pp: read P, src: [u8], head: u32, src_eid: u32, tgt_eid: u32) 
     while cur != 0u32 {
         let nd: Node = pp.nodes[conv usize cur];
         if nd.tag == T_IMPL && nd.a == 0u32 && span_eq(src, nd.p0, nd.p1, b"From") {
-            let te: u32 = enum_id_of(pp, src, head, nd.c);
+            let te: u32 = enum_of_ty(pp, src, head, nd.c);
             let mut se: u32 = 0u32;
-            if nd.b != 0u32 { se = enum_id_of(pp, src, head, nd.b); }
+            if nd.b != 0u32 { se = enum_of_ty(pp, src, head, nd.b); }
             if te == tgt_eid && se == src_eid { return cur; }
         }
         cur = pp.nodes[conv usize cur].nx;
@@ -1609,9 +1281,9 @@ fn lower_try_from(pp: read P, src: [u8], m: write M, s_local: i32, eid: u32, sp0
     let evid: u32 = variant_by_index(pp, eid, err_idx);
     let e1ty: u32 = variant_payload_ty(pp, evid, 0);
     let e1off: usize = variant_payload_off(pp, src, m.head, evid, 0);
-    let e1_eid: u32 = enum_id_of(pp, src, m.head, e1ty);
+    let e1_eid: u32 = enum_of_ty(pp, src, m.head, e1ty);
     let rty: u32 = m.ret_tn;
-    let reid: u32 = enum_id_of(pp, src, m.head, rty);
+    let reid: u32 = enum_of_ty(pp, src, m.head, rty);
     if reid == eid {
         // Same result type: early-return the operand value as-is.
         if m.reachable != 0 {
@@ -1633,7 +1305,7 @@ fn lower_try_from(pp: read P, src: [u8], m: write M, s_local: i32, eid: u32, sp0
     let rvid: u32 = variant_by_index(pp, reid, ret_err_idx);
     let e2ty: u32 = variant_payload_ty(pp, rvid, 0);
     let e2off: usize = variant_payload_off(pp, src, m.head, rvid, 0);
-    let e2_eid: u32 = enum_id_of(pp, src, m.head, e2ty);
+    let e2_eid: u32 = enum_of_ty(pp, src, m.head, e2ty);
     let impl_id: u32 = find_from_impl(pp, src, m.head, e1_eid, e2_eid);
     if impl_id == 0u32 { m.*.err = 1; return 1; }
     let from_fn: u32 = from_method_of(pp, src, impl_id);
@@ -1709,7 +1381,7 @@ fn lower_try(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
     let cbri: i32 = bret_lookup(m, fnid);
     if cbri >= 0 { ety_tn = m.bret_tn[conv usize cbri]; }
     else if fnnd.e != 0u32 { ety_tn = pp.nodes[conv usize fnnd.e].a; }
-    let eid: u32 = enum_id_of(pp, src, m.head, ety_tn);
+    let eid: u32 = enum_of_ty(pp, src, m.head, ety_tn);
     if eid == 0u32 { m.*.err = 1; return 1; }
     let ok_idx: i32 = ok_variant_index(pp, eid);
     if ok_idx < 0 { m.*.err = 1; return 1; }
@@ -1789,7 +1461,7 @@ fn lower_value(pp: read P, src: [u8], m: write M, i: u32, exp_w: i32) -> i32 {
         return 1;
     }
     if nd.tag == T_OFFSETOF {
-        let sid: u32 = struct_id_of(pp, src, m.head, nd.a);
+        let sid: u32 = struct_of_ty(pp, src, m.head, nd.a);
         let off: usize = field_off(pp, src, m.head, sid, nd.p0, nd.p1);
         set_res_const(m, conv u64 off, 0, 10);
         return 0;
@@ -2138,23 +1810,6 @@ fn is_builtin_name(src: [u8], p0: usize, p1: usize) -> bool {
     if span_eq(src, p0, p1, b"len") { return true; }
     return false;
 }
-// ---- compiler-known std collections (Vec / Map / String): mirror build.rs
-// lower_collection_agg / lower_collection_value and the interp type-table. ------
-fn tn_is_vec(pp: read P, src: [u8], tn: u32) -> bool {
-    if tn == 0u32 { return false; }
-    let nd: Node = pp.nodes[conv usize tn];
-    return nd.tag == T_APP && span_eq(src, nd.p0, nd.p1, b"Vec");
-}
-fn tn_is_map(pp: read P, src: [u8], tn: u32) -> bool {
-    if tn == 0u32 { return false; }
-    let nd: Node = pp.nodes[conv usize tn];
-    return nd.tag == T_APP && span_eq(src, nd.p0, nd.p1, b"Map");
-}
-fn tn_is_string(pp: read P, src: [u8], tn: u32) -> bool {
-    if tn == 0u32 { return false; }
-    let nd: Node = pp.nodes[conv usize tn];
-    return nd.tag == T_NAMED && span_eq(src, nd.p0, nd.p1, b"String");
-}
 // The `str` byte-view type: a string literal node (T_STR) or the `str` keyword,
 // which the parser records as a T_NAMED/T_SC. build.rs resolves both to Type::Str.
 fn tn_is_str_ty(pp: read P, src: [u8], tn: u32) -> bool {
@@ -2163,10 +1818,6 @@ fn tn_is_str_ty(pp: read P, src: [u8], tn: u32) -> bool {
     if nd.tag == T_STR { return true; }
     if nd.tag == T_NAMED || nd.tag == T_SC { return span_eq(src, nd.p0, nd.p1, b"str"); }
     return false;
-}
-// The element/value type node of a Vec/Map App (its sole type argument).
-fn coll_elem_tn(pp: read P, tn: u32) -> u32 {
-    return pp.nodes[conv usize tn].a;
 }
 // The collection type node a receiver arg names: peel a read/write prefix and any
 // borrow layer (mirrors build.rs collection_ty).
@@ -2186,7 +1837,7 @@ fn coll_recv_tn(pp: read P, src: [u8], m: write M, a0: u32) -> u32 {
 // it), else a fresh temp of type `tn` filled by lower_into (returns the temp id).
 fn coll_val_mat(pp: read P, src: [u8], m: write M, e: u32, tn: u32) -> i32 {
     if is_place_expr(pp, e) {
-        if !is_copy_ty(pp, src, m.head, tn) { mark_moved(pp, src, m, e); }
+        if !is_copy(pp, src, m.head, tn) { mark_moved(pp, src, m, e); }
         place_base_prep(pp, src, m, e);
         m.*.idx_cnt = 0usize;
         prep_place(pp, src, m, e);
@@ -2236,8 +1887,8 @@ fn is_coll_agg_call(pp: read P, src: [u8], m: write M, cp0: usize, cp1: usize, a
     if span_eq(src, cp0, cp1, b"string_new") { return true; }
     if a0 == 0u32 { return false; }
     let rtn: u32 = coll_recv_tn(pp, src, m, a0);
-    if span_eq(src, cp0, cp1, b"pop") { return tn_is_vec(pp, src, rtn); }
-    if span_eq(src, cp0, cp1, b"as_str") { return tn_is_string(pp, src, rtn); }
+    if span_eq(src, cp0, cp1, b"pop") { return is_vec_ty(pp, src, rtn); }
+    if span_eq(src, cp0, cp1, b"as_str") { return is_string_ty(pp, src, rtn); }
     return false;
 }
 // Lower an aggregate-producing collection intrinsic into the destination place
@@ -2273,7 +1924,7 @@ fn lower_coll_agg_into(pp: read P, src: [u8], m: write M, e: u32, root: i32) -> 
     }
     if span_eq(src, callee.p0, callee.p1, b"pop") {
         let rtn: u32 = coll_recv_tn(pp, src, m, a0);
-        let elem: u32 = coll_elem_tn(pp, rtn);
+        let elem: u32 = coll_elem_ty(pp, rtn);
         let sc: i32 = lower_value(pp, src, m, a0, 0 - 1i32);
         if sc != 0 { return sc; }
         let bk: i32 = m.res_kind; let bv: u64 = m.res_val; let bn: i32 = m.res_neg; let bw: i32 = m.res_w;
@@ -2326,7 +1977,7 @@ fn is_coll_get_call(pp: read P, src: [u8], m: write M, call: u32) -> bool {
     let a0: u32 = nd.b;
     if a0 == 0u32 { return false; }
     let rtn: u32 = coll_recv_tn(pp, src, m, a0);
-    return tn_is_vec(pp, src, rtn) || tn_is_map(pp, src, rtn);
+    return is_vec_ty(pp, src, rtn) || is_map_ty(pp, src, rtn);
 }
 // `get(read v/m, k).*`: lower the collection `get` (a borrow value), then read
 // through it (build.rs Prefix-Deref over a call result -> deref_place + Load).
@@ -2370,15 +2021,15 @@ fn lower_coll_value(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
     let a0: u32 = nd.b;
     if a0 == 0u32 { return 2; }
     let rtn: u32 = coll_recv_tn(pp, src, m, a0);
-    let is_vec: bool = tn_is_vec(pp, src, rtn);
-    let is_map: bool = tn_is_map(pp, src, rtn);
-    let is_string: bool = tn_is_string(pp, src, rtn);
+    let is_vec: bool = is_vec_ty(pp, src, rtn);
+    let is_map: bool = is_map_ty(pp, src, rtn);
+    let is_string: bool = is_string_ty(pp, src, rtn);
     if !is_vec && !is_map && !is_string { return 2; }
     let csp0: usize = nd.p0;
     let csp1: usize = nd.p1;
     let a1: u32 = pp.nodes[conv usize a0].nx;
     if is_vec && span_eq(src, callee.p0, callee.p1, b"push") {
-        let elem: u32 = coll_elem_tn(pp, rtn);
+        let elem: u32 = coll_elem_ty(pp, rtn);
         let sc: i32 = lower_value(pp, src, m, a0, 0 - 1i32);
         if sc != 0 { return 1; }
         let bk: i32 = m.res_kind; let bv: u64 = m.res_val; let bn: i32 = m.res_neg; let bw: i32 = m.res_w;
@@ -2440,7 +2091,7 @@ fn lower_coll_value(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
         return 0;
     }
     if is_vec && span_eq(src, callee.p0, callee.p1, b"get") {
-        let elem: u32 = coll_elem_tn(pp, rtn);
+        let elem: u32 = coll_elem_ty(pp, rtn);
         let sc: i32 = lower_value(pp, src, m, a0, 0 - 1i32);
         if sc != 0 { return 1; }
         let bk: i32 = m.res_kind; let bv: u64 = m.res_val; let bn: i32 = m.res_neg; let bw: i32 = m.res_w;
@@ -2475,7 +2126,7 @@ fn lower_coll_value(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
         return 0;
     }
     if is_map && span_eq(src, callee.p0, callee.p1, b"get") {
-        let valty: u32 = coll_elem_tn(pp, rtn);
+        let valty: u32 = coll_elem_ty(pp, rtn);
         let sc: i32 = lower_value(pp, src, m, a0, 0 - 1i32);
         if sc != 0 { return 1; }
         let bk: i32 = m.res_kind; let bv: u64 = m.res_val; let bn: i32 = m.res_neg; let bw: i32 = m.res_w;
@@ -2508,7 +2159,7 @@ fn lower_coll_value(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
         return 0;
     }
     if is_map && span_eq(src, callee.p0, callee.p1, b"insert") {
-        let valty: u32 = coll_elem_tn(pp, rtn);
+        let valty: u32 = coll_elem_ty(pp, rtn);
         let sc: i32 = lower_value(pp, src, m, a0, 0 - 1i32);
         if sc != 0 { return 1; }
         let bk: i32 = m.res_kind; let bv: u64 = m.res_val; let bn: i32 = m.res_neg; let bw: i32 = m.res_w;
@@ -2544,7 +2195,7 @@ fn lower_coll_value(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
         return 0;
     }
     if is_map && span_eq(src, callee.p0, callee.p1, b"contains") {
-        let valty: u32 = coll_elem_tn(pp, rtn);
+        let valty: u32 = coll_elem_ty(pp, rtn);
         let sc: i32 = lower_value(pp, src, m, a0, 0 - 1i32);
         if sc != 0 { return 1; }
         let bk: i32 = m.res_kind; let bv: u64 = m.res_val; let bn: i32 = m.res_neg; let bw: i32 = m.res_w;
@@ -2612,7 +2263,7 @@ fn build_dispatch(pp: read P, src: [u8], m: write M) -> unit {
     while cur != 0u32 {
         let nd: Node = pp.nodes[conv usize cur];
         if nd.tag == T_IMPL && nd.a == 0u32 {
-            let sid: u32 = struct_id_of(pp, src, m.head, nd.c);
+            let sid: u32 = struct_of_ty(pp, src, m.head, nd.c);
             let mut mcur: u32 = nd.d;
             while mcur != 0u32 {
                 let mnd: Node = pp.nodes[conv usize mcur];
@@ -2729,7 +2380,7 @@ fn lower_method_call(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
     m.*.idx_cnt = 0usize;
     prep_place(pp, src, m, base);
     let recv_tn: u32 = resolve_place_tn(pp, src, m, base);
-    let sid: u32 = struct_id_of(pp, src, m.head, peel_box_tn(pp, recv_tn));
+    let sid: u32 = struct_of_ty(pp, src, m.head, peel_box_tn(pp, recv_tn));
     let li: i32 = disp_index(m, src, sid, callee.p0, callee.p1);
     if li < 0 { m.*.err = 1; return 1; }
     let lk: usize = conv usize li;
@@ -3063,7 +2714,7 @@ fn resolve_place_tn(pp: read P, src: [u8], m: write M, i: u32) -> u32 {
     }
     if nd.tag == T_FIELD {
         let btn: u32 = peel_box_tn(pp, resolve_place_tn(pp, src, m, nd.a));
-        let sid: u32 = struct_id_of(pp, src, m.head, btn);
+        let sid: u32 = struct_of_ty(pp, src, m.head, btn);
         return field_ty(pp, src, sid, nd.p0, nd.p1);
     }
     if nd.tag == T_INDEX {
@@ -3131,7 +2782,7 @@ fn emit_projs(pp: read P, src: [u8], m: write M, i: u32) -> unit {
             m.*.plc_borrow = 0;
         }
         let btn: u32 = m.plc_tn;
-        let sid: u32 = struct_id_of(pp, src, m.head, btn);
+        let sid: u32 = struct_of_ty(pp, src, m.head, btn);
         let off: usize = field_off(pp, src, m.head, sid, nd.p0, nd.p1);
         let fty: u32 = field_ty(pp, src, sid, nd.p0, nd.p1);
         pool_lit(m, b" (field ");
@@ -3252,7 +2903,7 @@ fn emit_store_dbuf(m: write M, root: i32, sp0: usize, sp1: usize) -> unit {
 fn lower_struct_lit(pp: read P, src: [u8], m: write M, i: u32, root: i32, tn: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
     let mut sid: u32 = nd.b;
-    if sid == 0u32 { sid = struct_id_of(pp, src, m.head, tn); }
+    if sid == 0u32 { sid = struct_of_ty(pp, src, m.head, tn); }
     if sid == 0u32 { m.*.err = 1; return 1; }
     let snode: Node = pp.nodes[conv usize sid];
     let base_n: usize = m.dbuf_n;
@@ -3404,7 +3055,7 @@ fn lower_call_agg(pp: read P, src: [u8], m: write M, i: u32, root: i32, tn: u32)
 // A whole-aggregate value read from a place (`let q = p;`): byte-copy dst <- src.
 fn lower_agg_copy(pp: read P, src: [u8], m: write M, i: u32, root: i32, tn: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
-    if !is_copy_ty(pp, src, m.head, tn) {
+    if !is_copy(pp, src, m.head, tn) {
         mark_moved(pp, src, m, i);
     }
     // Pre-lower a static base + any index operands (a non-const index like
@@ -3516,7 +3167,7 @@ fn lower_args_core(pp: read P, src: [u8], m: write M, parc0: u32, arg_head: u32)
                 let sc2: i32 = lower_into(pp, src, m, argc, tmp, ptn);
                 if sc2 != 0 { return sc2; }
             }
-            if !is_copy_ty(pp, src, m.head, ptn) {
+            if !is_copy(pp, src, m.head, ptn) {
                 mark_moved(pp, src, m, argc);
             }
             let rt: i32 = new_local_ptr(m, ptn, 0, 0, 0);
@@ -3638,7 +3289,7 @@ fn lower_args_fnptr(pp: read P, src: [u8], m: write M, parc0: u32, arg_head: u32
                 let sc2: i32 = lower_into(pp, src, m, argc, tmp, ptn);
                 if sc2 != 0 { return sc2; }
             }
-            if !is_copy_ty(pp, src, m.head, ptn) { mark_moved(pp, src, m, argc); }
+            if !is_copy(pp, src, m.head, ptn) { mark_moved(pp, src, m, argc); }
             let rt: i32 = new_local_ptr(m, ptn, 0, 0, 0);
             if m.reachable != 0 {
                 let an2: Node = pp.nodes[conv usize argc];
@@ -3703,7 +3354,7 @@ fn lower_builtin_value(pp: read P, src: [u8], m: write M, i: u32, cp0: usize, cp
     }
     if span_eq(src, cp0, cp1, b"len") {
         let rtn: u32 = coll_recv_tn(pp, src, m, a0);
-        if tn_is_vec(pp, src, rtn) || tn_is_map(pp, src, rtn) {
+        if is_vec_ty(pp, src, rtn) || is_map_ty(pp, src, rtn) {
             // `len(read Vec[T]/Map[V])`: the length word lives at offset 8 of the
             // collection the borrow names (build.rs deref + field-8 load).
             let sc: i32 = lower_value(pp, src, m, a0, 0 - 1i32);
@@ -3995,7 +3646,7 @@ fn lower_builtin_into(pp: read P, src: [u8], m: write M, i: u32, root: i32, tn: 
             let scv: i32 = lower_into(pp, src, m, a1, val_tmp, inner);
             if scv != 0 { return scv; }
         }
-        if !is_copy_ty(pp, src, m.head, inner) { mark_moved(pp, src, m, a1); }
+        if !is_copy(pp, src, m.head, inner) { mark_moved(pp, src, m, a1); }
         if m.reachable != 0 {
             let s: usize = m.pool_n;
             pool_lit(m, b"(stmt (boxop ");
@@ -4440,7 +4091,7 @@ fn emit_fn(m: write M, pp: read P, src: [u8], defid: u32, impl_id: u32, kind: i3
         if m.loc_box[i] != 0 {
             dob = 1;
         } else if m.loc_ptr[i] == 0 {
-            if needs_drop_ty(pp, src, m.head, m.loc_tn[i]) { dob = 1; }
+            if needs_drop(pp, src, m.head, m.loc_tn[i]) { dob = 1; }
         }
         if dob != 0 { emit_lit(b" true)"); } else { emit_lit(b" false)"); }
         i = i + 1usize;
@@ -4612,7 +4263,7 @@ fn lower_enum_ctor(pp: read P, src: [u8], m: write M, e: u32, root: i32, tn: u32
         return 0;
     }
     let mut eid: u32 = nd.c;
-    if eid == 0u32 { eid = enum_id_of(pp, src, m.head, tn); }
+    if eid == 0u32 { eid = enum_of_ty(pp, src, m.head, tn); }
     if eid == 0u32 { m.*.err = 1; return 1; }
     let vname: Node = pp.nodes[conv usize nd.a];
     let idx: i32 = variant_index_by_name(pp, src, eid, vname.p0, vname.p1);
@@ -4718,7 +4369,7 @@ fn lower_match_arm(pp: read P, src: [u8], m: write M, arm: u32, scrut: u32, eid:
                     let pty: u32 = variant_payload_ty(pp, vid, i);
                     let off: usize = variant_payload_off(pp, src, m.head, vid, i);
                     let w: i32 = scalar_width(pp, src, pty);
-                    if is_copy_ty(pp, src, m.head, pty) {
+                    if is_copy(pp, src, m.head, pty) {
                         if w != 0 {
                             let loc: i32 = new_local(m, w, 1, spn.p0, spn.p1);
                             emit_payload_load(pp, src, m, loc, scrut, off, pty, spn.p0, spn.p1);
@@ -4810,7 +4461,7 @@ fn lower_match_full(pp: read P, src: [u8], m: write M, i: u32, has_dst: i32, dst
         is_br = 1;
         eid = stn;
     } else {
-        eid = enum_id_of(pp, src, m.head, stn);
+        eid = enum_of_ty(pp, src, m.head, stn);
         if eid == 0u32 { m.*.err = 1; return 1; }
     }
     let tagloc: i32 = new_local(m, 9, 0, 0, 0);

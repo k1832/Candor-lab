@@ -29,6 +29,7 @@
 use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl, decoded_len};
 use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_SC, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_STRUCT, T_NAMED, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_VARIANT, T_ENUMCTOR, T_MATCH, T_PVARIANT, T_WILD, T_BIND, T_STATIC, T_RAWPTR, T_FNPTR, T_UNSAFE, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_BOX, T_BOXRESULT, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_CONV, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT, T_BYTES, T_STR, T_PARAM, T_APP, T_GENERICVAL, T_IMPL, T_TRY};
 use mono::{mono_program};
+use layout::{ty_size, ty_align, struct_size, struct_align, field_off, field_off_lit, field_ty, enum_size, variant_by_index, variant_index_by_name, variant_payload_off, variant_payload_ty, struct_of_ty, enum_of_ty, is_copy, needs_drop, is_vec_ty, is_map_ty, is_string_ty, coll_elem_ty, array_len_of};
 
 // ---- fault kind codes (shared with the Rust harness) ------------------------
 static FK_OVERFLOW: i32 = 0;
@@ -702,61 +703,6 @@ fn rawptr_inner(pp: read P, tn: u32) -> u32 {
     }
     return 0u32;
 }
-// The `T_STRUCT` decl node for a struct type descriptor, or 0 if not a struct.
-fn struct_of_ty(pp: read P, src: [u8], e: write E, tn: u32) -> u32 {
-    if tn == 0u32 { return 0u32; }
-    let nd: Node = pp.nodes[conv usize tn];
-    if nd.tag == T_APP && nd.b != 0u32 { return struct_of_ty(pp, src, e, nd.b); }
-    if nd.tag == T_STRUCT { return tn; }
-    if (nd.tag == T_NAMED || nd.tag == T_SC) {
-        if sc_width(src, nd.p0, nd.p1) != 0 { return 0u32; }
-        return find_struct(pp, src, e, nd.p0, nd.p1);
-    }
-    return 0u32;
-}
-// The `T_ENUM` decl node for an enum type descriptor, or 0 if not an enum. A
-// scrutinee's `cur_ty` may be an enum decl node directly (a constructor result)
-// OR a `T_NAMED` local/param, so route both through here.
-fn enum_of_ty(pp: read P, src: [u8], e: write E, tn: u32) -> u32 {
-    if tn == 0u32 { return 0u32; }
-    let nd: Node = pp.nodes[conv usize tn];
-    if nd.tag == T_APP && nd.b != 0u32 { return enum_of_ty(pp, src, e, nd.b); }
-    if nd.tag == T_BOXRESULT { return nd.c; }
-    if nd.tag == T_ENUM { return tn; }
-    if (nd.tag == T_NAMED || nd.tag == T_SC) {
-        if sc_width(src, nd.p0, nd.p1) != 0 { return 0u32; }
-        return find_enum(pp, src, e, nd.p0, nd.p1);
-    }
-    return 0u32;
-}
-fn array_len_of(pp: read P, sn: u32) -> usize {
-    let nd: Node = pp.nodes[conv usize sn];
-    if nd.tag == T_INT { return conv usize nd.ival; }
-    // Named lengths (`[N]T` with a `static` N) need a const table -> S3+.
-    return 0usize;
-}
-// ---- compiler-known std collection recognizers (mirror the oracle's Type::App
-// "Vec"/"Map" special-cases and the synthesized nominal `String`) ---------------
-fn is_vec_ty(pp: read P, src: [u8], tn: u32) -> bool {
-    if tn == 0u32 { return false; }
-    let nd: Node = pp.nodes[conv usize tn];
-    return nd.tag == T_APP && span_eq(src, nd.p0, nd.p1, b"Vec");
-}
-fn is_map_ty(pp: read P, src: [u8], tn: u32) -> bool {
-    if tn == 0u32 { return false; }
-    let nd: Node = pp.nodes[conv usize tn];
-    return nd.tag == T_APP && span_eq(src, nd.p0, nd.p1, b"Map");
-}
-fn is_string_ty(pp: read P, src: [u8], tn: u32) -> bool {
-    if tn == 0u32 { return false; }
-    let nd: Node = pp.nodes[conv usize tn];
-    return nd.tag == T_NAMED && span_eq(src, nd.p0, nd.p1, b"String");
-}
-// The element/value type node of a Vec/Map App (the sole type argument).
-fn coll_elem_ty(pp: read P, tn: u32) -> u32 {
-    let nd: Node = pp.nodes[conv usize tn];
-    return nd.a;
-}
 // A little-endian usize load/store over the flat store (Vec/Map/String words).
 fn ld_us(e: write E, addr: usize) -> usize {
     return conv usize to_u64(mem_load(e, addr, W_USIZE));
@@ -766,231 +712,13 @@ fn st_us(e: write E, addr: usize, v: usize) -> unit {
     return;
 }
 
-fn ty_size(pp: read P, src: [u8], e: write E, tn: u32) -> usize {
-    if tn == 0u32 { return 0usize; }
-    let nd: Node = pp.nodes[conv usize tn];
-    if nd.tag == T_APP && nd.b != 0u32 { return ty_size(pp, src, e, nd.b); }
-    // Compiler-known std `Vec[T]`/`Map[V]`: five u64 words {buf,len,cap,ctx,vt}.
-    if nd.tag == T_APP {
-        if span_eq(src, nd.p0, nd.p1, b"Vec") || span_eq(src, nd.p0, nd.p1, b"Map") { return 40usize; }
-    }
-    if nd.tag == T_STR { return 16usize; }
-    if (nd.tag == T_NAMED || nd.tag == T_SC) {
-        let w: i32 = sc_width(src, nd.p0, nd.p1);
-        if w != 0 { return w_size(w); }
-        if span_eq(src, nd.p0, nd.p1, b"String") { return 40usize; }
-        if span_eq(src, nd.p0, nd.p1, b"str") { return 16usize; }
-        let sid: u32 = find_struct(pp, src, e, nd.p0, nd.p1);
-        if sid != 0u32 { return struct_size(pp, src, e, sid); }
-        let eid: u32 = find_enum(pp, src, e, nd.p0, nd.p1);
-        if eid != 0u32 { return enum_size(pp, src, e, eid); }
-        return 0usize;
-    }
-    if nd.tag == T_STRUCT { return struct_size(pp, src, e, tn); }
-    if nd.tag == T_ENUM { return enum_size(pp, src, e, tn); }
-    if nd.tag == T_RAWPTR || nd.tag == T_FNPTR { return 8usize; }
-    if nd.tag == T_BORROW || nd.tag == T_BORROWMUT { return 8usize; }
-    if nd.tag == T_SLICE || nd.tag == T_SLICEMUT { return 16usize; }
-    if nd.tag == T_BOX { return 24usize; }
-    if nd.tag == T_BOXRESULT { return 32usize; }
-    if nd.tag == T_ARRAY {
-        let n: usize = array_len_of(pp, nd.a);
-        let esz: usize = ty_size(pp, src, e, nd.b);
-        let eal: usize = ty_align(pp, src, e, nd.b);
-        return round_up_us(esz, eal) * n;
-    }
-    return 0usize;
-}
-fn ty_align(pp: read P, src: [u8], e: write E, tn: u32) -> usize {
-    if tn == 0u32 { return 1usize; }
-    let nd: Node = pp.nodes[conv usize tn];
-    if nd.tag == T_APP && nd.b != 0u32 { return ty_align(pp, src, e, nd.b); }
-    if nd.tag == T_APP {
-        if span_eq(src, nd.p0, nd.p1, b"Vec") || span_eq(src, nd.p0, nd.p1, b"Map") { return 8usize; }
-    }
-    if nd.tag == T_STR { return 8usize; }
-    if (nd.tag == T_NAMED || nd.tag == T_SC) {
-        let w: i32 = sc_width(src, nd.p0, nd.p1);
-        if w != 0 { return w_size(w); }
-        if span_eq(src, nd.p0, nd.p1, b"String") { return 8usize; }
-        if span_eq(src, nd.p0, nd.p1, b"str") { return 8usize; }
-        let sid: u32 = find_struct(pp, src, e, nd.p0, nd.p1);
-        if sid != 0u32 { return struct_align(pp, src, e, sid); }
-        let eid: u32 = find_enum(pp, src, e, nd.p0, nd.p1);
-        if eid != 0u32 { return 8usize; }
-        return 1usize;
-    }
-    if nd.tag == T_STRUCT { return struct_align(pp, src, e, tn); }
-    if nd.tag == T_ENUM { return 8usize; }
-    if nd.tag == T_RAWPTR || nd.tag == T_FNPTR { return 8usize; }
-    if nd.tag == T_BORROW || nd.tag == T_BORROWMUT { return 8usize; }
-    if nd.tag == T_SLICE || nd.tag == T_SLICEMUT { return 8usize; }
-    if nd.tag == T_BOX || nd.tag == T_BOXRESULT { return 8usize; }
-    if nd.tag == T_ARRAY { return ty_align(pp, src, e, nd.b); }
-    return 1usize;
-}
-fn struct_size(pp: read P, src: [u8], e: write E, sid: u32) -> usize {
-    if sid == 0u32 { return 0usize; }
-    let snode: Node = pp.nodes[conv usize sid];
-    let mut off: usize = 0usize;
-    let mut align: usize = 1usize;
-    let mut cur: u32 = snode.b;
-    while cur != 0u32 {
-        let fd: Node = pp.nodes[conv usize cur];
-        let a: usize = ty_align(pp, src, e, fd.a);
-        if a > align { align = a; }
-        off = round_up_us(off, a);
-        off = off + ty_size(pp, src, e, fd.a);
-        cur = fd.nx;
-    }
-    return round_up_us(off, align);
-}
-fn struct_align(pp: read P, src: [u8], e: write E, sid: u32) -> usize {
-    if sid == 0u32 { return 1usize; }
-    let snode: Node = pp.nodes[conv usize sid];
-    let mut align: usize = 1usize;
-    let mut cur: u32 = snode.b;
-    while cur != 0u32 {
-        let fd: Node = pp.nodes[conv usize cur];
-        let a: usize = ty_align(pp, src, e, fd.a);
-        if a > align { align = a; }
-        cur = fd.nx;
-    }
-    return align;
-}
-// Byte offset of field [fs,fen) within struct `sid` (declared-order layout).
-fn field_off(pp: read P, src: [u8], e: write E, sid: u32, fs: usize, fen: usize) -> usize {
-    let snode: Node = pp.nodes[conv usize sid];
-    let mut off: usize = 0usize;
-    let mut cur: u32 = snode.b;
-    while cur != 0u32 {
-        let fd: Node = pp.nodes[conv usize cur];
-        let a: usize = ty_align(pp, src, e, fd.a);
-        off = round_up_us(off, a);
-        if name_eq(src, fs, fen, fd.p0, fd.p1) { return off; }
-        off = off + ty_size(pp, src, e, fd.a);
-        cur = fd.nx;
-    }
-    return 0usize;
-}
-// Byte offset of the field named by a byte-string LITERAL within struct `sid`
-// (name-agnostic ABI resolution: box/unbox find `ctx`/`vt`/`alloc`/`free` here).
-fn field_off_lit(pp: read P, src: [u8], e: write E, sid: u32, name: [u8]) -> usize {
-    let snode: Node = pp.nodes[conv usize sid];
-    let mut off: usize = 0usize;
-    let mut cur: u32 = snode.b;
-    while cur != 0u32 {
-        let fd: Node = pp.nodes[conv usize cur];
-        let a: usize = ty_align(pp, src, e, fd.a);
-        off = round_up_us(off, a);
-        if span_eq(src, fd.p0, fd.p1, name) { return off; }
-        off = off + ty_size(pp, src, e, fd.a);
-        cur = fd.nx;
-    }
-    return 0usize;
-}
-// Type node of field [fs,fen) within struct `sid`.
-fn field_ty(pp: read P, src: [u8], sid: u32, fs: usize, fen: usize) -> u32 {
-    let snode: Node = pp.nodes[conv usize sid];
-    let mut cur: u32 = snode.b;
-    while cur != 0u32 {
-        let fd: Node = pp.nodes[conv usize cur];
-        if name_eq(src, fs, fen, fd.p0, fd.p1) { return fd.a; }
-        cur = fd.nx;
-    }
-    return 0u32;
-}
 // Is `tn` an aggregate (a real struct/array with bytes), not a scalar or unit?
 fn ty_is_agg(pp: read P, src: [u8], e: write E, tn: u32) -> bool {
     if tn == 0u32 { return false; }
     if scalar_width(pp, src, tn) != 0 { return false; }
-    return ty_size(pp, src, e, tn) > 0usize;
+    return ty_size(pp, src, e.head, tn) > 0usize;
 }
 
-// ---- copyability + drop obligation (ported from src/types.rs is_copy/needs_drop) ----
-// A struct is `copy` iff it carries the `copy` marker (T_STRUCT.op), declares no
-// drop hook (T_STRUCT.c == 0), and every field is copy. Scalars/arrays-of-copy are
-// copy. A struct NEEDS drop iff it has a hook or transitively holds a needs-drop
-// field. These gate every S3 addition, so S1/S2 (scalars + `copy` aggregates) are
-// drop-inert and unchanged.
-fn is_copy(pp: read P, src: [u8], e: write E, tn: u32) -> bool {
-    if tn == 0u32 { return true; }
-    // Compiler-known std collections are owning (allocator-bearing), never copy.
-    if is_vec_ty(pp, src, tn) || is_map_ty(pp, src, tn) || is_string_ty(pp, src, tn) { return false; }
-    if scalar_width(pp, src, tn) != 0 { return true; }
-    let nd: Node = pp.nodes[conv usize tn];
-    if nd.tag == T_BOX || nd.tag == T_BOXRESULT { return false; }
-    if nd.tag == T_ARRAY { return is_copy(pp, src, e, nd.b); }
-    let sid: u32 = struct_of_ty(pp, src, e, tn);
-    if sid != 0u32 {
-        let snode: Node = pp.nodes[conv usize sid];
-        if snode.op == 0 { return false; }
-        if snode.c != 0u32 { return false; }
-        let mut cur: u32 = snode.b;
-        while cur != 0u32 {
-            let fd: Node = pp.nodes[conv usize cur];
-            if !is_copy(pp, src, e, fd.a) { return false; }
-            cur = fd.nx;
-        }
-        return true;
-    }
-    let eid: u32 = enum_of_ty(pp, src, e, tn);
-    if eid != 0u32 {
-        let enode: Node = pp.nodes[conv usize eid];
-        if enode.op == 0 { return false; }
-        let mut vc: u32 = enode.b;
-        while vc != 0u32 {
-            let vd: Node = pp.nodes[conv usize vc];
-            let mut pc: u32 = vd.a;
-            while pc != 0u32 {
-                let pn: Node = pp.nodes[conv usize pc];
-                if !is_copy(pp, src, e, pc) { return false; }
-                pc = pn.nx;
-            }
-            vc = vd.nx;
-        }
-        return true;
-    }
-    return true;
-}
-fn needs_drop(pp: read P, src: [u8], e: write E, tn: u32) -> bool {
-    if tn == 0u32 { return false; }
-    // Vec/Map free their buffer (+ elements/keys) on drop; String frees its buffer.
-    if is_vec_ty(pp, src, tn) || is_map_ty(pp, src, tn) || is_string_ty(pp, src, tn) { return true; }
-    if scalar_width(pp, src, tn) != 0 { return false; }
-    let nd: Node = pp.nodes[conv usize tn];
-    if nd.tag == T_BOX || nd.tag == T_BOXRESULT { return true; }
-    if nd.tag == T_ARRAY { return needs_drop(pp, src, e, nd.b); }
-    let sid: u32 = struct_of_ty(pp, src, e, tn);
-    if sid != 0u32 {
-        let snode: Node = pp.nodes[conv usize sid];
-        if snode.c != 0u32 { return true; }
-        let mut cur: u32 = snode.b;
-        while cur != 0u32 {
-            let fd: Node = pp.nodes[conv usize cur];
-            if needs_drop(pp, src, e, fd.a) { return true; }
-            cur = fd.nx;
-        }
-        return false;
-    }
-    let eid: u32 = enum_of_ty(pp, src, e, tn);
-    if eid != 0u32 {
-        let enode: Node = pp.nodes[conv usize eid];
-        let mut vc: u32 = enode.b;
-        while vc != 0u32 {
-            let vd: Node = pp.nodes[conv usize vc];
-            let mut pc: u32 = vd.a;
-            while pc != 0u32 {
-                let pn: Node = pp.nodes[conv usize pc];
-                if needs_drop(pp, src, e, pc) { return true; }
-                pc = pn.nx;
-            }
-            vc = vd.nx;
-        }
-        return false;
-    }
-    return false;
-}
 // Declared-order 0-based position of field [fs,fen) in struct sid.
 fn field_index(pp: read P, src: [u8], sid: u32, fs: usize, fen: usize) -> i32 {
     let snode: Node = pp.nodes[conv usize sid];
@@ -1005,95 +733,6 @@ fn field_index(pp: read P, src: [u8], sid: u32, fs: usize, fen: usize) -> i32 {
     return 0 - 1i32;
 }
 
-// ---- enum layout (mirrors src/interp/layout.rs enum_size/payload_offset) -----
-// Enum layout: {tag: u64 @0, payload @8}. The payload is laid out struct-style
-// (declared order, natural alignment) from offset 8; enum size = round_up(8 +
-// max padded-payload, 8), enum align = 8 always. Tag = the variant's 0-based
-// declared index. The payload chain is a raw type-node `nx`-chain (each node IS
-// the field's type), so this generalizes S2's struct-field layout.
-fn payload_size(pp: read P, src: [u8], e: write E, head: u32) -> usize {
-    let mut off: usize = 0usize;
-    let mut align: usize = 1usize;
-    let mut cur: u32 = head;
-    while cur != 0u32 {
-        let tn: Node = pp.nodes[conv usize cur];
-        let a: usize = ty_align(pp, src, e, cur);
-        if a > align { align = a; }
-        off = round_up_us(off, a);
-        off = off + ty_size(pp, src, e, cur);
-        cur = tn.nx;
-    }
-    return round_up_us(off, align);
-}
-fn enum_size(pp: read P, src: [u8], e: write E, eid: u32) -> usize {
-    if eid == 0u32 { return 0usize; }
-    let enode: Node = pp.nodes[conv usize eid];
-    let mut max: usize = 0usize;
-    let mut cur: u32 = enode.b;
-    while cur != 0u32 {
-        let vd: Node = pp.nodes[conv usize cur];
-        let psz: usize = payload_size(pp, src, e, vd.a);
-        if psz > max { max = psz; }
-        cur = vd.nx;
-    }
-    return round_up_us(8usize + max, 8usize);
-}
-// The `T_VARIANT` node at 0-based declared index `idx`, or 0 if out of range.
-fn variant_by_index(pp: read P, eid: u32, idx: i32) -> u32 {
-    let enode: Node = pp.nodes[conv usize eid];
-    let mut cur: u32 = enode.b;
-    let mut k: i32 = 0;
-    while cur != 0u32 {
-        if k == idx { return cur; }
-        let vd: Node = pp.nodes[conv usize cur];
-        k = k + 1i32;
-        cur = vd.nx;
-    }
-    return 0u32;
-}
-// 0-based declared index of the variant named [s,en), or -1 if absent.
-fn variant_index_by_name(pp: read P, src: [u8], eid: u32, s: usize, en: usize) -> i32 {
-    let enode: Node = pp.nodes[conv usize eid];
-    let mut cur: u32 = enode.b;
-    let mut k: i32 = 0;
-    while cur != 0u32 {
-        let vd: Node = pp.nodes[conv usize cur];
-        if name_eq(src, vd.p0, vd.p1, s, en) { return k; }
-        k = k + 1i32;
-        cur = vd.nx;
-    }
-    return 0 - 1i32;
-}
-// Offset (from the enum base, INCLUDING the tag) of payload field `i`.
-fn variant_payload_off(pp: read P, src: [u8], e: write E, vid: u32, i: i32) -> usize {
-    let vd: Node = pp.nodes[conv usize vid];
-    let mut off: usize = 0usize;
-    let mut k: i32 = 0;
-    let mut cur: u32 = vd.a;
-    while cur != 0u32 {
-        let tn: Node = pp.nodes[conv usize cur];
-        let a: usize = ty_align(pp, src, e, cur);
-        off = round_up_us(off, a);
-        if k == i { return 8usize + off; }
-        off = off + ty_size(pp, src, e, cur);
-        k = k + 1i32;
-        cur = tn.nx;
-    }
-    return 8usize;
-}
-// Type node of payload field `i` of variant `vid`, or 0 if absent.
-fn variant_payload_ty(pp: read P, vid: u32, i: i32) -> u32 {
-    let vd: Node = pp.nodes[conv usize vid];
-    let mut k: i32 = 0;
-    let mut cur: u32 = vd.a;
-    while cur != 0u32 {
-        if k == i { return cur; }
-        let tn: Node = pp.nodes[conv usize cur];
-        k = k + 1i32;
-        cur = tn.nx;
-    }
-    return 0u32;
-}
 
 // ---- move-mask side table (whole-value + ONE-LEVEL partial move) -------------
 // Each row records a moved sub-path of a local: mv_field == -1 marks the whole
@@ -1219,11 +858,11 @@ fn drop_fields_rev(pp: read P, src: [u8], e: write E, addr: usize, sid: u32, li:
     let mut cur: u32 = snode.b;
     while cur != 0u32 {
         let fd: Node = pp.nodes[conv usize cur];
-        let a: usize = ty_align(pp, src, e, fd.a);
+        let a: usize = ty_align(pp, src, e.head, fd.a);
         off = round_up_us(off, a);
         foff[n] = off;
         ftyp[n] = fd.a;
-        off = off + ty_size(pp, src, e, fd.a);
+        off = off + ty_size(pp, src, e.head, fd.a);
         n = n + 1usize;
         cur = fd.nx;
     }
@@ -1254,11 +893,11 @@ fn drop_variant_rev(pp: read P, src: [u8], e: write E, addr: usize, vid: u32, li
     let mut cur: u32 = vd.a;
     while cur != 0u32 {
         let tn: Node = pp.nodes[conv usize cur];
-        let a: usize = ty_align(pp, src, e, cur);
+        let a: usize = ty_align(pp, src, e.head, cur);
         off = round_up_us(off, a);
         foff[n] = 8usize + off;
         ftyp[n] = cur;
-        off = off + ty_size(pp, src, e, cur);
+        off = off + ty_size(pp, src, e.head, cur);
         n = n + 1usize;
         cur = tn.nx;
     }
@@ -1298,7 +937,7 @@ fn drop_vec(pp: read P, src: [u8], e: write E, addr: usize, tn: u32) -> i32 {
         let cap: usize = ld_us(e, addr + 16usize);
         let ctx: i64 = mem_load(e, addr + 24usize, W_USIZE);
         let vt: i64 = mem_load(e, addr + 32usize, W_USIZE);
-        return call_free(pp, src, e, ctx, vt, buf, cap * stride, ty_align(pp, src, e, elem));
+        return call_free(pp, src, e, ctx, vt, buf, cap * stride, ty_align(pp, src, e.head, elem));
     }
     return 0;
 }
@@ -1344,7 +983,7 @@ fn drop_value(pp: read P, src: [u8], e: write E, addr: usize, tn: u32, li: i64) 
     if is_vec_ty(pp, src, tn) { return drop_vec(pp, src, e, addr, tn); }
     if is_map_ty(pp, src, tn) { return drop_map(pp, src, e, addr, tn); }
     if is_string_ty(pp, src, tn) { return drop_string(pp, src, e, addr); }
-    let sid: u32 = struct_of_ty(pp, src, e, tn);
+    let sid: u32 = struct_of_ty(pp, src, e.head, tn);
     if sid != 0u32 {
         let mut partial: bool = false;
         if li >= 0i64 { partial = partially_moved(e, conv usize li); }
@@ -1357,7 +996,7 @@ fn drop_value(pp: read P, src: [u8], e: write E, addr: usize, tn: u32, li: i64) 
         }
         return drop_fields_rev(pp, src, e, addr, sid, li);
     }
-    let eid: u32 = enum_of_ty(pp, src, e, tn);
+    let eid: u32 = enum_of_ty(pp, src, e.head, tn);
     if eid != 0u32 {
         let tagv: i64 = mem_load(e, addr, W_USIZE);
         let vid: u32 = variant_by_index(pp, eid, conv i32 tagv);
@@ -1372,8 +1011,8 @@ fn drop_value(pp: read P, src: [u8], e: write E, addr: usize, tn: u32, li: i64) 
     if nd.tag == T_ARRAY {
         let n: usize = array_len_of(pp, nd.a);
         let elem: u32 = nd.b;
-        let esz: usize = ty_size(pp, src, e, elem);
-        let eal: usize = ty_align(pp, src, e, elem);
+        let esz: usize = ty_size(pp, src, e.head, elem);
+        let eal: usize = ty_align(pp, src, e.head, elem);
         let stride: usize = round_up_us(esz, eal);
         let mut k: usize = n;
         while k > 0usize {
@@ -1397,8 +1036,8 @@ fn drop_box(pp: read P, src: [u8], e: write E, addr: usize, inner: u32) -> i32 {
     if ptr != 0usize {
         let sc: i32 = drop_value(pp, src, e, ptr, inner, 0 - 1i64);
         if sc != 0 { return sc; }
-        let size: usize = ty_size(pp, src, e, inner);
-        let align: usize = ty_align(pp, src, e, inner);
+        let size: usize = ty_size(pp, src, e.head, inner);
+        let align: usize = ty_align(pp, src, e.head, inner);
         return call_free(pp, src, e, ctx, vt, ptr, size, align);
     }
     return 0;
@@ -1407,7 +1046,7 @@ fn drop_box(pp: read P, src: [u8], e: write E, addr: usize, inner: u32) -> i32 {
 // `free(ctx, ptr, size, align)` (all 8-byte scalars). Reuses `call_fn`, the same
 // path S5a used for indirect `alloc` calls.
 fn call_free(pp: read P, src: [u8], e: write E, ctx: i64, vt: i64, ptr: usize, size: usize, align: usize) -> i32 {
-    let free_off: usize = field_off_lit(pp, src, e, e.alloc_vt_sid, b"free");
+    let free_off: usize = field_off_lit(pp, src, e.head, e.alloc_vt_sid, b"free");
     let vt_addr: usize = conv usize to_u64(vt);
     let ffn: u32 = conv u32 to_u64(mem_load(e, vt_addr + free_off, W_USIZE));
     e.*.arg_val[0] = ctx;
@@ -1671,8 +1310,8 @@ fn eval_place(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
         peel_box_place(pp, e);
         let base_addr: usize = e.plc_addr;
         let base_ty: u32 = e.plc_ty;
-        let sid: u32 = struct_of_ty(pp, src, e, base_ty);
-        let off: usize = field_off(pp, src, e, sid, nd.p0, nd.p1);
+        let sid: u32 = struct_of_ty(pp, src, e.head, base_ty);
+        let off: usize = field_off(pp, src, e.head, sid, nd.p0, nd.p1);
         let fty: u32 = field_ty(pp, src, sid, nd.p0, nd.p1);
         e.*.plc_addr = base_addr + off;
         e.*.plc_ty = fty;
@@ -1697,8 +1336,8 @@ fn eval_place(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
                 return 1;
             }
             let selem: u32 = arrnd.a;
-            let sesz: usize = ty_size(pp, src, e, selem);
-            let seal: usize = ty_align(pp, src, e, selem);
+            let sesz: usize = ty_size(pp, src, e.head, selem);
+            let seal: usize = ty_align(pp, src, e.head, selem);
             let sstride: usize = round_up_us(sesz, seal);
             e.*.plc_addr = sptr + (conv usize iv) * sstride;
             e.*.plc_ty = selem;
@@ -1711,8 +1350,8 @@ fn eval_place(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
             return 1;
         }
         let elem: u32 = arrnd.b;
-        let esz: usize = ty_size(pp, src, e, elem);
-        let eal: usize = ty_align(pp, src, e, elem);
+        let esz: usize = ty_size(pp, src, e.head, elem);
+        let eal: usize = ty_align(pp, src, e.head, elem);
         let stride: usize = round_up_us(esz, eal);
         e.*.plc_addr = base_addr + (conv usize iv) * stride;
         e.*.plc_ty = elem;
@@ -1752,8 +1391,8 @@ fn eval_struct_lit(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
     let mut sid: u32 = nd.b;
     if sid == 0u32 { sid = find_struct(pp, src, e, nd.p0, nd.p1); }
-    let size: usize = struct_size(pp, src, e, sid);
-    let align: usize = struct_align(pp, src, e, sid);
+    let size: usize = struct_size(pp, src, e.head, sid);
+    let align: usize = struct_align(pp, src, e.head, sid);
     let addr: usize = bump_alloc(e, size, align);
     zero_slot(e, addr, size);
     // Write each field at its offset in DECLARED order (matching the oracle's
@@ -1764,7 +1403,7 @@ fn eval_struct_lit(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     while fcur != 0u32 {
         let fdef: Node = pp.nodes[conv usize fcur];
         let fty: u32 = fdef.a;
-        let a: usize = ty_align(pp, src, e, fty);
+        let a: usize = ty_align(pp, src, e.head, fty);
         off = round_up_us(off, a);
         let finit: u32 = find_finit(pp, src, nd.a, fdef.p0, fdef.p1);
         if finit != 0u32 {
@@ -1781,21 +1420,21 @@ fn eval_struct_lit(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
                 let foa: usize = e.cur_org_a;
                 let fob: i32 = e.cur_org_b;
                 let sa: usize = conv usize e.cur_val;
-                let fsz: usize = ty_size(pp, src, e, fty);
+                let fsz: usize = ty_size(pp, src, e.head, fty);
                 mem_copy(e, addr + off, sa, fsz);
-                if !is_copy(pp, src, e, fty) {
+                if !is_copy(pp, src, e.head, fty) {
                     do_consume(e, forg, foa, fob);
                 }
             }
         }
-        off = off + ty_size(pp, src, e, fty);
+        off = off + ty_size(pp, src, e.head, fty);
         fcur = fdef.nx;
     }
     e.*.cur_val = conv i64 addr;
     e.*.cur_w = 0;
     e.*.cur_ty = sid;
     e.*.cur_org = 0;
-    if !is_copy(pp, src, e, sid) {
+    if !is_copy(pp, src, e.head, sid) {
         let ti: usize = reg_temp(e, addr, sid);
         e.*.cur_org = 1;
         e.*.cur_org_a = ti;
@@ -1819,8 +1458,8 @@ fn eval_array_rep(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
         esz = w_size(ew);
         eal = w_size(ew);
     } else {
-        esz = ty_size(pp, src, e, ety);
-        eal = ty_align(pp, src, e, ety);
+        esz = ty_size(pp, src, e.head, ety);
+        eal = ty_align(pp, src, e.head, ety);
     }
     let stride: usize = round_up_us(esz, eal);
     let addr: usize = bump_alloc(e, stride * n, eal);
@@ -1862,8 +1501,8 @@ fn eval_array_lit(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
         esz = w_size(ew);
         eal = w_size(ew);
     } else {
-        esz = ty_size(pp, src, e, ev_ty[0]);
-        eal = ty_align(pp, src, e, ev_ty[0]);
+        esz = ty_size(pp, src, e.head, ev_ty[0]);
+        eal = ty_align(pp, src, e.head, ev_ty[0]);
     }
     let stride: usize = round_up_us(esz, eal);
     let addr: usize = bump_alloc(e, stride * m, eal);
@@ -1892,12 +1531,12 @@ fn eval_enum_ctor(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let mut eid: u32 = nd.c;
     if eid == 0u32 { eid = find_enum(pp, src, e, nd.p0, nd.p1); }
     if span_eq(src, nd.p0, nd.p1, b"BoxResult") {
-        eid = enum_of_ty(pp, src, e, e.gen_boxresult);
+        eid = enum_of_ty(pp, src, e.head, e.gen_boxresult);
     }
     let vnamenode: Node = pp.nodes[conv usize nd.a];
     let vidx: i32 = variant_index_by_name(pp, src, eid, vnamenode.p0, vnamenode.p1);
     let vid: u32 = variant_by_index(pp, eid, vidx);
-    let size: usize = enum_size(pp, src, e, eid);
+    let size: usize = enum_size(pp, src, e.head, eid);
     let addr: usize = bump_alloc(e, size, 8usize);
     zero_slot(e, addr, size);
     mem_store(e, addr, conv i64 vidx, W_USIZE);
@@ -1905,7 +1544,7 @@ fn eval_enum_ctor(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let mut cur: u32 = nd.b;
     while cur != 0u32 {
         let an: Node = pp.nodes[conv usize cur];
-        let off: usize = variant_payload_off(pp, src, e, vid, k);
+        let off: usize = variant_payload_off(pp, src, e.head, vid, k);
         let pty: u32 = variant_payload_ty(pp, vid, k);
         let pw: i32 = scalar_width(pp, src, pty);
         if pw != 0 {
@@ -1919,9 +1558,9 @@ fn eval_enum_ctor(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
             let foa: usize = e.cur_org_a;
             let fob: i32 = e.cur_org_b;
             let sa: usize = conv usize e.cur_val;
-            let fsz: usize = ty_size(pp, src, e, pty);
+            let fsz: usize = ty_size(pp, src, e.head, pty);
             mem_copy(e, addr + off, sa, fsz);
-            if !is_copy(pp, src, e, pty) {
+            if !is_copy(pp, src, e.head, pty) {
                 do_consume(e, forg, foa, fob);
             }
         }
@@ -1932,7 +1571,7 @@ fn eval_enum_ctor(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     e.*.cur_w = 0;
     e.*.cur_ty = eid;
     e.*.cur_org = 0;
-    if !is_copy(pp, src, e, eid) {
+    if !is_copy(pp, src, e.head, eid) {
         let ti: usize = reg_temp(e, addr, eid);
         e.*.cur_org = 1;
         e.*.cur_org_a = ti;
@@ -1954,7 +1593,7 @@ fn eval_match(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let scrut_ty: u32 = e.cur_ty;
     let scrut_org: i32 = e.cur_org;
     let scrut_org_a: usize = e.cur_org_a;
-    let eid: u32 = enum_of_ty(pp, src, e, scrut_ty);
+    let eid: u32 = enum_of_ty(pp, src, e.head, scrut_ty);
     let tagv: i64 = mem_load(e, scrut_addr, W_USIZE);
     let vid: u32 = variant_by_index(pp, eid, conv i32 tagv);
     let vnode: Node = pp.nodes[conv usize vid];
@@ -1989,14 +1628,14 @@ fn eval_match(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
         let mut pcur: u32 = patnd.b;
         while pcur != 0u32 {
             let subnd: Node = pp.nodes[conv usize pcur];
-            let off: usize = variant_payload_off(pp, src, e, vid, k);
+            let off: usize = variant_payload_off(pp, src, e.head, vid, k);
             let pty: u32 = variant_payload_ty(pp, vid, k);
             let sub_addr: usize = scrut_addr + off;
             if subnd.tag == T_BIND {
                 let pw: i32 = scalar_width(pp, src, pty);
-                if is_copy(pp, src, e, pty) {
-                    let psz: usize = ty_size(pp, src, e, pty);
-                    let pal: usize = ty_align(pp, src, e, pty);
+                if is_copy(pp, src, e.head, pty) {
+                    let psz: usize = ty_size(pp, src, e.head, pty);
+                    let pal: usize = ty_align(pp, src, e.head, pty);
                     let slot: usize = bump_alloc(e, psz, pal);
                     mem_copy(e, slot, sub_addr, psz);
                     loc_push(e, subnd.p0, subnd.p1, slot, pw, pty, 1);
@@ -2057,9 +1696,9 @@ fn find_from_fn(pp: read P, src: [u8], e: write E, src_eid: u32, tgt_eid: u32) -
     while cur != 0u32 {
         let nd: Node = pp.nodes[conv usize cur];
         if nd.tag == T_IMPL && nd.a == 0u32 && span_eq(src, nd.p0, nd.p1, b"From") {
-            let te: u32 = enum_of_ty(pp, src, e, nd.c);
+            let te: u32 = enum_of_ty(pp, src, e.head, nd.c);
             let mut se: u32 = 0u32;
-            if nd.b != 0u32 { se = enum_of_ty(pp, src, e, nd.b); }
+            if nd.b != 0u32 { se = enum_of_ty(pp, src, e.head, nd.b); }
             if te == tgt_eid && se == src_eid {
                 let mut mcur: u32 = nd.d;
                 while mcur != 0u32 {
@@ -2086,32 +1725,32 @@ fn eval_try(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let op_org: i32 = e.cur_org;
     let op_org_a: usize = e.cur_org_a;
     let op_org_b: i32 = e.cur_org_b;
-    let eid: u32 = enum_of_ty(pp, src, e, op_ty);
+    let eid: u32 = enum_of_ty(pp, src, e.head, op_ty);
     let tag: i32 = conv i32 mem_load(e, enum_addr, W_USIZE);
     let ok_idx: i32 = ok_variant_index(pp, eid);
     let vid: u32 = variant_by_index(pp, eid, tag);
     if tag == ok_idx {
         let pty: u32 = variant_payload_ty(pp, vid, 0);
-        let off: usize = variant_payload_off(pp, src, e, vid, 0);
+        let off: usize = variant_payload_off(pp, src, e.head, vid, 0);
         let pw: i32 = scalar_width(pp, src, pty);
         if pw != 0 {
             e.*.cur_val = mem_load(e, enum_addr + off, pw);
             e.*.cur_w = pw;
             e.*.cur_ty = pty;
             e.*.cur_org = 0;
-            if !is_copy(pp, src, e, op_ty) { do_consume(e, op_org, op_org_a, op_org_b); }
+            if !is_copy(pp, src, e.head, op_ty) { do_consume(e, op_org, op_org_a, op_org_b); }
             return 0;
         }
-        let psz: usize = ty_size(pp, src, e, pty);
-        let pal: usize = ty_align(pp, src, e, pty);
+        let psz: usize = ty_size(pp, src, e.head, pty);
+        let pal: usize = ty_align(pp, src, e.head, pty);
         let slot: usize = bump_alloc(e, psz, pal);
         mem_copy(e, slot, enum_addr + off, psz);
-        if !is_copy(pp, src, e, op_ty) { do_consume(e, op_org, op_org_a, op_org_b); }
+        if !is_copy(pp, src, e.head, op_ty) { do_consume(e, op_org, op_org_a, op_org_b); }
         e.*.cur_val = conv i64 slot;
         e.*.cur_w = 0;
         e.*.cur_ty = pty;
         e.*.cur_org = 0;
-        if !is_copy(pp, src, e, pty) {
+        if !is_copy(pp, src, e.head, pty) {
             let ti: usize = reg_temp(e, slot, pty);
             e.*.cur_org = 1;
             e.*.cur_org_a = ti;
@@ -2123,22 +1762,22 @@ fn eval_try(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
 fn eval_try_from(pp: read P, src: [u8], e: write E, enum_addr: usize, eid: u32, vid: u32, op_ty: u32, op_org: i32, op_org_a: usize, op_org_b: i32) -> i32 {
     // The operand's active (error) payload e1.
     let e1ty: u32 = variant_payload_ty(pp, vid, 0);
-    let e1off: usize = variant_payload_off(pp, src, e, vid, 0);
-    let e1_eid: u32 = enum_of_ty(pp, src, e, e1ty);
+    let e1off: usize = variant_payload_off(pp, src, e.head, vid, 0);
+    let e1_eid: u32 = enum_of_ty(pp, src, e.head, e1ty);
     // The enclosing fn's declared error type: return enum's non-`ok` payload e2.
     let rty: u32 = e.cur_retty;
-    let reid: u32 = enum_of_ty(pp, src, e, rty);
+    let reid: u32 = enum_of_ty(pp, src, e.head, rty);
     // Same result type: no widening -- early-return the operand value as-is.
     if reid == eid {
-        mem_copy(e, e.cur_result_addr, enum_addr, ty_size(pp, src, e, rty));
-        if !is_copy(pp, src, e, op_ty) { do_consume(e, op_org, op_org_a, op_org_b); }
+        mem_copy(e, e.cur_result_addr, enum_addr, ty_size(pp, src, e.head, rty));
+        if !is_copy(pp, src, e.head, op_ty) { do_consume(e, op_org, op_org_a, op_org_b); }
         return 2;
     }
     let ret_err_idx: i32 = err_variant_index(pp, reid);
     let rvid: u32 = variant_by_index(pp, reid, ret_err_idx);
     let e2ty: u32 = variant_payload_ty(pp, rvid, 0);
-    let e2off: usize = variant_payload_off(pp, src, e, rvid, 0);
-    let e2_eid: u32 = enum_of_ty(pp, src, e, e2ty);
+    let e2off: usize = variant_payload_off(pp, src, e.head, rvid, 0);
+    let e2_eid: u32 = enum_of_ty(pp, src, e.head, e2ty);
     let from_fn: u32 = find_from_fn(pp, src, e, e1_eid, e2_eid);
     if from_fn == 0u32 {
         let onode: Node = pp.nodes[conv usize e1ty];
@@ -2163,10 +1802,10 @@ fn eval_try_from(pp: read P, src: [u8], e: write E, enum_addr: usize, eid: u32, 
     // Build the return enum in the caller's result slot: tag = error variant,
     // payload = the widened e2.
     let ret_addr: usize = e.cur_result_addr;
-    zero_slot(e, ret_addr, ty_size(pp, src, e, rty));
+    zero_slot(e, ret_addr, ty_size(pp, src, e.head, rty));
     mem_store(e, ret_addr, conv i64 ret_err_idx, W_USIZE);
-    mem_copy(e, ret_addr + e2off, from_addr, ty_size(pp, src, e, e2ty));
-    if !is_copy(pp, src, e, op_ty) { do_consume(e, op_org, op_org_a, op_org_b); }
+    mem_copy(e, ret_addr + e2off, from_addr, ty_size(pp, src, e.head, e2ty));
+    if !is_copy(pp, src, e.head, op_ty) { do_consume(e, op_org, op_org_a, op_org_b); }
     return 2;
 }
 
@@ -2298,7 +1937,7 @@ fn eval_expr(pp: read P, src: [u8], e: write E, i: u32, exp_w: i32) -> i32 {
                 e.*.cur_val = conv i64 e.loc_addr[idx];
                 e.*.cur_w = 0;
                 e.*.cur_ty = e.loc_ty[idx];
-                if !is_copy(pp, src, e, e.loc_ty[idx]) {
+                if !is_copy(pp, src, e.head, e.loc_ty[idx]) {
                     e.*.cur_org = 2;
                     e.*.cur_org_a = idx;
                 }
@@ -2369,11 +2008,11 @@ fn eval_expr(pp: read P, src: [u8], e: write E, i: u32, exp_w: i32) -> i32 {
         let lr: i32 = load_place(e);
         if lr != 0 { return lr; }
         // A non-copy field read off a direct local is a ONE-LEVEL partial move.
-        if tg == T_FIELD && e.cur_w == 0 && !is_copy(pp, src, e, e.cur_ty) {
+        if tg == T_FIELD && e.cur_w == 0 && !is_copy(pp, src, e.head, e.cur_ty) {
             let bnode: Node = pp.nodes[conv usize nd.a];
             if bnode.tag == T_ID {
                 let bli: usize = find_local(src, e, bnode.p0, bnode.p1);
-                let bsid: u32 = struct_of_ty(pp, src, e, e.loc_ty[bli]);
+                let bsid: u32 = struct_of_ty(pp, src, e.head, e.loc_ty[bli]);
                 let bfi: i32 = field_index(pp, src, bsid, nd.p0, nd.p1);
                 e.*.cur_org = 3;
                 e.*.cur_org_a = bli;
@@ -2431,8 +2070,8 @@ fn eval_expr(pp: read P, src: [u8], e: write E, i: u32, exp_w: i32) -> i32 {
     if tg == T_OFFSETOF {
         // offsetof(T, field): the S2 layout table gives the field's byte offset by
         // name-span (nd.a = struct type, [nd.p0, nd.p1) = field name), as a usize.
-        let sid: u32 = struct_of_ty(pp, src, e, nd.a);
-        let off: usize = field_off(pp, src, e, sid, nd.p0, nd.p1);
+        let sid: u32 = struct_of_ty(pp, src, e.head, nd.a);
+        let off: usize = field_off(pp, src, e.head, sid, nd.p0, nd.p1);
         e.*.cur_val = conv i64 off;
         e.*.cur_w = W_USIZE;
         e.*.cur_ty = 0u32;
@@ -2497,9 +2136,9 @@ fn eval_expr(pp: read P, src: [u8], e: write E, i: u32, exp_w: i32) -> i32 {
                 let roa: usize = e.cur_org_a;
                 let rob: i32 = e.cur_org_b;
                 let sa: usize = conv usize e.cur_val;
-                let sz: usize = ty_size(pp, src, e, rty);
+                let sz: usize = ty_size(pp, src, e.head, rty);
                 mem_copy(e, e.cur_result_addr, sa, sz);
-                if !is_copy(pp, src, e, rty) {
+                if !is_copy(pp, src, e.head, rty) {
                     do_consume(e, rorg, roa, rob);
                 }
             } else {
@@ -2676,8 +2315,8 @@ fn bi_box(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let sc0: i32 = eval_expr(pp, src, e, a0, 0 - 1i32);
     if sc0 != 0 { return sc0; }
     let alloc_addr: usize = conv usize e.cur_val;
-    let ctx_off: usize = field_off_lit(pp, src, e, e.alloc_sid, b"ctx");
-    let vt_off: usize = field_off_lit(pp, src, e, e.alloc_sid, b"vt");
+    let ctx_off: usize = field_off_lit(pp, src, e.head, e.alloc_sid, b"ctx");
+    let vt_off: usize = field_off_lit(pp, src, e.head, e.alloc_sid, b"vt");
     let ctx: i64 = mem_load(e, alloc_addr + ctx_off, W_USIZE);
     let vt: i64 = mem_load(e, alloc_addr + vt_off, W_USIZE);
     let vt_addr: usize = conv usize to_u64(vt);
@@ -2699,11 +2338,11 @@ fn bi_box(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
         vsz = w_size(vw);
         val = w_size(vw);
     } else {
-        vsz = ty_size(pp, src, e, vty);
-        val = ty_align(pp, src, e, vty);
-        vcopy = is_copy(pp, src, e, vty);
+        vsz = ty_size(pp, src, e.head, vty);
+        val = ty_align(pp, src, e.head, vty);
+        vcopy = is_copy(pp, src, e.head, vty);
     }
-    let alloc_off: usize = field_off_lit(pp, src, e, e.alloc_vt_sid, b"alloc");
+    let alloc_off: usize = field_off_lit(pp, src, e.head, e.alloc_vt_sid, b"alloc");
     let afn: u32 = conv u32 to_u64(mem_load(e, vt_addr + alloc_off, W_USIZE));
     e.*.arg_val[0] = ctx;
     e.*.arg_w[0] = W_USIZE;
@@ -2768,8 +2407,8 @@ fn bi_unbox(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let ptr: usize = conv usize to_u64(mem_load(e, bxaddr, W_USIZE));
     let ctx: i64 = mem_load(e, bxaddr + 8usize, W_USIZE);
     let vt: i64 = mem_load(e, bxaddr + 16usize, W_USIZE);
-    let size: usize = ty_size(pp, src, e, inner);
-    let align: usize = ty_align(pp, src, e, inner);
+    let size: usize = ty_size(pp, src, e.head, inner);
+    let align: usize = ty_align(pp, src, e.head, inner);
     let slot: usize = bump_alloc(e, size, align);
     zero_slot(e, slot, size);
     mem_copy(e, slot, ptr, size);
@@ -2787,7 +2426,7 @@ fn bi_unbox(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
         e.*.cur_w = 0;
         e.*.cur_ty = inner;
         e.*.cur_org = 0;
-        if !is_copy(pp, src, e, inner) {
+        if !is_copy(pp, src, e.head, inner) {
             let ti: usize = reg_temp(e, slot, inner);
             e.*.cur_org = 1;
             e.*.cur_org_a = ti;
@@ -2818,7 +2457,7 @@ fn yield_temp(pp: read P, src: [u8], e: write E, addr: usize, ty: u32) -> i32 {
     e.*.cur_w = 0;
     e.*.cur_ty = ty;
     e.*.cur_org = 0;
-    if !is_copy(pp, src, e, ty) {
+    if !is_copy(pp, src, e.head, ty) {
         let ti: usize = reg_temp(e, addr, ty);
         e.*.cur_org = 1;
         e.*.cur_org_a = ti;
@@ -2827,15 +2466,15 @@ fn yield_temp(pp: read P, src: [u8], e: write E, addr: usize, ty: u32) -> i32 {
 }
 // Padded stride of a Vec element / a Map bucket ({state,keyptr,keylen,value}).
 fn stride_of(pp: read P, src: [u8], e: write E, elem: u32) -> usize {
-    return round_up_us(ty_size(pp, src, e, elem), ty_align(pp, src, e, elem));
+    return round_up_us(ty_size(pp, src, e.head, elem), ty_align(pp, src, e.head, elem));
 }
 fn map_stride(pp: read P, src: [u8], e: write E, valty: u32) -> usize {
-    return round_up_us(24usize + ty_size(pp, src, e, valty), 8usize);
+    return round_up_us(24usize + ty_size(pp, src, e.head, valty), 8usize);
 }
 // Indirect alloc: read the `alloc` fn-ptr from the vtable and call
 // `alloc(ctx, size, align)`. The returned pointer lands in `e.cur_val`.
 fn call_alloc(pp: read P, src: [u8], e: write E, ctx: i64, vt: i64, size: usize, align: usize) -> i32 {
-    let alloc_off: usize = field_off_lit(pp, src, e, e.alloc_vt_sid, b"alloc");
+    let alloc_off: usize = field_off_lit(pp, src, e.head, e.alloc_vt_sid, b"alloc");
     let afn: u32 = conv u32 to_u64(mem_load(e, conv usize to_u64(vt) + alloc_off, W_USIZE));
     e.*.arg_val[0] = ctx;
     e.*.arg_w[0] = W_USIZE;
@@ -2884,8 +2523,8 @@ fn commit_move(pp: read P, src: [u8], e: write E, dst: usize, elem: u32) -> unit
     if e.mv_ew != 0 {
         mem_store(e, dst, e.mv_val, e.mv_ew);
     } else {
-        mem_copy(e, dst, e.mv_addr, ty_size(pp, src, e, elem));
-        if !is_copy(pp, src, e, elem) { do_consume(e, e.mv_org, e.mv_oa, e.mv_ob); }
+        mem_copy(e, dst, e.mv_addr, ty_size(pp, src, e.head, elem));
+        if !is_copy(pp, src, e.head, elem) { do_consume(e, e.mv_org, e.mv_oa, e.mv_ob); }
     }
     return;
 }
@@ -2924,8 +2563,8 @@ fn bi_coll_new(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let sc: i32 = eval_expr(pp, src, e, pp.nodes[conv usize i].b, 0 - 1i32);
     if sc != 0 { return sc; }
     let alloc_addr: usize = conv usize e.cur_val;
-    let ctx: i64 = mem_load(e, alloc_addr + field_off_lit(pp, src, e, e.alloc_sid, b"ctx"), W_USIZE);
-    let vt: i64 = mem_load(e, alloc_addr + field_off_lit(pp, src, e, e.alloc_sid, b"vt"), W_USIZE);
+    let ctx: i64 = mem_load(e, alloc_addr + field_off_lit(pp, src, e.head, e.alloc_sid, b"ctx"), W_USIZE);
+    let vt: i64 = mem_load(e, alloc_addr + field_off_lit(pp, src, e.head, e.alloc_sid, b"vt"), W_USIZE);
     let addr: usize = bump_alloc(e, 40usize, 8usize);
     zero_slot(e, addr, 40usize);
     mem_store(e, addr + 24usize, ctx, W_USIZE);
@@ -2991,7 +2630,7 @@ fn bi_vec_push(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let mc: i32 = eval_move_src(pp, src, e, nxt(pp, a0), elem);
     if mc != 0 { return mc; }
     let stride: usize = stride_of(pp, src, e, elem);
-    let rc: i32 = buf_reserve(pp, src, e, base, stride, ty_align(pp, src, e, elem), 1usize, 4usize);
+    let rc: i32 = buf_reserve(pp, src, e, base, stride, ty_align(pp, src, e.head, elem), 1usize, 4usize);
     if rc != 0 { return rc; }
     let len: usize = ld_us(e, base + 8usize);
     commit_move(pp, src, e, ld_us(e, base) + len * stride, elem);
@@ -3005,10 +2644,10 @@ fn bi_vec_pop(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let sc: i32 = eval_expr(pp, src, e, a0, 0 - 1i32);
     if sc != 0 { return sc; }
     let base: usize = conv usize e.cur_val;
-    let eid: u32 = enum_of_ty(pp, src, e, rty);
+    let eid: u32 = enum_of_ty(pp, src, e.head, rty);
     let len: usize = ld_us(e, base + 8usize);
-    let addr: usize = bump_alloc(e, enum_size(pp, src, e, eid), 8usize);
-    zero_slot(e, addr, enum_size(pp, src, e, eid));
+    let addr: usize = bump_alloc(e, enum_size(pp, src, e.head, eid), 8usize);
+    zero_slot(e, addr, enum_size(pp, src, e.head, eid));
     if len == 0usize {
         mem_store(e, addr, conv i64 variant_index_by_lit(pp, src, eid, b"None"), W_USIZE);
     } else {
@@ -3017,8 +2656,8 @@ fn bi_vec_pop(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
         st_us(e, base + 8usize, newlen);
         let someidx: i32 = variant_index_by_lit(pp, src, eid, b"Some");
         mem_store(e, addr, conv i64 someidx, W_USIZE);
-        let off: usize = variant_payload_off(pp, src, e, variant_by_index(pp, eid, someidx), 0);
-        mem_copy(e, addr + off, srcaddr, ty_size(pp, src, e, elem));
+        let off: usize = variant_payload_off(pp, src, e.head, variant_by_index(pp, eid, someidx), 0);
+        mem_copy(e, addr + off, srcaddr, ty_size(pp, src, e.head, elem));
     }
     return yield_temp(pp, src, e, addr, eid);
 }
@@ -3105,7 +2744,7 @@ fn map_reserve(pp: read P, src: [u8], e: write E, base: usize, valty: u32) -> i3
     zero_slot(e, newbuf, newcap * stride);
     let oldbuf: usize = ld_us(e, base);
     if oldbuf != 0usize {
-        let vsz: usize = ty_size(pp, src, e, valty);
+        let vsz: usize = ty_size(pp, src, e.head, valty);
         let mut ii: usize = 0usize;
         while ii < cap {
             let ob: usize = oldbuf + ii * stride;
@@ -3241,7 +2880,7 @@ fn build_dispatch(pp: read P, src: [u8], e: write E) -> unit {
     while cur != 0u32 {
         let nd: Node = pp.nodes[conv usize cur];
         if nd.tag == T_IMPL && nd.a == 0u32 {
-            let sid: u32 = struct_of_ty(pp, src, e, nd.c);
+            let sid: u32 = struct_of_ty(pp, src, e.head, nd.c);
             let mut mcur: u32 = nd.d;
             while mcur != 0u32 {
                 let mnd: Node = pp.nodes[conv usize mcur];
@@ -3282,7 +2921,7 @@ fn eval_method_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     peel_box_place(pp, e);
     let recv_addr: usize = e.plc_addr;
     let recv_ty: u32 = e.plc_ty;
-    let sid: u32 = struct_of_ty(pp, src, e, recv_ty);
+    let sid: u32 = struct_of_ty(pp, src, e.head, recv_ty);
     let fnid: u32 = dispatch_lookup(src, e, sid, callee.p0, callee.p1);
     if fnid == 0u32 {
         set_fault(e, FK_PANIC, callee.p0, callee.p1);
@@ -3319,7 +2958,7 @@ fn eval_method_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
             if sc != 0 { return sc; }
             aw[k] = 0;
             aa[k] = conv usize e.cur_val;
-            if !is_copy(pp, src, e, ptype) {
+            if !is_copy(pp, src, e.head, ptype) {
                 do_consume(e, e.cur_org, e.cur_org_a, e.cur_org_b);
             }
         }
@@ -3337,7 +2976,7 @@ fn eval_method_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let cs: i32 = call_fn(pp, src, e, fnid);
     if cs != 0 { return cs; }
     e.*.cur_org = 0;
-    if e.cur_w == 0 && !is_copy(pp, src, e, e.cur_ty) {
+    if e.cur_w == 0 && !is_copy(pp, src, e.head, e.cur_ty) {
         let ti: usize = reg_temp(e, conv usize e.cur_val, e.cur_ty);
         e.*.cur_org = 1;
         e.*.cur_org_a = ti;
@@ -3384,15 +3023,15 @@ fn eval_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
             e.*.cur_ty = inner;
             e.*.cur_org = 0;
         } else {
-            let size: usize = ty_size(pp, src, e, inner);
-            let align: usize = ty_align(pp, src, e, inner);
+            let size: usize = ty_size(pp, src, e.head, inner);
+            let align: usize = ty_align(pp, src, e.head, inner);
             let slot: usize = bump_alloc(e, size, align);
             mem_copy(e, slot, paddr, size);
             e.*.cur_val = conv i64 slot;
             e.*.cur_w = 0;
             e.*.cur_ty = inner;
             e.*.cur_org = 0;
-            if !is_copy(pp, src, e, inner) {
+            if !is_copy(pp, src, e.head, inner) {
                 let ti: usize = reg_temp(e, slot, inner);
                 e.*.cur_org = 1;
                 e.*.cur_org_a = ti;
@@ -3415,9 +3054,9 @@ fn eval_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
             let vob: i32 = e.cur_org_b;
             let vty: u32 = e.cur_ty;
             let sa: usize = conv usize e.cur_val;
-            let vsz: usize = ty_size(pp, src, e, vty);
+            let vsz: usize = ty_size(pp, src, e.head, vty);
             mem_copy(e, paddr, sa, vsz);
-            if !is_copy(pp, src, e, vty) {
+            if !is_copy(pp, src, e.head, vty) {
                 do_consume(e, vorg, voa, vob);
             }
         }
@@ -3480,7 +3119,7 @@ fn eval_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
         let base: usize = conv usize to_u64(e.cur_val);
         let pty: u32 = e.cur_ty;
         let inner: u32 = rawptr_inner(pp, pty);
-        let stride: usize = ty_size(pp, src, e, inner);
+        let stride: usize = ty_size(pp, src, e.head, inner);
         let pnode: Node = pp.nodes[conv usize nd.b];
         let sc2: i32 = eval_expr(pp, src, e, pnode.nx, 5);
         if sc2 != 0 { return sc2; }
@@ -3568,7 +3207,7 @@ fn eval_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
             aw[k] = 0;
             aa[k] = conv usize e.cur_val;
             // A by-value non-copy aggregate argument is moved into the param slot.
-            if !is_copy(pp, src, e, ptype) {
+            if !is_copy(pp, src, e.head, ptype) {
                 do_consume(e, e.cur_org, e.cur_org_a, e.cur_org_b);
             }
         }
@@ -3586,7 +3225,7 @@ fn eval_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let cs: i32 = call_fn(pp, src, e, fnid);
     if cs != 0 { return cs; }
     e.*.cur_org = 0;
-    if e.cur_w == 0 && !is_copy(pp, src, e, e.cur_ty) {
+    if e.cur_w == 0 && !is_copy(pp, src, e.head, e.cur_ty) {
         let ti: usize = reg_temp(e, conv usize e.cur_val, e.cur_ty);
         e.*.cur_org = 1;
         e.*.cur_org_a = ti;
@@ -3617,7 +3256,7 @@ fn drop_owned_locals_from(pp: read P, src: [u8], e: write E, base: usize) -> i32
         i = i - 1usize;
         if e.loc_owns[i] != 0u8 {
             let ty: u32 = e.loc_ty[i];
-            if needs_drop(pp, src, e, ty) && !whole_moved(e, i) {
+            if needs_drop(pp, src, e.head, ty) && !whole_moved(e, i) {
                 let dc: i32 = drop_value(pp, src, e, e.loc_addr[i], ty, conv i64 i);
                 if dc != 0 { fault = 1; }
             }
@@ -3636,8 +3275,8 @@ fn call_fn(pp: read P, src: [u8], e: write E, fnid: u32) -> i32 {
     let ragg: bool = ty_is_agg(pp, src, e, rtynode);
     let mut ret_slot: usize = 0usize;
     if ragg {
-        let rsz: usize = ty_size(pp, src, e, rtynode);
-        let ral: usize = ty_align(pp, src, e, rtynode);
+        let rsz: usize = ty_size(pp, src, e.head, rtynode);
+        let ral: usize = ty_align(pp, src, e.head, rtynode);
         ret_slot = bump_alloc(e, rsz, ral);
     }
     let base_bump: usize = e.stack_bump;
@@ -3656,8 +3295,8 @@ fn call_fn(pp: read P, src: [u8], e: write E, fnid: u32) -> i32 {
         let pm: Node = pp.nodes[conv usize pcur];
         let ptype: u32 = pm.a;
         let pw: i32 = scalar_width(pp, src, ptype);
-        let psz: usize = ty_size(pp, src, e, ptype);
-        let pal: usize = ty_align(pp, src, e, ptype);
+        let psz: usize = ty_size(pp, src, e.head, ptype);
+        let pal: usize = ty_align(pp, src, e.head, ptype);
         let paddr: usize = bump_alloc(e, psz, pal);
         if pw != 0 {
             mem_store(e, paddr, e.arg_val[k], pw);
@@ -3737,8 +3376,8 @@ fn exec_stmt_inner(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     if nd.tag == T_LET {
         let tynode: u32 = nd.a;
         let w: i32 = scalar_width(pp, src, tynode);
-        let size: usize = ty_size(pp, src, e, tynode);
-        let align: usize = ty_align(pp, src, e, tynode);
+        let size: usize = ty_size(pp, src, e.head, tynode);
+        let align: usize = ty_align(pp, src, e.head, tynode);
         let addr: usize = bump_alloc(e, size, align);
         if w == 0 { zero_slot(e, addr, size); }
         if nd.b != 0u32 {
@@ -3755,7 +3394,7 @@ fn exec_stmt_inner(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
                 let lob: i32 = e.cur_org_b;
                 let sa: usize = conv usize e.cur_val;
                 mem_copy(e, addr, sa, size);
-                if !is_copy(pp, src, e, tynode) {
+                if !is_copy(pp, src, e.head, tynode) {
                     do_consume(e, lorg, loa, lob);
                 }
             }
@@ -3780,22 +3419,22 @@ fn exec_stmt_inner(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
             let aoa: usize = e.cur_org_a;
             let aob: i32 = e.cur_org_b;
             let sa: usize = conv usize e.cur_val;
-            let sz: usize = ty_size(pp, src, e, dty);
+            let sz: usize = ty_size(pp, src, e.head, dty);
             // A drop-bearing owned direct-local target drops its OLD value first
             // (after the RHS, honoring the RHS's move state), then re-owns.
             let tnode: Node = pp.nodes[conv usize nd.a];
             let mut tli: usize = 0usize;
             let mut has_li: bool = false;
-            if tnode.tag == T_ID && !is_copy(pp, src, e, dty) {
+            if tnode.tag == T_ID && !is_copy(pp, src, e.head, dty) {
                 tli = find_local(src, e, tnode.p0, tnode.p1);
                 has_li = true;
-                if e.loc_owns[tli] != 0u8 && needs_drop(pp, src, e, dty) && !whole_moved(e, tli) {
+                if e.loc_owns[tli] != 0u8 && needs_drop(pp, src, e.head, dty) && !whole_moved(e, tli) {
                     let dc: i32 = drop_value(pp, src, e, dst, dty, conv i64 tli);
                     if dc != 0 { return 1; }
                 }
             }
             mem_copy(e, dst, sa, sz);
-            if !is_copy(pp, src, e, dty) {
+            if !is_copy(pp, src, e.head, dty) {
                 do_consume(e, aorg, aoa, aob);
             }
             if has_li { set_owned_whole(e, tli); }
@@ -3851,8 +3490,8 @@ fn run_statics(pp: read P, src: [u8], e: write E) -> unit {
         if snd.tag == T_STATIC {
             let tynode: u32 = snd.a;
             let w: i32 = scalar_width(pp, src, tynode);
-            let size: usize = ty_size(pp, src, e, tynode);
-            let align: usize = ty_align(pp, src, e, tynode);
+            let size: usize = ty_size(pp, src, e.head, tynode);
+            let align: usize = ty_align(pp, src, e.head, tynode);
             let addr: usize = bump_alloc(e, size, align);
             let k: usize = e.static_n;
             e.*.static_p0[k] = snd.p0;
@@ -3877,7 +3516,7 @@ fn run_statics(pp: read P, src: [u8], e: write E) -> unit {
         } else {
             let sc: i32 = eval_expr(pp, src, e, initn, 0 - 1i32);
             if sc == 0 {
-                let size: usize = ty_size(pp, src, e, e.static_ty[sj]);
+                let size: usize = ty_size(pp, src, e.head, e.static_ty[sj]);
                 mem_copy(e, addr, conv usize e.cur_val, size);
             }
         }

@@ -2165,6 +2165,39 @@ The four fix-now findings are resolved; each verified per-gate in isolation, byt
   The real fix (module-split interp.cnr / Vec-backed arena) stays deferred
   (F-LAYOUT-EXTRACT / token-cap obligation). Capacity-only; every gate byte-exact.
 
+### Addressed — F-LAYOUT-EXTRACT (Opus 4.8, 2026-07-11)
+
+**F-LAYOUT-EXTRACT — DONE.** The triplication-in-waiting is retired: the layout /
+type-property core now lives ONCE in the new module `selfhost/layout/layout.cnr`
+and both consumers `use` it. FEASIBILITY (assessed before extracting): the layout
+functions are PURE over `(read P pp, [u8] src, u32 head, ...)` — interp.cnr's
+copies took `write E` but only ever READ `e.head` (via `find_struct`/`find_enum`,
+which just walk the item `nx`-chain), and lower.cnr's copies already threaded a raw
+`head: u32`. No genuine coupling to mutable interpreter/lowering state — layout is a
+read-only computation over the arena — so the two signatures unify cleanly on
+`head`. `layout.cnr` (~460 lines) holds the single source of truth for the
+Vec/Map/String=40, str/slice=16, Box=24, BoxResult=32 (align 8) ABI plus
+`ty_size`/`ty_align`/`struct_size`/`struct_align`/`field_off`/`field_off_lit`/
+`field_ty`/enum layout (`enum_size`/`payload_size`/`variant_*`)/`struct_of_ty`/
+`enum_of_ty`/`is_copy`/`needs_drop`/collection recognizers, with its own small
+scalar utils (the per-module concatenation idiom). `interp.cnr` and `lower.cnr`
+`use layout::{...}`, deleted their copies, and adapted call sites (interp threads
+`e.head`; lower already threaded `head`, so only its divergently-named calls —
+`is_copy_ty`/`struct_id_of`/`tn_is_vec`/… — were renamed to the canonical names).
+HEADROOM: interp.cnr 4015 -> 3654 lines, lower.cnr 5297 -> 4948 (~360 / ~348 lines
+out of each), widening the interp.cnr arena/token headroom under the [49152] cap
+(F-ARENA-CAP) by the corresponding ~3k tokens — the room native N2 needs. `is_copy`
+and `needs_drop` were verified behaviorally identical between the two prior copies
+(interp's `scalar_width` treats pointers as word scalars; lower's handled them via
+explicit tag arms — same result), so the unified bodies are output-invariant.
+`layout.cnr` JOINS the self-check module tree (added to selfhost_checker.rs /
+selfhost_analyses.rs interp trees exactly as mono.cnr was); interp.cnr still
+self-checks CLEAN through the checker + analyses fixpoints, now resolving its
+`use layout` imports. codegen (N1, scalar) is untouched — it grows no layout copy
+until N2, when it too will `use layout`. Every gate byte-exact green: selfhost_interp
+(28s), selfhost_lower (59s), selfhost_codegen (4s), selfhost_checker (6/6), and
+selfhost_analyses (6/6) each in isolation; clippy clean.
+
 ## T1 — trait-generics front-end: `interface`/`impl` parsing in the self-host parser (2026-07-11)
 
 The FIRST slice of the trait-generics arc, closing the FRONT-END gap flagged by OBL-G1 /

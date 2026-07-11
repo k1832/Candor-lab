@@ -23,6 +23,8 @@ const LEXER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/lexer/lexer.cnr"));
 const PARSER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/parser/parser.cnr"));
+const LAYOUT_SRC: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/layout/layout.cnr"));
 const MONO_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/mono/mono.cnr"));
 const INTERP_SRC: &str =
@@ -91,6 +93,7 @@ fn candor_dump(src: &str) -> String {
         ("lexer.cnr", LEXER_SRC),
         ("parser.cnr", PARSER_SRC),
         ("mono.cnr", MONO_SRC),
+        ("layout.cnr", LAYOUT_SRC),
         ("interp.cnr", INTERP_SRC),
     ];
     match run_module_tree(&modules, &main) {
