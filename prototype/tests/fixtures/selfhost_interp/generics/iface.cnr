@@ -1,0 +1,19 @@
+// Interface bound + impl + static dispatch (0007 §2.3, §4.1).
+interface Weighable {
+    fn weight(read self) -> i64;
+}
+struct Node {
+    v: i64,
+}
+impl Weighable for Node {
+    fn weight(read self) -> i64 {
+        return self.v * 2;
+    }
+}
+fn weigh[T: Weighable](x: read T) -> i64 {
+    return x.weight();
+}
+fn main() -> i64 {
+    let n: Node = Node { v: 21 };
+    return weigh(read n);
+}

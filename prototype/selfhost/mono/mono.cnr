@@ -21,7 +21,9 @@
 // the equivalence class `inst_fn_name`/`mangle_ty` encode -- so dedup matches
 // the oracle without materializing the mangled string (dispatch is by node id).
 
-use parser::{Node, P, nnew, T_FN, T_STRUCT, T_ENUM, T_TPARAM, T_PARAM, T_SFIELD, T_VARIANT, T_RET, T_NAMED, T_SC, T_APP, T_ARRAY, T_BORROW, T_BORROWMUT, T_RAWPTR, T_BOX, T_BOXRESULT, T_SLICE, T_SLICEMUT, T_CALL, T_STRUCTLIT, T_ENUMCTOR, T_GENERICVAL, T_FINIT, T_LET, T_ID, T_INT, T_NEGINT, T_BOOL, T_PREFIX, T_FIELD, T_INDEX, T_BLOCK, T_IF, T_WHILE, T_LOOP, T_MATCH, T_ARM, T_RETURN, T_CONV, T_PAREN, T_ASSIGN, T_BIN, T_UNARY};
+use parser::{Node, P, nnew, T_FN, T_STRUCT, T_ENUM, T_TPARAM, T_PARAM, T_SFIELD, T_VARIANT, T_RET, T_NAMED, T_SC, T_APP, T_ARRAY, T_BORROW, T_BORROWMUT, T_RAWPTR, T_BOX, T_BOXRESULT, T_SLICE, T_SLICEMUT, T_CALL, T_STRUCTLIT, T_ENUMCTOR, T_GENERICVAL, T_FINIT, T_LET, T_ID, T_INT, T_NEGINT, T_BOOL, T_PREFIX, T_FIELD, T_INDEX, T_BLOCK, T_IF, T_WHILE, T_LOOP, T_MATCH, T_ARM, T_RETURN, T_CONV, T_PAREN, T_ASSIGN, T_BIN, T_UNARY, T_IMPL};
+
+use lexer::{span_eq};
 
 static MONO_DEPTH_LIMIT: i32 = 64;
 
@@ -57,6 +59,13 @@ struct M {
     targ_n: i32,
     // the return-type expected of the fn body currently being resolved
     ret_exp: u32,
+    // impl-dispatch support (T2): the source span of a `self` occurrence (so a
+    // dispatched method's synthetic `self` param binds by byte content), and the
+    // concrete struct type-args captured while emitting a struct instance (used to
+    // instantiate matching generic impls at that reached target).
+    self_start: usize,
+    sarg: [8]u32,
+    sarg_n: i32,
 }
 
 // ---- span compare -----------------------------------------------------------
@@ -395,6 +404,15 @@ fn emit_struct_inst(p: write P, src: [u8], m: write M, orig: u32, depth: i32) ->
     let existing: u32 = find_inst(p, src, m, orig);
     if existing != 0u32 { return existing; }
     if depth > MONO_DEPTH_LIMIT { return 0u32; }
+    // Snapshot the concrete type-args now: nested type resolution below reuses
+    // m.targ, so capture into a local for the post-emit impl instantiation.
+    let ncargs: i32 = m.targ_n;
+    let mut cargs: [8]u32 = [0u32; 8];
+    let mut cci: i32 = 0;
+    while cci < ncargs {
+        cargs[conv usize cci] = m.targ[conv usize cci];
+        cci = cci + 1i32;
+    }
     let od: Node = p.nodes[conv usize orig];
     let mut sn: Node = nnew(T_STRUCT);
     sn.op = od.op;
@@ -425,6 +443,13 @@ fn emit_struct_inst(p: write P, src: [u8], m: write M, orig: u32, depth: i32) ->
         resolve_block(p, src, m, cdrop, depth + 1i32);
         m.*.loc_n = lb;
     }
+    let mut si: i32 = 0;
+    while si < ncargs {
+        m.*.sarg[conv usize si] = cargs[conv usize si];
+        si = si + 1i32;
+    }
+    m.*.sarg_n = ncargs;
+    instantiate_impls_for_struct(p, src, m, od.p0, od.p1, sid);
     return sid;
 }
 
@@ -763,6 +788,130 @@ fn resolve_block_or_expr(p: write P, src: [u8], m: write M, id: u32, depth: i32)
     return;
 }
 
+// ---- impl-method dispatch support (T2) --------------------------------------
+// The self placeholder type the parser synthesizes for an impl method (a T_NAMED
+// spanning the self-mode keyword, e.g. `read`/`write`/`take`/`self`).
+fn is_self_placeholder(p: write P, src: [u8], tyid: u32) -> bool {
+    if tyid == 0u32 { return false; }
+    let nd: Node = p.nodes[conv usize tyid];
+    if nd.tag != T_NAMED { return false; }
+    if span_eq(src, nd.p0, nd.p1, b"self") { return true; }
+    if span_eq(src, nd.p0, nd.p1, b"read") { return true; }
+    if span_eq(src, nd.p0, nd.p1, b"write") { return true; }
+    if span_eq(src, nd.p0, nd.p1, b"take") { return true; }
+    return false;
+}
+// The first `self` byte-span in the source; a dispatched method binds its `self`
+// param by byte content, so any occurrence's span serves.
+fn self_bytes_start(src: [u8]) -> usize {
+    let n: usize = len(src);
+    let mut i: usize = 0usize;
+    while i + 4usize <= n {
+        if src[i] == 115u8 && src[i + 1usize] == 101u8 && src[i + 2usize] == 108u8 && src[i + 3usize] == 102u8 {
+            return i;
+        }
+        i = i + 1usize;
+    }
+    return 0usize;
+}
+// Point each impl method's synthetic `self` param at the concrete target type and
+// retarget its name span to `self` bytes, so the interp types the receiver and
+// binds `self` by content (the parser spans it on the mode keyword otherwise).
+fn fix_impl_selves(p: write P, src: [u8], mhead: u32, target: u32, selfstart: usize) -> unit {
+    let mut mcur: u32 = mhead;
+    while mcur != 0u32 {
+        let mnd: Node = p.nodes[conv usize mcur];
+        let ph: u32 = mnd.c;
+        if ph != 0u32 {
+            let pm: Node = p.nodes[conv usize ph];
+            if is_self_placeholder(p, src, pm.a) {
+                p.*.nodes[conv usize ph].a = target;
+                p.*.nodes[conv usize ph].p0 = selfstart;
+                p.*.nodes[conv usize ph].p1 = selfstart + 4usize;
+            }
+        }
+        mcur = mnd.nx;
+    }
+    return;
+}
+fn is_impl_tparam(p: write P, src: [u8], tphead: u32, s: usize, en: usize) -> bool {
+    let mut cur: u32 = tphead;
+    while cur != 0u32 {
+        let tp: Node = p.nodes[conv usize cur];
+        if name_eq_m(src, tp.p0, tp.p1, s, en) { return true; }
+        cur = tp.nx;
+    }
+    return false;
+}
+// Instantiate one generic impl at the reached concrete target `sid`: substitute
+// the impl's type params (recovered by matching its target App args against the
+// captured concrete args `m.sarg`) through its methods, append a concrete
+// (non-generic) T_IMPL to the item chain, and fix each method's `self`.
+fn emit_one_impl_inst(p: write P, src: [u8], m: write M, imid: u32, sid: u32) -> unit {
+    let imnd: Node = p.nodes[conv usize imid];
+    let tnode: Node = p.nodes[conv usize imnd.c];
+    let saved_env: usize = m.env_n;
+    let mut ac: u32 = tnode.a;
+    let mut idx: i32 = 0;
+    while ac != 0u32 && idx < m.sarg_n {
+        let argn: Node = p.nodes[conv usize ac];
+        if argn.tag == T_NAMED && is_impl_tparam(p, src, imnd.a, argn.p0, argn.p1) {
+            let j: usize = m.env_n;
+            m.*.env_p0[j] = argn.p0;
+            m.*.env_p1[j] = argn.p1;
+            m.*.env_ty[j] = m.sarg[conv usize idx];
+            m.*.env_n = j + 1usize;
+        }
+        idx = idx + 1i32;
+        ac = argn.nx;
+    }
+    let ctarget: u32 = clone_subst(p, src, m, imnd.c);
+    p.*.nodes[conv usize ctarget].nx = 0u32;
+    p.*.nodes[conv usize ctarget].b = sid;
+    let cmethods: u32 = clone_subst(p, src, m, imnd.d);
+    m.*.env_n = saved_env;
+    fix_impl_selves(p, src, cmethods, ctarget, m.self_start);
+    let mut ni: Node = nnew(T_IMPL);
+    ni.p0 = imnd.p0;
+    ni.p1 = imnd.p1;
+    ni.a = 0u32;
+    ni.c = ctarget;
+    ni.d = cmethods;
+    let niid: u32 = m_push(p, ni);
+    m_set_next(p, m.tail, niid);
+    m.*.tail = niid;
+    return;
+}
+// For a just-emitted struct instance `sid` (name [sname0,sname1)), instantiate any
+// generic impl whose App target head matches -- mirroring the oracle's per-reached
+// instantiation (src/generics.rs enqueue-drives-emit_impl_instance).
+fn instantiate_impls_for_struct(p: write P, src: [u8], m: write M, sname0: usize, sname1: usize, sid: u32) -> unit {
+    let mut cur: u32 = m.head;
+    while cur != 0u32 {
+        let imnd: Node = p.nodes[conv usize cur];
+        if imnd.tag == T_IMPL && imnd.a != 0u32 {
+            let tnode: Node = p.nodes[conv usize imnd.c];
+            if tnode.tag == T_APP && name_eq_m(src, tnode.p0, tnode.p1, sname0, sname1) {
+                emit_one_impl_inst(p, src, m, cur, sid);
+            }
+        }
+        cur = imnd.nx;
+    }
+    return;
+}
+// Non-generic impls: their methods are already concrete, so just retarget `self`.
+fn fixup_concrete_impls(p: write P, src: [u8], m: write M) -> unit {
+    let mut cur: u32 = m.head;
+    while cur != 0u32 {
+        let nd: Node = p.nodes[conv usize cur];
+        if nd.tag == T_IMPL && nd.a == 0u32 {
+            fix_impl_selves(p, src, nd.d, nd.c, m.self_start);
+        }
+        cur = nd.nx;
+    }
+    return;
+}
+
 // ---- entry ------------------------------------------------------------------
 // Monomorphize the parsed program in place: emit a concrete instance per reached
 // (name, type-args) and rewrite each generic reference to its instance. A no-op
@@ -779,11 +928,18 @@ pub fn mono_program(p: write P, src: [u8], head: u32) -> unit {
         itp_p0: [0usize; 16], itp_p1: [0usize; 16], itp_n: 0,
         targ: [0u32; 8], targ_n: 0,
         ret_exp: 0u32,
+        self_start: 0usize,
+        sarg: [0u32; 8], sarg_n: 0,
     };
     if head == 0u32 { return; }
     let mut tl: u32 = head;
     while p.nodes[conv usize tl].nx != 0u32 { tl = p.nodes[conv usize tl].nx; }
     m.tail = tl;
+    m.self_start = self_bytes_start(src);
+    // Non-generic impl methods are concrete already: retarget their `self`. Must
+    // run before the body walk so the dispatch table (built later by the interp)
+    // sees the fixed self spans; generic-impl instances are fixed as they emit.
+    fixup_concrete_impls(p, src, write m);
     // snapshot the original monomorphic fns (before appending instances)
     let mut orig_fns: [512]u32 = [0u32; 512];
     let mut nfns: usize = 0usize;

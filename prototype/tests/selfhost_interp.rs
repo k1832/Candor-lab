@@ -204,6 +204,10 @@ const CORPUS: &[(&str, Shape)] = &[
     ("generics/gdrop_groundfloor.cnr", Ret),
     ("generics/mixed.cnr", Ret),
     ("generics/nameval.cnr", Ret),
+    // ---- TRAIT interfaces + impls + static method dispatch (T2) ----
+    ("generics/iface.cnr", Ret),
+    ("generics/gimpl.cnr", Ret),
+    ("generics/gbound.cnr", Ret),
     // ---- std COLLECTIONS: compiler-known String / Vec[T] / Map[V] ----
     ("string_build.cnr", Ret),
     ("vec_push_get_sum.cnr", Ret),

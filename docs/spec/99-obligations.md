@@ -2220,3 +2220,51 @@ name-res-clean under the self-host checker); `selfhost_analyses` green including
 DEFERRED to later slices (unchanged): mono impl-method mangling/dispatch, interp method
 dispatch + `?`/`From` runtime, and the MIR lowering of impl methods (T2/T3+). This slice is
 purely the parser front-end that those slices build on.
+
+## T2 — trait-generics: impl-method monomorphization + interp method dispatch (2026-07-11)
+
+The tall-pole slice: teach `selfhost/mono/mono.cnr` to emit/instantiate impl methods and
+`selfhost/interp/interp.cnr` to dispatch `recv.m(args)` method calls, landing `iface`,
+`gimpl`, and `gbound` RUNNING on the interp tier (RET 42 / 40 / 105, byte-exact to
+`run_source_real`). Mirrors the Rust oracle: dispatch resolves at EVAL time from the
+receiver's static nominal (`src/interp/eval.rs:1571-1601`), and impl methods are emitted as
+concrete fns by `monomorphize` (`src/generics.rs`, `emit_impl`/`emit_impl_instance`).
+
+MONO (impl-method emission + generic-impl instantiation):
+- `fixup_concrete_impls` walks non-generic `T_IMPL` nodes and, per method, retargets the
+  synthetic `self` param — the parser spans its placeholder type on the self-MODE keyword
+  (`read`/`write`/…), so `fix_impl_selves` sets the param's type to the impl target and
+  retargets its NAME span to `self` bytes (the interp binds locals by byte content, so `self`
+  in the body then resolves).
+- Generic impls (`impl[T] … for Wrap[T]`) instantiate at each reached concrete target:
+  `emit_struct_inst` snapshots the struct's concrete type-args (into `M.sarg`) and, after
+  emitting the instance `sid`, calls `instantiate_impls_for_struct`. That finds each generic
+  `T_IMPL` whose App target head matches, recovers the impl's type-param bindings by matching
+  its target App args against the captured args, `clone_subst`s the target + method chain
+  (reusing the existing subst/dedup infra), stashes the concrete struct instance on the
+  cloned target, fixes `self`, and appends a CONCRETE (`a == 0`) `T_IMPL` to the item chain.
+  The `Self` placeholder resolves to the impl's target type. Existing generic fixtures are
+  untouched (no `T_IMPL` → both passes are no-ops).
+
+INTERP (dispatch table + T_FIELD-callee path):
+- `build_dispatch` (startup, after mono) walks concrete `T_IMPL` nodes and records
+  `(target struct-instance node id, method-name span) -> method fn node id`. Keying by NODE
+  ID (not a mangled name — synthesized names are unaddressable in the self-host interp)
+  disambiguates instantiations; generic templates (`a != 0`) are skipped.
+- `eval_call` routes a `T_FIELD` callee to `eval_method_call`: `eval_place(base)` +
+  `peel_box_place` type the receiver to a struct instance (`struct_of_ty`), `dispatch_lookup`
+  finds the method fn, and the receiver is bound as `self` — a `read`/`write` self is a
+  borrow (post-`synth_param_borrows`), so the receiver ADDRESS is passed as an 8-byte pointer
+  scalar exactly as `call_fn` expects a borrow param. NESTED dispatch (`gbound`'s
+  `self.inner.show()`) falls out for free: `eval_place` types `self.inner` to `Cell` after
+  T=Cell substitution, and `show` dispatches on `Cell`.
+
+VERIFICATION (all in isolation): `selfhost_interp` green — the 8 prior generic fixtures + all
+S1–S6 fixtures + `iface`/`gimpl`/`gbound` byte-exact to the oracle; `selfhost_checker` +
+`selfhost_analyses` green (mono.cnr/interp.cnr self-check clean via import resolution);
+`selfhost_lower` + `mir_serial` green; clippy clean. interp.cnr stays comfortably under the
+49152 node-arena cap.
+
+DEFERRED (unchanged): MIR lowering of impl methods (T3), and `?`/`From` runtime (T4). No
+bound checking in interp/mono — `[T: Weighable]`/`[T: Show]` is enforced only by the Rust
+oracle; after instantiation the method call resolves by the concrete nominal.

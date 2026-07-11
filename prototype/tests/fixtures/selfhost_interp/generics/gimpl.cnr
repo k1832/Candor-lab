@@ -1,0 +1,18 @@
+// A generic impl (`impl[T] Weighable for Wrap[T]`) checked once at its definition
+// site; method dispatch at a concrete instance substitutes the unified `T`.
+interface Weighable {
+    fn weight(read self) -> i64;
+}
+struct Wrap[T] {
+    inner: T,
+    tag: i64,
+}
+impl[T] Weighable for Wrap[T] {
+    fn weight(read self) -> i64 {
+        return self.tag * 10;
+    }
+}
+fn main() -> i64 {
+    let w: Wrap[i64] = Wrap { inner: 5, tag: 4 };
+    return w.weight();
+}

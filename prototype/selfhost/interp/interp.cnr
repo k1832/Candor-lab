@@ -27,7 +27,7 @@
 // `interp.cnr` is NOT self-checked in this slice, so it uses the full language.
 
 use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl, decoded_len};
-use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_SC, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_STRUCT, T_NAMED, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_VARIANT, T_ENUMCTOR, T_MATCH, T_PVARIANT, T_WILD, T_BIND, T_STATIC, T_RAWPTR, T_FNPTR, T_UNSAFE, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_BOX, T_BOXRESULT, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_CONV, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT, T_BYTES, T_STR, T_PARAM, T_APP, T_GENERICVAL};
+use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_SC, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_STRUCT, T_NAMED, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_VARIANT, T_ENUMCTOR, T_MATCH, T_PVARIANT, T_WILD, T_BIND, T_STATIC, T_RAWPTR, T_FNPTR, T_UNSAFE, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_BOX, T_BOXRESULT, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_CONV, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT, T_BYTES, T_STR, T_PARAM, T_APP, T_GENERICVAL, T_IMPL};
 use mono::{mono_program};
 
 // ---- fault kind codes (shared with the Rust harness) ------------------------
@@ -122,6 +122,13 @@ struct E {
     mv_org: i32,
     mv_oa: usize,
     mv_ob: i32,
+    // impl-method dispatch table (T2): (target struct-instance node, method-name
+    // span) -> the method's fn node id. Built at startup from concrete T_IMPL nodes.
+    disp_sid: [64]u32,
+    disp_p0: [64]usize,
+    disp_p1: [64]usize,
+    disp_fn: [64]u32,
+    disp_n: usize,
 }
 
 // ---- bit-pattern reinterpretation via wrapping conv (no transmute needed) ----
@@ -3072,9 +3079,128 @@ fn coll_arg_ty(pp: read P, src: [u8], e: write E, argnode: u32) -> u32 {
     return 0u32;
 }
 
+// ---- impl-method dispatch (T2) ----------------------------------------------
+// Build the dispatch table from every concrete (non-generic) T_IMPL: key each
+// method by (target struct-instance node, method-name span). Generic impl
+// templates (type-params present) are skipped -- mono has already instantiated
+// them at each reached concrete target as their own concrete T_IMPL nodes.
+fn build_dispatch(pp: read P, src: [u8], e: write E) -> unit {
+    let mut cur: u32 = e.head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_IMPL && nd.a == 0u32 {
+            let sid: u32 = struct_of_ty(pp, src, e, nd.c);
+            let mut mcur: u32 = nd.d;
+            while mcur != 0u32 {
+                let mnd: Node = pp.nodes[conv usize mcur];
+                let k: usize = e.disp_n;
+                e.*.disp_sid[k] = sid;
+                e.*.disp_p0[k] = mnd.p0;
+                e.*.disp_p1[k] = mnd.p1;
+                e.*.disp_fn[k] = mcur;
+                e.*.disp_n = k + 1usize;
+                mcur = mnd.nx;
+            }
+        }
+        cur = nd.nx;
+    }
+    return;
+}
+fn dispatch_lookup(src: [u8], e: write E, sid: u32, s: usize, en: usize) -> u32 {
+    let mut i: usize = 0usize;
+    while i < e.disp_n {
+        if e.disp_sid[i] == sid && name_eq(src, e.disp_p0[i], e.disp_p1[i], s, en) {
+            return e.disp_fn[i];
+        }
+        i = i + 1usize;
+    }
+    return 0u32;
+}
+// Dispatch `recv.m(args)`: type the receiver place to a struct instance, look up
+// the impl method, then bind the receiver as the method's synthetic `self`
+// (a `read`/`write` self is a borrow -> pass the receiver address as an 8-byte
+// pointer scalar, exactly as call_fn expects a borrow param). Nested receivers
+// like `self.inner.m()` fall out for free: eval_place types the field.
+fn eval_method_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let callee: Node = pp.nodes[conv usize nd.a];
+    let base: u32 = callee.a;
+    let sc0: i32 = eval_place(pp, src, e, base);
+    if sc0 != 0 { return sc0; }
+    peel_box_place(pp, e);
+    let recv_addr: usize = e.plc_addr;
+    let recv_ty: u32 = e.plc_ty;
+    let sid: u32 = struct_of_ty(pp, src, e, recv_ty);
+    let fnid: u32 = dispatch_lookup(src, e, sid, callee.p0, callee.p1);
+    if fnid == 0u32 {
+        set_fault(e, FK_PANIC, callee.p0, callee.p1);
+        return 1;
+    }
+    let mut av: [16]i64 = [0i64; 16];
+    let mut aw: [16]i32 = [0; 16];
+    let mut aa: [16]usize = [0usize; 16];
+    av[0] = conv i64 recv_addr;
+    aw[0] = W_USIZE;
+    aa[0] = 0usize;
+    let mut k: usize = 1usize;
+    let params: u32 = pp.nodes[conv usize fnid].c;
+    let mut pcur: u32 = 0u32;
+    if params != 0u32 { pcur = pp.nodes[conv usize params].nx; }
+    let mut cur: u32 = nd.b;
+    while cur != 0u32 {
+        let an: Node = pp.nodes[conv usize cur];
+        let mut ptype: u32 = 0u32;
+        if pcur != 0u32 {
+            let pm: Node = pp.nodes[conv usize pcur];
+            ptype = pm.a;
+            pcur = pm.nx;
+        }
+        let pw: i32 = scalar_width(pp, src, ptype);
+        if pw != 0 {
+            let sc: i32 = eval_expr(pp, src, e, cur, pw);
+            if sc != 0 { return sc; }
+            av[k] = e.cur_val;
+            aw[k] = e.cur_w;
+            aa[k] = 0usize;
+        } else {
+            let sc: i32 = eval_expr(pp, src, e, cur, 0 - 1i32);
+            if sc != 0 { return sc; }
+            aw[k] = 0;
+            aa[k] = conv usize e.cur_val;
+            if !is_copy(pp, src, e, ptype) {
+                do_consume(e, e.cur_org, e.cur_org_a, e.cur_org_b);
+            }
+        }
+        k = k + 1usize;
+        cur = an.nx;
+    }
+    let mut j: usize = 0usize;
+    while j < k {
+        e.*.arg_val[j] = av[j];
+        e.*.arg_w[j] = aw[j];
+        e.*.arg_addr[j] = aa[j];
+        j = j + 1usize;
+    }
+    e.*.arg_n = k;
+    let cs: i32 = call_fn(pp, src, e, fnid);
+    if cs != 0 { return cs; }
+    e.*.cur_org = 0;
+    if e.cur_w == 0 && !is_copy(pp, src, e, e.cur_ty) {
+        let ti: usize = reg_temp(e, conv usize e.cur_val, e.cur_ty);
+        e.*.cur_org = 1;
+        e.*.cur_org_a = ti;
+    }
+    return 0;
+}
 fn eval_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
     let callee: Node = pp.nodes[conv usize nd.a];
+    // A method call `recv.m(args)` parses as a T_CALL with a T_FIELD callee;
+    // dispatch it on the receiver's static nominal type (design 0007 static dispatch,
+    // mirroring the oracle eval.rs:1571-1601).
+    if callee.tag == T_FIELD {
+        return eval_method_call(pp, src, e, i);
+    }
     if span_eq(src, callee.p0, callee.p1, b"trace") {
         let sc: i32 = eval_expr(pp, src, e, nd.b, 4);
         if sc != 0 { return sc; }
@@ -3684,6 +3810,11 @@ pub fn interp_dump(src: [u8], buf: read Buf) -> unit {
         mv_org: 0,
         mv_oa: 0usize,
         mv_ob: 0,
+        disp_sid: [0u32; 64],
+        disp_p0: [0usize; 64],
+        disp_p1: [0usize; 64],
+        disp_fn: [0u32; 64],
+        disp_n: 0usize,
     };
     set_self_span(src, write e);
     // Structural Alloc/AllocVtable identification, computed once at startup like
@@ -3696,6 +3827,7 @@ pub fn interp_dump(src: [u8], buf: read Buf) -> unit {
     synth_param_borrows(write p);
     synth_generic_boxresult(write p, src, write e);
     synth_scalar_nodes(write p, src, write e);
+    build_dispatch(read p, src, write e);
     run_statics(read p, src, write e);
     let mainid: u32 = find_main(read p, src, write e);
     let mut ret: i64 = 0i64;
