@@ -248,6 +248,9 @@ const CORPUS: &[(&str, Shape)] = &[
     ("generics/iface.cnr", Ret),
     ("generics/gimpl.cnr", Ret),
     ("generics/gbound.cnr", Ret),
+    // T5: the `?` operator + `From` widening lowered to a MIR ok/err CFG.
+    ("generics/fromq.cnr", Ret),
+    ("generics/gfromq.cnr", Ret),
     // L-std: std collections Vec/Map/String lowered to MIR CollectionOp. Mirrors
     // the interp S7 corpus; closes the generic/std self-hosting tail.
     ("string_build.cnr", Ret),

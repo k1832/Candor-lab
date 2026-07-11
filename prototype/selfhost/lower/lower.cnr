@@ -25,7 +25,7 @@
 // It is NOT self-checked in this slice, so it uses the full language.
 
 use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl, emit_bytes, decoded_len};
-use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_PARAM, T_SC, T_NAMED, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, T_STRUCT, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, T_STR, T_BYTES, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_ENUMCTOR, T_MATCH, T_PVARIANT, T_WILD, T_BIND, T_VARIANT, T_ARM, T_NAME, T_STATIC, T_RAWPTR, T_BOX, T_BOXRESULT, T_FNPTR, T_FPPARAM, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT, T_APP, T_GENERICVAL, T_IMPL};
+use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_PARAM, T_SC, T_NAMED, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, T_STRUCT, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, T_STR, T_BYTES, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_ENUMCTOR, T_MATCH, T_PVARIANT, T_WILD, T_BIND, T_VARIANT, T_ARM, T_NAME, T_STATIC, T_RAWPTR, T_BOX, T_BOXRESULT, T_FNPTR, T_FPPARAM, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT, T_APP, T_GENERICVAL, T_IMPL, T_TRY};
 use mono::{mono_program};
 
 // ---- fault kind codes (the wire keyword table in serial.rs) -----------------
@@ -1501,6 +1501,257 @@ fn set_self_span(src: [u8], m: write M) -> unit {
 // ---- lowering ---------------------------------------------------------------
 // Forward-declared via mutual recursion; Candor resolves within the module.
 
+// ---- `?` operator + `From` widening (mirrors interp.cnr eval_try/eval_try_from
+// and src/mir/build.rs lower_try). `expr?` on a result-shaped enum branches on the
+// ok/err tag: the ok arm unwraps the (word-sized) ok payload as the `?` value and
+// joins; the err arm `From`-converts the error payload to the enclosing fn's error
+// type and early-returns the widened result (INV-DROP applies via emit_return_drops).
+// The From impl is resolved from the concrete T_IMPL blocks keyed (iface From,
+// target enum == the return error payload, iface-arg-0 enum == the operand error).
+fn ok_variant_index(pp: read P, eid: u32) -> i32 {
+    if eid == 0u32 { return 0 - 1i32; }
+    let enode: Node = pp.nodes[conv usize eid];
+    let mut cur: u32 = enode.b;
+    let mut k: i32 = 0;
+    while cur != 0u32 {
+        let vd: Node = pp.nodes[conv usize cur];
+        if vd.op == 1 { return k; }
+        k = k + 1i32;
+        cur = vd.nx;
+    }
+    return 0 - 1i32;
+}
+fn err_variant_index(pp: read P, eid: u32) -> i32 {
+    if eid == 0u32 { return 0 - 1i32; }
+    let enode: Node = pp.nodes[conv usize eid];
+    let mut cur: u32 = enode.b;
+    let mut k: i32 = 0;
+    while cur != 0u32 {
+        let vd: Node = pp.nodes[conv usize cur];
+        if vd.op != 1 { return k; }
+        k = k + 1i32;
+        cur = vd.nx;
+    }
+    return 0 - 1i32;
+}
+// `impl From[src] for tgt`'s owning concrete T_IMPL node (0 if none): iface name
+// `From`, target enum == `tgt_eid`, iface arg-0 enum == `src_eid`.
+fn find_from_impl(pp: read P, src: [u8], head: u32, src_eid: u32, tgt_eid: u32) -> u32 {
+    let mut cur: u32 = head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_IMPL && nd.a == 0u32 && span_eq(src, nd.p0, nd.p1, b"From") {
+            let te: u32 = enum_id_of(pp, src, head, nd.c);
+            let mut se: u32 = 0u32;
+            if nd.b != 0u32 { se = enum_id_of(pp, src, head, nd.b); }
+            if te == tgt_eid && se == src_eid { return cur; }
+        }
+        cur = pp.nodes[conv usize cur].nx;
+    }
+    return 0u32;
+}
+fn from_method_of(pp: read P, src: [u8], impl_id: u32) -> u32 {
+    let nd: Node = pp.nodes[conv usize impl_id];
+    let mut mc: u32 = nd.d;
+    while mc != 0u32 {
+        let mnd: Node = pp.nodes[conv usize mc];
+        if span_eq(src, mnd.p0, mnd.p1, b"from") { return mc; }
+        mc = mnd.nx;
+    }
+    return 0u32;
+}
+// Render a read place `(place base (proj (field off <ty>)))` over a raw local base.
+fn tryq_field_place(m: write M, pp: read P, src: [u8], base: i32, off: usize, is_scalar: i32, w: i32, fty: u32) -> unit {
+    pool_lit(m, b"(place ");
+    pool_num(m, conv u64 base);
+    pool_lit(m, b" (proj (field ");
+    pool_num(m, conv u64 off);
+    pool_byte(m, 32);
+    if is_scalar != 0 {
+        pool_lit(m, b"(scalar ");
+        pool_scalar(m, w);
+        pool_byte(m, 41);
+    } else {
+        pool_ty(m, pp, src, fty);
+    }
+    pool_lit(m, b")))");
+    return;
+}
+// `(stmt (store (place dst (proj)) (load (place base (proj (field off <ty>))) <ty>)) ...)`.
+fn tryq_load_field(m: write M, pp: read P, src: [u8], dst: i32, base: i32, off: usize, is_scalar: i32, w: i32, fty: u32, sp0: usize, sp1: usize) -> unit {
+    if m.reachable == 0 { return; }
+    let s: usize = m.pool_n;
+    pool_lit(m, b"(stmt (store (place ");
+    pool_num(m, conv u64 dst);
+    pool_lit(m, b" (proj)) (load ");
+    tryq_field_place(m, pp, src, base, off, is_scalar, w, fty);
+    pool_byte(m, 32);
+    if is_scalar != 0 {
+        pool_lit(m, b"(scalar ");
+        pool_scalar(m, w);
+        pool_byte(m, 41);
+    } else {
+        pool_ty(m, pp, src, fty);
+    }
+    pool_lit(m, b")) ");
+    pool_num(m, conv u64 sp0);
+    pool_byte(m, 32);
+    pool_num(m, conv u64 sp1);
+    pool_lit(m, b" false)");
+    chunk_end(m, s);
+    return;
+}
+// The err arm: `From`-widen the operand's error payload into the enclosing fn's
+// error type and build the return enum in `_0` (mirrors interp.cnr eval_try_from).
+// Same result type (no widening) copies the whole operand into `_0`.
+fn lower_try_from(pp: read P, src: [u8], m: write M, s_local: i32, eid: u32, sp0: usize, sp1: usize) -> i32 {
+    let err_idx: i32 = err_variant_index(pp, eid);
+    let evid: u32 = variant_by_index(pp, eid, err_idx);
+    let e1ty: u32 = variant_payload_ty(pp, evid, 0);
+    let e1off: usize = variant_payload_off(pp, src, m.head, evid, 0);
+    let e1_eid: u32 = enum_id_of(pp, src, m.head, e1ty);
+    let rty: u32 = m.ret_tn;
+    let reid: u32 = enum_id_of(pp, src, m.head, rty);
+    if reid == eid {
+        // Same result type: early-return the operand value as-is.
+        if m.reachable != 0 {
+            let s0: usize = m.pool_n;
+            pool_lit(m, b"(stmt (copyval (place 0 (proj)) (place ");
+            pool_num(m, conv u64 s_local);
+            pool_lit(m, b" (proj)) ");
+            pool_ty(m, pp, src, rty);
+            pool_lit(m, b") ");
+            pool_num(m, conv u64 sp0);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 sp1);
+            pool_lit(m, b" false)");
+            chunk_end(m, s0);
+        }
+        return 0;
+    }
+    let ret_err_idx: i32 = err_variant_index(pp, reid);
+    let rvid: u32 = variant_by_index(pp, reid, ret_err_idx);
+    let e2ty: u32 = variant_payload_ty(pp, rvid, 0);
+    let e2off: usize = variant_payload_off(pp, src, m.head, rvid, 0);
+    let e2_eid: u32 = enum_id_of(pp, src, m.head, e2ty);
+    let impl_id: u32 = find_from_impl(pp, src, m.head, e1_eid, e2_eid);
+    if impl_id == 0u32 { m.*.err = 1; return 1; }
+    let from_fn: u32 = from_method_of(pp, src, impl_id);
+    if from_fn == 0u32 { m.*.err = 1; return 1; }
+    // e1 -> the `from` argument: by value if word-sized, else by address.
+    let pw: i32 = scalar_width(pp, src, e1ty);
+    let mut argloc: i32 = 0;
+    if pw != 0 {
+        argloc = new_local(m, pw, 0, 0, 0);
+        tryq_load_field(m, pp, src, argloc, s_local, e1off, 1, pw, 0u32, sp0, sp1);
+        m.*.ak[0] = 1; m.*.av[0] = conv u64 argloc; m.*.an[0] = 0; m.*.aw[0] = pw;
+    } else {
+        argloc = new_local_ptr(m, e1ty, 0, 0, 0);
+        if m.reachable != 0 {
+            let sa: usize = m.pool_n;
+            pool_lit(m, b"(stmt (assign ");
+            pool_num(m, conv u64 argloc);
+            pool_lit(m, b" (ref ");
+            tryq_field_place(m, pp, src, s_local, e1off, 0, 0, e1ty);
+            pool_lit(m, b")) ");
+            pool_num(m, conv u64 sp0);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 sp1);
+            pool_lit(m, b" false)");
+            chunk_end(m, sa);
+        }
+        m.*.ak[0] = 1; m.*.av[0] = conv u64 argloc; m.*.an[0] = 0; m.*.aw[0] = 0;
+    }
+    m.*.na = 1usize;
+    // e2 = from(e1) via the return-slot ABI (a rawptr to the callee's result).
+    let fromloc: i32 = new_local_ptr(m, e2ty, 0, 0, 0);
+    emit_method_call(m, pp, src, fromloc, impl_id, from_fn, sp0, sp1);
+    // Build the return enum in `_0`: tag = error variant, payload = the widened e2.
+    m.*.dbuf_n = 0usize;
+    dbuf_field_scalar(m, 0usize, 9);
+    set_o1(m, 0, conv u64 ret_err_idx, 0, 9);
+    emit_store_dbuf(m, 0, sp0, sp1);
+    m.*.dbuf_n = 0usize;
+    dbuf_field(m, pp, src, e2off, e2ty);
+    if m.reachable != 0 {
+        let sc: usize = m.pool_n;
+        pool_lit(m, b"(stmt (copyval ");
+        place_from_dbuf(m, 0);
+        pool_byte(m, 32);
+        render_deref_place(m, pp, src, fromloc, e2ty);
+        pool_byte(m, 32);
+        pool_ty(m, pp, src, e2ty);
+        pool_lit(m, b") ");
+        pool_num(m, conv u64 sp0);
+        pool_byte(m, 32);
+        pool_num(m, conv u64 sp1);
+        pool_lit(m, b" false)");
+        chunk_end(m, sc);
+    }
+    m.*.dbuf_n = 0usize;
+    return 0;
+}
+// `expr?`: materialize the operand enum, branch on its ok/err tag; the ok arm
+// unwraps the (word-sized) ok payload as the `?` value; the err arm widens+returns.
+fn lower_try(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let opnd: Node = pp.nodes[conv usize nd.a];
+    if opnd.tag != T_CALL { m.*.err = 1; return 1; }
+    let callee: Node = pp.nodes[conv usize opnd.a];
+    if callee.tag != T_ID { m.*.err = 1; return 1; }
+    let sp0: usize = opnd.p0;
+    let sp1: usize = opnd.p1;
+    let mut fnid: u32 = opnd.c;
+    if fnid == 0u32 { fnid = find_fn(pp, src, m.head, callee.p0, callee.p1); }
+    if fnid == 0u32 { m.*.err = 1; return 1; }
+    let fnnd: Node = pp.nodes[conv usize fnid];
+    let mut ety_tn: u32 = 0u32;
+    let cbri: i32 = bret_lookup(m, fnid);
+    if cbri >= 0 { ety_tn = m.bret_tn[conv usize cbri]; }
+    else if fnnd.e != 0u32 { ety_tn = pp.nodes[conv usize fnnd.e].a; }
+    let eid: u32 = enum_id_of(pp, src, m.head, ety_tn);
+    if eid == 0u32 { m.*.err = 1; return 1; }
+    let ok_idx: i32 = ok_variant_index(pp, eid);
+    if ok_idx < 0 { m.*.err = 1; return 1; }
+    // Materialize the operand into a fresh enum temp.
+    let s_local: i32 = new_local_tn(m, ety_tn, 0, 0, 0);
+    m.*.dbuf_n = 0usize;
+    let sc: i32 = lower_into(pp, src, m, nd.a, s_local, ety_tn);
+    if sc != 0 { return sc; }
+    // Read the tag and compare against the ok index.
+    let tagloc: i32 = new_local(m, 9, 0, 0, 0);
+    tryq_load_field(m, pp, src, tagloc, s_local, 0usize, 1, 9, 0u32, sp0, sp1);
+    let cmploc: i32 = new_local(m, W_BOOL, 0, 0, 0);
+    set_o1(m, 1, conv u64 tagloc, 0, 9);
+    set_o2(m, 0, conv u64 ok_idx, 0, 9);
+    st_assign_cmp(m, cmploc, OP_EQ, sp0, sp1);
+    let ok_bb: i32 = new_block(m);
+    let err_bb: i32 = new_block(m);
+    let join: i32 = new_block(m);
+    set_o1(m, 1, conv u64 cmploc, 0, W_BOOL);
+    term_branch(m, ok_bb, err_bb);
+    // Err arm: From-widen + early-return.
+    switch_to(m, err_bb);
+    let scf: i32 = lower_try_from(pp, src, m, s_local, eid, sp0, sp1);
+    if scf != 0 { return scf; }
+    emit_return_drops(pp, src, m);
+    term_return(m);
+    // Ok arm: unwrap the (word-sized) ok payload as the `?` value, then join.
+    switch_to(m, ok_bb);
+    let okvid: u32 = variant_by_index(pp, eid, ok_idx);
+    let okpty: u32 = variant_payload_ty(pp, okvid, 0);
+    let okoff: usize = variant_payload_off(pp, src, m.head, okvid, 0);
+    let okw: i32 = scalar_width(pp, src, okpty);
+    if okw == 0 { m.*.err = 1; return 1; }
+    let valloc: i32 = new_local(m, okw, 0, 0, 0);
+    tryq_load_field(m, pp, src, valloc, s_local, okoff, 1, okw, 0u32, sp0, sp1);
+    term_goto(m, join);
+    switch_to(m, join);
+    set_res_local(m, valloc, okw);
+    set_res_ptr(m, pp, 0u32);
+    return 0;
+}
+
 fn lower_value(pp: read P, src: [u8], m: write M, i: u32, exp_w: i32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
     m.*.cur_p0 = nd.p0;
@@ -1633,6 +1884,9 @@ fn lower_value(pp: read P, src: [u8], m: write M, i: u32, exp_w: i32) -> i32 {
         let sc: i32 = lower_match_core(pp, src, m, i);
         set_res_const(m, 0u64, 0, 0);
         return sc;
+    }
+    if nd.tag == T_TRY {
+        return lower_try(pp, src, m, i);
     }
     if nd.tag == T_FIELD || nd.tag == T_INDEX {
         return lower_place_value(pp, src, m, i);

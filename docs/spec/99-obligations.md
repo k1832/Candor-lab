@@ -2268,3 +2268,50 @@ S1–S6 fixtures + `iface`/`gimpl`/`gbound` byte-exact to the oracle; `selfhost_
 DEFERRED (unchanged): MIR lowering of impl methods (T3), and `?`/`From` runtime (T4). No
 bound checking in interp/mono — `[T: Weighable]`/`[T: Show]` is enforced only by the Rust
 oracle; after instantiation the method call resolves by the concrete nominal.
+
+## T5 — trait-generics, FINAL slice: the `?` operator + `From` widening lowered to a MIR ok/err CFG — the trait-generics arc is COMPLETE (2026-07-11)
+
+The last slice of the trait-generics arc: teach the self-hosted lowering
+(`prototype/selfhost/lower/lower.cnr`) to lower `expr?` (`T_TRY`) + cross-type
+`From` widening to a MIR control-flow graph, landing `fromq` and `gfromq`
+COMPILING on the lower tier (both RET 7, byte-exact to `run_source_real`). Mirrors
+`selfhost/interp/interp.cnr`'s T4 `eval_try`/`eval_try_from`/`find_from_fn` and the
+Rust oracle `src/mir/build.rs` `lower_try`/`lower_try_from`, emitting MIR instead of
+walking.
+
+LOWERING (`lower_try` in the `lower_value` dispatch, gated on `T_TRY`):
+- Materialize the operand call into a fresh enum temp (reusing `lower_into` — the
+  existing agg-call return-slot ABI), read the tag at field 0, `cmp eq` against the
+  ok-variant index (`T_VARIANT.op == 1`), and `Branch` to an ok block / err block
+  with a join block, exactly as `build.rs` orders them.
+- OK arm: load the (word-sized) ok payload as the `?` expression's value and `Goto`
+  the join; the enclosing `let` store then runs in the join block. Aggregate ok
+  payloads stay out of subset (`build.rs` `unsupported`).
+- ERR arm: `lower_try_from` resolves the `From` impl from the concrete `T_IMPL`
+  blocks — `find_from_impl` keys (iface name `From`, target enum == the return
+  error payload e2, iface-arg-0 enum == the operand error payload e1), mirroring
+  interp's `find_from_fn` — then passes e1 to `from` (by value if word-sized, else
+  by address via `(ref …)`), calls it through the return-slot ABI, and builds the
+  return enum in `_0` (tag = the return error variant, payload = the widened e2
+  copied from the call result). `emit_return_drops` + `Return` early-return the
+  widened error (INV-DROP). Same-error-type `?` (`reid == eid`) is a plain
+  `copyval` of the whole operand into `_0` + return, no widening.
+- The gate compares EXECUTION (RET/TRACE/FAULT via deserialize -> `mir::interp`),
+  not wire text, so non-faulting statement spans are free; the From resolution uses
+  the same `enum_id_of` layout view as interp, and `gfromq`'s generic `From` impl is
+  already instantiated concretely by `mono.cnr` (interp T4 proved it), so the lower
+  side only emits the `?`/From CFG.
+
+VERIFICATION (all in isolation): `selfhost_lower` green — `fromq`/`gfromq` added to
+the CORPUS, both byte-exact, and ALL prior lower fixtures (the 8 user-generic +
+`iface`/`gimpl`/`gbound` + the systems + std corpora) UNCHANGED byte-exact;
+`mir_serial` green (unaffected — it exercises the Rust `build.rs` lowering); whole
+suite 591 passed / 0 failed; clippy clean. No edits to `interp.cnr` / `mono.cnr` /
+`src/mir/*` / the self-host parser — the change is contained to `lower.cnr` (+ its
+CORPUS). Runtime: `selfhost_lower` ~176s, `mir_serial` ~2s.
+
+THE TRAIT-GENERICS ARC IS COMPLETE: all 13 generic fixtures — the 8 user-generic
+(`mono3`, `mixed`, `nameval`, `pair`, `genenum`, `arena`, `gdrop_groundfloor`,
+`gdrop`) + `iface`/`gimpl`/`gbound` (interface/impl method dispatch) +
+`fromq`/`gfromq` (`?`/`From`) — now RUN on the interp tier AND COMPILE on the lower
+tier, byte-exact to the Rust oracle on both.
