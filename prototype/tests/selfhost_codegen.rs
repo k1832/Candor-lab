@@ -329,3 +329,47 @@ fn candor_native_codegen_equal_to_oracle_over_aggregate_subset() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// N3: the MOVE/DROP SCHEDULE with trace-on-drop. The S3 drop fixtures mirror
+// lower.cnr's L3 ownership/schedule: owned needs-drop locals drop at scope exit /
+// return / loop-exit in REVERSE declaration order, a struct runs its drop hook
+// (a `call` to the emitted `cnr_drophk_<Name>` asm fn, self address in %rdi) then
+// its needs-drop fields in reverse; a (whole-/partial-)moved path is not dropped;
+// a fault aborts without dropping. The trace-on-drop ORDER is the load-bearing
+// signal. Each codegen -> .s -> cc + aot_runtime.c -> run, vs run_source_real.
+// ---------------------------------------------------------------------------
+
+agg_fixture!(DROP_SINGLE, "drop_single.cnr");
+agg_fixture!(DROP_SCOPE_ORDER, "drop_scope_order.cnr");
+agg_fixture!(DROP_MOVE_SUPPRESS, "drop_move_suppress.cnr");
+agg_fixture!(DROP_PARTIAL_MOVE, "drop_partial_move.cnr");
+agg_fixture!(DROP_MOVE_RETURN, "drop_move_return.cnr");
+agg_fixture!(DROP_BREAK, "drop_break.cnr");
+agg_fixture!(DROP_NESTED, "drop_nested.cnr");
+agg_fixture!(DROP_PARAM, "drop_param.cnr");
+
+const DROP_OK: &[&str] = &[
+    DROP_SINGLE,
+    DROP_SCOPE_ORDER,
+    DROP_MOVE_SUPPRESS,
+    DROP_PARTIAL_MOVE,
+    DROP_MOVE_RETURN,
+    DROP_BREAK,
+    DROP_NESTED,
+    DROP_PARAM,
+];
+
+#[test]
+fn candor_native_codegen_equal_to_oracle_over_drop_subset() {
+    assert!(cc_available(), "cc/linker unavailable: cannot assemble+link the emitted .s");
+    on_big_stack(|| {
+        for (i, src) in DROP_OK.iter().enumerate() {
+            assert_native_eq_oracle(src, true, &format!("drop_ok{i}"));
+        }
+        eprintln!(
+            "selfhost codegen (N3): {} drop-schedule programs codegen -> assemble -> link -> run byte-exact vs oracle (trace-on-drop order load-bearing)",
+            DROP_OK.len()
+        );
+    });
+}

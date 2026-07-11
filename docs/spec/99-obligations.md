@@ -2481,3 +2481,56 @@ round-up. A future `pub fn stride_of` in layout.cnr would let index/array codege
 
 DEFERRED (later native slices): enums/box/pointers, DROP glue for non-copy
 aggregates, slices/collections, and a register allocator.
+
+## N3 — the native self-compile tier's THIRD slice: the MOVE/DROP SCHEDULE with trace-on-drop, byte-exact vs the oracle (2026-07-12)
+
+The third native slice extends `prototype/selfhost/codegen/codegen.cnr` to emit
+the DROP SCHEDULE for non-copy aggregates as x86-64 asm, matching the tree-walking
+oracle (`run_source_real`) byte-exact. It MIRRORS `selfhost/lower/lower.cnr`'s L3
+ownership/schedule logic (proven on the same fixtures) but emits a `call` to a
+drop-hook asm fn instead of a MIR `Drop` op. Gated by the new
+`..._over_drop_subset` test in `prototype/tests/selfhost_codegen.rs`; the N1
+scalar and N2 aggregate gates stay green.
+
+MOVE MASK (mirrors lower.cnr `collect_path`/`mark_moved`/`whole_moved`): a
+per-function side-table of moved (sub-)paths. A non-copy value is marked moved at
+let-init-from-a-place, a by-value aggregate arg, and a return operand
+(`is_copy` from layout.cnr gates it). Paths are (owned-local id, one-level field
+segment); `whole_moved` (no segments) suppresses the whole local's drop,
+`field_moved` (one segment) suppresses just that field in the struct recursion —
+matching the one-level partial move L3 supports.
+
+DROP EMISSION (mirrors lower.cnr `scope_pop_drops`/`emit_return_drops`/
+`emit_loop_exit_drops`): owned needs-drop locals are registered per drop-scope in
+declaration order (their `%rbp` slot holds the value's flat offset). Drops fire at
+scope exit, `return` (all live scopes), and `break`/`continue` (down to the loop's
+captured scope depth), each in REVERSE declaration order, pruned by the move mask.
+`emit_drop_at` runs a struct's drop hook FIRST (whole value) then drops its
+needs-drop fields in reverse (skipping moved ones), recursing for nested structs.
+ABORT-NO-DROP is automatic: a fault `call`s `rt_fault` (which exits) inline, so the
+scope-exit drop asm emitted after the body is simply never reached on the fault
+edge. `return` spills the return value (%rax), runs the return-drops (which clobber
+%rax via hook calls), then reloads it — the returned value itself is move-suppressed.
+
+DROP HOOKS AS ASM FNS: each `struct S { .. } drop(write self) { .. }` is emitted as
+a normal asm fn `cnr_drophk_S` reusing the N1/N2 body codegen (the hook body is a
+plain block that `trace`s `self.field`). `self` is a BORROW: its slot holds the
+flat OFFSET passed in %rdi (NO by-value copy), so `self.field` reads the caller's
+value in place. Dropping a value `call`s `cnr_drophk_S` with the value's flat
+offset (its self address) in %rdi.
+
+GATE / VERIFICATION (isolation): `selfhost_codegen` green — N3: 8 drop-schedule
+programs codegen -> assemble -> link -> run byte-exact to `run_source_real`, with
+the trace-on-drop ORDER load-bearing: drop_single ([7]), drop_scope_order
+(reverse [3,2,1]), drop_move_suppress (moved local pruned, [5]), drop_partial_move
+(one-level field move, [1,2]), drop_move_return (returned value pruned, [42]),
+drop_break (loop-exit drop, [100,2]), drop_nested (hook-first-then-fields-reverse,
+[2,1]), drop_param (owned aggregate param dropped at scope exit, exit 9 trace [3]).
+N1 (29 scalar) + N2 (12 aggregate) stay byte-exact. clippy clean. NO edits to
+`interp.cnr`/`lower.cnr`/`mono.cnr`/`layout.cnr`/`src/backend/*` — contained to
+`codegen.cnr` + its gate. `aot_runtime.c` reused UNCHANGED (drop needs no new
+runtime helper; the hook call is a plain SysV `call`).
+
+DEFERRED (later native slices): drop for arrays-of-drop / enums / box / collections
+(no N3 fixture exercises them), reassignment-drop of an owned aggregate (the move
+mask reassign path is unexercised by the corpus), and a register allocator.

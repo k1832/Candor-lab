@@ -25,8 +25,8 @@
 // is NOT self-checked in this slice, so it uses the full language.
 
 use lexer::{Buf, span_eq};
-use parser::{Node, P, nnew, parse_program, T_FN, T_PARAM, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, T_NAMED, T_SC, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_FIELD, T_INDEX, T_STRUCTLIT, T_ARRAYLIT, T_ARRAYREP, T_FINIT};
-use layout::{ty_size, ty_align, struct_size, struct_align, field_off, field_ty, struct_of_ty, array_len_of};
+use parser::{Node, P, nnew, parse_program, T_FN, T_PARAM, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, T_NAMED, T_SC, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_FIELD, T_INDEX, T_STRUCTLIT, T_ARRAYLIT, T_ARRAYREP, T_FINIT, T_STRUCT};
+use layout::{ty_size, ty_align, struct_size, struct_align, field_off, field_ty, struct_of_ty, array_len_of, needs_drop, is_copy};
 
 // rt_fault kind codes (src/backend/lower.rs kind_code / aot_runtime.c kind_name).
 static FK_OVERFLOW: i32 = 0;
@@ -65,6 +65,23 @@ struct C {
     luk_slot: i32,
     luk_w: i32,
     luk_ty: u32,
+    luk_locid: i32,
+    dloc_slot: [256]i32,
+    dloc_ty: [256]u32,
+    dloc_n: usize,
+    sco_local: [256]i32,
+    sco_mark: [64]usize,
+    sco_depth: usize,
+    sco_n: usize,
+    mv_local: [256]i32,
+    mv_seg_start: [256]usize,
+    mv_seg_count: [256]usize,
+    mv_seg_p0: [512]usize,
+    mv_seg_p1: [512]usize,
+    mv_seg_n: usize,
+    mv_n: usize,
+    loop_depth: [64]usize,
+    bnd_locid: [1024]i32,
     err: i32,
 }
 
@@ -226,13 +243,14 @@ fn smin_of(w: i32) -> i64 {
 }
 
 // ---- bindings (innermost-first, block-scoped by bnd_n save/restore) ----------
-fn bind(c: write C, p0: usize, p1: usize, s: i32, w: i32, ty: u32) -> unit {
+fn bind(c: write C, p0: usize, p1: usize, s: i32, w: i32, ty: u32, locid: i32) -> unit {
     let k: usize = c.bnd_n;
     c.*.bnd_p0[k] = p0;
     c.*.bnd_p1[k] = p1;
     c.*.bnd_slot[k] = s;
     c.*.bnd_w[k] = w;
     c.*.bnd_ty[k] = ty;
+    c.*.bnd_locid[k] = locid;
     c.*.bnd_n = k + 1usize;
     return;
 }
@@ -255,6 +273,7 @@ fn lookup(c: write C, src: [u8], p0: usize, p1: usize) -> i32 {
             c.*.luk_w = c.bnd_w[i];
             c.*.luk_slot = c.bnd_slot[i];
             c.*.luk_ty = c.bnd_ty[i];
+            c.*.luk_locid = c.bnd_locid[i];
             return c.bnd_slot[i];
         }
     }
@@ -268,6 +287,183 @@ fn find_fn(pp: read P, src: [u8], head: u32, p0: usize, p1: usize) -> u32 {
         cur = nd.nx;
     }
     return 0u32;
+}
+
+
+// ---- drop schedule: scopes, move mask, drop emission (mirrors lower.cnr L3) ----
+// Drop-scopes record the owned needs-drop locals bound in them (declaration order);
+// scope exit / return / loop-exit drop them in REVERSE, pruned by the move mask.
+fn scope_push(c: write C) -> unit {
+    c.*.sco_mark[c.sco_depth] = c.sco_n;
+    c.*.sco_depth = c.sco_depth + 1usize;
+    return;
+}
+fn scope_add(c: write C, id: i32) -> unit {
+    c.*.sco_local[c.sco_n] = id;
+    c.*.sco_n = c.sco_n + 1usize;
+    return;
+}
+// Register an owned drop-local (its slot holds the value's flat offset) and add it
+// to the current scope; returns its id (also stored in the binding for move lookup).
+fn reg_dloc(c: write C, slot: i32, ty: u32) -> i32 {
+    let id: i32 = conv i32 c.dloc_n;
+    c.*.dloc_slot[c.dloc_n] = slot;
+    c.*.dloc_ty[c.dloc_n] = ty;
+    c.*.dloc_n = c.dloc_n + 1usize;
+    scope_add(c, id);
+    return id;
+}
+fn whole_moved(c: write C, id: i32) -> bool {
+    let mut k: usize = 0usize;
+    while k < c.mv_n {
+        if c.mv_local[k] == id && c.mv_seg_count[k] == 0usize { return true; }
+        k = k + 1usize;
+    }
+    return false;
+}
+fn field_moved(c: write C, src: [u8], id: i32, fp0: usize, fp1: usize) -> bool {
+    let mut k: usize = 0usize;
+    while k < c.mv_n {
+        if c.mv_local[k] == id && c.mv_seg_count[k] == 1usize {
+            let sg: usize = c.mv_seg_start[k];
+            if name_eq(src, c.mv_seg_p0[sg], c.mv_seg_p1[sg], fp0, fp1) { return true; }
+        }
+        k = k + 1usize;
+    }
+    return false;
+}
+// The (owned-local id, one-level field path) a place names, appending segments to
+// the seg pool; -1 for a non-trackable operand (temp, literal, index, call result).
+fn collect_path(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    if nd.tag == T_PAREN { return collect_path(c, pp, src, nd.a); }
+    if nd.tag == T_ID {
+        let sl: i32 = lookup(c, src, nd.p0, nd.p1);
+        if sl < 0 { return 0i32 - 1i32; }
+        return c.luk_locid;
+    }
+    if nd.tag == T_FIELD {
+        let root: i32 = collect_path(c, pp, src, nd.a);
+        if root < 0 { return 0i32 - 1i32; }
+        let sg: usize = c.mv_seg_n;
+        c.*.mv_seg_p0[sg] = nd.p0;
+        c.*.mv_seg_p1[sg] = nd.p1;
+        c.*.mv_seg_n = sg + 1usize;
+        return root;
+    }
+    return 0i32 - 1i32;
+}
+// Record `i` as moved out (a non-copy by-value consume) so its drop is pruned.
+fn mark_moved(c: write C, pp: read P, src: [u8], i: u32) -> unit {
+    let seg_start: usize = c.mv_seg_n;
+    let root: i32 = collect_path(c, pp, src, i);
+    if root < 0 { c.*.mv_seg_n = seg_start; return; }
+    let k: usize = c.mv_n;
+    c.*.mv_local[k] = root;
+    c.*.mv_seg_start[k] = seg_start;
+    c.*.mv_seg_count[k] = c.mv_seg_n - seg_start;
+    c.*.mv_n = k + 1usize;
+    return;
+}
+// Call a struct's drop hook `cnr_drophk_<Name>` with the value's flat offset (its
+// self address) in %rdi.
+fn drop_hook_call(c: write C, src: [u8], sp0: usize, sp1: usize, off_slot: i32) -> unit {
+    bc(c, 9); bs(c, b"movq "); bslot(c, off_slot); bs(c, b", %rdi"); bc(c, 10);
+    bc(c, 9); bs(c, b"call cnr_drophk_");
+    let mut j: usize = sp0;
+    while j < sp1 { bc(c, conv i32 src[j]); j = j + 1usize; }
+    bc(c, 10);
+    return;
+}
+// Drop the value at flat offset `off_slot` of type `ty`: run its struct drop hook
+// first (whole value), then drop its needs-drop fields in REVERSE. `locid` (>=0 only
+// at the root value) enables the one-level partial-move field skip.
+fn emit_drop_at(c: write C, pp: read P, src: [u8], off_slot: i32, ty: u32, locid: i32) -> unit {
+    let sid: u32 = struct_of_ty(pp, src, c.head, ty);
+    if sid == 0u32 { return; }
+    let snode: Node = pp.nodes[conv usize sid];
+    if snode.c != 0u32 {
+        drop_hook_call(c, src, snode.p0, snode.p1, off_slot);
+    }
+    let mut fp0s: [32]usize = [0usize; 32];
+    let mut fp1s: [32]usize = [0usize; 32];
+    let mut ftys: [32]u32 = [0u32; 32];
+    let mut nf: usize = 0usize;
+    let mut fcur: u32 = snode.b;
+    while fcur != 0u32 {
+        let fd: Node = pp.nodes[conv usize fcur];
+        fp0s[nf] = fd.p0;
+        fp1s[nf] = fd.p1;
+        ftys[nf] = fd.a;
+        nf = nf + 1usize;
+        fcur = fd.nx;
+    }
+    let mut idx: usize = nf;
+    while idx > 0usize {
+        idx = idx - 1usize;
+        let fty: u32 = ftys[idx];
+        let mut skip: bool = false;
+        if locid >= 0 && field_moved(c, src, locid, fp0s[idx], fp1s[idx]) { skip = true; }
+        if !skip && needs_drop(pp, src, c.head, fty) {
+            let off: usize = field_off(pp, src, c.head, sid, fp0s[idx], fp1s[idx]);
+            reload_rax(c, off_slot);
+            if off != 0usize {
+                bc(c, 9); bs(c, b"addq $"); bn(c, conv u64 off); bs(c, b", %rax"); bc(c, 10);
+            }
+            let fslot: i32 = spill(c);
+            emit_drop_at(c, pp, src, fslot, fty, 0i32 - 1i32);
+        }
+    }
+    return;
+}
+fn emit_drop_local(c: write C, pp: read P, src: [u8], id: i32) -> unit {
+    if whole_moved(c, id) { return; }
+    let slot: i32 = c.dloc_slot[conv usize id];
+    let ty: u32 = c.dloc_ty[conv usize id];
+    emit_drop_at(c, pp, src, slot, ty, id);
+    return;
+}
+// Scope exit: drop this scope's owned locals in reverse declaration order.
+fn scope_pop_drops(c: write C, pp: read P, src: [u8]) -> unit {
+    c.*.sco_depth = c.sco_depth - 1usize;
+    let start: usize = c.sco_mark[c.sco_depth];
+    let mut i: usize = c.sco_n;
+    while i > start {
+        i = i - 1usize;
+        emit_drop_local(c, pp, src, c.sco_local[i]);
+    }
+    c.*.sco_n = start;
+    return;
+}
+// return: drop every live scope's locals innermost-first (no scope pop).
+fn emit_return_drops(c: write C, pp: read P, src: [u8]) -> unit {
+    let mut i: usize = c.sco_n;
+    while i > 0usize {
+        i = i - 1usize;
+        emit_drop_local(c, pp, src, c.sco_local[i]);
+    }
+    return;
+}
+// break/continue: drop the locals in scopes opened inside the innermost loop body.
+fn emit_loop_exit_drops(c: write C, pp: read P, src: [u8], keep: usize) -> unit {
+    let start: usize = c.sco_mark[keep];
+    let mut i: usize = c.sco_n;
+    while i > start {
+        i = i - 1usize;
+        emit_drop_local(c, pp, src, c.sco_local[i]);
+    }
+    return;
+}
+// The byte span of `self` in the source (the hook binds `self` by these bytes, so
+// the hook body's `self` place resolves). Same trick as lower.cnr set_self_span.
+fn find_self(src: [u8]) -> usize {
+    let n: usize = len(src);
+    let mut i: usize = 0usize;
+    while i + 4usize <= n {
+        if src[i] == 115u8 && src[i + 1usize] == 101u8 && src[i + 2usize] == 108u8 && src[i + 3usize] == 102u8 { return i; }
+        i = i + 1usize;
+    }
+    return 0usize;
 }
 
 // ---- fault edges ------------------------------------------------------------
@@ -669,6 +865,7 @@ fn gen_value(c: write C, pp: read P, src: [u8], i: u32, exp_w: i32) -> i32 {
     if nd.tag == T_RETURN { let _s: i32 = gen_return(c, pp, src, i); return 12; }
     if nd.tag == T_BREAK {
         if c.loop_n == 0usize { c.*.err = 1; return 12; }
+        emit_loop_exit_drops(c, pp, src, c.loop_depth[c.loop_n - 1usize]);
         bc(c, 9);
         bs(c, b"jmp ");
         blabel_ref(c, c.loop_brk[c.loop_n - 1usize]);
@@ -677,6 +874,7 @@ fn gen_value(c: write C, pp: read P, src: [u8], i: u32, exp_w: i32) -> i32 {
     }
     if nd.tag == T_CONTINUE {
         if c.loop_n == 0usize { c.*.err = 1; return 12; }
+        emit_loop_exit_drops(c, pp, src, c.loop_depth[c.loop_n - 1usize]);
         bc(c, 9);
         bs(c, b"jmp ");
         blabel_ref(c, c.loop_cont[c.loop_n - 1usize]);
@@ -1078,6 +1276,7 @@ fn gen_call(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
             let _at: u32 = gen_agg(c, pp, src, argc, pty);
         }
         argslots[na] = spill(c);
+        if pw == 0 && !is_copy(pp, src, c.head, pty) { mark_moved(c, pp, src, argc); }
         na = na + 1usize;
         argc = pp.nodes[conv usize argc].nx;
         parc = pp.nodes[conv usize parc].nx;
@@ -1144,6 +1343,7 @@ fn gen_while(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
     bc(c, 10);
     c.*.loop_cont[c.loop_n] = headl;
     c.*.loop_brk[c.loop_n] = exitl;
+    c.*.loop_depth[c.loop_n] = c.sco_depth;
     c.*.loop_n = c.loop_n + 1usize;
     let _s1: i32 = gen_block(c, pp, src, nd.b);
     c.*.loop_n = c.loop_n - 1usize;
@@ -1162,6 +1362,7 @@ fn gen_loop(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
     blabel_def(c, bodyl);
     c.*.loop_cont[c.loop_n] = bodyl;
     c.*.loop_brk[c.loop_n] = exitl;
+    c.*.loop_depth[c.loop_n] = c.sco_depth;
     c.*.loop_n = c.loop_n + 1usize;
     let _s1: i32 = gen_block(c, pp, src, nd.a);
     c.*.loop_n = c.loop_n - 1usize;
@@ -1204,11 +1405,17 @@ fn gen_return(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
             emit_canon(c, c.ret_w);
         } else if c.ret_ty != 0u32 && ty_size(pp, src, c.head, c.ret_ty) > 0usize {
             let _t: u32 = gen_agg(c, pp, src, nd.a, c.ret_ty);
+            if !is_copy(pp, src, c.head, c.ret_ty) { mark_moved(c, pp, src, nd.a); }
         } else {
             let _w: i32 = gen_value(c, pp, src, nd.a, c.ret_w);
             emit_canon(c, c.ret_w);
         }
+        // The returned value is consumed (moved out); drop the rest, preserving it.
+        let rs: i32 = spill(c);
+        emit_return_drops(c, pp, src);
+        reload_rax(c, rs);
     } else {
+        emit_return_drops(c, pp, src);
         bi(c, b"xorl %eax, %eax");
     }
     emit_epilogue(c);
@@ -1228,8 +1435,13 @@ fn gen_stmt(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
             if nd.b != 0u32 {
                 let _t: u32 = gen_agg(c, pp, src, nd.b, tn);
                 emit_copy_to(c, s, 0usize, size);
+                if !is_copy(pp, src, c.head, tn) { mark_moved(c, pp, src, nd.b); }
             }
-            bind(c, nd.p0, nd.p1, s, 0, tn);
+            let mut lid: i32 = 0i32 - 1i32;
+            if needs_drop(pp, src, c.head, tn) && !is_copy(pp, src, c.head, tn) {
+                lid = reg_dloc(c, s, tn);
+            }
+            bind(c, nd.p0, nd.p1, s, 0, tn, lid);
             return 0;
         }
         let mut w: i32 = scalar_width(pp, src, tn);
@@ -1240,7 +1452,7 @@ fn gen_stmt(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
             emit_canon(c, w);
             store_slot(c, s);
         }
-        bind(c, nd.p0, nd.p1, s, w, tn);
+        bind(c, nd.p0, nd.p1, s, w, tn, 0i32 - 1i32);
         return 0;
     }
     if nd.tag == T_ASSIGN {
@@ -1279,12 +1491,14 @@ fn gen_stmt(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
 
 fn gen_block(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
     let bsave: usize = c.bnd_n;
+    scope_push(c);
     let nd: Node = pp.nodes[conv usize i];
     let mut cur: u32 = nd.a;
     while cur != 0u32 {
         let _s: i32 = gen_stmt(c, pp, src, cur);
         cur = pp.nodes[conv usize cur].nx;
     }
+    scope_pop_drops(c, pp, src);
     c.*.bnd_n = bsave;
     return 0;
 }
@@ -1298,11 +1512,18 @@ fn gen_fn(c: write C, pp: read P, src: [u8], fnid: u32) -> unit {
     c.*.slot_max = 0usize;
     c.*.loop_n = 0usize;
     c.*.regime = 0;
+    c.*.sco_n = 0usize;
+    c.*.sco_depth = 0usize;
+    c.*.mv_n = 0usize;
+    c.*.mv_seg_n = 0usize;
+    c.*.dloc_n = 0usize;
     let mut retn: u32 = 0u32;
     if nd.e != 0u32 { retn = pp.nodes[conv usize nd.e].a; }
     c.*.ret_w = scalar_width(pp, src, retn);
     c.*.ret_ty = retn;
-    // params: slot per param (in declaration order), bound to their names.
+    // params: slot per param (in declaration order), bound to their names. An owned
+    // aggregate param (by value) that needs drop is registered in the param scope.
+    scope_push(c);
     let mut pslots: [16]i32 = [0i32; 16];
     let mut ptys: [16]u32 = [0u32; 16];
     let mut pc: u32 = nd.c;
@@ -1311,7 +1532,11 @@ fn gen_fn(c: write C, pp: read P, src: [u8], fnid: u32) -> unit {
         let pn: Node = pp.nodes[conv usize pc];
         let pw: i32 = scalar_width(pp, src, pn.a);
         let s: i32 = newslot(c);
-        bind(c, pn.p0, pn.p1, s, pw, pn.a);
+        let mut plid: i32 = 0i32 - 1i32;
+        if pw == 0 && needs_drop(pp, src, c.head, pn.a) && !is_copy(pp, src, c.head, pn.a) {
+            plid = reg_dloc(c, s, pn.a);
+        }
+        bind(c, pn.p0, pn.p1, s, pw, pn.a, plid);
         pslots[np] = s;
         ptys[np] = pn.a;
         np = np + 1usize;
@@ -1346,16 +1571,24 @@ fn gen_fn(c: write C, pp: read P, src: [u8], fnid: u32) -> unit {
         k2 = k2 + 1usize;
     }
     let _b: i32 = gen_block(c, pp, src, nd.d);
-    // implicit return (unit / fall-through): _0 defaults to 0.
+    // implicit return (fall-through): drop the param scope, then default _0 to 0.
+    scope_pop_drops(c, pp, src);
     bi(c, b"xorl %eax, %eax");
     emit_epilogue(c);
     // Now the frame size is known; stream the function.
+    emit_fn_streaming(c, src, 0, nd.p0, nd.p1);
+    return;
+}
+// Stream a compiled function: `cnr_[drophk_]<name>:` + SysV prologue (frame sized
+// from slot_max) + the buffered body. `hook != 0` emits a drop-hook name.
+fn emit_fn_streaming(c: write C, src: [u8], hook: i32, p0: usize, p1: usize) -> unit {
     let mut frame: usize = 8usize * c.slot_max;
     frame = ((frame + 15usize) / 16usize) * 16usize;
     trace(10);
-    trace(99); trace(110); trace(114); trace(95); // "cnr_"
-    let mut j: usize = nd.p0;
-    while j < nd.p1 {
+    emit_bytes_direct(b"cnr_");
+    if hook != 0 { emit_bytes_direct(b"drophk_"); }
+    let mut j: usize = p0;
+    while j < p1 {
         trace(conv i64 src[j]);
         j = j + 1usize;
     }
@@ -1374,6 +1607,34 @@ fn gen_fn(c: write C, pp: read P, src: [u8], fnid: u32) -> unit {
         trace(conv i64 c.bbuf[bi2]);
         bi2 = bi2 + 1usize;
     }
+    return;
+}
+// Emit a struct drop hook `drop(write self) { ... }` as an asm fn `cnr_drophk_<Name>`.
+// `self` is a borrow: its slot holds the flat offset passed in %rdi (no by-value
+// copy), so `self.field` reads/writes the caller's value. Reuses the N1/N2 body gen.
+fn gen_hook(c: write C, pp: read P, src: [u8], sid: u32) -> unit {
+    let snode: Node = pp.nodes[conv usize sid];
+    c.*.bbuf_n = 0usize;
+    c.*.bnd_n = 0usize;
+    c.*.slot_next = 0usize;
+    c.*.slot_max = 0usize;
+    c.*.loop_n = 0usize;
+    c.*.regime = 0;
+    c.*.sco_n = 0usize;
+    c.*.sco_depth = 0usize;
+    c.*.mv_n = 0usize;
+    c.*.mv_seg_n = 0usize;
+    c.*.dloc_n = 0usize;
+    c.*.ret_w = 0;
+    c.*.ret_ty = 0u32;
+    let selfslot: i32 = newslot(c);
+    bc(c, 9); bs(c, b"movq %rdi, "); bslot(c, selfslot); bc(c, 10);
+    let sp0: usize = find_self(src);
+    bind(c, sp0, sp0 + 4usize, selfslot, 0, sid, 0i32 - 1i32);
+    let _b: i32 = gen_block(c, pp, src, snode.c);
+    bi(c, b"xorl %eax, %eax");
+    emit_epilogue(c);
+    emit_fn_streaming(c, src, 1, snode.p0, snode.p1);
     return;
 }
 
@@ -1437,6 +1698,23 @@ pub fn codegen_dump(src: [u8], buf: read Buf) -> unit {
         luk_slot: 0,
         luk_w: 0,
         luk_ty: 0u32,
+        luk_locid: 0i32 - 1i32,
+        dloc_slot: [0i32; 256],
+        dloc_ty: [0u32; 256],
+        dloc_n: 0usize,
+        sco_local: [0i32; 256],
+        sco_mark: [0usize; 64],
+        sco_depth: 0usize,
+        sco_n: 0usize,
+        mv_local: [0i32; 256],
+        mv_seg_start: [0usize; 256],
+        mv_seg_count: [0usize; 256],
+        mv_seg_p0: [0usize; 512],
+        mv_seg_p1: [0usize; 512],
+        mv_seg_n: 0usize,
+        mv_n: 0usize,
+        loop_depth: [0usize; 64],
+        bnd_locid: [0i32; 1024],
         err: 0,
     };
     // header: entry alias jumps to the compiled `main`.
@@ -1454,6 +1732,15 @@ pub fn codegen_dump(src: [u8], buf: read Buf) -> unit {
             gen_fn(write c, read p, src, cur);
         }
         cur = nd.nx;
+    }
+    // Struct drop hooks as asm fns (called by the drop schedule above).
+    let mut curh: u32 = head;
+    while curh != 0u32 {
+        let ndh: Node = p.nodes[conv usize curh];
+        if ndh.tag == T_STRUCT && ndh.c != 0u32 {
+            gen_hook(write c, read p, src, curh);
+        }
+        curh = ndh.nx;
     }
     return;
 }
