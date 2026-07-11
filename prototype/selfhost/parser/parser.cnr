@@ -62,6 +62,8 @@ pub static T_STRUCT: i32 = 2;
 pub static T_ENUM: i32 = 3;
 pub static T_STATIC: i32 = 4;
 pub static T_USE: i32 = 5;
+pub static T_INTERFACE: i32 = 6;
+pub static T_IMPL: i32 = 7;
 pub static T_SC: i32 = 10;
 pub static T_NAMED: i32 = 11;
 pub static T_APP: i32 = 12;
@@ -131,6 +133,7 @@ pub static T_FINIT: i32 = 104;
 pub static T_TPARAM: i32 = 105;
 pub static T_FPPARAM: i32 = 106;
 pub static T_NAME: i32 = 107;
+pub static T_METHODSIG: i32 = 108;
 pub static T_RET: i32 = 111;
 
 pub static OP_ADD: i32 = 1;
@@ -1991,6 +1994,264 @@ fn parse_static(p: write P, src: [u8], buf: read Buf) -> u32 {
     return push_node(p, nd);
 }
 
+// ---- interface / impl items (design 0007 2.3, 4.1; parser.rs:250-424) --------
+// `interface`/`impl`/`for` are CONTEXTUAL identifiers (kind-1 tokens), not hard
+// keywords -- matching the Rust reference lexer -- so they are recognized by
+// `ids` at item position, leaving the token stream byte-identical to slice 1.
+
+// Consume a leading `self` receiver, returning its mode (0 take, 1 read,
+// 2 write); -1 when the method has no receiver (an associated function, e.g.
+// `From::from`, parser.rs:308-335).
+fn parse_self_mode(p: write P, src: [u8], buf: read Buf) -> i32 {
+    let t0: Tok = tok_at(buf, p.pos);
+    let t1: Tok = tok_at(buf, p.pos + 1usize);
+    if kw(src, t0, b"self") {
+        adv(p, buf);
+        return 0;
+    }
+    if kw(src, t0, b"read") && kw(src, t1, b"self") {
+        adv(p, buf);
+        adv(p, buf);
+        return 1;
+    }
+    if kw(src, t0, b"write") && kw(src, t1, b"self") {
+        adv(p, buf);
+        adv(p, buf);
+        return 2;
+    }
+    if kw(src, t0, b"take") && kw(src, t1, b"self") {
+        adv(p, buf);
+        adv(p, buf);
+        return 0;
+    }
+    return 0 - 1;
+}
+
+// The non-`self` parameters of a method, as a T_PARAM chain (head via nx). After
+// a `self` receiver they are comma-led; otherwise a standard parameter list.
+fn parse_method_params(p: write P, src: [u8], buf: read Buf, had_self: bool) -> u32 {
+    let mut phead: u32 = 0u32;
+    let mut ptail: u32 = 0u32;
+    if had_self {
+        loop {
+            if !eat(p, buf, 16) {
+                break;
+            }
+            if ck(p, buf) == 11 {
+                break;
+            }
+            let pm: u32 = parse_param(p, src, buf);
+            if phead == 0u32 {
+                phead = pm;
+            } else {
+                set_next(p, ptail, pm);
+            }
+            ptail = pm;
+        }
+    } else {
+        loop {
+            if ck(p, buf) == 11 {
+                break;
+            }
+            let pm: u32 = parse_param(p, src, buf);
+            if phead == 0u32 {
+                phead = pm;
+            } else {
+                set_next(p, ptail, pm);
+            }
+            ptail = pm;
+            if !eat(p, buf, 16) {
+                break;
+            }
+        }
+    }
+    return phead;
+}
+
+// One interface method signature: `fn name(SELF, params) [alloc] [-> ret] ;`.
+// T_METHODSIG: name span in p0/p1, op = self mode (-1 = none), suf = alloc flag,
+// a = non-self param chain, e = return type (0 = none).
+fn parse_method_sig(p: write P, src: [u8], buf: read Buf) -> u32 {
+    expect(p, buf, 2);
+    let nt: Tok = tok_at(buf, p.pos);
+    adv(p, buf);
+    expect(p, buf, 10);
+    let smode: i32 = parse_self_mode(p, src, buf);
+    let phead: u32 = parse_method_params(p, src, buf, smode >= 0);
+    expect(p, buf, 11);
+    let mut alloc: i32 = 0;
+    let at: Tok = tok_at(buf, p.pos);
+    if ids(src, at, b"alloc") {
+        adv(p, buf);
+        alloc = 1;
+    }
+    let mut ret: u32 = 0u32;
+    if ck(p, buf) == 22 {
+        adv(p, buf);
+        ret = parse_ret_ty(p, src, buf);
+    }
+    expect(p, buf, 19);
+    let mut nd: Node = nnew(T_METHODSIG);
+    nd.p0 = nt.start;
+    nd.p1 = nt.end;
+    nd.op = smode;
+    nd.suf = alloc;
+    nd.a = phead;
+    nd.e = ret;
+    return push_node(p, nd);
+}
+
+// `interface Name[params] { method-sigs }`. T_INTERFACE: name span in p0/p1,
+// a = type-param chain, b = T_METHODSIG chain.
+fn parse_interface(p: write P, src: [u8], buf: read Buf) -> u32 {
+    adv(p, buf);
+    let nt: Tok = tok_at(buf, p.pos);
+    adv(p, buf);
+    parse_decl_brackets(p, src, buf);
+    let tparams: u32 = p.dtp;
+    expect(p, buf, 12);
+    let mut mhead: u32 = 0u32;
+    let mut mtail: u32 = 0u32;
+    loop {
+        if ck(p, buf) == 13 {
+            break;
+        }
+        if ck(p, buf) == 99 {
+            break;
+        }
+        let ms: u32 = parse_method_sig(p, src, buf);
+        if mhead == 0u32 {
+            mhead = ms;
+        } else {
+            set_next(p, mtail, ms);
+        }
+        mtail = ms;
+    }
+    expect(p, buf, 13);
+    let mut nd: Node = nnew(T_INTERFACE);
+    nd.p0 = nt.start;
+    nd.p1 = nt.end;
+    nd.a = tparams;
+    nd.b = mhead;
+    return push_node(p, nd);
+}
+
+// An impl method: a free `fn` whose first parameter is a synthetic `self`
+// receiver (parser.rs:387-396). Its type is a `Self` placeholder (a T_NAMED)
+// resolved per-instance by the later monomorphization slice.
+fn parse_impl_method(p: write P, src: [u8], buf: read Buf) -> u32 {
+    expect(p, buf, 2);
+    let nt: Tok = tok_at(buf, p.pos);
+    adv(p, buf);
+    expect(p, buf, 10);
+    let st: Tok = tok_at(buf, p.pos);
+    let smode: i32 = parse_self_mode(p, src, buf);
+    let rest: u32 = parse_method_params(p, src, buf, smode >= 0);
+    expect(p, buf, 11);
+    let mut phead: u32 = rest;
+    if smode >= 0 {
+        let mut sty: Node = nnew(T_NAMED);
+        sty.p0 = st.start;
+        sty.p1 = st.end;
+        let styi: u32 = push_node(p, sty);
+        let mut sp: Node = nnew(T_PARAM);
+        sp.p0 = st.start;
+        sp.p1 = st.end;
+        sp.op = smode;
+        sp.b = 0u32;
+        sp.a = styi;
+        let spi: u32 = push_node(p, sp);
+        set_next(p, spi, rest);
+        phead = spi;
+    }
+    let mut flags: i32 = 0;
+    let al: Tok = tok_at(buf, p.pos);
+    if ids(src, al, b"alloc") {
+        adv(p, buf);
+        flags = flags + 1;
+    }
+    let mut ret: u32 = 0u32;
+    if ck(p, buf) == 22 {
+        adv(p, buf);
+        ret = parse_ret_ty(p, src, buf);
+    }
+    let body: u32 = parse_block(p, src, buf);
+    let mut nd: Node = nnew(T_FN);
+    nd.p0 = nt.start;
+    nd.p1 = nt.end;
+    nd.op = flags;
+    nd.a = 0u32;
+    nd.b = 0u32;
+    nd.c = phead;
+    nd.d = body;
+    nd.e = ret;
+    return push_node(p, nd);
+}
+
+// `impl[params] Iface[args] for Target { methods }`. T_IMPL: iface name span in
+// p0/p1, a = type-param chain, b = iface type-arg chain, c = target type,
+// d = impl-method (T_FN) chain. Generic type-params come free via decl-brackets.
+fn parse_impl(p: write P, src: [u8], buf: read Buf) -> u32 {
+    adv(p, buf);
+    parse_decl_brackets(p, src, buf);
+    let tparams: u32 = p.dtp;
+    let ifn: Tok = tok_at(buf, p.pos);
+    adv(p, buf);
+    let mut ahead: u32 = 0u32;
+    let mut atail: u32 = 0u32;
+    if ck(p, buf) == 14 {
+        adv(p, buf);
+        loop {
+            if ck(p, buf) == 15 {
+                break;
+            }
+            let ar: u32 = parse_type(p, src, buf);
+            if ahead == 0u32 {
+                ahead = ar;
+            } else {
+                set_next(p, atail, ar);
+            }
+            atail = ar;
+            if !eat(p, buf, 16) {
+                break;
+            }
+        }
+        expect(p, buf, 15);
+    }
+    let ft: Tok = tok_at(buf, p.pos);
+    if ids(src, ft, b"for") {
+        adv(p, buf);
+    }
+    let target: u32 = parse_type(p, src, buf);
+    expect(p, buf, 12);
+    let mut mhead: u32 = 0u32;
+    let mut mtail: u32 = 0u32;
+    loop {
+        if ck(p, buf) == 13 {
+            break;
+        }
+        if ck(p, buf) == 99 {
+            break;
+        }
+        let m: u32 = parse_impl_method(p, src, buf);
+        if mhead == 0u32 {
+            mhead = m;
+        } else {
+            set_next(p, mtail, m);
+        }
+        mtail = m;
+    }
+    expect(p, buf, 13);
+    let mut nd: Node = nnew(T_IMPL);
+    nd.p0 = ifn.start;
+    nd.p1 = ifn.end;
+    nd.a = tparams;
+    nd.b = ahead;
+    nd.c = target;
+    nd.d = mhead;
+    return push_node(p, nd);
+}
+
 fn parse_item(p: write P, src: [u8], buf: read Buf) -> u32 {
     let mut copyf: i32 = 0;
     let ct: Tok = tok_at(buf, p.pos);
@@ -1999,6 +2260,12 @@ fn parse_item(p: write P, src: [u8], buf: read Buf) -> u32 {
         copyf = 1;
     }
     let t: Tok = tok_at(buf, p.pos);
+    if copyf == 0 && ids(src, t, b"interface") {
+        return parse_interface(p, src, buf);
+    }
+    if copyf == 0 && ids(src, t, b"impl") {
+        return parse_impl(p, src, buf);
+    }
     if kw(src, t, b"struct") {
         return parse_struct(p, src, buf, copyf);
     }
@@ -2959,4 +3226,13 @@ pub fn parse_dump(src: [u8], buf: read Buf) -> unit {
     trace(41);
     emit_nl();
     return;
+}
+
+// Parse `src` (already lexed into `buf`) and return the arena node count. A
+// non-dumping entry point for gates that only need to prove a module PARSES
+// (e.g. the interface/impl trait fixtures) without an oracle AST to match.
+pub fn parse_count(src: [u8], buf: read Buf) -> usize {
+    let mut p: P = P { nodes: [nnew(0); 49152], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
+    let _head: u32 = parse_program(write p, src, buf);
+    return conv usize p.n;
 }

@@ -2164,3 +2164,59 @@ The four fix-now findings are resolved; each verified per-gate in isolation, byt
   checker/analyses self-checks (which lex interp.cnr into the arena) then pass without overflow.
   The real fix (module-split interp.cnr / Vec-backed arena) stays deferred
   (F-LAYOUT-EXTRACT / token-cap obligation). Capacity-only; every gate byte-exact.
+
+## T1 — trait-generics front-end: `interface`/`impl` parsing in the self-host parser (2026-07-11)
+
+The FIRST slice of the trait-generics arc, closing the FRONT-END gap flagged by OBL-G1 /
+OBL-L-GEN (the 5 deferred fixtures `iface`/`gimpl`/`gbound`/`fromq`/`gfromq` failed only
+because the self-host PARSER did not parse `interface`/`impl` items). This slice adds that
+parsing to `selfhost/parser/parser.cnr` SOLO; it lands nothing runnable alone — mono +
+interp + lower dispatch of impl methods / `?` / `From` stays DEFERRED to the T2+ slices —
+but it unblocks them.
+
+TOKENIZATION: `interface`, `impl`, and `for` are CONTEXTUAL identifiers (kind-1 tokens),
+not hard keywords — exactly as the Rust reference lexer treats them (`src/real/token.rs`
+has no such keywords; `parser.rs` dispatches on `at_ident("interface"/"impl"/"for")`). The
+self-host lexer is UNCHANGED, so the lexer gate's byte-exact token stream is preserved; the
+new item forms are recognized by the parser's existing `ids(src, t, b"...")` contextual
+check, mirroring how `use`/`pub` already work.
+
+NODE DESIGN (arena tags): `T_INTERFACE` (6), `T_IMPL` (7), `T_METHODSIG` (108).
+- `T_INTERFACE`: name span in p0/p1, `a` = type-param chain (free via `parse_decl_brackets`),
+  `b` = `T_METHODSIG` chain.
+- `T_METHODSIG`: name span, `op` = self-receiver mode (0 take / 1 read / 2 write, −1 = no
+  receiver → associated fn like `From::from`), `suf` = alloc flag, `a` = non-self params,
+  `e` = return type.
+- `T_IMPL`: iface-name span, `a` = type-params, `b` = iface type-arg chain, `c` = target
+  type, `d` = impl-method (`T_FN`) chain. Each impl method is a normal `T_FN` with a
+  SYNTHETIC `self` param prepended (a `Self`-placeholder `T_NAMED` type), mirroring the
+  reference's `parse_impl_method` (parser.rs:387-396).
+New parse fns: `parse_self_mode`, `parse_method_params`, `parse_method_sig`,
+`parse_interface`, `parse_impl_method`, `parse_impl`; `parse_item` dispatches
+`interface`/`impl` before the struct/enum/fn/static match. The self-receiver mode is carried
+in LOCALS (not a new `P` field) deliberately: `P` is imported by checker.cnr/analyses.cnr, so
+a new field would have broken their `P{}` literals — the change stays contained to parser.cnr.
+Associated-type members (`type Item;` / `type Item = T;`) are NOT parsed (no fixture needs
+them this slice); deferred.
+
+DUMP: the AST-dump `emit_node` gains NO cases for the new tags — the parser gate's corpus
+has no interface/impl fixtures, so those nodes are never traversed and the dump stays
+byte-exact; adding emit cases would be speculative (the oracle renderer has no canonical form
+for out-of-subset items to match against).
+
+SMOKE GATE (`tests/selfhost_traitparse.rs`): a new `pub fn parse_count(src, buf) -> usize`
+(non-dumping entry point) lets the harness lex+parse each of the 5 trait fixtures through the
+self-host lexer+parser and return the arena node count; the gate asserts a completed run (no
+fault / parse-error / check-error) with a non-trivial count, proving the interface/impl nodes
+land in the arena.
+
+VERIFICATION (all in isolation): `selfhost_parser` (AST-dump byte-exact) green — existing
+fixtures unaffected; `selfhost_checker` green including
+`candor_checker_checks_parser_source_clean_via_import_resolution` (parser.cnr self-checks
+name-res-clean under the self-host checker); `selfhost_analyses` green including
+`candor_analyses_check_parser_source_clean_fixpoint` (move/init-clean); the new
+`selfhost_traitparse` smoke gate green (all 5 fixtures parse); clippy clean.
+
+DEFERRED to later slices (unchanged): mono impl-method mangling/dispatch, interp method
+dispatch + `?`/`From` runtime, and the MIR lowering of impl methods (T2/T3+). This slice is
+purely the parser front-end that those slices build on.
