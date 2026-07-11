@@ -356,7 +356,8 @@ fn candor_analyses_check_parser_source_clean_fixpoint() {
 
 /// FIXPOINT GATE: the self-hosted ANALYSES core, run over the self-hosted
 /// INTERPRETER's own source (`interp.cnr`, the LARGEST self-host module --
-/// ~3083 lines / 25736 tokens), emits an EMPTY covered-diagnostic set across ALL
+/// ~3721 lines / ~32712 tokens, a thin ~56-token margin under the 32768 arena cap),
+/// emits an EMPTY covered-diagnostic set across ALL
 /// its families -- byte-equal to the module-aware Rust oracle over the real
 /// lexer+parser+analyses+interp tree. This is the SIXTH -- and final -- module
 /// under the analyses self-check, closing the fixpoint: every self-host module,

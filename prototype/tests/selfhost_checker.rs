@@ -389,10 +389,12 @@ fn candor_checker_checks_parser_source_clean_via_import_resolution() {
 /// and emits an EMPTY covered-diagnostic (E0102/E0103) set, byte-equal to the
 /// MODULE-AWARE reference oracle over the lexer+parser+checker+interp tree.
 ///
-/// interp.cnr is the largest self-host module (~3083 lines / 25736 tokens) and the
-/// SIXTH -- and final -- module to come under the name-resolution self-check,
-/// closing the checker fixpoint across every self-host module. It fits the harness
-/// arenas unchanged (25736 tokens < the 32768 token buffer / node arena).
+/// interp.cnr is the largest self-host module (~3721 lines / ~32712 tokens after the
+/// I-std collection port) and the SIXTH -- and final -- module to come under the
+/// name-resolution self-check, closing the checker fixpoint across every self-host
+/// module. It fits the harness arenas (~32712 tokens < the 32768 token buffer / node
+/// arena) -- but the margin is now THIN (~56 tokens); further interp.cnr growth will
+/// need the [32768] arena raised (or interp.cnr split) or this gate faults loudly.
 #[test]
 fn candor_checker_checks_interp_source_clean_via_import_resolution() {
     on_big_stack(|| {

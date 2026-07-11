@@ -5,12 +5,20 @@ authorship: memory-safe, explicit where meaning lives, locally verifiable, with
 source-declared semantics and a compiler built as a conversation partner rather
 than a gatekeeper.
 
-**Status: the first-version scope is complete and RUNNING, and Candor
-checks, runs, *and compiles* its own kind of program.** Three self-hosting
-tiers are closed — the same systems-heavy corpus (a bump allocator, an
+**Status: the first-version scope is complete and RUNNING, and Candor's
+toolchain is substantially self-hosted — it checks itself, and runs and
+compiles its own kind of program.** Three self-hosting tiers are closed, each by
+Candor-written tooling verified byte-exact against the Rust reference — though the
+tiers operate on different program sets, which is worth stating precisely rather
+than blurring. **Self-checking** operates on the compiler's *own source*: the
+Candor-written checker and analyses check all five self-host modules
+(lexer/parser/checker/analyses/interp) clean. **Self-interpreting** and
+**self-lowering** operate on the systems-heavy corpus (a bump allocator, an
 intrusive-list scheduler, MMIO registers, a recursive-descent parser, a
-`Box [4096]Node` arena) is checked, executed, and lowered to compiler IR, each
-by Candor-written tooling verified byte-exact against the Rust reference.
+`Box [4096]Node` arena): the Candor-written interpreter *executes* it, and the
+Candor-written lowering *compiles it to MIR* that the Rust MIR interpreter then
+runs — both reproducing the reference's exact results. (The checker does not run
+over that corpus; the interpret and lower tiers share the identical corpus files.)
 **Self-lowering:** a Candor-written lowering (`lower.cnr`) translates the parsed
 AST to the compiler's MIR — flattening structured control flow to a basic-block
 CFG, allocating temps, emitting the move/drop schedule and fault edges as explicit
