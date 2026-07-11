@@ -1,0 +1,265 @@
+//! The N1 gate: the FIRST Candor NATIVE code generator. `selfhost/codegen/codegen.cnr`
+//! (composed with the `lexer` + `parser` modules) walks the parser's AST arena for
+//! each in-subset scalar fixture and EMITS x86-64 assembly TEXT (AT&T syntax)
+//! through the `trace` byte sink. The harness reconstructs that `.s` text, links it
+//! with the static C runtime (`src/backend/aot_runtime.c`) via the system `cc` into
+//! a REAL ELF process, runs it, and asserts its observable outcome — θ (stdout
+//! trace), the process exit byte, and the `(kind, span)` fault JSON on stderr — is
+//! byte-exact to the tree-walking oracle (`run_source_real`). Passing proves Candor
+//! can emit a runnable native artifact for the scalar subset.
+//!
+//! Like the AOT gate, this FAILS LOUDLY if `cc` is unavailable: a code generator
+//! that cannot produce a runnable artifact is not verifiable.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use candor_proto::interp::{Fault, FaultKind};
+use candor_proto::{run_source, run_source_real, RunResult};
+
+mod selfhost_modtree;
+use selfhost_modtree::{run_module_tree, trace_text};
+
+const LEXER_SRC: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/lexer/lexer.cnr"));
+const PARSER_SRC: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/parser/parser.cnr"));
+const CODEGEN_SRC: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/codegen/codegen.cnr"));
+
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    Ok { exit: u8, trace: Vec<i64> },
+    Fault { kind: String, start: usize, end: usize },
+}
+
+fn kind_str(k: FaultKind) -> String {
+    use FaultKind::*;
+    match k {
+        Overflow => "overflow",
+        DivByZero => "div_by_zero",
+        Bounds => "bounds",
+        ConvLoss => "conv_loss",
+        Assert => "assert",
+        Requires => "requires",
+        Ensures => "ensures",
+        Panic => "panic",
+        BadPointer => "bad_pointer",
+        NoForeignRuntime => "no_foreign_runtime",
+    }
+    .to_string()
+}
+
+fn oracle_fault(f: &Fault) -> Outcome {
+    Outcome::Fault { kind: kind_str(f.kind), start: f.span.start, end: f.span.end }
+}
+
+fn oracle_src(src: &str, real: bool) -> Outcome {
+    let r = if real { run_source_real(src) } else { run_source(src) };
+    match r {
+        RunResult::Ok(run) => Outcome::Ok { exit: run.ret as u8, trace: run.trace },
+        RunResult::Fault(f) => oracle_fault(&f),
+        RunResult::CheckErrors(d) => {
+            panic!("fixture has check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>())
+        }
+        RunResult::ParseError(d) => panic!("fixture parse error: {}", d.to_json()),
+    }
+}
+
+/// Extract a JSON field `"<key>":<digits>` or `"<key>":"<str>"`.
+fn field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
+    let pat = format!("\"{key}\":");
+    let i = json.find(&pat)? + pat.len();
+    let rest = &json[i..];
+    if let Some(stripped) = rest.strip_prefix('"') {
+        let end = stripped.find('"')?;
+        Some(&stripped[..end])
+    } else {
+        let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        Some(&rest[..end])
+    }
+}
+
+/// Generate the root `main.cnr`: lex the embedded source, then run codegen_dump
+/// (which emits the `.s` text, one byte per `trace`).
+fn candor_main(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut m = String::from(
+        "use lexer::{Buf, mk, lex};\nuse codegen::{codegen_dump};\n\nfn main() -> i64 {\n",
+    );
+    m.push_str(&format!("    let src: [{}]u8 = [", bytes.len()));
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 {
+            m.push_str(", ");
+        }
+        m.push_str(&format!("{b}u8"));
+    }
+    m.push_str("];\n");
+    m.push_str("    let mut buf: Buf = Buf { toks: [mk(0, 0usize, 0usize); 49152], n: 0usize };\n");
+    m.push_str("    let cnt: usize = lex(slice_of(src), write buf);\n");
+    m.push_str("    codegen_dump(slice_of(src), read buf);\n");
+    m.push_str("    return conv i64 cnt;\n}\n");
+    m
+}
+
+/// Run codegen.cnr over `src` in the tree-walker and return the emitted `.s` text.
+fn candor_asm(src: &str) -> String {
+    let main = candor_main(src);
+    let modules = [
+        ("lexer.cnr", LEXER_SRC),
+        ("parser.cnr", PARSER_SRC),
+        ("codegen.cnr", CODEGEN_SRC),
+    ];
+    match run_module_tree(&modules, &main) {
+        RunResult::Ok(run) => trace_text(&run),
+        RunResult::Fault(f) => panic!("codegen.cnr faulted: {}", f.to_json()),
+        RunResult::CheckErrors(d) => panic!(
+            "codegen.cnr has check errors: {:?}",
+            d.iter().map(|x| &x.code).collect::<Vec<_>>()
+        ),
+        RunResult::ParseError(d) => panic!("codegen.cnr parse error: {}", d.to_json()),
+    }
+}
+
+fn runtime_c() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("src/backend/aot_runtime.c")
+}
+
+fn cc_available() -> bool {
+    Command::new("cc")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Assemble+link the Candor-emitted `.s` with the C runtime, run it, translate
+/// (exit, stdout, stderr) into an `Outcome`.
+fn native_outcome(asm: &str, tag: &str) -> Result<Outcome, String> {
+    let dir = std::env::temp_dir().join(format!("candor-codegen-{}-{}", std::process::id(), tag));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+    let spath = dir.join("prog.s");
+    let out = dir.join("prog");
+    std::fs::write(&spath, asm).map_err(|e| format!("write asm: {e}"))?;
+
+    let status = Command::new("cc")
+        .arg("-no-pie")
+        .arg(&spath)
+        .arg(runtime_c())
+        .arg("-pthread")
+        .arg("-o")
+        .arg(&out)
+        .output()
+        .map_err(|e| format!("cc invocation failed: {e}"))?;
+    if !status.status.success() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(format!(
+            "cc failed:\n{}\n--- asm ---\n{asm}",
+            String::from_utf8_lossy(&status.stderr)
+        ));
+    }
+    let output = Command::new(&out)
+        .output()
+        .map_err(|e| format!("could not run compiled program: {e}"))?;
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let code = output.status.code();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // A fault is exit 2 WITH the (kind, span) JSON on stderr; a plain program that
+    // returns 2 also exits 2 but writes nothing to stderr (INV: disambiguate).
+    if code == Some(2) && stderr.contains("\"kind\"") {
+        let kind = field(&stderr, "kind").ok_or("no kind in fault JSON")?.to_string();
+        let start: usize = field(&stderr, "start").ok_or("no start")?.parse().map_err(|_| "bad start")?;
+        let end: usize = field(&stderr, "end").ok_or("no end")?.parse().map_err(|_| "bad end")?;
+        return Ok(Outcome::Fault { kind, start, end });
+    }
+    let exit = code.ok_or("compiled process killed by signal")? as u8;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trace: Vec<i64> = stdout
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.trim().parse::<i64>().expect("trace line is an integer"))
+        .collect();
+    Ok(Outcome::Ok { exit, trace })
+}
+
+fn assert_native_eq_oracle(src: &str, real: bool, tag: &str) {
+    let o = oracle_src(src, real);
+    let asm = candor_asm(src);
+    let a = native_outcome(&asm, tag).expect("assemble+link+run should succeed");
+    assert_eq!(a, o, "native codegen vs oracle divergence for:\n{src}\n--- asm ---\n{asm}");
+}
+
+// ---------------------------------------------------------------------------
+// The scalar OK slice (traces + exit codes) and the fault axes (kind + span).
+// Sources are the tree-walker's `real` syntax (`.cnr`), the same corpus the L1
+// lowering gate exercises, plus the AOT gate's scalar OK/FAULT programs.
+// ---------------------------------------------------------------------------
+
+const OK: &[&str] = &[
+    "fn main() -> i64 { let a: i64 = 20; let b: i64 = 22; trace(a); trace(b); return a + b; }",
+    "fn fib(n: i64) -> i64 { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); } fn main() -> i64 { let r: i64 = fib(10); trace(r); return r; }",
+    "fn main() -> i64 { let mut s: i64 = 0; let mut i: i64 = 0; while i < 5 { s = s + i; trace(i); i = i + 1; } trace(s); return s; }",
+    "fn main() -> i64 { let a: u8 = 12u8; let b: u8 = 10u8; trace(conv i64 (a & b)); trace(conv i64 (a | b)); trace(conv i64 (a ^ b)); return 0; }",
+    "fn main() -> i64 { let a: i64 = 6i64; let b: i64 = 7i64; return a * b + 100i64 - 42i64 / 2i64; }",
+    "fn main() -> i64 { let a: i64 = 17i64; return a % 5i64; }",
+    "fn main() -> i64 { let x: i64 = 3i64; if x > 5i64 { return 1i64; } else if x > 2i64 { return 2i64; } else { return 3i64; } }",
+    "fn main() -> i64 { let mut sum: i64 = 0i64; let mut i: i64 = 1i64; while i <= 5i64 { sum = sum + i; i = i + 1i64; } trace(sum); return sum; }",
+    "fn main() -> i64 { let mut i: i64 = 0i64; let mut sum: i64 = 0i64; loop { i = i + 1i64; if i > 10i64 { break; } if i % 2i64 == 0i64 { continue; } sum = sum + i; } return sum; }",
+    "fn fact(n: i64) -> i64 { if n <= 1i64 { return 1i64; } return n * fact(n - 1i64); } fn main() -> i64 { return fact(5i64); }",
+    "fn main() -> i64 { let z: i64 = 0i64; let mut n: i64 = 0i64; if (z == 0i64) || (10i64 / z == 1i64) { n = n + 1i64; } if (z != 0i64) && (10i64 / z == 1i64) { n = n + 100i64; } return n; }",
+    "fn main() -> i64 { let a: i64 = 5i64; let b: i64 = 7i64; let mut n: i64 = 0i64; if a < b { n = n + 1i64; } if a <= 5i64 { n = n + 10i64; } if b > a { n = n + 100i64; } if a >= 5i64 { n = n + 1000i64; } if a == 5i64 { n = n + 10000i64; } if a != b { n = n + 100000i64; } return n; }",
+    "fn main() -> i64 { let a: i64 = 12i64; let b: i64 = 10i64; let c: i64 = (a & b) | (a ^ b); let d: i64 = (1i64 << 4i64) + (256i64 >> 2i64); trace(c); trace(d); return c + d; }",
+    "fn main() -> i64 { let x: i64 = 5i64; let y: i64 = -x; let b: bool = false; if !b { return y - 2i64; } return y; }",
+    "fn main() -> i64 { let x: i64 = 4i64; assert(x == 4i64); return x; }",
+    "fn main() -> i64 { trace(10i64); trace(20i64); trace(30i64); return 0i64; }",
+    "fn main() -> i64 { let x: i8 = 100i8 + 20i8; if x == 120i8 { return 1i64; } return 0i64; }",
+    "fn main() -> i64 { let a: u64 = 18446744073709551615u64; trace(a); return 0i64; }",
+];
+
+const FAULTS: &[&str] = &[
+    "fn main() -> i64 { let a: i32 = 2147483647i32; let b: i32 = a + 1i32; return conv i64 (b); }",
+    "fn main() -> i64 { let z: i64 = 0; let q: i64 = 10 / z; return q; }",
+    "fn main() -> i64 { let a: i64 = 300; let b: i8 = conv i8 (a); return 0; }",
+    "fn main() -> i64 { let x: i64 = 3; assert(x > 10); return 0; }",
+    "fn main() -> i64 { panic(\"boom\"); return 0; }",
+    "fn main() -> i64 { let a: u8 = 1u8; let b: u8 = a << 9u8; return 0; }",
+    "fn main() -> i64 { let x: i8 = 100i8 + 50i8; return 0i64; }",
+    "fn main() -> i64 { let x: u8 = 200u8 + 100u8; return 0i64; }",
+    "fn main() -> i64 { let a: u64 = 10000000000000000000u64; let b: u64 = 9000000000000000000u64; let c: u64 = a + b; return 0i64; }",
+    "fn main() -> i64 { let a: u64 = 3u64; let b: u64 = 5u64; let c: u64 = a - b; return 0i64; }",
+    "fn main() -> i64 { let a: i64 = 4000000000000i64; let b: i64 = 4000000000i64; let c: i64 = a * b; return c; }",
+];
+
+fn on_big_stack<F: FnOnce() + Send + 'static>(f: F) {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(f)
+        .expect("spawn big-stack thread")
+        .join()
+        .expect("gate thread panicked");
+}
+
+#[test]
+fn candor_native_codegen_equal_to_oracle_over_scalar_subset() {
+    assert!(cc_available(), "cc/linker unavailable: cannot assemble+link the emitted .s");
+    on_big_stack(|| {
+        for (i, src) in OK.iter().enumerate() {
+            assert_native_eq_oracle(src, true, &format!("ok{i}"));
+        }
+        let mut faults = 0usize;
+        for (i, src) in FAULTS.iter().enumerate() {
+            let o = oracle_src(src, true);
+            assert!(matches!(o, Outcome::Fault { .. }), "expected a fault:\n{src}");
+            assert_native_eq_oracle(src, true, &format!("fault{i}"));
+            faults += 1;
+        }
+        assert!(faults >= 6, "expected the full scalar fault axes");
+        eprintln!(
+            "selfhost codegen (N1): {} scalar programs codegen -> assemble -> link -> run byte-exact vs oracle ({} OK, {} faults)",
+            OK.len() + FAULTS.len(),
+            OK.len(),
+            FAULTS.len()
+        );
+    });
+}

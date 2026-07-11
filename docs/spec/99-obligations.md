@@ -2315,3 +2315,76 @@ THE TRAIT-GENERICS ARC IS COMPLETE: all 13 generic fixtures — the 8 user-gener
 `gdrop`) + `iface`/`gimpl`/`gbound` (interface/impl method dispatch) +
 `fromq`/`gfromq` (`?`/`From`) — now RUN on the interp tier AND COMPILE on the lower
 tier, byte-exact to the Rust oracle on both.
+
+## N1 — the native self-compile tier's FIRST slice: a Candor code generator that emits x86-64 assembly TEXT for the scalar subset, assembled+linked+run byte-exact vs the oracle (2026-07-11)
+
+The first slice of the native self-compile tier (the true bootstrap): a new
+Candor module `prototype/selfhost/codegen/codegen.cnr` walks the parser's AST
+arena — mirroring `selfhost/lower/lower.cnr`'s scalar-subset walk and its
+`cur`-span / fault-edge threading — and EMITS x86-64 assembly TEXT (AT&T syntax)
+through the same `trace` byte sink `lower_dump` uses for its MIR wire. The system
+`cc` assembles+links the reconstructed `.s` with the UNCHANGED C runtime
+(`src/backend/aot_runtime.c`) into a REAL ELF process whose observable outcome —
+θ (stdout trace), the exit byte, and the `(kind, span)` fault JSON on stderr — is
+asserted byte-exact to the tree-walking oracle (`run_source_real`). Gated by
+`prototype/tests/selfhost_codegen.rs`.
+
+SUBSET (same as lower.cnr's L1): integer (i8..i64/u8..u64/isize/usize) + bool
+scalars; `let`/`let mut` + assignment; `if`/`else if`/`else`; `while`; `loop` +
+`break`/`continue`; `return`; arithmetic `+ - * / %` in the Checked/Wrapping/
+Saturating regimes with the Overflow/DivByZero fault edges; comparisons; `&&`/`||`
+short-circuit; bitwise/shift; unary neg/not/bitnot; `trace(x)` (-> `rt_trace`);
+`assert`/`panic` (-> `rt_fault` Assert/Panic); direct non-generic scalar fn calls +
+recursion; `conv` (with the ConvLoss edge). Structs/arrays/enums/box/pointers/drop
+stay out of subset (later slices).
+
+MODEL (`codegen.cnr`):
+- AST WALK, not a MIR parser: `gen_value` dispatches on node tag exactly like
+  `lower_value`; `gen_if`/`gen_while`/`gen_loop` mirror the CFG shape and keep a
+  `(continue_lbl, break_lbl)` loop stack; width inference reuses lower.cnr's
+  `lit_width`/`concretize`/`scalar_width`.
+- ALL-ON-STACK, NO register allocator: each local + each temp gets an 8-byte stack
+  slot holding the CANONICAL i64 value (sign/zero-extended per scalar type, as
+  `load_scalar` produces). Values evaluate into `%rax`, spilling to / reloading
+  from slots; every op canonicalizes its result (`movsbq`/`movzbq`/… into width).
+- SysV frame per fn: `pushq %rbp; movq %rsp,%rbp; subq $frame,%rsp`. `%rsp` never
+  moves after the prologue (temps are `%rbp`-relative slots, not pushes), so every
+  `call` sees a 16-byte-aligned `%rsp` — the classic alignment bug is structurally
+  absent. The frame size is known only after the body is walked, so the body is
+  buffered in a byte pool and flushed after the streamed prologue. `main` compiles
+  to `cnr_main`; a `.globl candor_entry` alias tail-`jmp`s to it (the runtime's
+  entry, same 0-arg `-> i64` ABI).
+- FAULT edges (INV-CHECK): after each checked op an explicit test + `jCC` skips a
+  fault stub that does `call rt_fault(kind, span.start, span.end)` — signed
+  overflow via `jo`, u64 carry via `jc`, u64 mul via `mulq`+`jc`, narrow widths via
+  an explicit `[min,max]` range compare, `div/rem` guarding divisor==0 (and signed
+  type-MIN/-1). The rt_fault kind codes are the BACKEND codes
+  (`src/backend/lower.rs::kind_code` == `aot_runtime.c::kind_name`: overflow=0,
+  div_by_zero=1, conv_loss=3, assert=4, panic=7) — NOT lower.cnr's wire codes. The
+  spans are the same node spans lower.cnr/the oracle use (binary-expr span for
+  arith/shift; operand span for neg/conv; comparison-RHS span for assert;
+  `panic(...)` span for panic — confirmed against `run_source_real`).
+
+GATE (`tests/selfhost_codegen.rs`, cloning tests/aot.rs + tests/selfhost_lower.rs):
+per scalar fixture — run codegen.cnr in the tree-walker over the embedded source
+(module tree lexer+parser+codegen + a generated `main` that lexes then calls
+`codegen_dump`), reconstruct the `.s` text via the `trace` byte sink, then
+`cc -no-pie prog.s src/backend/aot_runtime.c -pthread -o prog`, run it, and compare
+(exit byte, stdout trace, stderr fault-JSON) to the oracle. Fault vs plain-exit-2
+is disambiguated by the presence of the `"kind"` JSON on stderr (a program that
+returns 2 also exits 2). FAILS LOUDLY if `cc` is unavailable.
+
+VERIFICATION (all in isolation): `selfhost_codegen` green — 29 scalar programs
+(18 OK: let/trace/return, fib recursion, while accumulate, loop/break/continue,
+factorial, short-circuit incl. the div-by-zero-guarded `||`, all six comparisons,
+bitwise+shift, unary neg/not, assert-pass, multi-trace, i8-width add, u64-max
+trace; 11 faults: i32 overflow, div-by-zero, conv-loss, assert, panic, u8 shift
+overflow, i8/u8 width overflow, u64 add/sub overflow, i64 mul overflow) codegen ->
+assemble -> link -> run byte-exact to `run_source_real`. Existing suites
+UNCHANGED: `aot` 6/6 and `selfhost_lower` 1/1 green; whole suite 592 passed / 0
+failed (591 baseline + this gate); clippy clean. NO edits to
+`interp.cnr`/`lower.cnr`/`mono.cnr`/`src/backend/*` — the change is contained to the
+new `codegen.cnr` + its gate. Runtime: `selfhost_codegen` ~19s.
+
+DEFERRED (later native slices): a register allocator (the all-on-stack model is the
+MVP), and structs/arrays/enums/box/pointers/drop/concurrency codegen (N2–N5).

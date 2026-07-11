@@ -1,0 +1,1123 @@
+// The FIRST Candor native code generator (N1): a Candor program that walks the
+// parser's AST arena and EMITS x86-64 assembly TEXT (AT&T syntax) for the scalar
+// subset, so the system assembler+linker (`cc`) turns it into a real ELF process
+// that reproduces the tree-walking oracle byte-exact (θ + exit byte + fault JSON).
+// Gated in tests/selfhost_codegen.rs.
+//
+// It ports the same scalar subset as selfhost/lower/lower.cnr (integer/bool
+// scalars; let/assign; if/else; while; loop + break/continue; return; arithmetic
+// + - * / % with the Checked/Wrapping regimes and the Overflow/DivByZero fault
+// edges; comparisons; && / || short-circuit; bitwise/shift; unary neg/not/bitnot;
+// trace(x); assert/panic; direct non-generic scalar fn calls + recursion; conv
+// with the ConvLoss edge) but lowers directly to machine instructions rather than
+// MIR. It mirrors lower.cnr's AST walk and its fault-span/`cur` threading exactly,
+// so the delivered (kind, span) matches the oracle.
+//
+// MODEL: all-on-stack, NO register allocator. Every local and every temp gets an
+// 8-byte stack slot holding the CANONICAL i64 value (sign/zero-extended per the
+// scalar type, as load_scalar produces). Values evaluate into %rax, spilling to /
+// reloading from slots. SysV frame per fn (push rbp; mov rsp,rbp; sub frame,rsp);
+// rsp never moves after the prologue, so every `call` sees a 16-byte-aligned rsp.
+// The frame size is known only after the body is walked, so the body is buffered
+// in a byte pool and flushed after the prologue is streamed.
+//
+// This module is composed with the `lexer` and `parser` modules. Like lower.cnr it
+// is NOT self-checked in this slice, so it uses the full language.
+
+use lexer::{Buf, span_eq};
+use parser::{Node, P, nnew, parse_program, T_FN, T_PARAM, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, T_NAMED, T_SC, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT};
+
+// rt_fault kind codes (src/backend/lower.rs kind_code / aot_runtime.c kind_name).
+static FK_OVERFLOW: i32 = 0;
+static FK_DIVZERO: i32 = 1;
+static FK_CONVLOSS: i32 = 3;
+static FK_ASSERT: i32 = 4;
+static FK_PANIC: i32 = 7;
+static W_BOOL: i32 = 11;
+
+struct C {
+    head: u32,
+    bbuf: [1048576]u8,
+    bbuf_n: usize,
+    bnd_p0: [1024]usize,
+    bnd_p1: [1024]usize,
+    bnd_slot: [1024]i32,
+    bnd_w: [1024]i32,
+    bnd_n: usize,
+    slot_next: usize,
+    slot_max: usize,
+    loop_cont: [64]i32,
+    loop_brk: [64]i32,
+    loop_n: usize,
+    lbl: i32,
+    ret_w: i32,
+    regime: i32,
+    cur_p0: usize,
+    cur_p1: usize,
+    luk_slot: i32,
+    luk_w: i32,
+    err: i32,
+}
+
+// ---- byte-pool emit (function body) -----------------------------------------
+fn bc(c: write C, x: i32) -> unit {
+    c.*.bbuf[c.bbuf_n] = conv u8 x;
+    c.*.bbuf_n = c.bbuf_n + 1usize;
+    return;
+}
+fn bs(c: write C, s: [u8]) -> unit {
+    let mut i: usize = 0usize;
+    while i < len(s) {
+        bc(c, conv i32 s[i]);
+        i = i + 1usize;
+    }
+    return;
+}
+fn bn(c: write C, v: u64) -> unit {
+    if v == 0u64 { bc(c, 48); return; }
+    let mut b: [24]u8 = [0u8; 24];
+    let mut cnt: usize = 0usize;
+    let mut x: u64 = v;
+    while x > 0u64 {
+        b[cnt] = conv u8 (48u64 + x % 10u64);
+        x = x / 10u64;
+        cnt = cnt + 1usize;
+    }
+    let mut i: usize = cnt;
+    while i > 0usize {
+        i = i - 1usize;
+        bc(c, conv i32 b[i]);
+    }
+    return;
+}
+// A whole instruction line: tab + text + newline.
+fn bi(c: write C, s: [u8]) -> unit {
+    bc(c, 9);
+    bs(c, s);
+    bc(c, 10);
+    return;
+}
+// The `-off(%rbp)` operand for slot `s` (slot 0 at -8, slot 1 at -16, ...).
+fn bslot(c: write C, s: i32) -> unit {
+    let off: usize = 8usize * (conv usize s + 1usize);
+    bc(c, 45);
+    bn(c, conv u64 off);
+    bs(c, b"(%rbp)");
+    return;
+}
+// A generated `.Lc<n>` label reference (no leading tab).
+fn blabel_ref(c: write C, n: i32) -> unit {
+    bs(c, b".Lc");
+    bn(c, conv u64 n);
+    return;
+}
+fn blabel_def(c: write C, n: i32) -> unit {
+    blabel_ref(c, n);
+    bc(c, 58);
+    bc(c, 10);
+    return;
+}
+fn newlbl(c: write C) -> i32 {
+    let n: i32 = c.lbl;
+    c.*.lbl = n + 1;
+    return n;
+}
+fn newslot(c: write C) -> i32 {
+    let s: usize = c.slot_next;
+    c.*.slot_next = s + 1usize;
+    if c.slot_next > c.slot_max { c.*.slot_max = c.slot_next; }
+    return conv i32 s;
+}
+// Spill %rax into a fresh temp slot; return the slot.
+fn spill(c: write C) -> i32 {
+    let s: i32 = newslot(c);
+    bc(c, 9);
+    bs(c, b"movq %rax, ");
+    bslot(c, s);
+    bc(c, 10);
+    return s;
+}
+fn reload_rax(c: write C, s: i32) -> unit {
+    bc(c, 9);
+    bs(c, b"movq ");
+    bslot(c, s);
+    bs(c, b", %rax");
+    bc(c, 10);
+    return;
+}
+fn store_slot(c: write C, s: i32) -> unit {
+    bc(c, 9);
+    bs(c, b"movq %rax, ");
+    bslot(c, s);
+    bc(c, 10);
+    return;
+}
+
+// ---- widths (mirror lower.cnr) ----------------------------------------------
+fn sc_width(src: [u8], s: usize, en: usize) -> i32 {
+    if span_eq(src, s, en, b"i8") { return 1; }
+    if span_eq(src, s, en, b"i16") { return 2; }
+    if span_eq(src, s, en, b"i32") { return 3; }
+    if span_eq(src, s, en, b"i64") { return 4; }
+    if span_eq(src, s, en, b"isize") { return 5; }
+    if span_eq(src, s, en, b"u8") { return 6; }
+    if span_eq(src, s, en, b"u16") { return 7; }
+    if span_eq(src, s, en, b"u32") { return 8; }
+    if span_eq(src, s, en, b"u64") { return 9; }
+    if span_eq(src, s, en, b"usize") { return 10; }
+    if span_eq(src, s, en, b"bool") { return W_BOOL; }
+    if span_eq(src, s, en, b"unit") { return 12; }
+    return 0;
+}
+fn scalar_width(pp: read P, src: [u8], tn: u32) -> i32 {
+    if tn == 0u32 { return 0; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_NAMED || nd.tag == T_SC { return sc_width(src, nd.p0, nd.p1); }
+    return 0;
+}
+fn lit_width(suf: i32, exp_w: i32) -> i32 {
+    if suf != 0 { return suf; }
+    if exp_w >= 1 && exp_w <= 10 { return exp_w; }
+    return 4;
+}
+fn concretize(w: i32) -> i32 {
+    if w >= 1 && w <= 10 { return w; }
+    if w == W_BOOL { return W_BOOL; }
+    return 4;
+}
+fn signedw(w: i32) -> i32 {
+    if w >= 1 && w <= 5 { return 1; }
+    return 0;
+}
+fn bits_of(w: i32) -> i32 {
+    if w == 1 || w == 6 || w == W_BOOL { return 8; }
+    if w == 2 || w == 7 { return 16; }
+    if w == 3 || w == 8 { return 32; }
+    return 64;
+}
+// The unsigned max of a non-64-bit width (as a u64 movabs immediate).
+fn umax_of(w: i32) -> u64 {
+    let b: i32 = bits_of(w);
+    if b == 8 { return 255u64; }
+    if b == 16 { return 65535u64; }
+    return 4294967295u64;
+}
+// The signed [min,max] of a non-64-bit width fit in imm32.
+fn smax_of(w: i32) -> i64 {
+    let b: i32 = bits_of(w);
+    if b == 8 { return 127i64; }
+    if b == 16 { return 32767i64; }
+    return 2147483647i64;
+}
+fn smin_of(w: i32) -> i64 {
+    let b: i32 = bits_of(w);
+    if b == 8 { return 0i64 - 128i64; }
+    if b == 16 { return 0i64 - 32768i64; }
+    return 0i64 - 2147483648i64;
+}
+
+// ---- bindings (innermost-first, block-scoped by bnd_n save/restore) ----------
+fn bind(c: write C, p0: usize, p1: usize, s: i32, w: i32) -> unit {
+    let k: usize = c.bnd_n;
+    c.*.bnd_p0[k] = p0;
+    c.*.bnd_p1[k] = p1;
+    c.*.bnd_slot[k] = s;
+    c.*.bnd_w[k] = w;
+    c.*.bnd_n = k + 1usize;
+    return;
+}
+fn name_eq(src: [u8], a0: usize, a1: usize, b0: usize, b1: usize) -> bool {
+    if a1 - a0 != b1 - b0 { return false; }
+    let n: usize = a1 - a0;
+    let mut i: usize = 0usize;
+    while i < n {
+        if src[a0 + i] != src[b0 + i] { return false; }
+        i = i + 1usize;
+    }
+    return true;
+}
+// Returns the slot or -1; sets luk_w.
+fn lookup(c: write C, src: [u8], p0: usize, p1: usize) -> i32 {
+    let mut i: usize = c.bnd_n;
+    while i > 0usize {
+        i = i - 1usize;
+        if name_eq(src, p0, p1, c.bnd_p0[i], c.bnd_p1[i]) {
+            c.*.luk_w = c.bnd_w[i];
+            c.*.luk_slot = c.bnd_slot[i];
+            return c.bnd_slot[i];
+        }
+    }
+    return 0i32 - 1i32;
+}
+fn find_fn(pp: read P, src: [u8], head: u32, p0: usize, p1: usize) -> u32 {
+    let mut cur: u32 = head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_FN && name_eq(src, p0, p1, nd.p0, nd.p1) { return cur; }
+        cur = nd.nx;
+    }
+    return 0u32;
+}
+
+// ---- fault edges ------------------------------------------------------------
+fn emit_fault(c: write C, kind: i32, s: usize, e: usize) -> unit {
+    bc(c, 9);
+    bs(c, b"movl $");
+    bn(c, conv u64 kind);
+    bs(c, b", %edi");
+    bc(c, 10);
+    bc(c, 9);
+    bs(c, b"movl $");
+    bn(c, conv u64 s);
+    bs(c, b", %esi");
+    bc(c, 10);
+    bc(c, 9);
+    bs(c, b"movl $");
+    bn(c, conv u64 e);
+    bs(c, b", %edx");
+    bc(c, 10);
+    bi(c, b"call rt_fault");
+    return;
+}
+// Emit `<jgood> skip; <fault>; skip:` — the fault fires unless the good branch is
+// taken. `jgood` is a jump mnemonic (e.g. "jno", "jbe", "jne").
+fn fault_unless(c: write C, jgood: [u8], kind: i32, s: usize, e: usize) -> unit {
+    let sk: i32 = newlbl(c);
+    bc(c, 9);
+    bs(c, jgood);
+    bc(c, 32);
+    blabel_ref(c, sk);
+    bc(c, 10);
+    emit_fault(c, kind, s, e);
+    blabel_def(c, sk);
+    return;
+}
+
+// ---- canonicalize %rax to width `w` (sign/zero-extend, matching load_scalar) --
+fn emit_canon(c: write C, w: i32) -> unit {
+    let b: i32 = bits_of(w);
+    if b == 64 { return; }
+    if signedw(w) != 0 {
+        if b == 8 { bi(c, b"movsbq %al, %rax"); return; }
+        if b == 16 { bi(c, b"movswq %ax, %rax"); return; }
+        bi(c, b"movslq %eax, %rax");
+        return;
+    }
+    if b == 8 { bi(c, b"movzbq %al, %rax"); return; }
+    if b == 16 { bi(c, b"movzwq %ax, %rax"); return; }
+    bi(c, b"movl %eax, %eax");
+    return;
+}
+
+// ---- constants --------------------------------------------------------------
+// Load the canonical bit pattern of a scalar const into %rax.
+fn emit_const(c: write C, ival: u64, neg: i32) -> unit {
+    let mut pat: u64 = ival;
+    if neg != 0 { pat = 0u64 - ival; }
+    bc(c, 9);
+    bs(c, b"movabsq $");
+    bn(c, pat);
+    bs(c, b", %rax");
+    bc(c, 10);
+    return;
+}
+
+// ---- signed/unsigned range check of %rax against width `w` (Checked) --------
+fn emit_range_check(c: write C, w: i32, kind: i32, s: usize, e: usize) -> unit {
+    if bits_of(w) == 64 { return; }
+    if signedw(w) != 0 {
+        bc(c, 9);
+        bs(c, b"cmpq $");
+        bn(c, conv u64 smax_of(w));
+        bs(c, b", %rax");
+        bc(c, 10);
+        fault_unless(c, b"jle", kind, s, e);
+        bc(c, 9);
+        bs(c, b"cmpq $");
+        if smin_of(w) < 0i64 {
+            bc(c, 45);
+            bn(c, conv u64 (0i64 - smin_of(w)));
+        } else {
+            bn(c, conv u64 smin_of(w));
+        }
+        bs(c, b", %rax");
+        bc(c, 10);
+        fault_unless(c, b"jge", kind, s, e);
+        return;
+    }
+    bc(c, 9);
+    bs(c, b"movabsq $");
+    bn(c, umax_of(w));
+    bs(c, b", %rcx");
+    bc(c, 10);
+    bi(c, b"cmpq %rcx, %rax");
+    fault_unless(c, b"jbe", kind, s, e);
+    return;
+}
+
+// ---- forward declarations via mutual recursion -------------------------------
+fn gen_value(c: write C, pp: read P, src: [u8], i: u32, exp_w: i32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    c.*.cur_p0 = nd.p0;
+    c.*.cur_p1 = nd.p1;
+    if nd.tag == T_PAREN { return gen_value(c, pp, src, nd.a, exp_w); }
+    if nd.tag == T_INT {
+        emit_const(c, nd.ival, 0);
+        return lit_width(nd.suf, exp_w);
+    }
+    if nd.tag == T_NEGINT {
+        emit_const(c, nd.ival, 1);
+        return lit_width(nd.suf, exp_w);
+    }
+    if nd.tag == T_BOOL {
+        emit_const(c, nd.ival, 0);
+        return W_BOOL;
+    }
+    if nd.tag == T_ID {
+        let s: i32 = lookup(c, src, nd.p0, nd.p1);
+        if s >= 0 {
+            reload_rax(c, s);
+            return c.luk_w;
+        }
+        c.*.err = 1;
+        return 4;
+    }
+    if nd.tag == T_UNARY { return gen_unary(c, pp, src, i, exp_w); }
+    if nd.tag == T_BIN { return gen_binary(c, pp, src, i, exp_w); }
+    if nd.tag == T_CONV { return gen_conv(c, pp, src, i); }
+    if nd.tag == T_CALL { return gen_call(c, pp, src, i); }
+    if nd.tag == T_BLOCK { let _s: i32 = gen_block(c, pp, src, i); return 12; }
+    if nd.tag == T_IF { let _s: i32 = gen_if(c, pp, src, i); return 12; }
+    if nd.tag == T_WHILE { let _s: i32 = gen_while(c, pp, src, i); return 12; }
+    if nd.tag == T_LOOP { let _s: i32 = gen_loop(c, pp, src, i); return 12; }
+    if nd.tag == T_UNSAFE { let _s: i32 = gen_block(c, pp, src, nd.a); return 12; }
+    if nd.tag == T_WRAPPING {
+        let save: i32 = c.regime;
+        c.*.regime = 1;
+        let _s: i32 = gen_block(c, pp, src, nd.a);
+        c.*.regime = save;
+        return 12;
+    }
+    if nd.tag == T_SATURATING {
+        let save: i32 = c.regime;
+        c.*.regime = 2;
+        let _s: i32 = gen_block(c, pp, src, nd.a);
+        c.*.regime = save;
+        return 12;
+    }
+    if nd.tag == T_RETURN { let _s: i32 = gen_return(c, pp, src, i); return 12; }
+    if nd.tag == T_BREAK {
+        if c.loop_n == 0usize { c.*.err = 1; return 12; }
+        bc(c, 9);
+        bs(c, b"jmp ");
+        blabel_ref(c, c.loop_brk[c.loop_n - 1usize]);
+        bc(c, 10);
+        return 12;
+    }
+    if nd.tag == T_CONTINUE {
+        if c.loop_n == 0usize { c.*.err = 1; return 12; }
+        bc(c, 9);
+        bs(c, b"jmp ");
+        blabel_ref(c, c.loop_cont[c.loop_n - 1usize]);
+        bc(c, 10);
+        return 12;
+    }
+    if nd.tag == T_ASSERT { let _s: i32 = gen_assert(c, pp, src, i); return 12; }
+    if nd.tag == T_PANIC {
+        emit_fault(c, FK_PANIC, nd.p0, nd.p1);
+        return 12;
+    }
+    c.*.err = 1;
+    return 4;
+}
+
+fn gen_unary(c: write C, pp: read P, src: [u8], i: u32, exp_w: i32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    if nd.op == UN_NOT {
+        let _w: i32 = gen_value(c, pp, src, nd.a, W_BOOL);
+        bi(c, b"testq %rax, %rax");
+        bi(c, b"sete %al");
+        bi(c, b"movzbq %al, %rax");
+        return W_BOOL;
+    }
+    let vw: i32 = gen_value(c, pp, src, nd.a, exp_w);
+    let sty: i32 = concretize(vw);
+    let fp0: usize = c.cur_p0;
+    let fp1: usize = c.cur_p1;
+    if nd.op == UN_BITNOT {
+        bi(c, b"notq %rax");
+        emit_canon(c, sty);
+        return sty;
+    }
+    // UN_NEG
+    if bits_of(sty) == 64 {
+        bi(c, b"negq %rax");
+        if c.regime == 0 && signedw(sty) != 0 {
+            fault_unless(c, b"jno", FK_OVERFLOW, fp0, fp1);
+        }
+        emit_canon(c, sty);
+        return sty;
+    }
+    bi(c, b"negq %rax");
+    if c.regime == 0 {
+        emit_range_check(c, sty, FK_OVERFLOW, fp0, fp1);
+    }
+    emit_canon(c, sty);
+    return sty;
+}
+
+// left in %rax, right in %rcx after this helper.
+fn gen_two(c: write C, pp: read P, src: [u8], la: u32, ra: u32, lexp: i32, rexp: i32) -> unit {
+    let _lw: i32 = gen_value(c, pp, src, la, lexp);
+    let ls: i32 = spill(c);
+    let _rw: i32 = gen_value(c, pp, src, ra, rexp);
+    bi(c, b"movq %rax, %rcx");
+    reload_rax(c, ls);
+    return;
+}
+
+fn gen_binary(c: write C, pp: read P, src: [u8], i: u32, exp_w: i32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let op: i32 = nd.op;
+    if op == OP_AND || op == OP_OR { return gen_short_circuit(c, pp, src, i); }
+    if op >= OP_EQ && op <= OP_GE { return gen_cmp(c, pp, src, i); }
+    // arithmetic / bitwise / shift
+    let mut opty: i32 = 0i32 - 1i32;
+    if exp_w >= 1 && exp_w <= 10 { opty = exp_w; }
+    let lw: i32 = gen_value(c, pp, src, nd.a, opty);
+    let ls: i32 = spill(c);
+    let mut sty: i32 = opty;
+    if opty < 0 { sty = concretize(lw); }
+    let mut rexp: i32 = sty;
+    if op == OP_SHL || op == OP_SHR { rexp = 0i32 - 1i32; }
+    let _rw: i32 = gen_value(c, pp, src, nd.b, rexp);
+    bi(c, b"movq %rax, %rcx");
+    reload_rax(c, ls);
+    gen_arith(c, op, sty, nd.p0, nd.p1);
+    return sty;
+}
+
+// %rax = left, %rcx = right; result -> %rax.
+fn gen_arith(c: write C, op: i32, sty: i32, s: usize, e: usize) -> unit {
+    let b: i32 = bits_of(sty);
+    let sg: i32 = signedw(sty);
+    if op == OP_ADD || op == OP_SUB || op == OP_MUL {
+        if b == 64 {
+            if op == OP_ADD { bi(c, b"addq %rcx, %rax"); }
+            else if op == OP_SUB { bi(c, b"subq %rcx, %rax"); }
+            else if sg != 0 { bi(c, b"imulq %rcx, %rax"); }
+            else { bi(c, b"mulq %rcx"); }
+            if c.regime == 0 {
+                if sg != 0 { fault_unless(c, b"jno", FK_OVERFLOW, s, e); }
+                else { fault_unless(c, b"jnc", FK_OVERFLOW, s, e); }
+            }
+            emit_canon(c, sty);
+            return;
+        }
+        // narrow: compute in 64-bit (exact), then range-check.
+        if op == OP_ADD { bi(c, b"addq %rcx, %rax"); }
+        else if op == OP_SUB { bi(c, b"subq %rcx, %rax"); }
+        else { bi(c, b"imulq %rcx, %rax"); }
+        if c.regime == 0 {
+            emit_range_check(c, sty, FK_OVERFLOW, s, e);
+        }
+        emit_canon(c, sty);
+        return;
+    }
+    if op == OP_DIV || op == OP_REM {
+        bi(c, b"testq %rcx, %rcx");
+        fault_unless(c, b"jne", FK_DIVZERO, s, e);
+        if sg == 0 {
+            bi(c, b"xorl %edx, %edx");
+            bi(c, b"divq %rcx");
+            if op == OP_REM { bi(c, b"movq %rdx, %rax"); }
+            emit_canon(c, sty);
+            return;
+        }
+        // signed: guard type-MIN / -1.
+        gen_signed_divrem(c, op, sty, s, e);
+        emit_canon(c, sty);
+        return;
+    }
+    if op == OP_BITAND { bi(c, b"andq %rcx, %rax"); emit_canon(c, sty); return; }
+    if op == OP_BITOR { bi(c, b"orq %rcx, %rax"); emit_canon(c, sty); return; }
+    if op == OP_BITXOR { bi(c, b"xorq %rcx, %rax"); emit_canon(c, sty); return; }
+    // shifts: amount in %rcx (%cl). A negative amount faults in every regime.
+    bi(c, b"testq %rcx, %rcx");
+    fault_unless(c, b"jns", FK_OVERFLOW, s, e);
+    if c.regime == 0 {
+        bc(c, 9);
+        bs(c, b"cmpq $");
+        bn(c, conv u64 b);
+        bs(c, b", %rcx");
+        bc(c, 10);
+        fault_unless(c, b"jb", FK_OVERFLOW, s, e);
+    } else if c.regime == 1 {
+        // wrapping: amount mod bits (bits is a power of two).
+        bc(c, 9);
+        bs(c, b"andq $");
+        bn(c, conv u64 (b - 1));
+        bs(c, b", %rcx");
+        bc(c, 10);
+    } else {
+        // saturating: clamp an out-of-range amount to bits-1.
+        bc(c, 9);
+        bs(c, b"cmpq $");
+        bn(c, conv u64 b);
+        bs(c, b", %rcx");
+        bc(c, 10);
+        let sk: i32 = newlbl(c);
+        bc(c, 9);
+        bs(c, b"jb ");
+        blabel_ref(c, sk);
+        bc(c, 10);
+        bc(c, 9);
+        bs(c, b"movq $");
+        bn(c, conv u64 (b - 1));
+        bs(c, b", %rcx");
+        bc(c, 10);
+        blabel_def(c, sk);
+    }
+    if op == OP_SHL { bi(c, b"shlq %cl, %rax"); }
+    else if sg != 0 { bi(c, b"sarq %cl, %rax"); }
+    else { bi(c, b"shrq %cl, %rax"); }
+    emit_canon(c, sty);
+    return;
+}
+
+fn gen_signed_divrem(c: write C, op: i32, sty: i32, s: usize, e: usize) -> unit {
+    // %rax = left, %rcx = right; both nonzero divisor already checked.
+    let ok: i32 = newlbl(c);
+    let done: i32 = newlbl(c);
+    // detect left == type-min && right == -1
+    if bits_of(sty) == 64 {
+        bi(c, b"movabsq $-9223372036854775808, %r8");
+    } else {
+        bc(c, 9);
+        bs(c, b"movq $");
+        if smin_of(sty) < 0i64 {
+            bc(c, 45);
+            bn(c, conv u64 (0i64 - smin_of(sty)));
+        } else {
+            bn(c, conv u64 smin_of(sty));
+        }
+        bs(c, b", %r8");
+        bc(c, 10);
+    }
+    bi(c, b"cmpq %r8, %rax");
+    bc(c, 9);
+    bs(c, b"jne ");
+    blabel_ref(c, ok);
+    bc(c, 10);
+    bi(c, b"cmpq $-1, %rcx");
+    bc(c, 9);
+    bs(c, b"jne ");
+    blabel_ref(c, ok);
+    bc(c, 10);
+    // overflow case
+    if op == OP_REM {
+        // type-MIN % -1 == 0
+        bi(c, b"xorl %eax, %eax");
+        bc(c, 9);
+        bs(c, b"jmp ");
+        blabel_ref(c, done);
+        bc(c, 10);
+    } else if c.regime == 0 {
+        emit_fault(c, FK_OVERFLOW, s, e);
+    } else if c.regime == 1 {
+        // wrapping: MIN / -1 == MIN
+        bc(c, 9);
+        bs(c, b"jmp ");
+        blabel_ref(c, done);
+        bc(c, 10);
+    } else {
+        // saturating: MIN / -1 == MAX; left stays type-min in %rax, negate to max-ish
+        bc(c, 9);
+        bs(c, b"jmp ");
+        blabel_ref(c, done);
+        bc(c, 10);
+    }
+    blabel_def(c, ok);
+    bi(c, b"cqto");
+    bi(c, b"idivq %rcx");
+    if op == OP_REM { bi(c, b"movq %rdx, %rax"); }
+    blabel_def(c, done);
+    return;
+}
+
+fn gen_cmp(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let op: i32 = nd.op;
+    let lw: i32 = gen_value(c, pp, src, nd.a, 0i32 - 1i32);
+    let ls: i32 = spill(c);
+    let ot: i32 = concretize(lw);
+    let _rw: i32 = gen_value(c, pp, src, nd.b, ot);
+    bi(c, b"movq %rax, %rcx");
+    reload_rax(c, ls);
+    bi(c, b"cmpq %rcx, %rax");
+    let un: i32 = 1i32 - signedw(ot);
+    if op == OP_EQ { bi(c, b"sete %al"); }
+    else if op == OP_NE { bi(c, b"setne %al"); }
+    else if op == OP_LT { if un != 0 { bi(c, b"setb %al"); } else { bi(c, b"setl %al"); } }
+    else if op == OP_LE { if un != 0 { bi(c, b"setbe %al"); } else { bi(c, b"setle %al"); } }
+    else if op == OP_GT { if un != 0 { bi(c, b"seta %al"); } else { bi(c, b"setg %al"); } }
+    else { if un != 0 { bi(c, b"setae %al"); } else { bi(c, b"setge %al"); } }
+    bi(c, b"movzbq %al, %rax");
+    return W_BOOL;
+}
+
+fn gen_short_circuit(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let op: i32 = nd.op;
+    let rloc: i32 = newslot(c);
+    let join: i32 = newlbl(c);
+    let shortl: i32 = newlbl(c);
+    let _lw: i32 = gen_value(c, pp, src, nd.a, W_BOOL);
+    bi(c, b"testq %rax, %rax");
+    if op == OP_AND {
+        bc(c, 9);
+        bs(c, b"jz ");
+        blabel_ref(c, shortl);
+        bc(c, 10);
+    } else {
+        bc(c, 9);
+        bs(c, b"jnz ");
+        blabel_ref(c, shortl);
+        bc(c, 10);
+    }
+    let _rw: i32 = gen_value(c, pp, src, nd.b, W_BOOL);
+    store_slot(c, rloc);
+    bc(c, 9);
+    bs(c, b"jmp ");
+    blabel_ref(c, join);
+    bc(c, 10);
+    blabel_def(c, shortl);
+    if op == OP_AND { bi(c, b"movq $0, %rax"); } else { bi(c, b"movq $1, %rax"); }
+    store_slot(c, rloc);
+    blabel_def(c, join);
+    reload_rax(c, rloc);
+    return W_BOOL;
+}
+
+fn gen_conv(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let vw: i32 = gen_value(c, pp, src, nd.b, 0i32 - 1i32);
+    let tow: i32 = scalar_width(pp, src, nd.a);
+    let fp0: usize = c.cur_p0;
+    let fp1: usize = c.cur_p1;
+    let svw: i32 = concretize(vw);
+    if c.regime == 0 {
+        // Range-check the source value against the TARGET range (ConvLoss).
+        if signedw(svw) != 0 {
+            // signed source: lower always, upper unless target is u64/usize.
+            emit_conv_lower(c, tow, fp0, fp1);
+            if tow != 9 && tow != 10 {
+                emit_conv_upper_signed(c, tow, fp0, fp1);
+            }
+        } else {
+            // unsigned source: value >= 0, so only an upper bound (unsigned).
+            emit_conv_upper_unsigned(c, tow, fp0, fp1);
+        }
+    }
+    emit_canon(c, tow);
+    return tow;
+}
+// signed-source lower bound: fault if %rax < target-min.
+fn emit_conv_lower(c: write C, tow: i32, s: usize, e: usize) -> unit {
+    if bits_of(tow) == 64 {
+        if signedw(tow) != 0 { return; }
+        // target u64/usize: min is 0.
+        bi(c, b"cmpq $0, %rax");
+        fault_unless(c, b"jge", FK_CONVLOSS, s, e);
+        return;
+    }
+    bc(c, 9);
+    bs(c, b"cmpq $");
+    if smin_of(tow) < 0i64 {
+        bc(c, 45);
+        bn(c, conv u64 (0i64 - smin_of(tow)));
+    } else {
+        bn(c, conv u64 smin_of(tow));
+    }
+    bs(c, b", %rax");
+    bc(c, 10);
+    fault_unless(c, b"jge", FK_CONVLOSS, s, e);
+    return;
+}
+fn emit_conv_upper_signed(c: write C, tow: i32, s: usize, e: usize) -> unit {
+    if bits_of(tow) == 64 {
+        // target i64/isize: max is i64-max; a signed source always fits.
+        return;
+    }
+    bc(c, 9);
+    bs(c, b"movabsq $");
+    bn(c, umax_of(tow));
+    bs(c, b", %rcx");
+    bc(c, 10);
+    bi(c, b"cmpq %rcx, %rax");
+    fault_unless(c, b"jle", FK_CONVLOSS, s, e);
+    return;
+}
+fn emit_conv_upper_unsigned(c: write C, tow: i32, s: usize, e: usize) -> unit {
+    if bits_of(tow) == 64 {
+        if signedw(tow) == 0 { return; }
+        // target i64/isize: max is i64-max; compare unsigned.
+        bi(c, b"movabsq $9223372036854775807, %rcx");
+        bi(c, b"cmpq %rcx, %rax");
+        fault_unless(c, b"jbe", FK_CONVLOSS, s, e);
+        return;
+    }
+    bc(c, 9);
+    bs(c, b"movabsq $");
+    bn(c, umax_of(tow));
+    bs(c, b", %rcx");
+    bc(c, 10);
+    bi(c, b"cmpq %rcx, %rax");
+    fault_unless(c, b"jbe", FK_CONVLOSS, s, e);
+    return;
+}
+
+fn emit_arg_reg(c: write C, idx: usize) -> unit {
+    if idx == 0usize { bs(c, b"%rdi"); return; }
+    if idx == 1usize { bs(c, b"%rsi"); return; }
+    if idx == 2usize { bs(c, b"%rdx"); return; }
+    if idx == 3usize { bs(c, b"%rcx"); return; }
+    if idx == 4usize { bs(c, b"%r8"); return; }
+    bs(c, b"%r9");
+    return;
+}
+
+fn gen_call(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let callee: Node = pp.nodes[conv usize nd.a];
+    if callee.tag != T_ID { c.*.err = 1; return 4; }
+    if span_eq(src, callee.p0, callee.p1, b"trace") {
+        let _w: i32 = gen_value(c, pp, src, nd.b, 4);
+        bi(c, b"movq %rax, %rdi");
+        bi(c, b"call rt_trace");
+        return 12;
+    }
+    let fnid: u32 = find_fn(pp, src, c.head, callee.p0, callee.p1);
+    if fnid == 0u32 { c.*.err = 1; return 4; }
+    let fnnd: Node = pp.nodes[conv usize fnid];
+    let mut retn: u32 = 0u32;
+    if fnnd.e != 0u32 { retn = pp.nodes[conv usize fnnd.e].a; }
+    let retw: i32 = scalar_width(pp, src, retn);
+    // Evaluate args into fresh temp slots (left to right), then load arg regs.
+    let mut argslots: [16]i32 = [0i32; 16];
+    let mut na: usize = 0usize;
+    let mut argc: u32 = nd.b;
+    let mut parc: u32 = fnnd.c;
+    while argc != 0u32 {
+        let pw: i32 = scalar_width(pp, src, pp.nodes[conv usize parc].a);
+        let _aw: i32 = gen_value(c, pp, src, argc, pw);
+        argslots[na] = spill(c);
+        na = na + 1usize;
+        argc = pp.nodes[conv usize argc].nx;
+        parc = pp.nodes[conv usize parc].nx;
+    }
+    let mut k: usize = 0usize;
+    while k < na {
+        bc(c, 9);
+        bs(c, b"movq ");
+        bslot(c, argslots[k]);
+        bs(c, b", ");
+        emit_arg_reg(c, k);
+        bc(c, 10);
+        k = k + 1usize;
+    }
+    bc(c, 9);
+    bs(c, b"call cnr_");
+    let mut j: usize = callee.p0;
+    while j < callee.p1 {
+        bc(c, conv i32 src[j]);
+        j = j + 1usize;
+    }
+    bc(c, 10);
+    if retw == 0 { return 12; }
+    return retw;
+}
+
+fn gen_if(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let _cw: i32 = gen_value(c, pp, src, nd.a, W_BOOL);
+    let elsel: i32 = newlbl(c);
+    let endl: i32 = newlbl(c);
+    bi(c, b"testq %rax, %rax");
+    bc(c, 9);
+    bs(c, b"jz ");
+    blabel_ref(c, elsel);
+    bc(c, 10);
+    let _s1: i32 = gen_block(c, pp, src, nd.b);
+    bc(c, 9);
+    bs(c, b"jmp ");
+    blabel_ref(c, endl);
+    bc(c, 10);
+    blabel_def(c, elsel);
+    if nd.c != 0u32 {
+        let _s2: i32 = gen_value(c, pp, src, nd.c, 0i32 - 1i32);
+    }
+    blabel_def(c, endl);
+    return 12;
+}
+
+fn gen_while(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let headl: i32 = newlbl(c);
+    let exitl: i32 = newlbl(c);
+    blabel_def(c, headl);
+    let _cw: i32 = gen_value(c, pp, src, nd.a, W_BOOL);
+    bi(c, b"testq %rax, %rax");
+    bc(c, 9);
+    bs(c, b"jz ");
+    blabel_ref(c, exitl);
+    bc(c, 10);
+    c.*.loop_cont[c.loop_n] = headl;
+    c.*.loop_brk[c.loop_n] = exitl;
+    c.*.loop_n = c.loop_n + 1usize;
+    let _s1: i32 = gen_block(c, pp, src, nd.b);
+    c.*.loop_n = c.loop_n - 1usize;
+    bc(c, 9);
+    bs(c, b"jmp ");
+    blabel_ref(c, headl);
+    bc(c, 10);
+    blabel_def(c, exitl);
+    return 12;
+}
+
+fn gen_loop(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let bodyl: i32 = newlbl(c);
+    let exitl: i32 = newlbl(c);
+    blabel_def(c, bodyl);
+    c.*.loop_cont[c.loop_n] = bodyl;
+    c.*.loop_brk[c.loop_n] = exitl;
+    c.*.loop_n = c.loop_n + 1usize;
+    let _s1: i32 = gen_block(c, pp, src, nd.a);
+    c.*.loop_n = c.loop_n - 1usize;
+    bc(c, 9);
+    bs(c, b"jmp ");
+    blabel_ref(c, bodyl);
+    bc(c, 10);
+    blabel_def(c, exitl);
+    return 12;
+}
+
+fn gen_assert(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let _cw: i32 = gen_value(c, pp, src, nd.a, W_BOOL);
+    let fp0: usize = c.cur_p0;
+    let fp1: usize = c.cur_p1;
+    bi(c, b"testq %rax, %rax");
+    let okl: i32 = newlbl(c);
+    bc(c, 9);
+    bs(c, b"jnz ");
+    blabel_ref(c, okl);
+    bc(c, 10);
+    emit_fault(c, FK_ASSERT, fp0, fp1);
+    blabel_def(c, okl);
+    return 12;
+}
+
+fn emit_epilogue(c: write C) -> unit {
+    bi(c, b"movq %rbp, %rsp");
+    bi(c, b"popq %rbp");
+    bi(c, b"ret");
+    return;
+}
+
+fn gen_return(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    if nd.a != 0u32 {
+        let _w: i32 = gen_value(c, pp, src, nd.a, c.ret_w);
+        emit_canon(c, c.ret_w);
+    } else {
+        bi(c, b"xorl %eax, %eax");
+    }
+    emit_epilogue(c);
+    return 12;
+}
+
+fn gen_stmt(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    if nd.tag == T_LET {
+        let tn: u32 = nd.a;
+        let mut w: i32 = scalar_width(pp, src, tn);
+        let s: i32 = newslot(c);
+        if nd.b != 0u32 {
+            let vw: i32 = gen_value(c, pp, src, nd.b, w);
+            if w == 0 { w = vw; }
+            emit_canon(c, w);
+            store_slot(c, s);
+        }
+        bind(c, nd.p0, nd.p1, s, w);
+        return 0;
+    }
+    if nd.tag == T_ASSIGN {
+        let place: Node = pp.nodes[conv usize nd.a];
+        let slot: i32 = lookup(c, src, place.p0, place.p1);
+        let w: i32 = c.luk_w;
+        if slot < 0 { c.*.err = 1; return 1; }
+        let _vw: i32 = gen_value(c, pp, src, nd.b, w);
+        emit_canon(c, w);
+        store_slot(c, slot);
+        return 0;
+    }
+    let _r: i32 = gen_value(c, pp, src, i, 0i32 - 1i32);
+    return 0;
+}
+
+fn gen_block(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
+    let bsave: usize = c.bnd_n;
+    let nd: Node = pp.nodes[conv usize i];
+    let mut cur: u32 = nd.a;
+    while cur != 0u32 {
+        let _s: i32 = gen_stmt(c, pp, src, cur);
+        cur = pp.nodes[conv usize cur].nx;
+    }
+    c.*.bnd_n = bsave;
+    return 0;
+}
+
+fn gen_fn(c: write C, pp: read P, src: [u8], fnid: u32) -> unit {
+    let nd: Node = pp.nodes[conv usize fnid];
+    // reset per-function state
+    c.*.bbuf_n = 0usize;
+    c.*.bnd_n = 0usize;
+    c.*.slot_next = 0usize;
+    c.*.slot_max = 0usize;
+    c.*.loop_n = 0usize;
+    c.*.regime = 0;
+    let mut retn: u32 = 0u32;
+    if nd.e != 0u32 { retn = pp.nodes[conv usize nd.e].a; }
+    c.*.ret_w = scalar_width(pp, src, retn);
+    // params: slot per param (in declaration order), bound to their names.
+    let mut pc: u32 = nd.c;
+    let mut np: usize = 0usize;
+    while pc != 0u32 {
+        let pn: Node = pp.nodes[conv usize pc];
+        let pw: i32 = scalar_width(pp, src, pn.a);
+        let s: i32 = newslot(c);
+        bind(c, pn.p0, pn.p1, s, pw);
+        np = np + 1usize;
+        pc = pn.nx;
+    }
+    // copy incoming argument registers into the param slots.
+    let mut k: usize = 0usize;
+    while k < np {
+        bc(c, 9);
+        bs(c, b"movq ");
+        emit_arg_reg(c, k);
+        bs(c, b", ");
+        bslot(c, conv i32 k);
+        bc(c, 10);
+        k = k + 1usize;
+    }
+    let _b: i32 = gen_block(c, pp, src, nd.d);
+    // implicit return (unit / fall-through): _0 defaults to 0.
+    bi(c, b"xorl %eax, %eax");
+    emit_epilogue(c);
+    // Now the frame size is known; stream the function.
+    let mut frame: usize = 8usize * c.slot_max;
+    frame = ((frame + 15usize) / 16usize) * 16usize;
+    trace(10);
+    trace(99); trace(110); trace(114); trace(95); // "cnr_"
+    let mut j: usize = nd.p0;
+    while j < nd.p1 {
+        trace(conv i64 src[j]);
+        j = j + 1usize;
+    }
+    trace(58); trace(10); // ":\n"
+    emit_line(b"pushq %rbp");
+    emit_line(b"movq %rsp, %rbp");
+    if frame > 0usize {
+        trace(9);
+        emit_bytes_direct(b"subq $");
+        emit_num_direct(conv u64 frame);
+        emit_bytes_direct(b", %rsp");
+        trace(10);
+    }
+    let mut bi2: usize = 0usize;
+    while bi2 < c.bbuf_n {
+        trace(conv i64 c.bbuf[bi2]);
+        bi2 = bi2 + 1usize;
+    }
+    return;
+}
+
+fn emit_bytes_direct(s: [u8]) -> unit {
+    let mut i: usize = 0usize;
+    while i < len(s) {
+        trace(conv i64 s[i]);
+        i = i + 1usize;
+    }
+    return;
+}
+fn emit_num_direct(v: u64) -> unit {
+    if v == 0u64 { trace(48); return; }
+    let mut b: [24]u8 = [0u8; 24];
+    let mut cnt: usize = 0usize;
+    let mut x: u64 = v;
+    while x > 0u64 {
+        b[cnt] = conv u8 (48u64 + x % 10u64);
+        x = x / 10u64;
+        cnt = cnt + 1usize;
+    }
+    let mut i: usize = cnt;
+    while i > 0usize {
+        i = i - 1usize;
+        trace(conv i64 b[i]);
+    }
+    return;
+}
+fn emit_line(s: [u8]) -> unit {
+    trace(9);
+    emit_bytes_direct(s);
+    trace(10);
+    return;
+}
+
+pub fn codegen_dump(src: [u8], buf: read Buf) -> unit {
+    let mut p: P = P { nodes: [nnew(0); 49152], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
+    let head: u32 = parse_program(write p, src, buf);
+    let mut c: C = C {
+        head: head,
+        bbuf: [0u8; 1048576],
+        bbuf_n: 0usize,
+        bnd_p0: [0usize; 1024],
+        bnd_p1: [0usize; 1024],
+        bnd_slot: [0i32; 1024],
+        bnd_w: [0i32; 1024],
+        bnd_n: 0usize,
+        slot_next: 0usize,
+        slot_max: 0usize,
+        loop_cont: [0i32; 64],
+        loop_brk: [0i32; 64],
+        loop_n: 0usize,
+        lbl: 0,
+        ret_w: 4,
+        regime: 0,
+        cur_p0: 0usize,
+        cur_p1: 0usize,
+        luk_slot: 0,
+        luk_w: 0,
+        err: 0,
+    };
+    // header: entry alias jumps to the compiled `main`.
+    emit_bytes_direct(b".text");
+    trace(10);
+    emit_bytes_direct(b".globl candor_entry");
+    trace(10);
+    emit_bytes_direct(b"candor_entry:");
+    trace(10);
+    emit_line(b"jmp cnr_main");
+    let mut cur: u32 = head;
+    while cur != 0u32 {
+        let nd: Node = p.nodes[conv usize cur];
+        if nd.tag == T_FN && nd.a == 0u32 {
+            gen_fn(write c, read p, src, cur);
+        }
+        cur = nd.nx;
+    }
+    return;
+}
