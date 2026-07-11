@@ -25,7 +25,7 @@
 // It is NOT self-checked in this slice, so it uses the full language.
 
 use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl, emit_bytes, decoded_len};
-use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_PARAM, T_SC, T_NAMED, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, T_STRUCT, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, T_STR, T_BYTES, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_ENUMCTOR, T_MATCH, T_PVARIANT, T_WILD, T_BIND, T_VARIANT, T_ARM, T_NAME, T_STATIC, T_RAWPTR, T_BOX, T_BOXRESULT, T_FNPTR, T_FPPARAM, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT, T_APP, T_GENERICVAL};
+use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_PARAM, T_SC, T_NAMED, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, T_STRUCT, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, T_STR, T_BYTES, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_ENUMCTOR, T_MATCH, T_PVARIANT, T_WILD, T_BIND, T_VARIANT, T_ARM, T_NAME, T_STATIC, T_RAWPTR, T_BOX, T_BOXRESULT, T_FNPTR, T_FPPARAM, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT, T_APP, T_GENERICVAL, T_IMPL};
 use mono::{mono_program};
 
 // ---- fault kind codes (the wire keyword table in serial.rs) -----------------
@@ -147,6 +147,12 @@ struct M {
     mv_seg_n: usize,
     self_p0: usize,
     self_p1: usize,
+    disp_sid: [256]u32,
+    disp_p0: [256]usize,
+    disp_p1: [256]usize,
+    disp_fn: [256]u32,
+    disp_impl: [256]u32,
+    disp_n: usize,
     err: i32,
 }
 
@@ -2342,9 +2348,189 @@ fn lower_coll_value(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
     return 2;
 }
 
+// ---- impl-method dispatch (T3) ----------------------------------------------
+// Build the dispatch table from every concrete (a == 0) T_IMPL, mirroring
+// interp.cnr build_dispatch: key each method by (target struct node, method-name
+// span) -> (method fn node, owning T_IMPL node). Generic templates (a != 0) are
+// skipped; mono has already instantiated them as concrete T_IMPL nodes.
+fn build_dispatch(pp: read P, src: [u8], m: write M) -> unit {
+    let mut cur: u32 = m.head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_IMPL && nd.a == 0u32 {
+            let sid: u32 = struct_id_of(pp, src, m.head, nd.c);
+            let mut mcur: u32 = nd.d;
+            while mcur != 0u32 {
+                let mnd: Node = pp.nodes[conv usize mcur];
+                let k: usize = m.disp_n;
+                m.*.disp_sid[k] = sid;
+                m.*.disp_p0[k] = mnd.p0;
+                m.*.disp_p1[k] = mnd.p1;
+                m.*.disp_fn[k] = mcur;
+                m.*.disp_impl[k] = cur;
+                m.*.disp_n = k + 1usize;
+                mcur = mnd.nx;
+            }
+        }
+        cur = nd.nx;
+    }
+    return;
+}
+fn disp_index(m: write M, src: [u8], sid: u32, s: usize, en: usize) -> i32 {
+    let mut i: usize = 0usize;
+    while i < m.disp_n {
+        if m.disp_sid[i] == sid && name_eq(src, m.disp_p0[i], m.disp_p1[i], s, en) {
+            return conv i32 i;
+        }
+        i = i + 1usize;
+    }
+    return 0 - 1i32;
+}
+// The mangled free-function name an impl method lowers to (generics.rs
+// impl_method_fn_name): `<impl Iface[$args] for Target>::method`. `Target` is the
+// concrete nominal (a struct instance's `$`-mangled name for a generic impl).
+fn emit_impl_method_name(pp: read P, src: [u8], impl_id: u32, method_id: u32) -> unit {
+    let imnd: Node = pp.nodes[conv usize impl_id];
+    let mnd: Node = pp.nodes[conv usize method_id];
+    emit_byte(34);
+    emit_lit(b"<impl ");
+    emit_bytes(src, imnd.p0, imnd.p1);
+    let mut ac: u32 = imnd.b;
+    while ac != 0u32 {
+        emit_byte(36);
+        emit_mangle_ty(pp, src, ac);
+        ac = pp.nodes[conv usize ac].nx;
+    }
+    emit_lit(b" for ");
+    emit_mangle_ty(pp, src, imnd.c);
+    emit_lit(b">::");
+    emit_bytes(src, mnd.p0, mnd.p1);
+    emit_byte(34);
+    return;
+}
+fn pool_impl_method_name(m: write M, pp: read P, src: [u8], impl_id: u32, method_id: u32) -> unit {
+    let imnd: Node = pp.nodes[conv usize impl_id];
+    let mnd: Node = pp.nodes[conv usize method_id];
+    pool_byte(m, 34);
+    pool_lit(m, b"<impl ");
+    let mut i: usize = imnd.p0;
+    while i < imnd.p1 { pool_byte(m, conv i32 src[i]); i = i + 1usize; }
+    let mut ac: u32 = imnd.b;
+    while ac != 0u32 {
+        pool_byte(m, 36);
+        pool_mangle_ty(m, pp, src, ac);
+        ac = pp.nodes[conv usize ac].nx;
+    }
+    pool_lit(m, b" for ");
+    pool_mangle_ty(m, pp, src, imnd.c);
+    pool_lit(m, b">::");
+    let mut j: usize = mnd.p0;
+    while j < mnd.p1 { pool_byte(m, conv i32 src[j]); j = j + 1usize; }
+    pool_byte(m, 34);
+    return;
+}
+fn emit_method_call(m: write M, pp: read P, src: [u8], dst: i32, impl_id: u32, method_id: u32, sp0: usize, sp1: usize) -> unit {
+    if m.reachable == 0 { return; }
+    let s: usize = m.pool_n;
+    pool_lit(m, b"(stmt (assign ");
+    pool_num(m, conv u64 dst);
+    pool_lit(m, b" (call ");
+    pool_impl_method_name(m, pp, src, impl_id, method_id);
+    pool_lit(m, b" (args");
+    let mut j: usize = 0usize;
+    while j < m.na {
+        pool_byte(m, 32);
+        pool_operand(m, m.ak[j], m.av[j], m.an[j], m.aw[j]);
+        j = j + 1usize;
+    }
+    pool_lit(m, b"))) ");
+    pool_num(m, conv u64 sp0);
+    pool_byte(m, 32);
+    pool_num(m, conv u64 sp1);
+    pool_lit(m, b" false)");
+    chunk_end(m, s);
+    return;
+}
+// A receiver whose value is itself a borrow (build.rs `base_is_borrow`): the
+// borrow is forwarded as `self` directly, without taking its address.
+fn base_is_borrow(pp: read P, src: [u8], m: write M, base: u32) -> bool {
+    let nd: Node = pp.nodes[conv usize base];
+    if nd.tag == T_PAREN { return base_is_borrow(pp, src, m, nd.a); }
+    if nd.tag == T_ID {
+        let id: i32 = lookup(m, src, nd.p0, nd.p1);
+        if id >= 0 && m.loc_ptr[conv usize id] >= 2 { return true; }
+    }
+    return false;
+}
+// `recv.m(args)` -> a direct MIR Call to the resolved impl method with the receiver
+// passed as `self`. Mirrors interp.cnr eval_method_call + build.rs resolve_method:
+// type the receiver to its nominal, look up (nominal, method) in the dispatch table,
+// then pass the receiver's ADDRESS (a `read`/`write` borrow) as the leading `self`
+// operand -- unless the receiver is already a borrow, which is forwarded as-is.
+fn lower_method_call(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let callee: Node = pp.nodes[conv usize nd.a];
+    let base: u32 = callee.a;
+    place_base_prep(pp, src, m, base);
+    m.*.idx_cnt = 0usize;
+    prep_place(pp, src, m, base);
+    let recv_tn: u32 = resolve_place_tn(pp, src, m, base);
+    let sid: u32 = struct_id_of(pp, src, m.head, peel_box_tn(pp, recv_tn));
+    let li: i32 = disp_index(m, src, sid, callee.p0, callee.p1);
+    if li < 0 { m.*.err = 1; return 1; }
+    let lk: usize = conv usize li;
+    let fnid: u32 = m.disp_fn[lk];
+    let impl_id: u32 = m.disp_impl[lk];
+    let fnnd: Node = pp.nodes[conv usize fnid];
+    let self_param: u32 = fnnd.c;
+    let self_mode: i32 = pp.nodes[conv usize self_param].op;
+    let mut retn: u32 = 0u32;
+    let cbri: i32 = bret_lookup(m, fnid);
+    if cbri >= 0 { retn = m.bret_tn[conv usize cbri]; }
+    else if fnnd.e != 0u32 { retn = pp.nodes[conv usize fnnd.e].a; }
+    let retw: i32 = scalar_width(pp, src, retn);
+    m.*.na = 0usize;
+    if base_is_borrow(pp, src, m, base) {
+        let sc: i32 = lower_value(pp, src, m, base, 0 - 1i32);
+        if sc != 0 { return sc; }
+        let k: usize = m.na;
+        m.*.ak[k] = m.res_kind; m.*.av[k] = m.res_val; m.*.an[k] = m.res_neg; m.*.aw[k] = m.res_w;
+        m.*.na = k + 1usize;
+    } else {
+        let mut tmp: i32 = 0;
+        if self_mode == 2 { tmp = new_local_borrow(m, recv_tn, 0, 0, 0); }
+        else { tmp = new_local_borrow_sh(m, recv_tn, 0, 0, 0); }
+        if m.reachable != 0 {
+            let s: usize = m.pool_n;
+            pool_lit(m, b"(stmt (assign ");
+            pool_num(m, conv u64 tmp);
+            pool_lit(m, b" (ref ");
+            render_place_read(pp, src, m, base);
+            pool_lit(m, b")) ");
+            pool_num(m, conv u64 callee.p0);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 callee.p1);
+            pool_lit(m, b" false)");
+            chunk_end(m, s);
+        }
+        let k: usize = m.na;
+        m.*.ak[k] = 1; m.*.av[k] = conv u64 tmp; m.*.an[k] = 0; m.*.aw[k] = 0;
+        m.*.na = k + 1usize;
+    }
+    let sc2: i32 = lower_args_core(pp, src, m, pp.nodes[conv usize self_param].nx, nd.b);
+    if sc2 != 0 { return sc2; }
+    let mut id: i32 = 0;
+    if retw != 0 { id = new_local(m, retw, 0, 0, 0); }
+    else if is_wordy_tn(pp, src, retn) { id = new_local_tn(m, retn, 0, 0, 0); }
+    else { id = new_local(m, 0, 0, 0, 0); }
+    emit_method_call(m, pp, src, id, impl_id, fnid, nd.p0, nd.p1);
+    if retw != 0 { set_res_local(m, id, retw); } else { set_res_local(m, id, 10); }
+    return 0;
+}
 fn lower_call(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
     let callee: Node = pp.nodes[conv usize nd.a];
+    if callee.tag == T_FIELD { return lower_method_call(pp, src, m, i); }
     if callee.tag != T_ID { m.*.err = 1; return 1; }
     // trace(x): the observable.
     if span_eq(src, callee.p0, callee.p1, b"trace") {
@@ -3044,8 +3230,14 @@ fn is_place_expr(pp: read P, i: u32) -> bool {
 }
 fn lower_args(pp: read P, src: [u8], m: write M, fnnd: Node, arg_head: u32) -> i32 {
     m.*.na = 0usize;
+    return lower_args_core(pp, src, m, fnnd.c, arg_head);
+}
+// The per-argument lowering loop shared by direct and method calls: pairs each
+// argument against the parameter chain starting at `parc0`, appending operands
+// to `m.na` (the caller seeds any leading `self` operand and does not reset na).
+fn lower_args_core(pp: read P, src: [u8], m: write M, parc0: u32, arg_head: u32) -> i32 {
     let mut argc: u32 = arg_head;
-    let mut parc: u32 = fnnd.c;
+    let mut parc: u32 = parc0;
     while argc != 0u32 {
         let pnode: Node = pp.nodes[conv usize parc];
         let ptn: u32 = pnode.a;
@@ -3943,13 +4135,15 @@ fn emit_init_ref(src: [u8], p0: usize, p1: usize) -> unit {
     return;
 }
 // kind: 0 = user fn (quoted name), 1 = drop hook (`<drop N>`), 2 = static init (`<init N>`).
-fn emit_fn(m: write M, pp: read P, src: [u8], defid: u32, kind: i32) -> unit {
+fn emit_fn(m: write M, pp: read P, src: [u8], defid: u32, impl_id: u32, kind: i32) -> unit {
     let dn: Node = pp.nodes[conv usize defid];
     emit_lit(b"(fn ");
     if kind == 1 {
         emit_hook_qname(pp, src, defid);
     } else if kind == 2 {
         emit_init_ref(src, dn.p0, dn.p1);
+    } else if kind == 3 {
+        emit_impl_method_name(pp, src, impl_id, defid);
     } else {
         emit_qname(pp, src, defid);
     }
@@ -4734,10 +4928,17 @@ pub fn lower_dump(src: [u8], buf: read Buf) -> unit {
         mv_seg_n: 0usize,
         self_p0: 0usize,
         self_p1: 0usize,
+        disp_sid: [0u32; 256],
+        disp_p0: [0usize; 256],
+        disp_p1: [0usize; 256],
+        disp_fn: [0u32; 256],
+        disp_impl: [0u32; 256],
+        disp_n: 0usize,
         err: 0,
     };
     set_self_span(src, write m);
     prep_synth(write p, src, write m, head);
+    build_dispatch(read p, src, write m);
     emit_lit(b"(mir (fns");
     // Drop-hook fns first (item order), then user fns -- matching build.rs.
     let mut ch: u32 = head;
@@ -4747,7 +4948,7 @@ pub fn lower_dump(src: [u8], buf: read Buf) -> unit {
             reset_fn(write m);
             let _sh: i32 = lower_hook(read p, src, write m, ch);
             emit_byte(32);
-            emit_fn(write m, read p, src, ch, 1);
+            emit_fn(write m, read p, src, ch, 0u32, 1);
         }
         ch = cn.nx;
     }
@@ -4759,7 +4960,7 @@ pub fn lower_dump(src: [u8], buf: read Buf) -> unit {
             reset_fn(write m);
             let _ss: i32 = lower_static_init(read p, src, write m, si);
             emit_byte(32);
-            emit_fn(write m, read p, src, si, 2);
+            emit_fn(write m, read p, src, si, 0u32, 2);
         }
         si = sn.nx;
     }
@@ -4770,9 +4971,27 @@ pub fn lower_dump(src: [u8], buf: read Buf) -> unit {
             reset_fn(write m);
             let _sc: i32 = lower_fn(read p, src, write m, cur);
             emit_byte(32);
-            emit_fn(write m, read p, src, cur, 0);
+            emit_fn(write m, read p, src, cur, 0u32, 0);
         }
         cur = nd.nx;
+    }
+    // Impl-method fns: each concrete (a == 0) T_IMPL method lowers to a free fn
+    // named `<impl Iface for Target>::method`, referenced by method-call Calls.
+    let mut ic: u32 = head;
+    while ic != 0u32 {
+        let icn: Node = p.nodes[conv usize ic];
+        if icn.tag == T_IMPL && icn.a == 0u32 {
+            let mut mc: u32 = icn.d;
+            while mc != 0u32 {
+                let mcn: Node = p.nodes[conv usize mc];
+                reset_fn(write m);
+                let _ms: i32 = lower_fn(read p, src, write m, mc);
+                emit_byte(32);
+                emit_fn(write m, read p, src, mc, ic, 3);
+                mc = mcn.nx;
+            }
+        }
+        ic = icn.nx;
     }
     emit_lit(b") (drop_hooks");
     let mut dh: u32 = head;
