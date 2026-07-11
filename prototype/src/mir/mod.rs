@@ -173,6 +173,49 @@ pub enum Rvalue {
     StrAddr(String),
 }
 
+/// A compiler-known collection operation (PROPOSAL-selfhost-ergonomics / design
+/// 0013): the `Vec[T]` / `Map[V]` / `String` builtins carried as MIR intrinsics.
+/// The algorithm (FNV-1a hash, open-addressed linear probing, alloc-copy-free
+/// growth, per-element / per-key/value drop) is NOT lowered into basic blocks; it
+/// lives in ONE place — the MIR interpreter's handlers — mirroring the
+/// tree-walking oracle (`interp::eval::bi_*`) byte-for-byte over the same flat
+/// memory substrate. Every collection header is five `u64` words
+/// `{ buf@0, len@8, cap@16, ctx@24, vt@32 }`; keys are byte-strings (`str`/`[u8]`).
+#[derive(Clone, Debug)]
+pub enum CollOp {
+    /// `vec_new` / `map_new` / `string_new`: initialize an empty header
+    /// `{ buf:0, len:0, cap:0, ctx, vt }` at `dst`, taking `ctx`/`vt` from the
+    /// `Alloc` handle at `alloc` (the init is identical for all three headers).
+    New { alloc: Operand },
+    /// Vec `push(write v, x)`: move `value` onto the end, growing (alloc-copy-free)
+    /// when full. Unit result.
+    VecPush { base: Operand, elem: Type, value: Place, span: Span },
+    /// Vec `pop(write v) -> Opt[elem]`: move the last element into `dst` as
+    /// `Opt::Some`, or write `Opt::None` when empty.
+    VecPop { base: Operand, elem: Type },
+    /// Vec `get(read v, i) -> read elem`: a bounds-faulting borrow written to `dst`.
+    VecGet { base: Operand, elem: Type, index: Operand, span: Span },
+    /// Vec `set(write v, i, x)`: drop the overwritten element, then move `value`
+    /// into slot `i` (bounds-faulting). Unit result.
+    VecSet { base: Operand, elem: Type, index: Operand, value: Place, span: Span },
+    /// Map `insert(write m, key, v)`: move `value` in under byte-string `key`
+    /// (dropping a displaced value on an existing key; owning a key byte-copy on a
+    /// new key; growing/rehashing at load factor 3/4). Unit result.
+    MapInsert { base: Operand, valty: Type, key: Place, value: Place, span: Span },
+    /// Map `contains(read m, key) -> bool`: the membership bool written to `dst`.
+    MapContains { base: Operand, valty: Type, key: Place },
+    /// Map `get(read m, key) -> read valty`: a borrow of the stored value written
+    /// to `dst`, faulting `Bounds` if the key is absent.
+    MapGet { base: Operand, valty: Type, key: Place, span: Span },
+    /// String `push(write s, c: u32)`: append one UTF-8-encoded Unicode scalar
+    /// value (faulting `Requires` on a surrogate / out-of-range code point). Unit.
+    StringPush { base: Operand, ch: Operand, span: Span },
+    /// String `append(write s, v: read str)`: append a validated byte view. Unit.
+    StringAppend { base: Operand, view: Place, span: Span },
+    /// String `as_str(read s) -> str`: a `{ptr@0, len@8}` view written to `dst`.
+    StringAsStr { base: Operand },
+}
+
 #[derive(Clone, Debug)]
 pub enum StatementKind {
     /// Assign an rvalue to a local place.
@@ -208,6 +251,10 @@ pub enum StatementKind {
     /// instead creates a real OS thread running `func` with the marshalled `args`
     /// and joins it at the enclosing `ScopeEnd`. `func` is a direct MIR fn name.
     Spawn { func: String, args: Vec<Operand> },
+    /// A compiler-known `Vec`/`Map`/`String` collection intrinsic (see [`CollOp`]):
+    /// the interpreter runs the ported `interp::eval::bi_*` body onto the shared
+    /// memory substrate, matching the tree-walker byte-for-byte.
+    CollectionOp { dst: Place, op: CollOp },
     /// The opening `{` of a `scope` concurrency region (design 0012 §1.1). Oracle:
     /// a no-op. Native: push a scope frame onto the running thread's frame stack.
     ScopeBegin,

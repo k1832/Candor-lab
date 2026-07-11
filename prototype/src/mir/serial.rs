@@ -39,8 +39,8 @@ use crate::token::ScalarTy;
 use crate::types::{ArrayLen, FnPtrTy, Type};
 
 use super::{
-    BasicBlock, FaultEdge, LocalDecl, MirFn, MirProgram, Operand, Place, Predicate, Proj, Regime,
-    ReplayPolicy, Rvalue, StaticInit, Statement, StatementKind, Terminator,
+    BasicBlock, CollOp, FaultEdge, LocalDecl, MirFn, MirProgram, Operand, Place, Predicate, Proj,
+    Regime, ReplayPolicy, Rvalue, StaticInit, Statement, StatementKind, Terminator,
 };
 
 // ---------------------------------------------------------------------------
@@ -739,10 +739,99 @@ fn stmtkind_to(k: &StatementKind) -> Sexp {
             n(span.start),
             n(span.end),
         ]),
+        StatementKind::CollectionOp { dst, op } => l(vec![a("collop"), place_to(dst), collop_to(op)]),
         StatementKind::Spawn { func, args } => l(vec![a("spawn"), s(func), args_to(args)]),
         StatementKind::ScopeBegin => l(vec![a("scopebegin")]),
         StatementKind::ScopeEnd => l(vec![a("scopeend")]),
     }
+}
+
+fn collop_to(op: &CollOp) -> Sexp {
+    match op {
+        CollOp::New { alloc } => l(vec![a("new"), operand_to(alloc)]),
+        CollOp::VecPush { base, elem, value, span } => l(vec![
+            a("vecpush"), operand_to(base), ty_to(elem), place_to(value), n(span.start), n(span.end),
+        ]),
+        CollOp::VecPop { base, elem } => l(vec![a("vecpop"), operand_to(base), ty_to(elem)]),
+        CollOp::VecGet { base, elem, index, span } => l(vec![
+            a("vecget"), operand_to(base), ty_to(elem), operand_to(index), n(span.start), n(span.end),
+        ]),
+        CollOp::VecSet { base, elem, index, value, span } => l(vec![
+            a("vecset"), operand_to(base), ty_to(elem), operand_to(index), place_to(value), n(span.start), n(span.end),
+        ]),
+        CollOp::MapInsert { base, valty, key, value, span } => l(vec![
+            a("mapinsert"), operand_to(base), ty_to(valty), place_to(key), place_to(value), n(span.start), n(span.end),
+        ]),
+        CollOp::MapContains { base, valty, key } => l(vec![
+            a("mapcontains"), operand_to(base), ty_to(valty), place_to(key),
+        ]),
+        CollOp::MapGet { base, valty, key, span } => l(vec![
+            a("mapget"), operand_to(base), ty_to(valty), place_to(key), n(span.start), n(span.end),
+        ]),
+        CollOp::StringPush { base, ch, span } => l(vec![
+            a("stringpush"), operand_to(base), operand_to(ch), n(span.start), n(span.end),
+        ]),
+        CollOp::StringAppend { base, view, span } => l(vec![
+            a("stringappend"), operand_to(base), place_to(view), n(span.start), n(span.end),
+        ]),
+        CollOp::StringAsStr { base } => l(vec![a("stringasstr"), operand_to(base)]),
+    }
+}
+fn collop_from(sx: &Sexp) -> Result<CollOp, String> {
+    let (tag, args) = head(sx)?;
+    Ok(match tag {
+        "new" => CollOp::New { alloc: operand_from(&args[0])? },
+        "vecpush" => CollOp::VecPush {
+            base: operand_from(&args[0])?,
+            elem: ty_from(&args[1])?,
+            value: place_from(&args[2])?,
+            span: Span { start: args[3].num()?, end: args[4].num()? },
+        },
+        "vecpop" => CollOp::VecPop { base: operand_from(&args[0])?, elem: ty_from(&args[1])? },
+        "vecget" => CollOp::VecGet {
+            base: operand_from(&args[0])?,
+            elem: ty_from(&args[1])?,
+            index: operand_from(&args[2])?,
+            span: Span { start: args[3].num()?, end: args[4].num()? },
+        },
+        "vecset" => CollOp::VecSet {
+            base: operand_from(&args[0])?,
+            elem: ty_from(&args[1])?,
+            index: operand_from(&args[2])?,
+            value: place_from(&args[3])?,
+            span: Span { start: args[4].num()?, end: args[5].num()? },
+        },
+        "mapinsert" => CollOp::MapInsert {
+            base: operand_from(&args[0])?,
+            valty: ty_from(&args[1])?,
+            key: place_from(&args[2])?,
+            value: place_from(&args[3])?,
+            span: Span { start: args[4].num()?, end: args[5].num()? },
+        },
+        "mapcontains" => CollOp::MapContains {
+            base: operand_from(&args[0])?,
+            valty: ty_from(&args[1])?,
+            key: place_from(&args[2])?,
+        },
+        "mapget" => CollOp::MapGet {
+            base: operand_from(&args[0])?,
+            valty: ty_from(&args[1])?,
+            key: place_from(&args[2])?,
+            span: Span { start: args[3].num()?, end: args[4].num()? },
+        },
+        "stringpush" => CollOp::StringPush {
+            base: operand_from(&args[0])?,
+            ch: operand_from(&args[1])?,
+            span: Span { start: args[2].num()?, end: args[3].num()? },
+        },
+        "stringappend" => CollOp::StringAppend {
+            base: operand_from(&args[0])?,
+            view: place_from(&args[1])?,
+            span: Span { start: args[2].num()?, end: args[3].num()? },
+        },
+        "stringasstr" => CollOp::StringAsStr { base: operand_from(&args[0])? },
+        other => return Err(format!("unknown collection op `{other}`")),
+    })
 }
 fn stmtkind_from(sx: &Sexp) -> Result<StatementKind, String> {
     let (tag, args) = head(sx)?;
@@ -775,6 +864,10 @@ fn stmtkind_from(sx: &Sexp) -> Result<StatementKind, String> {
             hi: operand_from(&args[3])?,
             stride: args[4].num()?,
             span: Span { start: args[5].num()?, end: args[6].num()? },
+        },
+        "collop" => StatementKind::CollectionOp {
+            dst: place_from(&args[0])?,
+            op: collop_from(&args[1])?,
         },
         "spawn" => {
             StatementKind::Spawn { func: args[0].as_str()?.to_string(), args: args_from(&args[1])? }

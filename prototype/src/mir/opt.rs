@@ -34,8 +34,8 @@ use std::collections::HashSet;
 
 use crate::ast::UnOp;
 use crate::mir::{
-    BasicBlock, LocalId, MirFn, MirProgram, Operand, Place, Proj, Rvalue, Statement, StatementKind,
-    Terminator,
+    BasicBlock, CollOp, LocalId, MirFn, MirProgram, Operand, Place, Proj, Rvalue, Statement,
+    StatementKind, Terminator,
 };
 
 /// A record of one applied R1 rewrite (for reporting / testing the machinery).
@@ -291,6 +291,12 @@ fn stmt_uses(kind: &StatementKind, live: &mut HashSet<LocalId>) {
             op_use(lo, live);
             op_use(hi, live);
         }
+        // A collection intrinsic reads its receiver base, index/key/value operands
+        // and places, and writes its result place — all live uses.
+        StatementKind::CollectionOp { dst, op } => {
+            place_use(dst, live);
+            collop_uses(op, live);
+        }
         // A `spawn`'s marshalled args are live uses (they cross into the task);
         // the scope markers reference no locals.
         StatementKind::Spawn { args, .. } => {
@@ -299,6 +305,44 @@ fn stmt_uses(kind: &StatementKind, live: &mut HashSet<LocalId>) {
             }
         }
         StatementKind::ScopeBegin | StatementKind::ScopeEnd => {}
+    }
+}
+
+fn collop_uses(op: &CollOp, live: &mut HashSet<LocalId>) {
+    match op {
+        CollOp::New { alloc } => op_use(alloc, live),
+        CollOp::VecPush { base, value, .. } => {
+            op_use(base, live);
+            place_use(value, live);
+        }
+        CollOp::VecPop { base, .. } => op_use(base, live),
+        CollOp::VecGet { base, index, .. } => {
+            op_use(base, live);
+            op_use(index, live);
+        }
+        CollOp::VecSet { base, index, value, .. } => {
+            op_use(base, live);
+            op_use(index, live);
+            place_use(value, live);
+        }
+        CollOp::MapInsert { base, key, value, .. } => {
+            op_use(base, live);
+            place_use(key, live);
+            place_use(value, live);
+        }
+        CollOp::MapContains { base, key, .. } | CollOp::MapGet { base, key, .. } => {
+            op_use(base, live);
+            place_use(key, live);
+        }
+        CollOp::StringPush { base, ch, .. } => {
+            op_use(base, live);
+            op_use(ch, live);
+        }
+        CollOp::StringAppend { base, view, .. } => {
+            op_use(base, live);
+            place_use(view, live);
+        }
+        CollOp::StringAsStr { base } => op_use(base, live),
     }
 }
 

@@ -34,8 +34,8 @@ use crate::token::ScalarTy;
 use crate::types::{ItemEnv, Type};
 
 use super::{
-    BinOp, FaultEdge, MirFn, MirProgram, Operand, Place, Proj, Regime, Rvalue, StatementKind,
-    Terminator, UnOp,
+    BinOp, CollOp, FaultEdge, MirFn, MirProgram, Operand, Place, Proj, Regime, Rvalue,
+    StatementKind, Terminator, UnOp,
 };
 
 /// Run a lowered program's `main` precisely over the shared memory substrate,
@@ -341,6 +341,9 @@ impl<'a> Engine<'a> {
                     }
                     StatementKind::Subslice { dst, src, lo, hi, stride, span } => {
                         self.subslice_op(dst, src, *lo, *hi, *stride, *span, mf, frame)?;
+                    }
+                    StatementKind::CollectionOp { dst, op } => {
+                        self.collection_op(dst, op, mf, frame)?;
                     }
                     // Stage-2 sequential oracle (design 0012 §6): a `spawn` runs the
                     // task inline at the spawn point (spawn order); a fault propagates
@@ -654,6 +657,361 @@ impl<'a> Engine<'a> {
         self.write_u64(daddr + 8, hi - lo)?;
         Ok(())
     }
+
+    // ---- compiler-known collections (Vec / Map / String) ----
+    //
+    // These handlers port `interp::eval`'s `bi_vec_*`/`bi_map_*`/`bi_string_*`
+    // bodies onto the SAME flat memory substrate (design 0010 §5): identical
+    // header layout `{ buf@0, len@8, cap@16, ctx@24, vt@32 }`, identical alloc-copy
+    // -free growth, identical FNV-1a hash + open-addressed linear probing, so the
+    // MIR execution matches the tree-walker byte-for-byte (the round-trip gate).
+
+    fn read_bytes(&mut self, addr: u64, len: u64) -> Result<Vec<u8>, Fault> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        self.mem
+            .read(addr, len, false)
+            .map_err(|_| self.fault(FaultKind::BadPointer, Span::point(0), "read bytes"))
+    }
+    fn write_bytes(&mut self, addr: u64, data: &[u8]) -> Result<(), Fault> {
+        self.mem
+            .write(addr, data)
+            .map_err(|_| self.fault(FaultKind::BadPointer, Span::point(0), "write bytes"))
+    }
+
+    /// Allocate `size` bytes through the carried allocator's `alloc` vtable slot.
+    fn call_alloc(&mut self, ctx: u64, vt: u64, size: u64, align: u64) -> Result<u64, Fault> {
+        let alloc_off = self.field_off(self.alloc_vtable_name(), "alloc");
+        let afn = self.read_u64(vt + alloc_off)?;
+        self.call_id_word(afn, &[ctx as i128, size as i128, align as i128])
+    }
+
+    fn collection_op(&mut self, dst: &Place, op: &CollOp, mf: &MirFn, frame: &Frame) -> Result<(), Fault> {
+        match op {
+            CollOp::New { alloc } => {
+                let alloc_addr = self.eval_operand(alloc, mf, frame)? as u64;
+                let ctx_off = self.field_off(self.alloc_struct_name(), "ctx");
+                let vt_off = self.field_off(self.alloc_struct_name(), "vt");
+                let ctx = self.read_u64(alloc_addr + ctx_off)?;
+                let vt = self.read_u64(alloc_addr + vt_off)?;
+                let (daddr, _) = self.place_addr(dst, mf, frame)?;
+                self.write_u64(daddr, 0)?; // buf
+                self.write_u64(daddr + 8, 0)?; // len
+                self.write_u64(daddr + 16, 0)?; // cap
+                self.write_u64(daddr + 24, ctx)?; // ctx
+                self.write_u64(daddr + 32, vt)?; // vt
+                Ok(())
+            }
+            CollOp::VecPush { base, elem, value, span } => {
+                let base = self.eval_operand(base, mf, frame)? as u64;
+                self.vec_reserve(base, elem, 1, *span)?;
+                let stride = round_up(self.size_of(elem), self.align_of(elem));
+                let buf = self.read_u64(base)?;
+                let len = self.read_u64(base + 8)?;
+                let (vaddr, _) = self.place_addr(value, mf, frame)?;
+                let sz = self.size_of(elem);
+                self.copy_bytes(buf + len * stride, vaddr, sz)?;
+                self.write_u64(base + 8, len + 1)?;
+                Ok(())
+            }
+            CollOp::VecPop { base, elem } => {
+                let base = self.eval_operand(base, mf, frame)? as u64;
+                let (daddr, _) = self.place_addr(dst, mf, frame)?;
+                let len = self.read_u64(base + 8)?;
+                let opt = Type::Named("Opt".to_string());
+                let einfo = self
+                    .lay()
+                    .enum_info(&opt)
+                    .ok_or_else(|| self.fault(FaultKind::Panic, Span::point(0), "unknown enum `Opt`"))?;
+                let some_idx = einfo.iter().position(|(n, _)| n == "Some").unwrap_or(0);
+                let none_idx = einfo.iter().position(|(n, _)| n == "None").unwrap_or(1);
+                if len == 0 {
+                    self.write_u64(daddr, none_idx as u64)?;
+                    return Ok(());
+                }
+                let newlen = len - 1;
+                let stride = round_up(self.size_of(elem), self.align_of(elem));
+                let buf = self.read_u64(base)?;
+                let src = buf + newlen * stride;
+                self.write_u64(base + 8, newlen)?;
+                self.write_u64(daddr, some_idx as u64)?;
+                let some_payloads = einfo[some_idx].1.clone();
+                let (_, off) = self.lay().payload_offset(&some_payloads, 0);
+                let sz = self.size_of(elem);
+                self.copy_bytes(daddr + off, src, sz)?;
+                Ok(())
+            }
+            CollOp::VecGet { base, elem, index, span } => {
+                let base = self.eval_operand(base, mf, frame)? as u64;
+                let len = self.read_u64(base + 8)?;
+                let i = self.eval_operand(index, mf, frame)? as u64;
+                if i >= len {
+                    return Err(self.fault(FaultKind::Bounds, *span, "Vec index out of bounds"));
+                }
+                let stride = round_up(self.size_of(elem), self.align_of(elem));
+                let buf = self.read_u64(base)?;
+                let (daddr, _) = self.place_addr(dst, mf, frame)?;
+                self.write_u64(daddr, buf + i * stride)?;
+                Ok(())
+            }
+            CollOp::VecSet { base, elem, index, value, span } => {
+                let base = self.eval_operand(base, mf, frame)? as u64;
+                let len = self.read_u64(base + 8)?;
+                let i = self.eval_operand(index, mf, frame)? as u64;
+                if i >= len {
+                    return Err(self.fault(FaultKind::Bounds, *span, "Vec index out of bounds"));
+                }
+                let stride = round_up(self.size_of(elem), self.align_of(elem));
+                let buf = self.read_u64(base)?;
+                let slot = buf + i * stride;
+                let (vaddr, _) = self.place_addr(value, mf, frame)?;
+                self.drop_value(slot, elem, &[], &mut Vec::new())?;
+                let sz = self.size_of(elem);
+                self.copy_bytes(slot, vaddr, sz)?;
+                Ok(())
+            }
+            CollOp::MapInsert { base, valty, key, value, span } => {
+                let base = self.eval_operand(base, mf, frame)? as u64;
+                let (kaddr, _) = self.place_addr(key, mf, frame)?;
+                let kptr = self.read_u64(kaddr)?;
+                let klen = self.read_u64(kaddr + 8)?;
+                let key = self.read_bytes(kptr, klen)?;
+                let stride = round_up(24 + self.size_of(valty), 8);
+                let (vaddr, _) = self.place_addr(value, mf, frame)?;
+                let vsz = self.size_of(valty);
+                let buf0 = self.read_u64(base)?;
+                let cap0 = self.read_u64(base + 16)?;
+                if let Some(slot) = self.map_find(buf0, cap0, stride, &key)? {
+                    let voff = buf0 + slot * stride + 24;
+                    self.drop_value(voff, valty, &[], &mut Vec::new())?;
+                    self.copy_bytes(voff, vaddr, vsz)?;
+                    return Ok(());
+                }
+                self.map_reserve(base, valty, *span)?;
+                let buf = self.read_u64(base)?;
+                let cap = self.read_u64(base + 16)?;
+                let slot = self.map_find_empty(buf, cap, stride, &key)?;
+                let ctx = self.read_u64(base + 24)?;
+                let vt = self.read_u64(base + 32)?;
+                let kbuf = self.call_alloc(ctx, vt, klen, 1)?;
+                if kbuf == 0 {
+                    return Err(self.fault(FaultKind::Panic, *span, "Map key allocation failed (OOM)"));
+                }
+                self.write_bytes(kbuf, &key)?;
+                let b = buf + slot * stride;
+                self.write_u64(b, 1)?; // state = occupied
+                self.write_u64(b + 8, kbuf)?; // keyptr
+                self.write_u64(b + 16, klen)?; // keylen
+                self.copy_bytes(b + 24, vaddr, vsz)?; // value
+                let len = self.read_u64(base + 8)?;
+                self.write_u64(base + 8, len + 1)?;
+                Ok(())
+            }
+            CollOp::MapContains { base, valty, key } => {
+                let base = self.eval_operand(base, mf, frame)? as u64;
+                let (kaddr, _) = self.place_addr(key, mf, frame)?;
+                let kptr = self.read_u64(kaddr)?;
+                let klen = self.read_u64(kaddr + 8)?;
+                let key = self.read_bytes(kptr, klen)?;
+                let stride = round_up(24 + self.size_of(valty), 8);
+                let buf = self.read_u64(base)?;
+                let cap = self.read_u64(base + 16)?;
+                let found = self.map_find(buf, cap, stride, &key)?.is_some();
+                let (daddr, _) = self.place_addr(dst, mf, frame)?;
+                self.write_int(daddr, found as i128, ScalarTy::Bool)?;
+                Ok(())
+            }
+            CollOp::MapGet { base, valty, key, span } => {
+                let base = self.eval_operand(base, mf, frame)? as u64;
+                let (kaddr, _) = self.place_addr(key, mf, frame)?;
+                let kptr = self.read_u64(kaddr)?;
+                let klen = self.read_u64(kaddr + 8)?;
+                let key = self.read_bytes(kptr, klen)?;
+                let stride = round_up(24 + self.size_of(valty), 8);
+                let buf = self.read_u64(base)?;
+                let cap = self.read_u64(base + 16)?;
+                match self.map_find(buf, cap, stride, &key)? {
+                    Some(slot) => {
+                        let voff = buf + slot * stride + 24;
+                        let (daddr, _) = self.place_addr(dst, mf, frame)?;
+                        self.write_u64(daddr, voff)?;
+                        Ok(())
+                    }
+                    None => Err(self.fault(FaultKind::Bounds, *span, "Map key not found")),
+                }
+            }
+            CollOp::StringPush { base, ch, span } => {
+                let base = self.eval_operand(base, mf, frame)? as u64;
+                let c = self.eval_operand(ch, mf, frame)? as u32;
+                let enc = match utf8_encode_scalar(c) {
+                    Some(e) => e,
+                    None => return Err(self.fault(FaultKind::Requires, *span, "push: not a Unicode scalar value")),
+                };
+                self.string_reserve(base, enc.len() as u64, *span)?;
+                let buf = self.read_u64(base)?;
+                let len = self.read_u64(base + 8)?;
+                self.write_bytes(buf + len, &enc)?;
+                self.write_u64(base + 8, len + enc.len() as u64)?;
+                Ok(())
+            }
+            CollOp::StringAppend { base, view, span } => {
+                let base = self.eval_operand(base, mf, frame)? as u64;
+                let (vaddr, _) = self.place_addr(view, mf, frame)?;
+                let ptr = self.read_u64(vaddr)?;
+                let slen = self.read_u64(vaddr + 8)?;
+                let bytes = self.read_bytes(ptr, slen)?;
+                self.string_reserve(base, slen, *span)?;
+                let buf = self.read_u64(base)?;
+                let len = self.read_u64(base + 8)?;
+                self.write_bytes(buf + len, &bytes)?;
+                self.write_u64(base + 8, len + slen)?;
+                Ok(())
+            }
+            CollOp::StringAsStr { base } => {
+                let base = self.eval_operand(base, mf, frame)? as u64;
+                let buf = self.read_u64(base)?;
+                let len = self.read_u64(base + 8)?;
+                let (daddr, _) = self.place_addr(dst, mf, frame)?;
+                self.write_u64(daddr, buf)?;
+                self.write_u64(daddr + 8, len)?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Ensure the Vec has room for `need` more elements (alloc-copy-free growth).
+    fn vec_reserve(&mut self, base: u64, elem: &Type, need: u64, span: Span) -> Result<(), Fault> {
+        let len = self.read_u64(base + 8)?;
+        let cap = self.read_u64(base + 16)?;
+        if len + need <= cap {
+            return Ok(());
+        }
+        let stride = round_up(self.size_of(elem), self.align_of(elem));
+        let align = self.align_of(elem);
+        let newcap = (len + need).max(cap * 2).max(4);
+        let ctx = self.read_u64(base + 24)?;
+        let vt = self.read_u64(base + 32)?;
+        let newbuf = self.call_alloc(ctx, vt, newcap * stride, align)?;
+        if newbuf == 0 {
+            return Err(self.fault(FaultKind::Panic, span, "Vec allocation failed (OOM)"));
+        }
+        let oldbuf = self.read_u64(base)?;
+        if len > 0 && oldbuf != 0 {
+            self.copy_bytes(newbuf, oldbuf, len * stride)?;
+        }
+        if oldbuf != 0 {
+            self.call_free(ctx, vt, oldbuf, cap * stride, align)?;
+        }
+        self.write_u64(base, newbuf)?;
+        self.write_u64(base + 16, newcap)?;
+        Ok(())
+    }
+
+    /// Ensure the String has room for `need` more bytes (alloc-copy-free growth).
+    fn string_reserve(&mut self, base: u64, need: u64, span: Span) -> Result<(), Fault> {
+        let len = self.read_u64(base + 8)?;
+        let cap = self.read_u64(base + 16)?;
+        if len + need <= cap {
+            return Ok(());
+        }
+        let newcap = (len + need).max(cap * 2).max(8);
+        let ctx = self.read_u64(base + 24)?;
+        let vt = self.read_u64(base + 32)?;
+        let newbuf = self.call_alloc(ctx, vt, newcap, 1)?;
+        if newbuf == 0 {
+            return Err(self.fault(FaultKind::Panic, span, "String allocation failed (OOM)"));
+        }
+        let oldbuf = self.read_u64(base)?;
+        if len > 0 && oldbuf != 0 {
+            self.copy_bytes(newbuf, oldbuf, len)?;
+        }
+        if oldbuf != 0 {
+            self.call_free(ctx, vt, oldbuf, cap, 1)?;
+        }
+        self.write_u64(base, newbuf)?;
+        self.write_u64(base + 16, newcap)?;
+        Ok(())
+    }
+
+    /// The occupied bucket slot matching `key`, else `None` (probing stops at the
+    /// first empty bucket — no tombstones, as no `remove` op ships).
+    fn map_find(&mut self, buf: u64, cap: u64, stride: u64, key: &[u8]) -> Result<Option<u64>, Fault> {
+        if cap == 0 || buf == 0 {
+            return Ok(None);
+        }
+        let mask = cap - 1;
+        let mut idx = map_hash(key) & mask;
+        loop {
+            let b = buf + idx * stride;
+            if self.read_u64(b)? == 0 {
+                return Ok(None);
+            }
+            let klen = self.read_u64(b + 16)?;
+            if klen == key.len() as u64 {
+                let kptr = self.read_u64(b + 8)?;
+                if self.read_bytes(kptr, klen)? == key {
+                    return Ok(Some(idx));
+                }
+            }
+            idx = (idx + 1) & mask;
+        }
+    }
+
+    /// The first empty slot along `key`'s probe chain (caller ensures `key` absent).
+    fn map_find_empty(&mut self, buf: u64, cap: u64, stride: u64, key: &[u8]) -> Result<u64, Fault> {
+        let mask = cap - 1;
+        let mut idx = map_hash(key) & mask;
+        loop {
+            let b = buf + idx * stride;
+            if self.read_u64(b)? == 0 {
+                return Ok(idx);
+            }
+            idx = (idx + 1) & mask;
+        }
+    }
+
+    /// Grow + rehash (initial 8, then x2) at load factor 3/4 (alloc-rehash-free).
+    fn map_reserve(&mut self, base: u64, valty: &Type, span: Span) -> Result<(), Fault> {
+        let len = self.read_u64(base + 8)?;
+        let cap = self.read_u64(base + 16)?;
+        if cap != 0 && (len + 1) * 4 <= cap * 3 {
+            return Ok(());
+        }
+        let stride = round_up(24 + self.size_of(valty), 8);
+        let newcap = if cap == 0 { 8 } else { cap * 2 };
+        let ctx = self.read_u64(base + 24)?;
+        let vt = self.read_u64(base + 32)?;
+        let newbuf = self.call_alloc(ctx, vt, newcap * stride, 8)?;
+        if newbuf == 0 {
+            return Err(self.fault(FaultKind::Panic, span, "Map allocation failed (OOM)"));
+        }
+        self.write_bytes(newbuf, &vec![0u8; (newcap * stride) as usize])?;
+        let oldbuf = self.read_u64(base)?;
+        if oldbuf != 0 {
+            let vsz = self.size_of(valty);
+            for i in 0..cap {
+                let ob = oldbuf + i * stride;
+                if self.read_u64(ob)? == 1 {
+                    let kptr = self.read_u64(ob + 8)?;
+                    let klen = self.read_u64(ob + 16)?;
+                    let kbytes = self.read_bytes(kptr, klen)?;
+                    let slot = self.map_find_empty(newbuf, newcap, stride, &kbytes)?;
+                    let nb = newbuf + slot * stride;
+                    self.write_u64(nb, 1)?;
+                    self.write_u64(nb + 8, kptr)?;
+                    self.write_u64(nb + 16, klen)?;
+                    if vsz > 0 {
+                        self.copy_bytes(nb + 24, ob + 24, vsz)?;
+                    }
+                }
+            }
+            self.call_free(ctx, vt, oldbuf, cap * stride, 8)?;
+        }
+        self.write_u64(base, newbuf)?;
+        self.write_u64(base + 16, newcap)?;
+        Ok(())
+    }
 }
 
 impl Engine<'_> {
@@ -678,6 +1036,61 @@ impl Engine<'_> {
                 Ok(())
             }
             Type::Box(inner) => self.drop_box(addr, inner),
+            // Compiler-known `Vec[T]`: drop each live element (`0..len`, reverse),
+            // then free the backing buffer through the carried allocator (mirrors
+            // the oracle's `drop_value`). Popped elements decremented `len`.
+            Type::App(n, args) if n == "Vec" => {
+                let buf = self.read_u64(addr)?;
+                if buf != 0 {
+                    let elem = args.first().cloned().unwrap_or(Type::Error);
+                    let stride = round_up(self.size_of(&elem), self.align_of(&elem));
+                    let len = self.read_u64(addr + 8)?;
+                    for i in (0..len).rev() {
+                        self.drop_value(buf + i * stride, &elem, &[], &mut Vec::new())?;
+                    }
+                    let cap = self.read_u64(addr + 16)?;
+                    let ctx = self.read_u64(addr + 24)?;
+                    let vt = self.read_u64(addr + 32)?;
+                    self.call_free(ctx, vt, buf, cap * stride, self.align_of(&elem))?;
+                }
+                Ok(())
+            }
+            // Compiler-known hash `Map[V]`: free each live key byte-copy, drop each
+            // live value, then free the bucket buffer (alloc-on-drop).
+            Type::App(n, args) if n == "Map" => {
+                let buf = self.read_u64(addr)?;
+                if buf != 0 {
+                    let valty = args.first().cloned().unwrap_or(Type::Error);
+                    let stride = round_up(24 + self.size_of(&valty), 8);
+                    let cap = self.read_u64(addr + 16)?;
+                    let ctx = self.read_u64(addr + 24)?;
+                    let vt = self.read_u64(addr + 32)?;
+                    for i in 0..cap {
+                        let b = buf + i * stride;
+                        if self.read_u64(b)? == 1 {
+                            let kptr = self.read_u64(b + 8)?;
+                            let klen = self.read_u64(b + 16)?;
+                            self.call_free(ctx, vt, kptr, klen, 1)?;
+                            self.drop_value(b + 24, &valty, &[], &mut Vec::new())?;
+                        }
+                    }
+                    self.call_free(ctx, vt, buf, cap * stride, 8)?;
+                }
+                Ok(())
+            }
+            // Compiler-known `String` (design 0013): free its heap buffer through
+            // the carried allocator (alloc-on-drop). Must precede the generic struct
+            // arm — `String` is a synthesized nominal struct.
+            Type::Named(n) if n == "String" => {
+                let buf = self.read_u64(addr)?;
+                if buf != 0 {
+                    let cap = self.read_u64(addr + 16)?;
+                    let ctx = self.read_u64(addr + 24)?;
+                    let vt = self.read_u64(addr + 32)?;
+                    self.call_free(ctx, vt, buf, cap, 1)?;
+                }
+                Ok(())
+            }
             Type::Named(n) if self.items.lookup_struct(n).is_some() => {
                 let partial = partially(moved, path);
                 if !partial {
@@ -846,4 +1259,31 @@ fn fit_bits(value: i128, sty: ScalarTy) -> i128 {
         x -= m;
     }
     x
+}
+
+// ---------------------------------------------------------------------------
+// Collection primitives replicated from the oracle (src/interp/eval.rs) so both
+// engines hash / encode identically (the round-trip must be byte-exact).
+// ---------------------------------------------------------------------------
+
+/// 64-bit FNV-1a over the key bytes (offset basis 0xcbf29ce484222325, prime
+/// 0x100000001b3) — the Map key hash, matching `interp::eval::map_hash`.
+fn map_hash(bytes: &[u8]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// UTF-8-encode one Unicode scalar value, rejecting surrogates / out-of-range
+/// code points (the `String::push` `is_scalar_value` backstop, matching the oracle).
+fn utf8_encode_scalar(c: u32) -> Option<Vec<u8>> {
+    if c > 0x10FFFF || (0xD800..=0xDFFF).contains(&c) {
+        return None;
+    }
+    let ch = char::from_u32(c)?;
+    let mut buf = [0u8; 4];
+    Some(ch.encode_utf8(&mut buf).as_bytes().to_vec())
 }

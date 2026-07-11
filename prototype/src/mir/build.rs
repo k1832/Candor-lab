@@ -29,9 +29,9 @@ use crate::interp::mem::round_up;
 use crate::types::{is_copy, needs_drop, ArrayLen, Type};
 
 use super::{
-    check_invariants, BasicBlock, BlockId, FaultEdge, LocalDecl, LocalId, MirFn, MirProgram,
-    Operand, Place, Predicate, Proj, Regime, ReplayPolicy, Rvalue, StaticInit, Statement,
-    StatementKind, Terminator,
+    check_invariants, BasicBlock, BlockId, CollOp, FaultEdge, LocalDecl, LocalId, MirFn,
+    MirProgram, Operand, Place, Predicate, Proj, Regime, ReplayPolicy, Rvalue, StaticInit,
+    Statement, StatementKind, Terminator,
 };
 
 /// A construct outside the Stage-A MIR subset. The gate treats it as out-of-subset
@@ -468,6 +468,12 @@ impl<'a> Lowerer<'a> {
                 foreign: fp.foreign,
                 ret: Box::new(self.resolve_ty(&fp.ret)?),
             }),
+            // Compiler-known collections `Vec[T]`/`Map[V]` (design 0013): a nominal
+            // type application that lays out through the shared `Layout` App path.
+            TyKind::App { name, args } => Type::App(
+                name.clone(),
+                args.iter().map(|a| self.resolve_ty(a)).collect::<LR<Vec<_>>>()?,
+            ),
             other => return unsupported(format!("type {other:?}")),
         })
     }
@@ -930,6 +936,17 @@ impl<'a> Lowerer<'a> {
                 }
             }
             ExprKind::Prefix { op: PrefixOp::Deref, expr } => {
+                // Deref of a value-producing expression (e.g. `vec.get(i).*` /
+                // `map.get(k).*`, whose intrinsic yields a borrow): lower it to the
+                // pointer operand and deref that temp.
+                if let ExprKind::Call { .. } = &expr.kind {
+                    let (op, t) = self.lower_value(expr, None)?;
+                    let inner = match &t {
+                        Type::Borrow(x) | Type::BorrowMut(x) | Type::Box(x) | Type::RawPtr(x) => (**x).clone(),
+                        _ => return unsupported("deref of non-pointer call result"),
+                    };
+                    return Ok((self.deref_place(op, inner.clone()), inner));
+                }
                 let (mut pl, t) = self.lower_place(expr)?;
                 let inner = match &t {
                     Type::Borrow(x) | Type::BorrowMut(x) | Type::Box(x) | Type::RawPtr(x) => (**x).clone(),
@@ -1476,6 +1493,14 @@ impl<'a> Lowerer<'a> {
                 self.emit(StatementKind::Store(dst.clone(), Rvalue::Use(op)), self.cur_span, false);
                 Ok(())
             }
+            // Aggregate-producing collection intrinsics: `vec_new`/`map_new`/
+            // `string_new` (Vec/Map/String), `pop` (Opt), `as_str` (str).
+            ExprKind::Call { callee, args }
+                if matches!(&callee.kind, ExprKind::Ident(n) if self.is_collection_agg(n, args)) =>
+            {
+                let name = match &callee.kind { ExprKind::Ident(n) => n.clone(), _ => unreachable!() };
+                self.lower_collection_agg(&name, args, dst)
+            }
             // Aggregate-producing builtins (box/unbox/ptr_read/slice_of/subslice).
             ExprKind::Call { callee, args } if matches!(&callee.kind, ExprKind::Ident(n) if is_builtin(n)) => {
                 let name = match &callee.kind { ExprKind::Ident(n) => n.clone(), _ => unreachable!() };
@@ -1794,6 +1819,12 @@ impl<'a> Lowerer<'a> {
             }
             if is_builtin(name) {
                 return self.lower_builtin_value(name, args, span);
+            }
+            // Word/unit-producing collection intrinsics (Vec/Map/String), gated by
+            // the receiver's static type exactly as the oracle's `arg0_is_*` guards;
+            // a non-collection call of the same name falls through to a user fn.
+            if let Some(res) = self.lower_collection_value(name, args, span)? {
+                return Ok(res);
             }
             // A monomorphized method resolved to a free fn, or a direct user fn.
             if let Some(sig) = self.items.fns.get(name.as_str()).cloned() {
@@ -2140,9 +2171,25 @@ impl<'a> Lowerer<'a> {
                 Ok((Operand::Local(id), Type::usize()))
             }
             "len" => {
+                // `len(read Vec[T]/Map[V])`: the length word lives at offset 8 of the
+                // collection the borrow names (same field the oracle's `bi_len` reads).
+                if matches!(self.collection_ty(&args[0]), Some(Type::App(n, _)) if n == "Vec" || n == "Map") {
+                    let (base, _) = self.lower_value(&args[0], None)?;
+                    let root = self.operand_local(base, Type::usize());
+                    let place = Place {
+                        root,
+                        proj: vec![
+                            Proj::Deref { inner: Type::usize() },
+                            Proj::Field { offset: 8, ty: Type::usize() },
+                        ],
+                    };
+                    let id = self.emit_temp(Type::usize(), Rvalue::Load { place, ty: Type::usize() }, span);
+                    return Ok((Operand::Local(id), Type::usize()));
+                }
                 let (pl, ty) = self.lower_place(&args[0])?;
                 match &ty {
-                    Type::Slice(_) | Type::SliceMut(_) => {
+                    // `str`/`[u8]`/`[T]` fat pointers carry the length word at offset 8.
+                    Type::Slice(_) | Type::SliceMut(_) | Type::Str => {
                         let mut lp = pl;
                         lp.proj.push(Proj::Field { offset: 8, ty: Type::Scalar(ScalarTy::U64) });
                         let id = self.emit_temp(Type::usize(), Rvalue::Load { place: lp, ty: Type::usize() }, span);
@@ -2172,6 +2219,200 @@ impl<'a> Lowerer<'a> {
             }
             _ => unsupported(format!("builtin `{name}` in value position")),
         }
+    }
+
+    // ---- compiler-known collection intrinsics (Vec / Map / String) ----
+
+    /// The collection type (`Vec[T]`/`Map[V]`/`String`) an `arg0` receiver names,
+    /// peeling a `read`/`write` prefix and any borrow layer — the MIR analogue of
+    /// the oracle's `arg0_is_vec/map/string` guards.
+    fn collection_ty(&self, arg0: &Expr) -> Option<Type> {
+        let inner = match &arg0.kind {
+            ExprKind::Prefix { op: PrefixOp::Read | PrefixOp::Write, expr } => expr.as_ref(),
+            _ => arg0,
+        };
+        match self.static_ty(inner)? {
+            Type::Borrow(b) | Type::BorrowMut(b) => Some(*b),
+            other => Some(other),
+        }
+    }
+
+    /// The element / value type of a `Vec[T]` / `Map[V]` receiver.
+    fn collection_elem(&self, arg0: &Expr) -> LR<Type> {
+        match self.collection_ty(arg0) {
+            Some(Type::App(_, targs)) => Ok(targs.into_iter().next().unwrap_or(Type::Error)),
+            _ => unsupported("collection op on a non-collection receiver"),
+        }
+    }
+
+    /// Root an operand in a local (materializing a const into a temp), for building
+    /// a projected place over it.
+    fn operand_local(&mut self, op: Operand, ty: Type) -> LocalId {
+        match op {
+            Operand::Local(id) => id,
+            other => self.emit_temp(ty, Rvalue::Use(other), self.cur_span),
+        }
+    }
+
+    /// Does `name`/`args` name an aggregate-producing collection intrinsic
+    /// (`vec_new`/`map_new`/`string_new`, `pop` on a Vec, `as_str` on a String)?
+    fn is_collection_agg(&self, name: &str, args: &[Expr]) -> bool {
+        match name {
+            "vec_new" | "map_new" | "string_new" => true,
+            "pop" => matches!(args.first().and_then(|a| self.collection_ty(a)), Some(Type::App(n, _)) if n == "Vec"),
+            "as_str" => matches!(args.first().and_then(|a| self.collection_ty(a)), Some(Type::Named(n)) if n == "String"),
+            _ => false,
+        }
+    }
+
+    /// Lower an aggregate-producing collection intrinsic into `dst`.
+    fn lower_collection_agg(&mut self, name: &str, args: &[Expr], dst: &Place) -> LR<()> {
+        let span = self.cur_span;
+        let op = match name {
+            "vec_new" | "map_new" | "string_new" => {
+                let alloc = self.alloc_addr_operand(&args[0])?;
+                CollOp::New { alloc }
+            }
+            "pop" => {
+                let elem = self.collection_elem(&args[0])?;
+                let (base, _) = self.lower_value(&args[0], None)?;
+                CollOp::VecPop { base, elem }
+            }
+            "as_str" => {
+                let (base, _) = self.lower_value(&args[0], None)?;
+                CollOp::StringAsStr { base }
+            }
+            _ => return unsupported(format!("collection aggregate `{name}`")),
+        };
+        self.emit(StatementKind::CollectionOp { dst: dst.clone(), op }, span, false);
+        Ok(())
+    }
+
+    /// Materialize a `str`/`[u8]` byte-view argument as a place over its 16-byte
+    /// `{ptr@0, len@8}` fat pointer (a key or an append view).
+    fn coll_view_place(&mut self, e: &Expr) -> LR<Place> {
+        self.materialize_place(e, &Type::Str)
+    }
+
+    /// Lower a word/unit-producing collection intrinsic (`push`/`pop`-are-agg,
+    /// `set`/`get`/`insert`/`contains`/`append`). Returns `Ok(None)` when `name`
+    /// matches no collection op for `arg0`'s type, so a same-named user fn wins.
+    fn lower_collection_value(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> LR<Option<(Operand, Type)>> {
+        let ct = match args.first().and_then(|a| self.collection_ty(a)) {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        let is_vec = matches!(&ct, Type::App(n, _) if n == "Vec");
+        let is_map = matches!(&ct, Type::App(n, _) if n == "Map");
+        let is_string = matches!(&ct, Type::Named(n) if n == "String");
+        let first_targ = match &ct {
+            Type::App(_, t) => t.first().cloned().unwrap_or(Type::Error),
+            _ => Type::Error,
+        };
+        let unit_dst = |s: &mut Self| Place::local(s.new_local(Type::unit(), None));
+        let op = match name {
+            "push" if is_vec => {
+                let elem = first_targ;
+                let (base, _) = self.lower_value(&args[0], None)?;
+                let value = self.materialize_place(&args[1], &elem)?;
+                if !is_copy(&elem, self.items) {
+                    self.mark_moved(&args[1]);
+                }
+                // OOM faults after the value is evaluated: the oracle's `cur_span` is
+                // then the value arg's span (see `bi_vec_push`).
+                CollOp::VecPush { base, elem, value, span: args[1].span }
+            }
+            "push" if is_string => {
+                let (base, _) = self.lower_value(&args[0], None)?;
+                let (ch, _) = self.lower_value(&args[1], Some(&Type::Scalar(ScalarTy::U32)))?;
+                // `bi_string_push` resets `cur_span` to the call span before its
+                // scalar-value backstop / OOM fault.
+                CollOp::StringPush { base, ch, span }
+            }
+            "set" if is_vec => {
+                let elem = first_targ;
+                let (base, _) = self.lower_value(&args[0], None)?;
+                let (index, _) = self.lower_value(&args[1], Some(&Type::usize()))?;
+                let value = self.materialize_place(&args[2], &elem)?;
+                if !is_copy(&elem, self.items) {
+                    self.mark_moved(&args[2]);
+                }
+                // Bounds fault span: the index arg's span (the oracle checks bounds
+                // right after evaluating the index — `bi_vec_set`).
+                CollOp::VecSet { base, elem, index, value, span: args[1].span }
+            }
+            "get" if is_vec => {
+                let elem = first_targ;
+                let (base, _) = self.lower_value(&args[0], None)?;
+                let (index, _) = self.lower_value(&args[1], Some(&Type::usize()))?;
+                let rty = Type::Borrow(Box::new(elem.clone()));
+                let dst = self.new_local(rty.clone(), None);
+                self.emit(
+                    StatementKind::CollectionOp {
+                        dst: Place::local(dst),
+                        op: CollOp::VecGet { base, elem, index, span: args[1].span },
+                    },
+                    span,
+                    false,
+                );
+                return Ok(Some((Operand::Local(dst), rty)));
+            }
+            "get" if is_map => {
+                let valty = first_targ;
+                let (base, _) = self.lower_value(&args[0], None)?;
+                let key = self.coll_view_place(&args[1])?;
+                let rty = Type::Borrow(Box::new(valty.clone()));
+                let dst = self.new_local(rty.clone(), None);
+                self.emit(
+                    StatementKind::CollectionOp {
+                        dst: Place::local(dst),
+                        op: CollOp::MapGet { base, valty, key, span: args[1].span },
+                    },
+                    span,
+                    false,
+                );
+                return Ok(Some((Operand::Local(dst), rty)));
+            }
+            "insert" if is_map => {
+                let valty = first_targ;
+                let (base, _) = self.lower_value(&args[0], None)?;
+                let key = self.coll_view_place(&args[1])?;
+                let value = self.materialize_place(&args[2], &valty)?;
+                if !is_copy(&valty, self.items) {
+                    self.mark_moved(&args[2]);
+                }
+                // OOM faults after the value is evaluated (`bi_map_insert`).
+                CollOp::MapInsert { base, valty, key, value, span: args[2].span }
+            }
+            "contains" if is_map => {
+                let valty = first_targ;
+                let (base, _) = self.lower_value(&args[0], None)?;
+                let key = self.coll_view_place(&args[1])?;
+                let dst = self.new_local(Type::bool(), None);
+                self.emit(
+                    StatementKind::CollectionOp { dst: Place::local(dst), op: CollOp::MapContains { base, valty, key } },
+                    span,
+                    false,
+                );
+                return Ok(Some((Operand::Local(dst), Type::bool())));
+            }
+            "append" if is_string => {
+                let (base, _) = self.lower_value(&args[0], None)?;
+                let view = self.coll_view_place(&args[1])?;
+                // OOM span: the view arg's span (`bi_string_append` reads it, leaving
+                // `cur_span` at the arg before the reserve/OOM check).
+                CollOp::StringAppend { base, view, span: args[1].span }
+            }
+            _ => return Ok(None),
+        };
+        let dst = unit_dst(self);
+        self.emit(StatementKind::CollectionOp { dst, op }, span, false);
+        Ok(Some(self.unit()))
     }
 
     // ---- aggregate-producing builtins ----

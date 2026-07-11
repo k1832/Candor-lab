@@ -1215,6 +1215,12 @@ impl<M: Module> Cg<'_, '_, M> {
             StatementKind::Subslice { dst, src, lo, hi, stride, span } => {
                 self.subslice_op(dst, src, lo, hi, *stride, *span, mf);
             }
+            // The compiler-known `Vec`/`Map`/`String` intrinsics (design 0013) run
+            // through the precise MIR interpreter (`mir::interp`); native codegen of
+            // their alloc-copy-free / hash-probe bodies is a forward dependency.
+            StatementKind::CollectionOp { .. } => {
+                unimplemented!("native backend: Vec/Map/String collection intrinsics are MIR-interp only")
+            }
             // Stage 2 (design 0012 §6): `spawn` becomes real thread creation, the
             // `scope` markers push/join a frame. Args are evaluated on the PARENT
             // thread (the marshalling) and handed to the task's thread by value.

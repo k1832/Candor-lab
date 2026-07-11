@@ -191,6 +191,25 @@ fn read_fixture(rel: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 
+/// The compiler-known collection corpus (Vec/Map/String, PROPOSAL-selfhost-
+/// ergonomics / design 0013), lowered as MIR intrinsics: the SAME serialize ->
+/// deserialize -> `mir::interp` round-trip the systems corpus proves, now over
+/// programs the MIR path previously could not represent. Each must run byte-exact
+/// (RET / TRACE / FAULT) to the tree-walking oracle, which already runs collections.
+const COLLECTION_CORPUS: &[(&str, Shape)] = &[
+    ("vec_push_get_sum.cnr", Ret),
+    ("vec_pop_opt.cnr", Ret),
+    ("vec_struct_drop.cnr", Ret),
+    ("map_insert_contains_get.cnr", Ret),
+    ("string_build.cnr", Ret),
+    ("vec_get_oob_fault.cnr", Fault),
+];
+
+fn read_fixture_lower(rel: &str) -> String {
+    let path = format!("{}/tests/fixtures/selfhost_lower/{}", env!("CARGO_MANIFEST_DIR"), rel);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+}
+
 fn on_big_stack<F: FnOnce() + Send + 'static>(f: F) {
     std::thread::Builder::new()
         .stack_size(256 * 1024 * 1024)
@@ -241,6 +260,53 @@ fn mir_serialization_boundary_execution_equal_to_oracle() {
         eprintln!(
             "mir serial boundary: {} fixtures round-trip byte-exact vs oracle ({} returns, {} faults)",
             CORPUS.len(),
+            rets,
+            faults
+        );
+    });
+}
+
+#[test]
+fn mir_collection_boundary_execution_equal_to_oracle() {
+    on_big_stack(|| {
+        let mut rets = 0usize;
+        let mut faults = 0usize;
+        for &(rel, shape) in COLLECTION_CORPUS {
+            let src = read_fixture_lower(rel);
+            let oracle = oracle_dump(&src);
+
+            let (mp, items, consts) = lower_from_source(&src);
+
+            // (1) wire round-trip idempotence: the new collection ops carry losslessly.
+            let wire1 = serial::serialize(&mp);
+            let mp2 = serial::deserialize(&wire1)
+                .unwrap_or_else(|e| panic!("deserialize failed on {rel}: {e}"));
+            let wire2 = serial::serialize(&mp2);
+            assert_eq!(wire1, wire2, "wire not round-trip idempotent on {rel}");
+
+            // (2) deserialized MIR runs byte-exact to the oracle (which runs collections).
+            let via_wire = run_dump(&mp2, &items, &consts);
+            assert_eq!(via_wire, oracle, "deserialized collection MIR diverges from oracle on {rel}");
+
+            // (3) the boundary changed nothing: in-memory == deserialized == oracle.
+            let in_memory = run_dump(&mp, &items, &consts);
+            assert_eq!(in_memory, via_wire, "boundary changed execution on {rel}");
+
+            match shape {
+                Ret => {
+                    assert!(oracle.starts_with("RET "), "expected RET on {rel}, got {oracle:?}");
+                    rets += 1;
+                }
+                Fault => {
+                    assert!(oracle.starts_with("FAULT "), "expected FAULT on {rel}, got {oracle:?}");
+                    faults += 1;
+                }
+            }
+        }
+        assert!(rets > 0 && faults > 0, "collection corpus must exercise both returns and faults");
+        eprintln!(
+            "mir collection boundary: {} fixtures round-trip byte-exact vs oracle ({} returns, {} faults)",
+            COLLECTION_CORPUS.len(),
             rets,
             faults
         );
