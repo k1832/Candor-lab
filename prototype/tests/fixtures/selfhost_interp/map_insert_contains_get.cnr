@@ -1,0 +1,37 @@
+// Map[i64] with string keys: insert several, probe membership with `contains`, read
+// values with `get` — exercises FNV-1a hashing, linear probing, the owned key
+// byte-copies, grow/rehash, and key+value+buffer free on drop.
+struct AllocVtable { alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8, free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit }
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize, live: i64 }
+fn with_window(base: usize, size: usize) -> Bump { return Bump { next: base, end: base + size, live: 0 }; }
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 { unsafe "reserved window" { let b: Bump = ptr_read(cast_ptr[Bump](ctx)); let a: usize = (b.next + align - 1) / align * align; if a + size > b.end { return ptr_null[u8](); } ptr_write(cast_ptr[Bump](ctx), Bump { next: a + size, end: b.end, live: b.live + 1 }); return addr_to_ptr[u8](a); } }
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit { unsafe "reserved window" { let b: Bump = ptr_read(cast_ptr[Bump](ctx)); ptr_write(cast_ptr[Bump](ctx), Bump { next: b.next, end: b.end, live: b.live - 1 }); } }
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+fn mk_alloc(state: write Bump) -> Alloc { unsafe "outlives every alloc" { return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) }; } }
+
+fn build(al: Alloc) alloc -> i64 {
+  let mut m: Map[i64] = map_new(read al);
+  insert(write m, "fn", 1);
+  insert(write m, "let", 2);
+  insert(write m, "return", 5);
+  insert(write m, "match", 8);
+  // Overwrite an existing key: value replaced, length unchanged.
+  insert(write m, "let", 20);
+  let mut s: i64 = 0;
+  if contains(read m, "fn") { s = s + get(read m, "fn").*; }
+  if contains(read m, "let") { s = s + get(read m, "let").*; }
+  if contains(read m, "return") { s = s + get(read m, "return").*; }
+  if contains(read m, "match") { s = s + get(read m, "match").*; }
+  if contains(read m, "nope") { s = s + 1000; }
+  s = s + conv i64 len(read m);
+  return s;
+}
+
+fn main() alloc -> i64 {
+  let mut bs: Bump = with_window(16777216, 1048576);
+  let al: Alloc = mk_alloc(write bs);
+  let r: i64 = build(al);
+  trace(r);
+  return bs.live + r;
+}

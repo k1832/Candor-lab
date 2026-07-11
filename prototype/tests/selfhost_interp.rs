@@ -204,6 +204,13 @@ const CORPUS: &[(&str, Shape)] = &[
     ("generics/gdrop_groundfloor.cnr", Ret),
     ("generics/mixed.cnr", Ret),
     ("generics/nameval.cnr", Ret),
+    // ---- std COLLECTIONS: compiler-known String / Vec[T] / Map[V] ----
+    ("string_build.cnr", Ret),
+    ("vec_push_get_sum.cnr", Ret),
+    ("vec_pop_opt.cnr", Ret),
+    ("vec_struct_drop.cnr", Ret),
+    ("map_insert_contains_get.cnr", Ret),
+    ("vec_get_oob_fault.cnr", Fault),
 ];
 
 fn read_fixture(rel: &str) -> String {

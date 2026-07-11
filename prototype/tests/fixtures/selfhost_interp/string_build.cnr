@@ -1,0 +1,28 @@
+// String: build via `push` (UTF-8-encoded scalars) + `append` (byte views), read
+// back through `as_str` + `len`, then free the buffer on drop.
+struct AllocVtable { alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8, free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit }
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize, live: i64 }
+fn with_window(base: usize, size: usize) -> Bump { return Bump { next: base, end: base + size, live: 0 }; }
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 { unsafe "reserved window" { let b: Bump = ptr_read(cast_ptr[Bump](ctx)); let a: usize = (b.next + align - 1) / align * align; if a + size > b.end { return ptr_null[u8](); } ptr_write(cast_ptr[Bump](ctx), Bump { next: a + size, end: b.end, live: b.live + 1 }); return addr_to_ptr[u8](a); } }
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit { unsafe "reserved window" { let b: Bump = ptr_read(cast_ptr[Bump](ctx)); ptr_write(cast_ptr[Bump](ctx), Bump { next: b.next, end: b.end, live: b.live - 1 }); } }
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+fn mk_alloc(state: write Bump) -> Alloc { unsafe "outlives every alloc" { return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) }; } }
+
+fn build(al: Alloc) alloc -> i64 {
+  let mut sb: String = string_new(read al);
+  push(write sb, 65); // 'A'
+  push(write sb, 66); // 'B'
+  push(write sb, 67); // 'C'
+  append(write sb, "DEFG");
+  let v: str = as_str(read sb);
+  return conv i64 len(v);
+}
+
+fn main() alloc -> i64 {
+  let mut bs: Bump = with_window(16777216, 1048576);
+  let al: Alloc = mk_alloc(write bs);
+  let n: i64 = build(al);
+  trace(n);
+  return bs.live;
+}

@@ -1,0 +1,31 @@
+// Vec[i64]: push several elements, read them back through bounds-checked `get`,
+// and sum — exercises vec_new / push / get / len and buffer-free-on-drop.
+struct AllocVtable { alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8, free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit }
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize, live: i64 }
+fn with_window(base: usize, size: usize) -> Bump { return Bump { next: base, end: base + size, live: 0 }; }
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 { unsafe "reserved window" { let b: Bump = ptr_read(cast_ptr[Bump](ctx)); let a: usize = (b.next + align - 1) / align * align; if a + size > b.end { return ptr_null[u8](); } ptr_write(cast_ptr[Bump](ctx), Bump { next: a + size, end: b.end, live: b.live + 1 }); return addr_to_ptr[u8](a); } }
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit { unsafe "reserved window" { let b: Bump = ptr_read(cast_ptr[Bump](ctx)); ptr_write(cast_ptr[Bump](ctx), Bump { next: b.next, end: b.end, live: b.live - 1 }); } }
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+fn mk_alloc(state: write Bump) -> Alloc { unsafe "outlives every alloc" { return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) }; } }
+
+fn sum_vec(al: Alloc) alloc -> i64 {
+  let mut v: Vec[i64] = vec_new(read al);
+  push(write v, 10); push(write v, 20); push(write v, 30); push(write v, 40); push(write v, 50);
+  let n: usize = len(read v);
+  let mut i: usize = 0;
+  let mut s: i64 = 0;
+  while i < n {
+    s = s + get(read v, i).*;
+    i = i + 1;
+  }
+  return s;
+}
+
+fn main() alloc -> i64 {
+  let mut bs: Bump = with_window(16777216, 1048576);
+  let al: Alloc = mk_alloc(write bs);
+  let total: i64 = sum_vec(al);
+  trace(total);
+  return bs.live;
+}
