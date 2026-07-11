@@ -1385,7 +1385,7 @@ SELF-CHECK PROBE — the "NOT self-checked (uses `unsafe` and the raw-pointer in
 above is STALE. interp.cnr's OWN code uses no `unsafe`, no raw-ptr intrinsic calls, no `self`, no
 generics/Map/Vec; its heavy constructs (`wrapping{}`, `conv`) are already self-checked in
 parser/analyses.cnr. Running interp.cnr through the SAME machinery that gates the other modules:
-- EMBED: the self-host lexer produces 25736 tokens (< the 32768 buffer, ~7k headroom) and the parse
+- EMBED: the self-host lexer produces 25736 tokens at the time (< the 32768 buffer; NOTE after the later I-std collection port interp.cnr is ~32712 tokens, only ~56 under the cap) and the parse
   fits the 32768-node arena with no fault — NO arena bump needed.
 - CHECKER (name-res, E0102/E0103): the self-host checker resolves interp.cnr's `use lexer::{..}` /
   `use parser::{..}` imports itself and emits ZERO E0102/E0103, byte-equal to the module-aware oracle
@@ -1415,7 +1415,7 @@ existing per-module fixpoint gates (same shape as the parser.cnr/analyses.cnr ga
   injected use-after-move fires E0301.
 
 Both pass CLEAN, oracle-matched, exactly as the probe predicted — no construct in interp.cnr fails to
-check clean. NO arena bump needed (25736 tokens < the 32768 token buffer / node arena, ~7k headroom).
+check clean. NO arena bump needed at the time (25736 tokens; NOTE now ~32712 after the I-std collection port -- ~56-token margin, see the token-cap constraint in ROADMAP).
 This completes the self-check fixpoint across ALL FIVE self-host modules: the lexer, parser, checker,
 analyses core, AND the interpreter that executes them all name-resolve clean under the self-host
 checker and pass the self-host move/init/loan/effect/exhaustiveness analyses — each byte-equal to the
@@ -2089,3 +2089,40 @@ corpus — UNCHANGED, plus the 6 collections); `mir_serial` 2/2 green (the refer
 boundary unaffected); clippy clean. Runtime: `selfhost_lower` ~154s, `mir_serial` ~2s.
 No edits to `interp.cnr` / `mono.cnr` / `src/mir/*`. The generic/std self-hosting tail
 is COMPLETE: Candor compiles user generics + std collections to MIR.
+
+## OBL-QUALITY-REVIEW — findings from the cross-model quality audit (Fable 5 on Opus 4.8's work, 2026-07-11)
+
+Four fresh-context quality reviewers graded the ~30h self-hosting arc: code GOOD-with-caveats,
+Rust STRONG, docs MOSTLY-HONEST, architecture SOUND-with-bounded-debt. Genuineness was already
+verified separately. Findings, with disposition:
+
+**Fixing now (latent correctness + the acute blocker):**
+- **F-LAYOUT-DRIFT:** lower.cnr's ty_size returns 0 for Vec/Map/String/str/Box (interp.cnr's does
+  not) -- masked today because lower routes collections separately, but a `struct { v: Vec[i64] }`
+  field would mis-size the struct. LATENT correctness bug.
+- **F-MONO-SILENT:** mono.cnr ty_of returns 0 for literals/field/call; an un-inferred type-param
+  leaves T_NAMED unsubstituted with NO diagnostic (silent-wrong). Fail loud instead.
+- **F-FIND-NEEDLE:** synth_boxresults/synth_generic_boxresult scan the source for "boxed"/"oom"
+  substrings WITHOUT a bounds guard (unlike synth_scw) -> OOB read if a BoxResult program lacks
+  them.
+- **F-ARENA-CAP:** interp.cnr self-checks with ~56 tokens under the [32768] arena -- already
+  blocking the next interp feature. Raise the arena (stopgap) now.
+
+**Deferred (documented debt, not blocking; fix when the trigger fires):**
+- **F-VECSET-ORDER:** build.rs materializes Vec::set's value BEFORE the bounds check; the oracle
+  checks bounds THEN evaluates. Divergence only if a faulting set has a side-effecting value arg;
+  UNTESTED (no `.set(` fixture). Fix + add a fixture when Vec::set is exercised.
+- **F-FAULT-TRACE:** the differential harness compares FAULT kind+span but NOT the pre-fault trace
+  sequence (Fault carries no trace). So "byte-exact including trace" holds only for NON-faulting
+  runs. Full fix: thread accumulated trace into Fault and compare. Until then the claim is scoped
+  to non-faulting runs.
+- **F-DESERIALIZE-ARITY:** src/mir/serial.rs deserialize indexes args positionally with no arity
+  guard -> panics (not Err) on malformed wire. Matters now that Candor emits the wire. Add arity
+  checks or document the trust boundary.
+- **F-LAYOUT-EXTRACT:** ty_size/field_off/enum layout is triplicated (interp/lower/Rust). Extract a
+  shared layout.cnr BEFORE a 4th consumer (trait-generics front-end or native codegen) appears.
+- **F-FOUR-ENGINE-CLAIM:** the "matching the tree-walker is transitively matching native" framing
+  is feature-level, not program-level -- the 11_* corpus does not itself run through the
+  four-engine gate. Soften the doc language, or add 11_* to the four-engine gate.
+- **F-TEST-DEDUP:** fault_code/dump_ok/on_big_stack/CORPUS are copy-pasted across 5+ gate files and
+  fault_code has drifted (6 vs 10 arms). Hoist into selfhost_modtree/mod.rs.

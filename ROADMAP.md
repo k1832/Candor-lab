@@ -228,10 +228,13 @@ parser-span diffs on non-observable statements. Every program monomorphic; nothi
 needed beyond L1-L6. The gate: Candor lowers -> serialize -> Rust deserialize ->
 mir::interp::run -> byte-exact, reusing L0's proven serialization boundary.
 
-**THREE self-hosting tiers now closed over the same systems corpus:**
-- self-CHECK (all 5 self-host modules, incl. interp.cnr) — oracle-matched diagnostics
-- self-INTERPRET (interp.cnr runs the corpus) — oracle-matched Run{ret,trace}+faults
-- self-LOWER to MIR (lower.cnr compiles the corpus to MIR) — oracle-matched execution
+**THREE self-hosting tiers now closed — but on DIFFERENT program sets (stated precisely,
+not blurred; corrected 2026-07-11 after the same conflation was found in the README):**
+- self-CHECK — oracle-matched diagnostics over the compiler's OWN SOURCE (all 5 self-host
+  modules incl. interp.cnr), NOT the 11_* systems corpus.
+- self-INTERPRET (interp.cnr runs the systems corpus) — oracle-matched Run{ret,trace}+faults.
+- self-LOWER to MIR (lower.cnr compiles the systems corpus to MIR) — oracle-matched execution.
+- (Interpret and lower share the identical 11_* corpus files; the checker does not run over it.)
 
 **Remaining tails (none gated by the milestone):**
 - Interpreter S7-S9 and Lowering L7+: the std/generic library (slices/str done for the
@@ -244,7 +247,12 @@ mir::interp::run -> byte-exact, reusing L0's proven serialization boundary.
   is where a real code generator (Cranelift is Rust-only) must be ported or written;
   the largest remaining undertaking, still a horizon.
 
-### Generic/std self-hosting tail COMPLETE (2026-07-11)
+### Generic/std self-hosting tail: in-subset COMPLETE (2026-07-11)
+
+(Headline scope note: "complete" means the MONOMORPHIC/in-subset surface -- plain
+fn[T]/struct[T]/enum[T] + Vec/Map/String -- runs AND compiles byte-exact. TRAIT-based
+generics (iface/gimpl/gbound/fromq/gfromq, 5 of 13 generic fixtures) remain deferred
+on a self-host front-end gap, per the body below. Not "every generic program".)
 
 Both proven tiers now cover user generics + std collections, byte-exact vs the Rust
 reference:

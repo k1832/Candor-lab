@@ -107,14 +107,20 @@ and the existing gate guarantees that agreement with the tree-walker is agreemen
 with the optimized native backend. The self-interpreter did not have to re-prove
 equivalence across engines; it inherited it.
 
-### 2.3 The self-interpreter is gated on execution, not self-checked
+### 2.3 The self-interpreter is gated on execution — and (since this doc was drafted) ALSO self-checks
 
-One honest boundary, restated in every slice: **`interp.cnr` is gated on its
-EXECUTION behaviour, not run through the self-host checker.** It uses the *full*
-language (including `unsafe`, raw-pointer intrinsics, and constructs the self-host
-checker does not yet cover) precisely because it is a program the *oracle* runs,
-not one the self-host front-end must accept. Self-checking `interp.cnr` itself is a
-separate, later concern (§8) — the same staging the earlier self-host modules used.
+> **Update (2026-07-11, superseding this section's original claim).** When drafted, this
+> section stated `interp.cnr` was gated on execution only and "not run through the self-host
+> checker", framing self-checking it as a later concern. That is now DONE and the original
+> premise was wrong: a probe found `interp.cnr` uses NO `unsafe` and no raw-pointer intrinsics
+> in its own code, so the self-host checker + analyses check it clean with no new coverage and
+> no arena bump. `interp.cnr` is the fifth module under the self-check fixpoint (commit
+> `60e1974`). See ROADMAP and 99-obligations. The paragraph below is kept for the record but is
+> superseded.
+
+Originally: `interp.cnr` is gated on its EXECUTION behaviour, not run through the self-host
+checker — it uses the full language precisely because it is a program the *oracle* runs, not
+one the self-host front-end must accept, and self-checking it is a separate, later concern (§8).
 
 ## 3. The value model: from tagged scalars to flat paged memory
 
@@ -437,6 +443,15 @@ is "the self-interpreter runs Candor's systems-programming corpus byte-exact," n
 and S8 in particular is independently descopable.
 
 ## 8. Forward look
+
+> **Update (2026-07-11).** This section was written at the interpreter milestone, before the
+> next steps were taken. Both branches of the "horizon" below have since been ACTED ON: the
+> self-lowering-to-MIR tier is DONE (L0–L6; `lower.cnr` lowers the systems corpus + generics +
+> collections to MIR, run byte-exact by the Rust MIR interpreter), and the generic/std tail is
+> in-subset done (monomorphizer + Vec/Map/String on both tiers). And "self-checking `interp.cnr`
+> itself" — described below as open and as *requiring new checker coverage* — is CLOSED and
+> required NONE (see §2.3's update). The prose below is preserved as the original record; ROADMAP
+> holds the current state.
 
 The interpreter tier has proven the language can express its own **execution**
 semantics. The horizon (not a plan — a direction) has two branches, recorded in
