@@ -27,7 +27,7 @@
 // `interp.cnr` is NOT self-checked in this slice, so it uses the full language.
 
 use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl, decoded_len};
-use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_SC, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_STRUCT, T_NAMED, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_VARIANT, T_ENUMCTOR, T_MATCH, T_PVARIANT, T_WILD, T_BIND, T_STATIC, T_RAWPTR, T_FNPTR, T_UNSAFE, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_BOX, T_BOXRESULT, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_CONV, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT, T_BYTES, T_STR, T_PARAM, T_APP, T_GENERICVAL, T_IMPL};
+use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_SC, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_STRUCT, T_NAMED, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_VARIANT, T_ENUMCTOR, T_MATCH, T_PVARIANT, T_WILD, T_BIND, T_STATIC, T_RAWPTR, T_FNPTR, T_UNSAFE, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_BOX, T_BOXRESULT, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_CONV, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT, T_BYTES, T_STR, T_PARAM, T_APP, T_GENERICVAL, T_IMPL, T_TRY};
 use mono::{mono_program};
 
 // ---- fault kind codes (shared with the Rust harness) ------------------------
@@ -2021,6 +2021,155 @@ fn eval_match(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     return bs;
 }
 
+// ---- `?` operator + `From`-based error widening (design 0007 §7.1) -----------
+// 0-based index of the `ok`-marked variant (T_VARIANT.op == 1), or -1 if none.
+fn ok_variant_index(pp: read P, eid: u32) -> i32 {
+    if eid == 0u32 { return 0 - 1i32; }
+    let enode: Node = pp.nodes[conv usize eid];
+    let mut cur: u32 = enode.b;
+    let mut k: i32 = 0;
+    while cur != 0u32 {
+        let vd: Node = pp.nodes[conv usize cur];
+        if vd.op == 1 { return k; }
+        k = k + 1i32;
+        cur = vd.nx;
+    }
+    return 0 - 1i32;
+}
+// 0-based index of the FIRST non-`ok` (error) variant, or -1 if none.
+fn err_variant_index(pp: read P, eid: u32) -> i32 {
+    if eid == 0u32 { return 0 - 1i32; }
+    let enode: Node = pp.nodes[conv usize eid];
+    let mut cur: u32 = enode.b;
+    let mut k: i32 = 0;
+    while cur != 0u32 {
+        let vd: Node = pp.nodes[conv usize cur];
+        if vd.op != 1 { return k; }
+        k = k + 1i32;
+        cur = vd.nx;
+    }
+    return 0 - 1i32;
+}
+// Resolve `impl From[src] for tgt`'s `from` fn node: scan concrete T_IMPL blocks
+// whose iface name is `From`, target enum == `tgt_eid`, and iface arg-0 == `src_eid`.
+fn find_from_fn(pp: read P, src: [u8], e: write E, src_eid: u32, tgt_eid: u32) -> u32 {
+    let mut cur: u32 = e.head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_IMPL && nd.a == 0u32 && span_eq(src, nd.p0, nd.p1, b"From") {
+            let te: u32 = enum_of_ty(pp, src, e, nd.c);
+            let mut se: u32 = 0u32;
+            if nd.b != 0u32 { se = enum_of_ty(pp, src, e, nd.b); }
+            if te == tgt_eid && se == src_eid {
+                let mut mcur: u32 = nd.d;
+                while mcur != 0u32 {
+                    let mnd: Node = pp.nodes[conv usize mcur];
+                    if span_eq(src, mnd.p0, mnd.p1, b"from") { return mcur; }
+                    mcur = mnd.nx;
+                }
+            }
+        }
+        cur = nd.nx;
+    }
+    return 0u32;
+}
+// `expr?`: evaluate the operand to a result-shaped enum; on the `ok` variant,
+// unwrap its payload and continue; on the error variant, `From`-convert the
+// payload to the enclosing fn's declared error type and EARLY-RETURN (status 2).
+// Mirrors src/interp/eval.rs eval_try / eval_try_from.
+fn eval_try(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let sc: i32 = eval_expr(pp, src, e, nd.a, 0 - 1i32);
+    if sc != 0 { return sc; }
+    let enum_addr: usize = conv usize e.cur_val;
+    let op_ty: u32 = e.cur_ty;
+    let op_org: i32 = e.cur_org;
+    let op_org_a: usize = e.cur_org_a;
+    let op_org_b: i32 = e.cur_org_b;
+    let eid: u32 = enum_of_ty(pp, src, e, op_ty);
+    let tag: i32 = conv i32 mem_load(e, enum_addr, W_USIZE);
+    let ok_idx: i32 = ok_variant_index(pp, eid);
+    let vid: u32 = variant_by_index(pp, eid, tag);
+    if tag == ok_idx {
+        let pty: u32 = variant_payload_ty(pp, vid, 0);
+        let off: usize = variant_payload_off(pp, src, e, vid, 0);
+        let pw: i32 = scalar_width(pp, src, pty);
+        if pw != 0 {
+            e.*.cur_val = mem_load(e, enum_addr + off, pw);
+            e.*.cur_w = pw;
+            e.*.cur_ty = pty;
+            e.*.cur_org = 0;
+            if !is_copy(pp, src, e, op_ty) { do_consume(e, op_org, op_org_a, op_org_b); }
+            return 0;
+        }
+        let psz: usize = ty_size(pp, src, e, pty);
+        let pal: usize = ty_align(pp, src, e, pty);
+        let slot: usize = bump_alloc(e, psz, pal);
+        mem_copy(e, slot, enum_addr + off, psz);
+        if !is_copy(pp, src, e, op_ty) { do_consume(e, op_org, op_org_a, op_org_b); }
+        e.*.cur_val = conv i64 slot;
+        e.*.cur_w = 0;
+        e.*.cur_ty = pty;
+        e.*.cur_org = 0;
+        if !is_copy(pp, src, e, pty) {
+            let ti: usize = reg_temp(e, slot, pty);
+            e.*.cur_org = 1;
+            e.*.cur_org_a = ti;
+        }
+        return 0;
+    }
+    return eval_try_from(pp, src, e, enum_addr, eid, vid, op_ty, op_org, op_org_a, op_org_b);
+}
+fn eval_try_from(pp: read P, src: [u8], e: write E, enum_addr: usize, eid: u32, vid: u32, op_ty: u32, op_org: i32, op_org_a: usize, op_org_b: i32) -> i32 {
+    // The operand's active (error) payload e1.
+    let e1ty: u32 = variant_payload_ty(pp, vid, 0);
+    let e1off: usize = variant_payload_off(pp, src, e, vid, 0);
+    let e1_eid: u32 = enum_of_ty(pp, src, e, e1ty);
+    // The enclosing fn's declared error type: return enum's non-`ok` payload e2.
+    let rty: u32 = e.cur_retty;
+    let reid: u32 = enum_of_ty(pp, src, e, rty);
+    // Same result type: no widening -- early-return the operand value as-is.
+    if reid == eid {
+        mem_copy(e, e.cur_result_addr, enum_addr, ty_size(pp, src, e, rty));
+        if !is_copy(pp, src, e, op_ty) { do_consume(e, op_org, op_org_a, op_org_b); }
+        return 2;
+    }
+    let ret_err_idx: i32 = err_variant_index(pp, reid);
+    let rvid: u32 = variant_by_index(pp, reid, ret_err_idx);
+    let e2ty: u32 = variant_payload_ty(pp, rvid, 0);
+    let e2off: usize = variant_payload_off(pp, src, e, rvid, 0);
+    let e2_eid: u32 = enum_of_ty(pp, src, e, e2ty);
+    let from_fn: u32 = find_from_fn(pp, src, e, e1_eid, e2_eid);
+    if from_fn == 0u32 {
+        let onode: Node = pp.nodes[conv usize e1ty];
+        set_fault(e, FK_PANIC, onode.p0, onode.p1);
+        return 1;
+    }
+    // Call `from(e1)`; e1 rides an aggregate arg (its enum payload) or a scalar.
+    let pw: i32 = scalar_width(pp, src, e1ty);
+    if pw != 0 {
+        e.*.arg_val[0] = mem_load(e, enum_addr + e1off, pw);
+        e.*.arg_w[0] = pw;
+        e.*.arg_addr[0] = 0usize;
+    } else {
+        e.*.arg_val[0] = 0i64;
+        e.*.arg_w[0] = 0;
+        e.*.arg_addr[0] = enum_addr + e1off;
+    }
+    e.*.arg_n = 1usize;
+    let cs: i32 = call_fn(pp, src, e, from_fn);
+    if cs != 0 { return cs; }
+    let from_addr: usize = conv usize e.cur_val;
+    // Build the return enum in the caller's result slot: tag = error variant,
+    // payload = the widened e2.
+    let ret_addr: usize = e.cur_result_addr;
+    zero_slot(e, ret_addr, ty_size(pp, src, e, rty));
+    mem_store(e, ret_addr, conv i64 ret_err_idx, W_USIZE);
+    mem_copy(e, ret_addr + e2off, from_addr, ty_size(pp, src, e, e2ty));
+    if !is_copy(pp, src, e, op_ty) { do_consume(e, op_org, op_org_a, op_org_b); }
+    return 2;
+}
+
 // ---- conv (integer widening/narrowing) --------------------------------------
 // Mirrors src/interp/eval.rs eval_conv: read the source integer at its declared
 // signedness, then range-check against the TARGET scalar's range. In-range keeps
@@ -2247,6 +2396,9 @@ fn eval_expr(pp: read P, src: [u8], e: write E, i: u32, exp_w: i32) -> i32 {
     }
     if tg == T_MATCH {
         return eval_match(pp, src, e, i);
+    }
+    if tg == T_TRY {
+        return eval_try(pp, src, e, i);
     }
     if tg == T_UNSAFE {
         // `unsafe "why" { ... }` runs its body block; its raw-pointer ops are

@@ -457,6 +457,15 @@ fn emit_enum_inst(p: write P, src: [u8], m: write M, orig: u32, depth: i32) -> u
     let existing: u32 = find_inst(p, src, m, orig);
     if existing != 0u32 { return existing; }
     if depth > MONO_DEPTH_LIMIT { return 0u32; }
+    // Snapshot the concrete type-args before nested resolution clobbers m.targ,
+    // so a generic impl over this enum can be instantiated at the reached args.
+    let ncargs: i32 = m.targ_n;
+    let mut cargs: [8]u32 = [0u32; 8];
+    let mut cci: i32 = 0;
+    while cci < ncargs {
+        cargs[conv usize cci] = m.targ[conv usize cci];
+        cci = cci + 1i32;
+    }
     let od: Node = p.nodes[conv usize orig];
     let mut en: Node = nnew(T_ENUM);
     en.op = od.op;
@@ -482,6 +491,13 @@ fn emit_enum_inst(p: write P, src: [u8], m: write M, orig: u32, depth: i32) -> u
         }
         vc = vd.nx;
     }
+    let mut si: i32 = 0;
+    while si < ncargs {
+        m.*.sarg[conv usize si] = cargs[conv usize si];
+        si = si + 1i32;
+    }
+    m.*.sarg_n = ncargs;
+    instantiate_impls_for_struct(p, src, m, od.p0, od.p1, eid);
     return eid;
 }
 
@@ -519,6 +535,63 @@ fn resolve_type(p: write P, src: [u8], m: write M, id: u32, depth: i32) -> unit 
         }
         // not a user generic (Vec/Map/...): leave as App.
         return;
+    }
+    if tg == T_NAMED || tg == T_SC {
+        // A reached non-generic enum/struct may hold generic instances in its
+        // payloads/fields (e.g. `enum AppRes { AppBad(AppErr[i64]) }`) that no fn
+        // body names directly; resolve those App instances so they get emitted.
+        // Named sub-decls stay leaves here (resolve_app_only), so a decl graph
+        // with named cross-references cannot drive unbounded re-walks.
+        resolve_named_decl(p, src, m, nd.p0, nd.p1, depth);
+        return;
+    }
+    return;
+}
+// Resolve only the generic App instances a type node denotes, unwrapping the
+// pointer/array/borrow shells; a `T_NAMED`/`T_SC` is a leaf (no decl recursion).
+fn resolve_app_only(p: write P, src: [u8], m: write M, id: u32, depth: i32) -> unit {
+    if id == 0u32 { return; }
+    let nd: Node = p.nodes[conv usize id];
+    let tg: i32 = nd.tag;
+    if tg == T_BORROW || tg == T_BORROWMUT || tg == T_RAWPTR || tg == T_BOX || tg == T_BOXRESULT {
+        resolve_app_only(p, src, m, nd.a, depth);
+        return;
+    }
+    if tg == T_RET || tg == T_SLICE || tg == T_SLICEMUT { resolve_app_only(p, src, m, nd.a, depth); return; }
+    if tg == T_ARRAY { resolve_app_only(p, src, m, nd.b, depth); return; }
+    if tg == T_APP { resolve_type(p, src, m, id, depth); return; }
+    return;
+}
+// Resolve the generic App instances referenced by a reached non-generic
+// enum/struct decl's payload/field types (the reach the oracle gets via
+// type-graph enqueue).
+fn resolve_named_decl(p: write P, src: [u8], m: write M, s: usize, en: usize, depth: i32) -> unit {
+    let mut cur: u32 = m.head;
+    while cur != 0u32 {
+        let nd: Node = p.nodes[conv usize cur];
+        if nd.tag == T_ENUM && nd.a == 0u32 && name_eq_m(src, nd.p0, nd.p1, s, en) {
+            let mut vc: u32 = nd.b;
+            while vc != 0u32 {
+                let vd: Node = p.nodes[conv usize vc];
+                let mut pc: u32 = vd.a;
+                while pc != 0u32 {
+                    resolve_app_only(p, src, m, pc, depth);
+                    pc = p.nodes[conv usize pc].nx;
+                }
+                vc = vd.nx;
+            }
+            return;
+        }
+        if nd.tag == T_STRUCT && nd.a == 0u32 && name_eq_m(src, nd.p0, nd.p1, s, en) {
+            let mut fc: u32 = nd.b;
+            while fc != 0u32 {
+                let fd: Node = p.nodes[conv usize fc];
+                resolve_app_only(p, src, m, fd.a, depth);
+                fc = fd.nx;
+            }
+            return;
+        }
+        cur = nd.nx;
     }
     return;
 }
@@ -830,6 +903,18 @@ fn fix_impl_selves(p: write P, src: [u8], mhead: u32, target: u32, selfstart: us
                 p.*.nodes[conv usize ph].p1 = selfstart + 4usize;
             }
         }
+        // A method returning `Self` (e.g. `From::from`) needs its return type
+        // pointed at the concrete target so the interp sizes it as an aggregate.
+        let rw: u32 = mnd.e;
+        if rw != 0u32 {
+            let rt: Node = p.nodes[conv usize rw];
+            if rt.a != 0u32 {
+                let rty: Node = p.nodes[conv usize rt.a];
+                if rty.tag == T_NAMED && span_eq(src, rty.p0, rty.p1, b"Self") {
+                    p.*.nodes[conv usize rw].a = target;
+                }
+            }
+        }
         mcur = mnd.nx;
     }
     return;
@@ -868,6 +953,9 @@ fn emit_one_impl_inst(p: write P, src: [u8], m: write M, imid: u32, sid: u32) ->
     let ctarget: u32 = clone_subst(p, src, m, imnd.c);
     p.*.nodes[conv usize ctarget].nx = 0u32;
     p.*.nodes[conv usize ctarget].b = sid;
+    // Carry the interface type-args (e.g. `From[IoErr]`'s `IoErr`) onto the
+    // concrete impl so trait resolution can key on the source type.
+    let cargs: u32 = clone_subst(p, src, m, imnd.b);
     let cmethods: u32 = clone_subst(p, src, m, imnd.d);
     m.*.env_n = saved_env;
     fix_impl_selves(p, src, cmethods, ctarget, m.self_start);
@@ -875,6 +963,7 @@ fn emit_one_impl_inst(p: write P, src: [u8], m: write M, imid: u32, sid: u32) ->
     ni.p0 = imnd.p0;
     ni.p1 = imnd.p1;
     ni.a = 0u32;
+    ni.b = cargs;
     ni.c = ctarget;
     ni.d = cmethods;
     let niid: u32 = m_push(p, ni);

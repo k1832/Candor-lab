@@ -208,6 +208,9 @@ const CORPUS: &[(&str, Shape)] = &[
     ("generics/iface.cnr", Ret),
     ("generics/gimpl.cnr", Ret),
     ("generics/gbound.cnr", Ret),
+    // ---- `?` operator + `From`-based error widening (T4) ----
+    ("generics/fromq.cnr", Ret),
+    ("generics/gfromq.cnr", Ret),
     // ---- std COLLECTIONS: compiler-known String / Vec[T] / Map[V] ----
     ("string_build.cnr", Ret),
     ("vec_push_get_sum.cnr", Ret),
