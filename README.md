@@ -19,6 +19,14 @@ intrusive-list scheduler, MMIO registers, a recursive-descent parser, a
 Candor-written lowering *compiles it to MIR* that the Rust MIR interpreter then
 runs — both reproducing the reference's exact results. (The checker does not run
 over that corpus; the interpret and lower tiers share the identical corpus files.)
+Beyond the systems corpus, both the interpret and lower tiers also cover the
+**full generic and trait surface** and the **std collections** — user
+`fn[T]`/`struct[T]`/`enum[T]`, `interface`/`impl` method dispatch, generic impls,
+trait bounds, `?`/`From` error widening, and `Vec`/`Map`/`String` — via a
+self-hosted monomorphizer (`mono.cnr`); all thirteen generic fixtures run and
+compile byte-exact. So the self-hosted toolchain now handles essentially the whole
+language, not a subset (the honest remaining gaps are minor and logged:
+associated-type members, multibyte `push`, `vec_set`).
 **Self-lowering:** a Candor-written lowering (`lower.cnr`) translates the parsed
 AST to the compiler's MIR — flattening structured control flow to a basic-block
 CFG, allocating temps, emitting the move/drop schedule and fault edges as explicit
