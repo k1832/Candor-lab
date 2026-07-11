@@ -24,8 +24,8 @@
 // This module is composed with the `lexer` and `parser` modules. Like lower.cnr it
 // is NOT self-checked in this slice, so it uses the full language.
 
-use lexer::{Buf, span_eq};
-use parser::{Node, P, nnew, parse_program, T_FN, T_PARAM, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, T_NAMED, T_SC, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_FIELD, T_INDEX, T_STRUCTLIT, T_ARRAYLIT, T_ARRAYREP, T_FINIT, T_STRUCT, T_ENUMCTOR, T_MATCH, T_PVARIANT, T_WILD, T_BIND, T_STATIC, T_RAWPTR, T_FNPTR, T_FPPARAM, T_BOX, T_BOXRESULT, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_ENUM, T_VARIANT, T_BORROW, T_BORROWMUT};
+use lexer::{Buf, span_eq, decoded_len};
+use parser::{Node, P, nnew, parse_program, T_FN, T_PARAM, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, T_NAMED, T_SC, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_FIELD, T_INDEX, T_STRUCTLIT, T_ARRAYLIT, T_ARRAYREP, T_FINIT, T_STRUCT, T_ENUMCTOR, T_MATCH, T_PVARIANT, T_WILD, T_BIND, T_STATIC, T_RAWPTR, T_FNPTR, T_FPPARAM, T_BOX, T_BOXRESULT, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_ENUM, T_VARIANT, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT, T_BYTES, T_ARRAY, T_STR};
 use layout::{ty_size, ty_align, struct_size, struct_align, field_off, field_off_lit, field_ty, struct_of_ty, array_len_of, needs_drop, is_copy, enum_size, enum_of_ty, variant_by_index, variant_index_by_name, variant_payload_off, variant_payload_ty};
 
 // rt_fault kind codes (src/backend/lower.rs kind_code / aot_runtime.c kind_name).
@@ -95,6 +95,12 @@ struct C {
     at_n: usize,
     bnd_flat: [1024]i32,
     luk_flat: i32,
+    mat_scrut: [64]u32,
+    mat_tn: [64]u32,
+    mat_hold: [64]i32,
+    mat_n: usize,
+    glue_eid: [128]u32,
+    glue_n: usize,
     err: i32,
 }
 
@@ -434,7 +440,17 @@ fn emit_drop_at(c: write C, pp: read P, src: [u8], off_slot: i32, ty: u32, locid
     let sid: u32 = struct_of_ty(pp, src, c.head, ty);
     if sid == 0u32 {
         let eid: u32 = enum_of_ty(pp, src, c.head, ty);
-        if eid != 0u32 { emit_enum_drop(c, pp, src, off_slot, eid, locid); }
+        if eid != 0u32 {
+            // A root value carries partial-move info -> inline its tag-directed drop; a
+            // nested value (locid < 0, incl. Box pointees) routes through a per-enum drop-
+            // glue fn, so a self-referential enum (e.g. `Box Expr` inside `Expr`) recurses
+            // at RUNTIME via a `call` rather than expanding forever at codegen time.
+            if locid >= 0 {
+                emit_enum_drop(c, pp, src, off_slot, eid, locid);
+            } else {
+                emit_enum_drop_call(c, off_slot, eid);
+            }
+        }
         return;
     }
     let snode: Node = pp.nodes[conv usize sid];
@@ -470,6 +486,24 @@ fn emit_drop_at(c: write C, pp: read P, src: [u8], off_slot: i32, ty: u32, locid
             emit_drop_at(c, pp, src, fslot, fty, 0i32 - 1i32);
         }
     }
+    return;
+}
+// Register (dedup) `eid` for drop-glue emission, and emit a call to its glue fn with the
+// value's flat offset in %rdi.
+fn emit_enum_drop_call(c: write C, off_slot: i32, eid: u32) -> unit {
+    let mut k: usize = 0usize;
+    let mut found: bool = false;
+    while k < c.glue_n {
+        if c.glue_eid[k] == eid { found = true; }
+        k = k + 1usize;
+    }
+    if !found {
+        let g: usize = c.glue_n;
+        c.*.glue_eid[g] = eid;
+        c.*.glue_n = g + 1usize;
+    }
+    bc(c, 9); bs(c, b"movq "); bslot(c, off_slot); bs(c, b", %rdi"); bc(c, 10);
+    bc(c, 9); bs(c, b"call cnr_dropenum_"); bn(c, conv u64 eid); bc(c, 10);
     return;
 }
 // Tag-directed enum drop: read the tag@0, then a runtime switch that, for the active
@@ -779,7 +813,8 @@ fn gen_place_addr(c: write C, pp: read P, src: [u8], i: u32) -> u32 {
         if nd.op == PF_DEREF {
             let bt: u32 = gen_place_addr(c, pp, src, nd.a);
             let btn: Node = pp.nodes[conv usize bt];
-            if btn.tag == T_BOX || btn.tag == T_BORROW || btn.tag == T_BORROWMUT {
+            // A Box deref loads ptr@0; a borrow/rawptr value already IS the pointee address.
+            if btn.tag == T_BOX {
                 emit_load_flat(c, W_USIZE);
             }
             return btn.a;
@@ -799,9 +834,34 @@ fn gen_place_addr(c: write C, pp: read P, src: [u8], i: u32) -> u32 {
     if nd.tag == T_INDEX {
         let _iw: i32 = gen_value(c, pp, src, nd.b, W_USIZE);
         let idxslot: i32 = spill(c);
-        let bt: u32 = gen_place_addr(c, pp, src, nd.a);
-        let baseslot: i32 = spill(c);
+        let mut bt: u32 = gen_place_addr(c, pp, src, nd.a);
+        // A Box/borrow base auto-derefs to its pointee (an array or slice) before index.
+        bt = peel_box_addr(c, pp, src, bt);
         let arrnd: Node = pp.nodes[conv usize bt];
+        if arrnd.tag == T_SLICE || arrnd.tag == T_SLICEMUT {
+            // A slice is a {ptr@0, len@8} fat pointer: bounds-check idx < len, then load
+            // the data ptr and offset by idx*stride (element size).
+            let hdr_slot: i32 = spill(c);
+            let elem: u32 = arrnd.a;
+            let stride: usize = ty_size(pp, src, c.head, elem);
+            reload_rax(c, hdr_slot);
+            bi(c, b"addq $8, %rax");
+            emit_load_flat(c, W_USIZE);
+            let len_slot: i32 = spill(c);
+            reload_rax(c, idxslot);
+            bc(c, 9); bs(c, b"movq "); bslot(c, len_slot); bs(c, b", %rcx"); bc(c, 10);
+            bi(c, b"cmpq %rcx, %rax");
+            fault_unless(c, b"jb", FK_BOUNDS, c.cur_p0, c.cur_p1);
+            reload_rax(c, hdr_slot);
+            emit_load_flat(c, W_USIZE);
+            let ptr_slot: i32 = spill(c);
+            reload_rax(c, idxslot);
+            bc(c, 9); bs(c, b"imulq $"); bn(c, conv u64 stride); bs(c, b", %rax, %rax"); bc(c, 10);
+            bc(c, 9); bs(c, b"movq "); bslot(c, ptr_slot); bs(c, b", %rcx"); bc(c, 10);
+            bi(c, b"addq %rcx, %rax");
+            return elem;
+        }
+        let baseslot: i32 = spill(c);
         let n: usize = array_len_of(pp, arrnd.a);
         let stride: usize = arr_stride(pp, src, c.head, bt);
         reload_rax(c, idxslot);
@@ -826,11 +886,18 @@ fn gen_agg(c: write C, pp: read P, src: [u8], i: u32, exp_ty: u32) -> u32 {
     if nd.tag == T_STRUCTLIT { return gen_struct_lit(c, pp, src, i, exp_ty); }
     if nd.tag == T_ARRAYLIT { return gen_array_lit(c, pp, src, i, exp_ty); }
     if nd.tag == T_ARRAYREP { return gen_array_rep(c, pp, src, i, exp_ty); }
+    if nd.tag == T_BYTES { return gen_bytes(c, pp, src, i, exp_ty); }
+    if nd.tag == T_MATCH { return gen_match_value(c, pp, src, i, exp_ty); }
     if nd.tag == T_ID || nd.tag == T_FIELD || nd.tag == T_INDEX {
         return gen_place_addr(c, pp, src, i);
     }
     if nd.tag == T_PREFIX && nd.op == PF_DEREF {
         return gen_place_addr(c, pp, src, i);
+    }
+    // `read x`/`write x` as an aggregate value yields the borrowed place's address (its
+    // flat offset); the borrow's pointee lives there (e.g. box's Alloc handle argument).
+    if nd.tag == T_PREFIX && (nd.op == PF_READ || nd.op == PF_WRITE) {
+        return gen_place_addr(c, pp, src, nd.a);
     }
     if nd.tag == T_CALL {
         let callee: Node = pp.nodes[conv usize nd.a];
@@ -873,6 +940,7 @@ fn gen_enum_ctor(c: write C, pp: read P, src: [u8], i: u32, exp_ty: u32) -> u32 
         } else {
             let _t: u32 = gen_agg(c, pp, src, argc, pty);
             emit_copy_to(c, baseslot, off, ty_size(pp, src, c.head, pty));
+            if !is_copy(pp, src, c.head, pty) { mark_moved(c, pp, src, argc); }
         }
         k = k + 1i32;
         argc = pp.nodes[conv usize argc].nx;
@@ -905,6 +973,7 @@ fn gen_struct_lit(c: write C, pp: read P, src: [u8], i: u32, exp_ty: u32) -> u32
             } else {
                 let _t: u32 = gen_agg(c, pp, src, fin.a, fty);
                 emit_copy_to(c, baseslot, off, ty_size(pp, src, c.head, fty));
+                if !is_copy(pp, src, c.head, fty) { mark_moved(c, pp, src, fin.a); }
             }
         }
         fcur = fdef.nx;
@@ -935,6 +1004,7 @@ fn gen_array_lit(c: write C, pp: read P, src: [u8], i: u32, exp_ty: u32) -> u32 
         } else {
             let _t: u32 = gen_agg(c, pp, src, cur, elem);
             emit_copy_to(c, baseslot, k * stride, esz);
+            if !is_copy(pp, src, c.head, elem) { mark_moved(c, pp, src, cur); }
         }
         k = k + 1usize;
         cur = cn.nx;
@@ -976,6 +1046,44 @@ fn gen_array_rep(c: write C, pp: read P, src: [u8], i: u32, exp_ty: u32) -> u32 
         }
     }
     reload_rax(c, baseslot);
+    c.*.cur_agg_ty = exp_ty;
+    return exp_ty;
+}
+
+// A byte-string literal `b"..."` materializes as a `[u8]` slice: decode its bytes into
+// a fresh flat blob, then build the {ptr@0, len@8} header (mirrors lower.cnr
+// lower_str_into; the blob lives in flat memory so slice indexing loads through ptr@0).
+fn gen_bytes(c: write C, pp: read P, src: [u8], i: u32, exp_ty: u32) -> u32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let clen: usize = conv usize decoded_len(src, nd.p0, nd.p1);
+    emit_alloc(c, clen, 1usize);
+    let blob_slot: i32 = spill(c);
+    let mut j: usize = nd.p0;
+    let mut k: usize = 0usize;
+    while j < nd.p1 {
+        let mut dec: u8 = src[j];
+        if src[j] == 92u8 && j + 1usize < nd.p1 {
+            let nx: u8 = src[j + 1usize];
+            if nx == 34u8 { dec = 34u8; }
+            else if nx == 92u8 { dec = 92u8; }
+            else if nx == 110u8 { dec = 10u8; }
+            else if nx == 116u8 { dec = 9u8; }
+            else { dec = nx; }
+            j = j + 2usize;
+        } else {
+            j = j + 1usize;
+        }
+        emit_const(c, conv u64 dec, 0);
+        emit_store_flat(c, 6, blob_slot, k);
+        k = k + 1usize;
+    }
+    emit_alloc(c, 16usize, 8usize);
+    let hdr_slot: i32 = spill(c);
+    reload_rax(c, blob_slot);
+    emit_store_flat(c, W_USIZE, hdr_slot, 0usize);
+    emit_const(c, conv u64 clen, 0);
+    emit_store_flat(c, W_USIZE, hdr_slot, 8usize);
+    reload_rax(c, hdr_slot);
     c.*.cur_agg_ty = exp_ty;
     return exp_ty;
 }
@@ -1466,6 +1574,27 @@ fn emit_arg_reg(c: write C, idx: usize) -> unit {
     return;
 }
 
+// `len(x)`: a slice loads its len@8 word; a fixed array is its compile-time length
+// (mirrors lower.cnr's `len` intrinsic).
+fn gen_len(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let a0: u32 = nd.b;
+    let mut ttn: u32 = expr_place_ty(c, pp, src, a0);
+    let mut tnode: Node = pp.nodes[conv usize ttn];
+    if tnode.tag == T_BORROW || tnode.tag == T_BORROWMUT {
+        ttn = tnode.a;
+        tnode = pp.nodes[conv usize ttn];
+    }
+    if tnode.tag == T_SLICE || tnode.tag == T_SLICEMUT {
+        let _t: u32 = gen_place_addr(c, pp, src, a0);
+        bi(c, b"addq $8, %rax");
+        emit_load_flat(c, W_USIZE);
+        return W_USIZE;
+    }
+    let n: usize = array_len_of(pp, tnode.a);
+    emit_const(c, conv u64 n, 0);
+    return W_USIZE;
+}
 fn gen_call(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
     let callee: Node = pp.nodes[conv usize nd.a];
@@ -1495,12 +1624,19 @@ fn gen_call(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
         let _v: i32 = gen_value(c, pp, src, nd.b, W_USIZE);
         return W_USIZE;
     }
+    if span_eq(src, callee.p0, callee.p1, b"len") { return gen_len(c, pp, src, i); }
     let fnid: u32 = find_fn(pp, src, c.head, callee.p0, callee.p1);
     if fnid == 0u32 { return gen_indirect_call(c, pp, src, i); }
     let fnnd: Node = pp.nodes[conv usize fnid];
     let mut retn: u32 = 0u32;
-    if fnnd.e != 0u32 { retn = pp.nodes[conv usize fnnd.e].a; }
-    let retw: i32 = scalar_width(pp, src, retn);
+    let mut ret_borrow: i32 = 0;
+    if fnnd.e != 0u32 {
+        retn = pp.nodes[conv usize fnnd.e].a;
+        let rmode: i32 = pp.nodes[conv usize fnnd.e].op;
+        if rmode == 1 || rmode == 2 { ret_borrow = 1; }
+    }
+    let mut retw: i32 = scalar_width(pp, src, retn);
+    if ret_borrow != 0 { retw = W_USIZE; retn = 0u32; }
     // Evaluate args into fresh temp slots (left to right), then load arg regs.
     let mut argslots: [16]i32 = [0i32; 16];
     let mut na: usize = 0usize;
@@ -1551,7 +1687,7 @@ fn gen_call(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
 // non-copy payload additionally marks the scrutinee's `_i` path moved and registers the
 // bound local for drop), emit the arm body, then drop the arm scope. `idx < 0` (a
 // wildcard/binding arm) binds nothing, mirroring lower.cnr lower_match_arm.
-fn gen_match_arm(c: write C, pp: read P, src: [u8], arm: u32, scrut: u32, scrut_slot: i32, eid: u32, idx: i32) -> unit {
+fn gen_match_arm(c: write C, pp: read P, src: [u8], arm: u32, scrut: u32, scrut_slot: i32, eid: u32, idx: i32, want_val: i32, res_slot: i32, res_w: i32, res_ty: u32) -> unit {
     let an: Node = pp.nodes[conv usize arm];
     let pat: Node = pp.nodes[conv usize an.a];
     let bsave: usize = c.bnd_n;
@@ -1606,7 +1742,18 @@ fn gen_match_arm(c: write C, pp: read P, src: [u8], arm: u32, scrut: u32, scrut_
             sp = spn.nx;
         }
     }
-    let _sc: i32 = gen_value(c, pp, src, an.b, 0i32 - 1i32);
+    if want_val != 0 {
+        if res_w != 0 {
+            let _v: i32 = gen_value(c, pp, src, an.b, res_w);
+            emit_canon(c, res_w);
+            store_slot(c, res_slot);
+        } else {
+            let _t: u32 = gen_agg(c, pp, src, an.b, res_ty);
+            emit_copy_to(c, res_slot, 0usize, ty_size(pp, src, c.head, res_ty));
+        }
+    } else {
+        let _sc: i32 = gen_value(c, pp, src, an.b, 0i32 - 1i32);
+    }
     scope_pop_drops(c, pp, src);
     c.*.bnd_n = bsave;
     return;
@@ -1616,13 +1763,34 @@ fn gen_match_arm(c: write C, pp: read P, src: [u8], arm: u32, scrut: u32, scrut_
 // (first-match order); a wildcard/binding arm is the unconditional tail. Each arm jumps
 // to the shared join; a non-exhaustive tail faults (Panic). Mirrors lower.cnr
 // lower_match_full's Cmp/Branch shape.
-fn gen_match(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
+// Resolve a match scrutinee to its enum value's flat offset in %rax, returning the
+// enum type node. A place scrutinee resolves directly; a non-place scrutinee (recorded
+// in the mat table) is either an owned aggregate value materialized in place, or a
+// borrow-returning call whose result IS the pointee address (mirrors lower.cnr
+// lower_match_full's materialize/hold split).
+fn gen_match_scrut(c: write C, pp: read P, src: [u8], scrut: u32) -> u32 {
+    let midx: i32 = mat_lookup(c, scrut);
+    if midx >= 0 {
+        let stn: u32 = c.mat_tn[conv usize midx];
+        if c.mat_hold[conv usize midx] != 0 {
+            let _w: i32 = gen_value(c, pp, src, scrut, W_USIZE);
+        } else {
+            let _t: u32 = gen_agg(c, pp, src, scrut, stn);
+        }
+        return stn;
+    }
+    return gen_place_addr(c, pp, src, scrut);
+}
+// The shared match core: resolve the scrutinee, read tag@0 once, per-arm test chain.
+// `want_val != 0` routes each arm's result into `res_slot` (scalar store / aggregate
+// copy); otherwise the arm is a statement. Mirrors lower.cnr lower_match_full.
+fn gen_match_core(c: write C, pp: read P, src: [u8], i: u32, want_val: i32, res_slot: i32, res_w: i32, res_ty: u32) -> unit {
     let nd: Node = pp.nodes[conv usize i];
     let scrut: u32 = nd.a;
-    let stn: u32 = gen_place_addr(c, pp, src, scrut);
+    let stn: u32 = gen_match_scrut(c, pp, src, scrut);
     let scrut_slot: i32 = spill(c);
     let eid: u32 = enum_of_ty(pp, src, c.head, stn);
-    if eid == 0u32 { c.*.err = 1; return 12; }
+    if eid == 0u32 { c.*.err = 1; return; }
     reload_rax(c, scrut_slot);
     emit_load_flat(c, 9);
     let tag_slot: i32 = spill(c);
@@ -1634,18 +1802,18 @@ fn gen_match(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
         let an: Node = pp.nodes[conv usize arm];
         let pat: Node = pp.nodes[conv usize an.a];
         if pat.tag == T_WILD || pat.tag == T_BIND {
-            gen_match_arm(c, pp, src, arm, scrut, scrut_slot, eid, 0i32 - 1i32);
+            gen_match_arm(c, pp, src, arm, scrut, scrut_slot, eid, 0i32 - 1i32, want_val, res_slot, res_w, res_ty);
             bc(c, 9); bs(c, b"jmp "); blabel_ref(c, join); bc(c, 10);
             test_open = 0;
         } else {
             let vname: Node = pp.nodes[conv usize pat.a];
             let vidx: i32 = variant_index_by_name(pp, src, eid, vname.p0, vname.p1);
-            if vidx < 0 { c.*.err = 1; return 12; }
+            if vidx < 0 { c.*.err = 1; return; }
             let nextl: i32 = newlbl(c);
             reload_rax(c, tag_slot);
             bc(c, 9); bs(c, b"cmpq $"); bn(c, conv u64 vidx); bs(c, b", %rax"); bc(c, 10);
             bc(c, 9); bs(c, b"jne "); blabel_ref(c, nextl); bc(c, 10);
-            gen_match_arm(c, pp, src, arm, scrut, scrut_slot, eid, vidx);
+            gen_match_arm(c, pp, src, arm, scrut, scrut_slot, eid, vidx, want_val, res_slot, res_w, res_ty);
             bc(c, 9); bs(c, b"jmp "); blabel_ref(c, join); bc(c, 10);
             blabel_def(c, nextl);
         }
@@ -1655,7 +1823,24 @@ fn gen_match(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
         emit_fault(c, FK_PANIC, nd.p0, nd.p1);
     }
     blabel_def(c, join);
+    return;
+}
+fn gen_match(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
+    gen_match_core(c, pp, src, i, 0, 0i32 - 1i32, 0, 0u32);
     return 12;
+}
+// A value-producing match (build.rs dst): materialize each arm's aggregate result into
+// a fresh flat temp and leave its offset in %rax (aggregate convention).
+fn gen_match_value(c: write C, pp: read P, src: [u8], i: u32, exp_ty: u32) -> u32 {
+    let size: usize = ty_size(pp, src, c.head, exp_ty);
+    let align: usize = ty_align(pp, src, c.head, exp_ty);
+    let res_slot: i32 = newslot(c);
+    emit_alloc(c, size, align);
+    store_slot(c, res_slot);
+    gen_match_core(c, pp, src, i, 1, res_slot, 0, exp_ty);
+    reload_rax(c, res_slot);
+    c.*.cur_agg_ty = exp_ty;
+    return exp_ty;
 }
 fn gen_if(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
@@ -1885,6 +2070,12 @@ fn gen_fn(c: write C, pp: read P, src: [u8], fnid: u32) -> unit {
     if nd.e != 0u32 { retn = pp.nodes[conv usize nd.e].a; }
     c.*.ret_w = scalar_width(pp, src, retn);
     c.*.ret_ty = retn;
+    // A borrow-returning fn (`-> read/write T`) yields the pointee ADDRESS: a word-
+    // sized scalar, never an aggregate copy.
+    if nd.e != 0u32 {
+        let rmode: i32 = pp.nodes[conv usize nd.e].op;
+        if rmode == 1 || rmode == 2 { c.*.ret_w = W_USIZE; c.*.ret_ty = 0u32; }
+    }
     // params: slot per param (in declaration order), bound to their names. An owned
     // aggregate param (by value) that needs drop is registered in the param scope.
     scope_push(c);
@@ -2002,6 +2193,54 @@ fn gen_hook(c: write C, pp: read P, src: [u8], sid: u32) -> unit {
     return;
 }
 
+// Emit a per-enum drop-glue fn `cnr_dropenum_<eid>(%rdi = value flat offset)`: run the
+// enum's tag-directed drop (no partial-move info). A self-referential enum's payload drop
+// re-enters this glue via a `call`, so recursion is bounded at runtime, not at codegen.
+fn gen_enum_glue(c: write C, pp: read P, src: [u8], eid: u32) -> unit {
+    c.*.bbuf_n = 0usize;
+    c.*.bnd_n = 0usize;
+    c.*.slot_next = 0usize;
+    c.*.slot_max = 0usize;
+    c.*.loop_n = 0usize;
+    c.*.regime = 0;
+    c.*.sco_n = 0usize;
+    c.*.sco_depth = 0usize;
+    c.*.mv_n = 0usize;
+    c.*.mv_seg_n = 0usize;
+    c.*.dloc_n = 0usize;
+    c.*.ret_w = 0;
+    c.*.ret_ty = 0u32;
+    let selfslot: i32 = newslot(c);
+    bc(c, 9); bs(c, b"movq %rdi, "); bslot(c, selfslot); bc(c, 10);
+    emit_enum_drop(c, pp, src, selfslot, eid, 0i32 - 1i32);
+    bi(c, b"xorl %eax, %eax");
+    emit_epilogue(c);
+    emit_glue_streaming(c, eid);
+    return;
+}
+fn emit_glue_streaming(c: write C, eid: u32) -> unit {
+    let mut frame: usize = 8usize * c.slot_max;
+    frame = ((frame + 15usize) / 16usize) * 16usize;
+    trace(10);
+    emit_bytes_direct(b"cnr_dropenum_");
+    emit_num_direct(conv u64 eid);
+    trace(58); trace(10);
+    emit_line(b"pushq %rbp");
+    emit_line(b"movq %rsp, %rbp");
+    if frame > 0usize {
+        trace(9);
+        emit_bytes_direct(b"subq $");
+        emit_num_direct(conv u64 frame);
+        emit_bytes_direct(b", %rsp");
+        trace(10);
+    }
+    let mut bi2: usize = 0usize;
+    while bi2 < c.bbuf_n {
+        trace(conv i64 c.bbuf[bi2]);
+        bi2 = bi2 + 1usize;
+    }
+    return;
+}
 fn emit_bytes_direct(s: [u8]) -> unit {
     let mut i: usize = 0usize;
     while i < len(s) {
@@ -2105,6 +2344,15 @@ fn ptr_type_node(c: write C, pp: read P, src: [u8], i: u32) -> u32 {
         let callee: Node = pp.nodes[conv usize nd.a];
         if callee.tag == T_ID && span_eq(src, callee.p0, callee.p1, b"ptr_offset") {
             return ptr_type_node(c, pp, src, nd.b);
+        }
+        // A call returning a rawptr (e.g. `task_of(...) -> rawptr Task`): the pointee
+        // is resolved from the callee's declared return type.
+        if callee.tag == T_ID {
+            let fid: u32 = find_fn(pp, src, c.head, callee.p0, callee.p1);
+            if fid != 0u32 {
+                let fnnd: Node = pp.nodes[conv usize fid];
+                if fnnd.e != 0u32 { return pp.nodes[conv usize fnnd.e].a; }
+            }
         }
     }
     return 0u32;
@@ -2220,6 +2468,179 @@ fn synth_boxresults(p: write P, src: [u8]) -> unit {
             en.b = boxedid;
             let enid: u32 = cg_inode(p, en);
             p.*.nodes[conv usize i].c = enid;
+        }
+        i = i + 1u32;
+    }
+    return;
+}
+// ---- non-place match scrutinee: synthetic type nodes (mirrors lower.cnr prep_synth) --
+fn is_ident_char_cg(b: u8) -> bool {
+    if b >= 97u8 && b <= 122u8 { return true; }
+    if b >= 65u8 && b <= 90u8 { return true; }
+    if b >= 48u8 && b <= 57u8 { return true; }
+    if b == 95u8 { return true; }
+    return false;
+}
+fn match_at_cg(src: [u8], i: usize, kw: [u8]) -> bool {
+    let k: usize = len(kw);
+    let mut j: usize = 0usize;
+    while j < k {
+        if src[i + j] != kw[j] { return false; }
+        j = j + 1usize;
+    }
+    return true;
+}
+// Find a whole-token occurrence of `kw` in `src`; returns its start or len(src).
+fn find_tok_cg(src: [u8], kw: [u8]) -> usize {
+    let n: usize = len(src);
+    let k: usize = len(kw);
+    if k == 0usize { return n; }
+    let mut i: usize = 0usize;
+    while i + k <= n {
+        if match_at_cg(src, i, kw) {
+            let mut before_ok: bool = true;
+            if i > 0usize { before_ok = !is_ident_char_cg(src[i - 1usize]); }
+            let mut after_ok: bool = true;
+            if i + k < n { after_ok = !is_ident_char_cg(src[i + k]); }
+            if before_ok && after_ok { return i; }
+        }
+        i = i + 1usize;
+    }
+    return n;
+}
+// A synthetic scalar type node (T_SC) for width `w`; spans the keyword in `src`.
+fn synth_scalar_cg(p: write P, src: [u8], w: i32) -> u32 {
+    let n: usize = len(src);
+    let mut sp: usize = n;
+    let mut ep: usize = n;
+    if w == 4 { sp = find_tok_cg(src, b"i64"); ep = sp + 3usize; }
+    else if w == 3 { sp = find_tok_cg(src, b"i32"); ep = sp + 3usize; }
+    else if w == 8 { sp = find_tok_cg(src, b"u32"); ep = sp + 3usize; }
+    else if w == 6 { sp = find_tok_cg(src, b"u8"); ep = sp + 2usize; }
+    else if w == 9 { sp = find_tok_cg(src, b"u64"); ep = sp + 3usize; }
+    else if w == 10 { sp = find_tok_cg(src, b"usize"); ep = sp + 5usize; }
+    else if w == 5 { sp = find_tok_cg(src, b"isize"); ep = sp + 5usize; }
+    let mut nd: Node = nnew(T_SC);
+    nd.p0 = sp;
+    nd.p1 = ep;
+    return cg_inode(p, nd);
+}
+fn add_named_cg(p: write P, p0: usize, p1: usize) -> u32 {
+    let mut nd: Node = nnew(T_NAMED);
+    nd.p0 = p0;
+    nd.p1 = p1;
+    return cg_inode(p, nd);
+}
+fn add_array_cg(p: write P, size: u32, elem: u32) -> u32 {
+    let mut nd: Node = nnew(T_ARRAY);
+    nd.a = size;
+    nd.b = elem;
+    return cg_inode(p, nd);
+}
+fn add_boxresult_cg(p: write P, inner: u32) -> u32 {
+    let mut nd: Node = nnew(T_BOXRESULT);
+    nd.a = inner;
+    return cg_inode(p, nd);
+}
+// The type node of a box(...) value argument (infer over the subset).
+fn synth_ty_for_value(p: write P, src: [u8], e: u32) -> u32 {
+    let nd: Node = p.nodes[conv usize e];
+    if nd.tag == T_PAREN { return synth_ty_for_value(p, src, nd.a); }
+    if nd.tag == T_INT { return synth_scalar_cg(p, src, lit_width(nd.suf, 4)); }
+    if nd.tag == T_NEGINT { return synth_scalar_cg(p, src, lit_width(nd.suf, 4)); }
+    if nd.tag == T_ARRAYREP {
+        let elem: u32 = synth_ty_for_value(p, src, nd.a);
+        return add_array_cg(p, nd.b, elem);
+    }
+    if nd.tag == T_ENUMCTOR { return add_named_cg(p, nd.p0, nd.p1); }
+    if nd.tag == T_STRUCTLIT { return add_named_cg(p, nd.p0, nd.p1); }
+    return 0u32;
+}
+fn is_place_cg(p: write P, i: u32) -> bool {
+    let nd: Node = p.nodes[conv usize i];
+    if nd.tag == T_PAREN { return is_place_cg(p, nd.a); }
+    if nd.tag == T_ID || nd.tag == T_FIELD || nd.tag == T_INDEX { return true; }
+    if nd.tag == T_PREFIX && nd.op == PF_DEREF { return true; }
+    return false;
+}
+fn find_fn_w(p: write P, src: [u8], head: u32, p0: usize, p1: usize) -> u32 {
+    let mut cur: u32 = head;
+    while cur != 0u32 {
+        let nd: Node = p.nodes[conv usize cur];
+        if nd.tag == T_FN && name_eq(src, p0, p1, nd.p0, nd.p1) { return cur; }
+        cur = nd.nx;
+    }
+    return 0u32;
+}
+// Wrap every `read`/`write` param's declared type in a synthetic borrow node, so the
+// param is treated as a word-sized pointer (passed by address, drop-inert) rather than a
+// by-value aggregate copy (mirrors lower.cnr new_local_borrow / build.rs borrow params).
+fn synth_borrow_params(p: write P, src: [u8]) -> unit {
+    let orig_n: u32 = p.n;
+    let mut i: u32 = 1u32;
+    while i < orig_n {
+        let nd: Node = p.nodes[conv usize i];
+        if nd.tag == T_PARAM && (nd.op == 1 || nd.op == 2) {
+            let mut tag: i32 = T_BORROW;
+            if nd.op == 2 { tag = T_BORROWMUT; }
+            let mut bnode: Node = nnew(tag);
+            bnode.a = nd.a;
+            let bid: u32 = cg_inode(p, bnode);
+            p.*.nodes[conv usize i].a = bid;
+        }
+        i = i + 1u32;
+    }
+    return;
+}
+// The recorded materialized-scrutinee index for `scrut`, or -1 if it is a place.
+fn mat_lookup(c: write C, scrut: u32) -> i32 {
+    let mut k: usize = 0usize;
+    while k < c.mat_n {
+        if c.mat_scrut[k] == scrut { return conv i32 k; }
+        k = k + 1usize;
+    }
+    return 0i32 - 1i32;
+}
+// Record the materialized-scrutinee type for every non-place `match` scrutinee: a
+// `box(...)` yields a synthetic BoxResult, a call yields the callee's declared return
+// type (a borrow return is held as the pointee address). Runs BEFORE synth_boxresults
+// so the synthesized BoxResult nodes also acquire their enum bodies.
+fn prep_match_synth(p: write P, src: [u8], c: write C, head: u32) -> unit {
+    let orig_n: u32 = p.n;
+    let mut i: u32 = 1u32;
+    while i < orig_n {
+        let nd: Node = p.nodes[conv usize i];
+        if nd.tag == T_MATCH {
+            let scrut: u32 = nd.a;
+            if !is_place_cg(p, scrut) {
+                let cn: Node = p.nodes[conv usize scrut];
+                if cn.tag == T_CALL {
+                    let callee: Node = p.nodes[conv usize cn.a];
+                    let mut stn: u32 = 0u32;
+                    let mut hold: i32 = 0;
+                    if span_eq(src, callee.p0, callee.p1, b"box") {
+                        let a0: u32 = cn.b;
+                        let a1: u32 = p.nodes[conv usize a0].nx;
+                        let inner: u32 = synth_ty_for_value(p, src, a1);
+                        stn = add_boxresult_cg(p, inner);
+                    } else {
+                        let fnid: u32 = find_fn_w(p, src, head, callee.p0, callee.p1);
+                        if fnid != 0u32 {
+                            let fnnd: Node = p.nodes[conv usize fnid];
+                            if fnnd.e != 0u32 {
+                                let rt: Node = p.nodes[conv usize fnnd.e];
+                                stn = rt.a;
+                                if rt.op == 1 || rt.op == 2 { hold = 1; }
+                            }
+                        }
+                    }
+                    let k: usize = c.mat_n;
+                    c.*.mat_scrut[k] = scrut;
+                    c.*.mat_tn[k] = stn;
+                    c.*.mat_hold[k] = hold;
+                    c.*.mat_n = k + 1usize;
+                }
+            }
         }
         i = i + 1u32;
     }
@@ -2527,8 +2948,13 @@ fn peel_box_addr(c: write C, pp: read P, src: [u8], bt: u32) -> u32 {
     let mut t: u32 = bt;
     loop {
         let n: Node = pp.nodes[conv usize t];
-        if n.tag == T_BOX || n.tag == T_BORROW || n.tag == T_BORROWMUT {
+        if n.tag == T_BOX {
+            // A Box local holds the {ptr,ctx,vt} header offset; the pointee address is
+            // ptr@0, so peeling a Box loads it. A borrow already holds the pointee
+            // address directly (like a rawptr), so peeling a borrow is address-preserving.
             emit_load_flat(c, W_USIZE);
+            t = n.a;
+        } else if n.tag == T_BORROW || n.tag == T_BORROWMUT {
             t = n.a;
         } else {
             return t;
@@ -2581,7 +3007,6 @@ fn gen_indirect_call(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
 pub fn codegen_dump(src: [u8], buf: read Buf) -> unit {
     let mut p: P = P { nodes: [nnew(0); 49152], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
     let head: u32 = parse_program(write p, src, buf);
-    synth_boxresults(write p, src);
     let mut c: C = C {
         head: head,
         bbuf: [0u8; 1048576],
@@ -2637,8 +3062,19 @@ pub fn codegen_dump(src: [u8], buf: read Buf) -> unit {
         at_n: 0usize,
         bnd_flat: [0i32; 1024],
         luk_flat: 0,
+        mat_scrut: [0u32; 64],
+        mat_tn: [0u32; 64],
+        mat_hold: [0i32; 64],
+        mat_n: 0usize,
+        glue_eid: [0u32; 128],
+        glue_n: 0usize,
         err: 0,
     };
+    // Record non-place match scrutinees (synthesizing their BoxResult/return types),
+    // THEN materialize every BoxResult into a real enum.
+    synth_borrow_params(write p, src);
+    prep_match_synth(write p, src, write c, head);
+    synth_boxresults(write p, src);
     c.alloc_vt_sid = find_alloc_vt(read p, src, head);
     c.alloc_sid = find_alloc_handle(read p, src, head);
     let mut scur: u32 = head;
@@ -2671,6 +3107,19 @@ pub fn codegen_dump(src: [u8], buf: read Buf) -> unit {
                 }
             }
         }
+        // A `read x`/`write x` borrow of a scalar local takes its address, so that
+        // local must live in flat memory (its slot holds the offset the borrow passes).
+        if and2.tag == T_PREFIX && (and2.op == PF_READ || and2.op == PF_WRITE) {
+            let mut arg: u32 = and2.a;
+            let mut argn: Node = p.nodes[conv usize arg];
+            while argn.tag == T_PAREN { arg = argn.a; argn = p.nodes[conv usize arg]; }
+            if argn.tag == T_ID {
+                let ak: usize = c.at_n;
+                c.at_p0[ak] = argn.p0;
+                c.at_p1[ak] = argn.p1;
+                c.at_n = ak + 1usize;
+            }
+        }
         ai = ai + 1u32;
     }
     // header: entry alias jumps to the compiled `main`.
@@ -2698,6 +3147,12 @@ pub fn codegen_dump(src: [u8], buf: read Buf) -> unit {
             gen_hook(write c, read p, src, curh);
         }
         curh = ndh.nx;
+    }
+    // Per-enum drop-glue fns (worklist: emitting one may register more).
+    let mut gi: usize = 0usize;
+    while gi < c.glue_n {
+        gen_enum_glue(write c, read p, src, c.glue_eid[gi]);
+        gi = gi + 1usize;
     }
     if c.st_n > 0usize {
         gen_static_init(write c, read p, src);

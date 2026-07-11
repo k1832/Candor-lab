@@ -2658,3 +2658,59 @@ DEFERRED: value-producing match into a result slot and non-plain-local (call/cto
 scrutinees — NO N5 fixture exercises them (every box/enum match is
 statement-position with an explicit-`return`/assign arm over a plain-local
 scrutinee), so per the no-speculative-generality rule they are NOT added here.
+
+## N6 — THE MILESTONE: Candor native-compiles all five systems-corpus programs to real x86-64 executables, byte-exact vs the oracle (no Rust in the compile path) (2026-07-12)
+
+The true-bootstrap milestone: `prototype/selfhost/codegen/codegen.cnr` (composed
+with the Candor `lexer`+`parser`+`layout` modules, run in the tree-walker) now
+emits x86-64 asm for the FULL systems corpus, and each program `codegen -> cc +
+aot_runtime.c -> run` reproduces `run_source_real` byte-exact (exit / θ trace /
+fault JSON). Gated by five `n6_11_*` tests in
+`prototype/tests/selfhost_codegen.rs`. The five programs — an allocator/pool
+(`11_1`, RET 1234), a scheduler intrusive list (`11_2`, 42), MMIO device state
+(`11_3`, 42), a recursive-descent parser over a byte-string (`11_4`, 17), and a
+`Box [4096]Node` arena (`11_5`, 5) — are the SAME corpus the interp (S6b) and
+lower (L6) arcs run; the reference native backend (`src/backend/lower.rs`)
+compiles them too. NOTHING beyond asm codegen was needed.
+
+FEATURES / BUGS the real programs surfaced (each a real codegen fix mirroring
+`lower.cnr` L6 + `backend/lower.rs`, not a fixture special-case):
+- BORROW PARAMS by address (`11_1/2/3/4/5`): a `read`/`write T` param carries its
+  mode in `T_PARAM.op` with `.a` = the *bare* pointee type, so codegen was copying
+  it BY VALUE (16-byte Uart copy) — the borrow-param-by-value bug. `synth_borrow_params`
+  now wraps such a param's type in a synthetic `T_BORROW`/`T_BORROWMUT`, so it flows
+  as a word-sized pointer (the pointee's flat offset). `peel_box_addr` / `PF_DEREF`
+  no longer over-dereference a borrow (only a Box loads `ptr@0`; a borrow's value IS
+  the pointee address).
+- VALUE-PRODUCING MATCH (`11_3` `let s: State = match ev {...}`): `gen_match` split
+  into `gen_match_core` + a value form (`gen_match_value`) that materializes each
+  arm's aggregate result into a fresh flat temp.
+- NON-PLACE (materialized) SCRUTINEE (`11_1/4/5` `match box(...)` / `match parse_expr(...)`):
+  a `prep_match_synth` pre-pass records each non-place scrutinee's type (a synthetic
+  `BoxResult` for `box(...)`; the callee's declared return type for a call — a borrow
+  return like `arena_get -> read Node` held as the pointee address), and
+  `gen_match_scrut` materializes owned values / uses the borrow address in place.
+- BYTE-STRINGS + SLICES (`11_4`): a `[u8]` is a `{ptr@0,len@8}` fat pointer; `gen_bytes`
+  decodes `b"..."` into a fresh flat blob and builds the header; slice indexing bounds-
+  checks against `len@8` and offsets through `ptr@0`; `len(slice)` loads `len@8`.
+- RECURSIVE-TYPE DROP GLUE (`11_4` `enum Expr { add(Box Expr, Box Expr) ...}`): inline
+  drop expansion recurses forever on a self-referential enum. Enum drops with no
+  partial-move info now route through per-enum drop-glue fns `cnr_dropenum_<eid>`
+  (emitted once via a worklist), so a `Box Expr`-inside-`Expr` drop recurses at RUNTIME
+  via a `call`. Enum/struct/array-lit ctor payloads now `mark_moved` non-copy operands
+  (matching `lower_agg_copy`), so moved values' drops are pruned.
+- CALL-RETURNS-RAWPTR pointee (`11_2` `ptr_read(task_of(lp))`): `ptr_type_node` resolves
+  a call's pointee from the callee's declared return type (container_of).
+- The SysV/stack pole HELD: the pre-existing all-on-stack frame model (rbp-relative
+  slots, 16-byte-aligned `rsp` at every `call`, only caller-saved regs) already
+  survives the corpus's deep/nested recursion (`11_4` parser, `11_5` arena) — no
+  change was required there.
+
+GATE / VERIFICATION (isolation): `selfhost_codegen` green — all 10 tests: N6's five
+corpus programs native-compile byte-exact, and N1 (29 scalar) + N2 (12 aggregate) +
+N3 (8 drop) + N4 (6 enum) + N5 (16 box/rawptr) stay byte-exact. Full suite: 601
+passed, 0 failed. clippy clean. `aot_runtime.c` reused UNCHANGED (the 256 MiB mmap
+covers `11_5`'s ~16.8 MiB arena). NO edits to
+`interp.cnr`/`lower.cnr`/`mono.cnr`/`layout.cnr`/`src/backend/*` — contained to
+`codegen.cnr` + its gate. Gate runtime ~27 s (dominated by `11_5`'s 4096-element
+array literal; the emitted `.s` assembles/links/runs without choking `cc`).

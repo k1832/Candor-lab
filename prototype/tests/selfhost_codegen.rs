@@ -469,3 +469,40 @@ fn candor_native_codegen_equal_to_oracle_over_box_subset() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// N6 — THE MILESTONE: the systems corpus native-compiles. The five programs the
+// interp (S6b) and lower (L6) arcs already run — an allocator/pool, a scheduler
+// intrusive list, MMIO device state, a recursive-descent parser over a byte-
+// string, and a Box-array arena — each codegen -> .s -> cc + aot_runtime.c -> run,
+// byte-exact (exit / trace / fault) vs run_source_real. Proves Candor compiles
+// the corpus to a native x86-64 executable with NO Rust in the compile path.
+// ---------------------------------------------------------------------------
+
+fn corpus_src(name: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/run").join(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"))
+}
+
+fn run_corpus(name: &str, tag: &str) {
+    assert!(cc_available(), "cc/linker unavailable: cannot assemble+link the emitted .s");
+    let name = name.to_string();
+    let tag = tag.to_string();
+    on_big_stack(move || {
+        let src = corpus_src(&name);
+        assert_native_eq_oracle(&src, true, &tag);
+        eprintln!("selfhost codegen (N6): {name} native-compiles byte-exact vs oracle");
+    });
+}
+
+#[test]
+fn n6_11_1_allocator() { run_corpus("11_1_allocator.cnr", "n6_alloc"); }
+#[test]
+fn n6_11_2_scheduler() { run_corpus("11_2_scheduler.cnr", "n6_sched"); }
+#[test]
+fn n6_11_3_mmio() { run_corpus("11_3_mmio.cnr", "n6_mmio"); }
+#[test]
+fn n6_11_4_parser() { run_corpus("11_4_parser.cnr", "n6_parser"); }
+#[test]
+fn n6_11_5_arena() { run_corpus("11_5_arena.cnr", "n6_arena"); }
+
