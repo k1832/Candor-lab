@@ -1,0 +1,781 @@
+// The MONOMORPHIZER: a shared Candor pre-pass that resolves USER generics
+// (fn[T] / struct[T] / enum[T]) into concrete instances, mirroring the Rust
+// oracle `src/generics.rs`. It runs over the PARSE ARENA (the same `[N]Node`
+// arena the parser fills) while it is writable, appending one concrete instance
+// per reached (name, type-args) pair and REWRITING each generic reference to
+// point at its instance. The existing tree-walker then runs the concrete arena
+// unchanged. Vec/Map/String stay App (they are compiler-known, resolved by the
+// type table) -- mono only instantiates USER generic decls (those with a
+// type-parameter list).
+//
+// DISPATCH IDIOM. The self-host interp resolves names by SOURCE SPAN, so a
+// synthesized instance name is not addressable by span. Instead each generic
+// REFERENCE node is rewritten to carry the RESOLVED INSTANCE NODE ID in a
+// spare arena field, and the interp's lookups prefer that stash:
+//   * T_CALL.c      = the resolved fn-instance node id
+//   * T_STRUCTLIT.b = the resolved struct-instance node id
+//   * T_ENUMCTOR.c  = the resolved enum-instance node id
+//   * T_GENERICVAL.c = the resolved fn-instance node id (named-as-value)
+//   * T_APP.b       = the resolved struct/enum-instance node id (a type ref)
+// Instance IDENTITY is (orig decl, type-args) compared STRUCTURALLY -- exactly
+// the equivalence class `inst_fn_name`/`mangle_ty` encode -- so dedup matches
+// the oracle without materializing the mangled string (dispatch is by node id).
+
+use parser::{Node, P, nnew, T_FN, T_STRUCT, T_ENUM, T_TPARAM, T_PARAM, T_SFIELD, T_VARIANT, T_RET, T_NAMED, T_SC, T_APP, T_ARRAY, T_BORROW, T_BORROWMUT, T_RAWPTR, T_BOX, T_BOXRESULT, T_SLICE, T_SLICEMUT, T_CALL, T_STRUCTLIT, T_ENUMCTOR, T_GENERICVAL, T_FINIT, T_LET, T_ID, T_INT, T_NEGINT, T_BOOL, T_PREFIX, T_FIELD, T_INDEX, T_BLOCK, T_IF, T_WHILE, T_LOOP, T_MATCH, T_ARM, T_RETURN, T_CONV, T_PAREN, T_ASSIGN, T_BIN, T_UNARY};
+
+static MONO_DEPTH_LIMIT: i32 = 64;
+
+// Monomorphizer state. Region-free single-state-struct idiom.
+struct M {
+    head: u32,
+    tail: u32,
+    // dedup table of emitted instances, keyed by (orig decl, type-args)
+    inst_orig: [512]u32,
+    inst_node: [512]u32,
+    inst_a0: [512]u32,
+    inst_a1: [512]u32,
+    inst_a2: [512]u32,
+    inst_a3: [512]u32,
+    inst_na: [512]i32,
+    inst_n: usize,
+    // active substitution env (type-param name span -> concrete type node id)
+    env_p0: [32]usize,
+    env_p1: [32]usize,
+    env_ty: [32]u32,
+    env_n: usize,
+    // local variable env (name span -> declared type node id) for arg synthesis
+    loc_p0: [512]usize,
+    loc_p1: [512]usize,
+    loc_ty: [512]u32,
+    loc_n: usize,
+    // the type-param name table for the call currently being unified
+    itp_p0: [16]usize,
+    itp_p1: [16]usize,
+    itp_n: i32,
+    // inferred type args for the current call
+    targ: [8]u32,
+    targ_n: i32,
+    // the return-type expected of the fn body currently being resolved
+    ret_exp: u32,
+}
+
+// ---- span compare -----------------------------------------------------------
+fn name_eq_m(src: [u8], a0: usize, a1: usize, b0: usize, b1: usize) -> bool {
+    if a1 - a0 != b1 - b0 { return false; }
+    let mut i: usize = 0usize;
+    let n: usize = a1 - a0;
+    while i < n {
+        if src[a0 + i] != src[b0 + i] { return false; }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+// ---- arena helpers ----------------------------------------------------------
+fn m_push(p: write P, nd: Node) -> u32 {
+    let i: u32 = p.n;
+    p.*.nodes[conv usize i] = nd;
+    p.*.n = i + 1u32;
+    return i;
+}
+fn m_set_next(p: write P, prev: u32, cur: u32) -> unit {
+    p.*.nodes[conv usize prev].nx = cur;
+    return;
+}
+
+// ---- generic decl lookup (by name span; a decl is generic iff its type-param
+// list `.a` is non-empty) --------------------------------------------------
+fn find_gfn(p: write P, src: [u8], m: write M, s: usize, en: usize) -> u32 {
+    let mut cur: u32 = m.head;
+    while cur != 0u32 {
+        let nd: Node = p.nodes[conv usize cur];
+        if nd.tag == T_FN && nd.a != 0u32 && name_eq_m(src, nd.p0, nd.p1, s, en) {
+            return cur;
+        }
+        cur = nd.nx;
+    }
+    return 0u32;
+}
+fn find_gstruct(p: write P, src: [u8], m: write M, s: usize, en: usize) -> u32 {
+    let mut cur: u32 = m.head;
+    while cur != 0u32 {
+        let nd: Node = p.nodes[conv usize cur];
+        if nd.tag == T_STRUCT && nd.a != 0u32 && name_eq_m(src, nd.p0, nd.p1, s, en) {
+            return cur;
+        }
+        cur = nd.nx;
+    }
+    return 0u32;
+}
+fn find_genum(p: write P, src: [u8], m: write M, s: usize, en: usize) -> u32 {
+    let mut cur: u32 = m.head;
+    while cur != 0u32 {
+        let nd: Node = p.nodes[conv usize cur];
+        if nd.tag == T_ENUM && nd.a != 0u32 && name_eq_m(src, nd.p0, nd.p1, s, en) {
+            return cur;
+        }
+        cur = nd.nx;
+    }
+    return 0u32;
+}
+
+fn tparam_count(p: write P, tphead: u32) -> i32 {
+    let mut n: i32 = 0;
+    let mut cur: u32 = tphead;
+    while cur != 0u32 {
+        n = n + 1i32;
+        cur = p.nodes[conv usize cur].nx;
+    }
+    return n;
+}
+
+// ---- structural type identity (== mangled-name equality over our type forms) ----
+fn same_type(p: write P, src: [u8], a: u32, b: u32) -> bool {
+    if a == b { return true; }
+    if a == 0u32 || b == 0u32 { return false; }
+    let na: Node = p.nodes[conv usize a];
+    let nb: Node = p.nodes[conv usize b];
+    let ta: i32 = na.tag;
+    let tb: i32 = nb.tag;
+    // borrows: compare pointee
+    if ta == T_BORROW || ta == T_BORROWMUT { return same_type(p, src, na.a, b); }
+    if tb == T_BORROW || tb == T_BORROWMUT { return same_type(p, src, a, nb.a); }
+    if (ta == T_NAMED || ta == T_SC) && (tb == T_NAMED || tb == T_SC) {
+        return name_eq_m(src, na.p0, na.p1, nb.p0, nb.p1);
+    }
+    if ta == T_APP && tb == T_APP {
+        if !name_eq_m(src, na.p0, na.p1, nb.p0, nb.p1) { return false; }
+        let mut ca: u32 = na.a;
+        let mut cb: u32 = nb.a;
+        while ca != 0u32 && cb != 0u32 {
+            if !same_type(p, src, ca, cb) { return false; }
+            ca = p.nodes[conv usize ca].nx;
+            cb = p.nodes[conv usize cb].nx;
+        }
+        return ca == 0u32 && cb == 0u32;
+    }
+    if ta == T_ARRAY && tb == T_ARRAY { return same_type(p, src, na.b, nb.b); }
+    if ta == T_RAWPTR && tb == T_RAWPTR { return same_type(p, src, na.a, nb.a); }
+    return false;
+}
+
+// ---- dedup table ------------------------------------------------------------
+fn find_inst(p: write P, src: [u8], m: write M, orig: u32) -> u32 {
+    let mut i: usize = 0usize;
+    while i < m.inst_n {
+        if m.inst_orig[i] == orig && m.inst_na[i] == m.targ_n {
+            let mut ok: bool = true;
+            if m.targ_n >= 1i32 && !same_type(p, src, m.inst_a0[i], m.targ[0]) { ok = false; }
+            if m.targ_n >= 2i32 && !same_type(p, src, m.inst_a1[i], m.targ[1]) { ok = false; }
+            if m.targ_n >= 3i32 && !same_type(p, src, m.inst_a2[i], m.targ[2]) { ok = false; }
+            if m.targ_n >= 4i32 && !same_type(p, src, m.inst_a3[i], m.targ[3]) { ok = false; }
+            if ok { return m.inst_node[i]; }
+        }
+        i = i + 1usize;
+    }
+    return 0u32;
+}
+fn register_inst(m: write M, orig: u32, node: u32) -> unit {
+    let i: usize = m.inst_n;
+    m.*.inst_orig[i] = orig;
+    m.*.inst_node[i] = node;
+    m.*.inst_na[i] = m.targ_n;
+    m.*.inst_a0[i] = m.targ[0];
+    m.*.inst_a1[i] = m.targ[1];
+    m.*.inst_a2[i] = m.targ[2];
+    m.*.inst_a3[i] = m.targ[3];
+    m.*.inst_n = i + 1usize;
+    return;
+}
+
+// ---- substitution env -------------------------------------------------------
+fn subst_lookup(m: write M, src: [u8], s: usize, en: usize) -> u32 {
+    let mut i: usize = m.env_n;
+    while i > 0usize {
+        i = i - 1usize;
+        if name_eq_m(src, m.env_p0[i], m.env_p1[i], s, en) { return m.env_ty[i]; }
+    }
+    return 0u32;
+}
+
+// Plain deep copy of a (ground) type subtree; the root's `nx` is cleared so the
+// caller can re-link the occurrence into its list.
+fn copy_tree(p: write P, id: u32) -> u32 {
+    if id == 0u32 { return 0u32; }
+    let nd: Node = p.nodes[conv usize id];
+    let mut c: Node = nd;
+    c.a = copy_tree(p, nd.a);
+    c.b = copy_tree(p, nd.b);
+    c.c = copy_tree(p, nd.c);
+    c.d = copy_tree(p, nd.d);
+    c.e = copy_tree(p, nd.e);
+    c.nx = copy_tree(p, nd.nx);
+    return m_push(p, c);
+}
+
+// Deep clone a subtree, substituting type-parameter references (T_NAMED whose
+// name is bound in the active env) with a fresh copy of the concrete type node.
+fn clone_subst(p: write P, src: [u8], m: write M, id: u32) -> u32 {
+    if id == 0u32 { return 0u32; }
+    let nd: Node = p.nodes[conv usize id];
+    if nd.tag == T_NAMED {
+        let sub: u32 = subst_lookup(m, src, nd.p0, nd.p1);
+        if sub != 0u32 {
+            let fresh: u32 = copy_tree(p, sub);
+            let sib: u32 = clone_subst(p, src, m, nd.nx);
+            p.*.nodes[conv usize fresh].nx = sib;
+            return fresh;
+        }
+    }
+    let mut c: Node = nd;
+    c.a = clone_subst(p, src, m, nd.a);
+    c.b = clone_subst(p, src, m, nd.b);
+    c.c = clone_subst(p, src, m, nd.c);
+    c.d = clone_subst(p, src, m, nd.d);
+    c.e = clone_subst(p, src, m, nd.e);
+    c.nx = clone_subst(p, src, m, nd.nx);
+    return m_push(p, c);
+}
+
+// ---- unification: recover type-param bindings from param-vs-arg types --------
+fn itp_index(m: write M, src: [u8], s: usize, en: usize) -> i32 {
+    let mut i: i32 = 0;
+    while i < m.itp_n {
+        let k: usize = conv usize i;
+        if name_eq_m(src, m.itp_p0[k], m.itp_p1[k], s, en) { return i; }
+        i = i + 1i32;
+    }
+    return 0 - 1i32;
+}
+fn unify(p: write P, src: [u8], m: write M, pat: u32, conc: u32) -> unit {
+    if pat == 0u32 || conc == 0u32 { return; }
+    let pn: Node = p.nodes[conv usize pat];
+    let cn: Node = p.nodes[conv usize conc];
+    if pn.tag == T_BORROW || pn.tag == T_BORROWMUT { unify(p, src, m, pn.a, conc); return; }
+    if cn.tag == T_BORROW || cn.tag == T_BORROWMUT { unify(p, src, m, pat, cn.a); return; }
+    if pn.tag == T_RET { unify(p, src, m, pn.a, conc); return; }
+    if cn.tag == T_RET { unify(p, src, m, pat, cn.a); return; }
+    if pn.tag == T_NAMED {
+        let idx: i32 = itp_index(m, src, pn.p0, pn.p1);
+        if idx >= 0i32 {
+            let k: usize = conv usize idx;
+            if m.targ[k] == 0u32 { m.*.targ[k] = conc; }
+        }
+        return;
+    }
+    if pn.tag == T_APP && cn.tag == T_APP {
+        let mut ca: u32 = pn.a;
+        let mut cb: u32 = cn.a;
+        while ca != 0u32 && cb != 0u32 {
+            unify(p, src, m, ca, cb);
+            ca = p.nodes[conv usize ca].nx;
+            cb = p.nodes[conv usize cb].nx;
+        }
+        return;
+    }
+    if pn.tag == T_ARRAY && cn.tag == T_ARRAY { unify(p, src, m, pn.b, cn.b); return; }
+    if pn.tag == T_RAWPTR && cn.tag == T_RAWPTR { unify(p, src, m, pn.a, cn.a); return; }
+    return;
+}
+
+// ---- local-var type synthesis (minimal ty_of for arg inference) -------------
+fn loc_lookup(m: write M, src: [u8], s: usize, en: usize) -> u32 {
+    let mut i: usize = m.loc_n;
+    while i > 0usize {
+        i = i - 1usize;
+        if name_eq_m(src, m.loc_p0[i], m.loc_p1[i], s, en) { return m.loc_ty[i]; }
+    }
+    return 0u32;
+}
+fn loc_push(m: write M, s: usize, en: usize, ty: u32) -> unit {
+    let i: usize = m.loc_n;
+    m.*.loc_p0[i] = s;
+    m.*.loc_p1[i] = en;
+    m.*.loc_ty[i] = ty;
+    m.*.loc_n = i + 1usize;
+    return;
+}
+fn ty_of(p: write P, src: [u8], m: write M, id: u32) -> u32 {
+    if id == 0u32 { return 0u32; }
+    let nd: Node = p.nodes[conv usize id];
+    if nd.tag == T_ID { return loc_lookup(m, src, nd.p0, nd.p1); }
+    if nd.tag == T_PREFIX { return ty_of(p, src, m, nd.a); }
+    if nd.tag == T_PAREN { return ty_of(p, src, m, nd.a); }
+    return 0u32;
+}
+
+// The inner type of a fn ret node (T_RET wraps the declared return type).
+fn ret_inner(p: write P, retnode: u32) -> u32 {
+    if retnode == 0u32 { return 0u32; }
+    let nd: Node = p.nodes[conv usize retnode];
+    if nd.tag == T_RET { return nd.a; }
+    return retnode;
+}
+
+// ---- emission ---------------------------------------------------------------
+// Load m.targ[0..n] from the active env for the decl's type-param names.
+fn build_env(p: write P, src: [u8], m: write M, tphead: u32) -> unit {
+    let mut cur: u32 = tphead;
+    let mut i: i32 = 0;
+    while cur != 0u32 {
+        let tp: Node = p.nodes[conv usize cur];
+        let j: usize = m.env_n;
+        m.*.env_p0[j] = tp.p0;
+        m.*.env_p1[j] = tp.p1;
+        m.*.env_ty[j] = m.targ[conv usize i];
+        m.*.env_n = j + 1usize;
+        i = i + 1i32;
+        cur = tp.nx;
+    }
+    return;
+}
+
+fn emit_fn_inst(p: write P, src: [u8], m: write M, orig: u32, depth: i32) -> u32 {
+    let existing: u32 = find_inst(p, src, m, orig);
+    if existing != 0u32 { return existing; }
+    if depth > MONO_DEPTH_LIMIT { return 0u32; }
+    let od: Node = p.nodes[conv usize orig];
+    let mut fnn: Node = nnew(T_FN);
+    fnn.op = od.op;
+    fnn.p0 = od.p0;
+    fnn.p1 = od.p1;
+    let fid: u32 = m_push(p, fnn);
+    register_inst(m, orig, fid);
+    m_set_next(p, m.tail, fid);
+    m.*.tail = fid;
+    let saved_env: usize = m.env_n;
+    build_env(p, src, m, od.a);
+    let cparams: u32 = clone_subst(p, src, m, od.c);
+    let cret: u32 = clone_subst(p, src, m, od.e);
+    let cbody: u32 = clone_subst(p, src, m, od.d);
+    m.*.env_n = saved_env;
+    p.*.nodes[conv usize fid].c = cparams;
+    p.*.nodes[conv usize fid].e = cret;
+    p.*.nodes[conv usize fid].d = cbody;
+    // resolve nominal instances referenced by the concrete param/ret types
+    resolve_param_types(p, src, m, cparams, depth + 1i32);
+    resolve_type(p, src, m, ret_inner(p, cret), depth + 1i32);
+    // resolve generic references in the body (own local env from cparams)
+    resolve_body(p, src, m, fid, ret_inner(p, cret), depth + 1i32);
+    return fid;
+}
+
+fn emit_struct_inst(p: write P, src: [u8], m: write M, orig: u32, depth: i32) -> u32 {
+    let existing: u32 = find_inst(p, src, m, orig);
+    if existing != 0u32 { return existing; }
+    if depth > MONO_DEPTH_LIMIT { return 0u32; }
+    let od: Node = p.nodes[conv usize orig];
+    let mut sn: Node = nnew(T_STRUCT);
+    sn.op = od.op;
+    sn.p0 = od.p0;
+    sn.p1 = od.p1;
+    let sid: u32 = m_push(p, sn);
+    register_inst(m, orig, sid);
+    m_set_next(p, m.tail, sid);
+    m.*.tail = sid;
+    let saved_env: usize = m.env_n;
+    build_env(p, src, m, od.a);
+    let cfields: u32 = clone_subst(p, src, m, od.b);
+    let cdrop: u32 = clone_subst(p, src, m, od.c);
+    m.*.env_n = saved_env;
+    p.*.nodes[conv usize sid].b = cfields;
+    p.*.nodes[conv usize sid].c = cdrop;
+    // resolve nominal instances referenced by the concrete field types
+    let mut fc: u32 = cfields;
+    while fc != 0u32 {
+        let fd: Node = p.nodes[conv usize fc];
+        resolve_type(p, src, m, fd.a, depth + 1i32);
+        fc = fd.nx;
+    }
+    // resolve generic refs inside the drop hook, with `self` bound to this instance
+    if cdrop != 0u32 {
+        let lb: usize = m.loc_n;
+        loc_push(m, od.p0, od.p1, sid);
+        resolve_block(p, src, m, cdrop, depth + 1i32);
+        m.*.loc_n = lb;
+    }
+    return sid;
+}
+
+fn emit_enum_inst(p: write P, src: [u8], m: write M, orig: u32, depth: i32) -> u32 {
+    let existing: u32 = find_inst(p, src, m, orig);
+    if existing != 0u32 { return existing; }
+    if depth > MONO_DEPTH_LIMIT { return 0u32; }
+    let od: Node = p.nodes[conv usize orig];
+    let mut en: Node = nnew(T_ENUM);
+    en.op = od.op;
+    en.p0 = od.p0;
+    en.p1 = od.p1;
+    let eid: u32 = m_push(p, en);
+    register_inst(m, orig, eid);
+    m_set_next(p, m.tail, eid);
+    m.*.tail = eid;
+    let saved_env: usize = m.env_n;
+    build_env(p, src, m, od.a);
+    let cvars: u32 = clone_subst(p, src, m, od.b);
+    m.*.env_n = saved_env;
+    p.*.nodes[conv usize eid].b = cvars;
+    // resolve nominal instances referenced by concrete payload types
+    let mut vc: u32 = cvars;
+    while vc != 0u32 {
+        let vd: Node = p.nodes[conv usize vc];
+        let mut pc: u32 = vd.a;
+        while pc != 0u32 {
+            resolve_type(p, src, m, pc, depth + 1i32);
+            pc = p.nodes[conv usize pc].nx;
+        }
+        vc = vd.nx;
+    }
+    return eid;
+}
+
+// Emit + stash the nominal instance a concrete App/array/borrow type denotes.
+fn resolve_type(p: write P, src: [u8], m: write M, id: u32, depth: i32) -> unit {
+    if id == 0u32 { return; }
+    let nd: Node = p.nodes[conv usize id];
+    let tg: i32 = nd.tag;
+    if tg == T_BORROW || tg == T_BORROWMUT || tg == T_RAWPTR || tg == T_BOX || tg == T_BOXRESULT {
+        resolve_type(p, src, m, nd.a, depth);
+        return;
+    }
+    if tg == T_RET { resolve_type(p, src, m, nd.a, depth); return; }
+    if tg == T_ARRAY { resolve_type(p, src, m, nd.b, depth); return; }
+    if tg == T_SLICE || tg == T_SLICEMUT { resolve_type(p, src, m, nd.a, depth); return; }
+    if tg == T_APP {
+        if nd.b != 0u32 { return; }
+        // resolve any generic App args first (nested nominals)
+        let mut ca: u32 = nd.a;
+        while ca != 0u32 {
+            resolve_type(p, src, m, ca, depth);
+            ca = p.nodes[conv usize ca].nx;
+        }
+        let gs: u32 = find_gstruct(p, src, m, nd.p0, nd.p1);
+        if gs != 0u32 {
+            let inst: u32 = emit_app_struct(p, src, m, gs, nd.a, depth);
+            p.*.nodes[conv usize id].b = inst;
+            return;
+        }
+        let ge: u32 = find_genum(p, src, m, nd.p0, nd.p1);
+        if ge != 0u32 {
+            let inst: u32 = emit_app_enum(p, src, m, ge, nd.a, depth);
+            p.*.nodes[conv usize id].b = inst;
+            return;
+        }
+        // not a user generic (Vec/Map/...): leave as App.
+        return;
+    }
+    return;
+}
+
+// Load m.targ from an explicit App arg-node chain, then emit the instance.
+fn load_targs_from_chain(p: write P, m: write M, arghead: u32) -> unit {
+    let mut i: i32 = 0;
+    let mut cur: u32 = arghead;
+    while cur != 0u32 {
+        m.*.targ[conv usize i] = cur;
+        i = i + 1i32;
+        cur = p.nodes[conv usize cur].nx;
+    }
+    m.*.targ_n = i;
+    return;
+}
+fn emit_app_struct(p: write P, src: [u8], m: write M, gs: u32, arghead: u32, depth: i32) -> u32 {
+    load_targs_from_chain(p, m, arghead);
+    return emit_struct_inst(p, src, m, gs, depth);
+}
+fn emit_app_enum(p: write P, src: [u8], m: write M, ge: u32, arghead: u32, depth: i32) -> u32 {
+    load_targs_from_chain(p, m, arghead);
+    return emit_enum_inst(p, src, m, ge, depth);
+}
+
+fn resolve_param_types(p: write P, src: [u8], m: write M, phead: u32, depth: i32) -> unit {
+    let mut cur: u32 = phead;
+    while cur != 0u32 {
+        let pm: Node = p.nodes[conv usize cur];
+        resolve_type(p, src, m, pm.a, depth);
+        cur = pm.nx;
+    }
+    return;
+}
+
+// ---- inference at generic reference sites -----------------------------------
+// Set up the current call's type-param name table (for unify) from a decl.
+fn setup_itp(p: write P, m: write M, tphead: u32) -> unit {
+    let mut i: i32 = 0;
+    let mut cur: u32 = tphead;
+    while cur != 0u32 {
+        let tp: Node = p.nodes[conv usize cur];
+        let k: usize = conv usize i;
+        m.*.itp_p0[k] = tp.p0;
+        m.*.itp_p1[k] = tp.p1;
+        m.*.targ[k] = 0u32;
+        i = i + 1i32;
+        cur = tp.nx;
+    }
+    m.*.itp_n = i;
+    m.*.targ_n = i;
+    return;
+}
+
+fn infer_emit_call(p: write P, src: [u8], m: write M, callnode: u32, gd: u32, exp: u32, depth: i32) -> unit {
+    let od: Node = p.nodes[conv usize gd];
+    setup_itp(p, m, od.a);
+    // 1) return-type-vs-expected
+    if exp != 0u32 { unify(p, src, m, ret_inner(p, od.e), exp); }
+    // 2) param-vs-arg types (fills any still-unbound params)
+    let call: Node = p.nodes[conv usize callnode];
+    let mut pcur: u32 = od.c;
+    let mut acur: u32 = call.b;
+    while pcur != 0u32 && acur != 0u32 {
+        let pm: Node = p.nodes[conv usize pcur];
+        let at: u32 = ty_of(p, src, m, acur);
+        if at != 0u32 { unify(p, src, m, pm.a, at); }
+        pcur = pm.nx;
+        acur = p.nodes[conv usize acur].nx;
+    }
+    let fid: u32 = emit_fn_inst(p, src, m, gd, depth + 1i32);
+    p.*.nodes[conv usize callnode].c = fid;
+    return;
+}
+
+fn infer_emit_structlit(p: write P, src: [u8], m: write M, litnode: u32, gd: u32, exp: u32, depth: i32) -> unit {
+    let od: Node = p.nodes[conv usize gd];
+    setup_itp(p, m, od.a);
+    // 1) expected App args (a `let x: S[..]` annotation)
+    if exp != 0u32 { unify(p, src, m, mk_app_of(p, src, gd), exp); }
+    // 2) field-value types unified against declared field types
+    let lit: Node = p.nodes[conv usize litnode];
+    let mut fc: u32 = od.b;
+    while fc != 0u32 {
+        let fd: Node = p.nodes[conv usize fc];
+        let fin: u32 = find_finit(p, src, lit.a, fd.p0, fd.p1);
+        if fin != 0u32 {
+            let fv: u32 = p.nodes[conv usize fin].a;
+            let vt: u32 = ty_of(p, src, m, fv);
+            if vt != 0u32 { unify(p, src, m, fd.a, vt); }
+        }
+        fc = fd.nx;
+    }
+    let sid: u32 = emit_struct_inst(p, src, m, gd, depth + 1i32);
+    p.*.nodes[conv usize litnode].b = sid;
+    return;
+}
+
+fn infer_emit_enumctor(p: write P, src: [u8], m: write M, ctornode: u32, gd: u32, exp: u32, depth: i32) -> unit {
+    let od: Node = p.nodes[conv usize gd];
+    setup_itp(p, m, od.a);
+    if exp != 0u32 { unify(p, src, m, mk_app_of(p, src, gd), exp); }
+    let eid: u32 = emit_enum_inst(p, src, m, gd, depth + 1i32);
+    p.*.nodes[conv usize ctornode].c = eid;
+    return;
+}
+
+// Build (lazily, reusing a scratch node) an App-shaped pattern `Name[T0,T1,..]`
+// from a decl's type-param list, so `unify` can match it against an expected App.
+fn mk_app_of(p: write P, src: [u8], gd: u32) -> u32 {
+    let od: Node = p.nodes[conv usize gd];
+    let mut head: u32 = 0u32;
+    let mut tail: u32 = 0u32;
+    let mut cur: u32 = od.a;
+    while cur != 0u32 {
+        let tp: Node = p.nodes[conv usize cur];
+        let mut nn: Node = nnew(T_NAMED);
+        nn.p0 = tp.p0;
+        nn.p1 = tp.p1;
+        let ni: u32 = m_push(p, nn);
+        if head == 0u32 { head = ni; } else { m_set_next(p, tail, ni); }
+        tail = ni;
+        cur = tp.nx;
+    }
+    let mut app: Node = nnew(T_APP);
+    app.p0 = od.p0;
+    app.p1 = od.p1;
+    app.a = head;
+    return m_push(p, app);
+}
+
+fn find_finit(p: write P, src: [u8], head: u32, fs: usize, fen: usize) -> u32 {
+    let mut cur: u32 = head;
+    while cur != 0u32 {
+        let fn2: Node = p.nodes[conv usize cur];
+        if name_eq_m(src, fn2.p0, fn2.p1, fs, fen) { return cur; }
+        cur = fn2.nx;
+    }
+    return 0u32;
+}
+
+// ---- body walk (in place; used for main, other monomorphic fns, and each
+// emitted instance) ---------------------------------------------------------
+fn resolve_body(p: write P, src: [u8], m: write M, fnid: u32, ret_exp: u32, depth: i32) -> unit {
+    let fnd: Node = p.nodes[conv usize fnid];
+    let lb: usize = m.loc_n;
+    let saved_ret: u32 = m.ret_exp;
+    m.*.ret_exp = ret_exp;
+    // seed local env with the (concrete) params
+    let mut pc: u32 = fnd.c;
+    while pc != 0u32 {
+        let pm: Node = p.nodes[conv usize pc];
+        loc_push(m, pm.p0, pm.p1, pm.a);
+        pc = pm.nx;
+    }
+    resolve_block(p, src, m, fnd.d, depth);
+    m.*.loc_n = lb;
+    m.*.ret_exp = saved_ret;
+    return;
+}
+
+fn resolve_block(p: write P, src: [u8], m: write M, blk: u32, depth: i32) -> unit {
+    if blk == 0u32 { return; }
+    let bn: Node = p.nodes[conv usize blk];
+    let mut cur: u32 = bn.a;
+    while cur != 0u32 {
+        resolve_stmt(p, src, m, cur, depth);
+        cur = p.nodes[conv usize cur].nx;
+    }
+    return;
+}
+
+fn resolve_stmt(p: write P, src: [u8], m: write M, id: u32, depth: i32) -> unit {
+    let nd: Node = p.nodes[conv usize id];
+    let tg: i32 = nd.tag;
+    if tg == T_LET {
+        if nd.a != 0u32 { resolve_type(p, src, m, nd.a, depth); }
+        if nd.b != 0u32 { resolve_expr(p, src, m, nd.b, nd.a, depth); }
+        loc_push(m, nd.p0, nd.p1, nd.a);
+        return;
+    }
+    if tg == T_RETURN {
+        if nd.a != 0u32 { resolve_expr(p, src, m, nd.a, m.ret_exp, depth); }
+        return;
+    }
+    resolve_expr(p, src, m, id, 0u32, depth);
+    return;
+}
+
+// Resolve generic references in an expression subtree. `exp` is the expected
+// type for THIS node (a let/return context); children are resolved with no
+// expectation.
+fn resolve_expr(p: write P, src: [u8], m: write M, id: u32, exp: u32, depth: i32) -> unit {
+    if id == 0u32 { return; }
+    let nd: Node = p.nodes[conv usize id];
+    let tg: i32 = nd.tag;
+    if tg == T_CALL {
+        // resolve args first (post-order), then dispatch on the callee.
+        resolve_expr(p, src, m, nd.b, 0u32, depth);
+        let callee: Node = p.nodes[conv usize nd.a];
+        let gd: u32 = find_gfn(p, src, m, callee.p0, callee.p1);
+        if gd != 0u32 { infer_emit_call(p, src, m, id, gd, exp, depth); }
+        return;
+    }
+    if tg == T_STRUCTLIT {
+        // resolve field-init values first
+        let mut fc: u32 = nd.a;
+        while fc != 0u32 {
+            let fd: Node = p.nodes[conv usize fc];
+            resolve_expr(p, src, m, fd.a, 0u32, depth);
+            fc = fd.nx;
+        }
+        let gd: u32 = find_gstruct(p, src, m, nd.p0, nd.p1);
+        if gd != 0u32 { infer_emit_structlit(p, src, m, id, gd, exp, depth); }
+        return;
+    }
+    if tg == T_ENUMCTOR {
+        resolve_expr(p, src, m, nd.b, 0u32, depth);
+        let gd: u32 = find_genum(p, src, m, nd.p0, nd.p1);
+        if gd != 0u32 { infer_emit_enumctor(p, src, m, id, gd, exp, depth); }
+        return;
+    }
+    if tg == T_GENERICVAL {
+        let gd: u32 = find_gfn(p, src, m, nd.p0, nd.p1);
+        if gd != 0u32 {
+            load_targs_from_chain(p, m, nd.a);
+            let fid: u32 = emit_fn_inst(p, src, m, gd, depth + 1i32);
+            p.*.nodes[conv usize id].c = fid;
+        }
+        return;
+    }
+    if tg == T_MATCH {
+        resolve_expr(p, src, m, nd.a, 0u32, depth);
+        let mut ac: u32 = nd.b;
+        while ac != 0u32 {
+            let arm: Node = p.nodes[conv usize ac];
+            resolve_block_or_expr(p, src, m, arm.b, depth);
+            ac = arm.nx;
+        }
+        return;
+    }
+    if tg == T_BLOCK { resolve_block(p, src, m, id, depth); return; }
+    if tg == T_IF {
+        resolve_expr(p, src, m, nd.a, 0u32, depth);
+        resolve_block_or_expr(p, src, m, nd.b, depth);
+        resolve_block_or_expr(p, src, m, nd.c, depth);
+        return;
+    }
+    if tg == T_WHILE || tg == T_LOOP {
+        resolve_expr(p, src, m, nd.a, 0u32, depth);
+        resolve_block_or_expr(p, src, m, nd.b, depth);
+        return;
+    }
+    if tg == T_PAREN { resolve_expr(p, src, m, nd.a, exp, depth); return; }
+    // generic recursion for the remaining expression forms (bin/unary/prefix/
+    // field/index/conv/...): resolve each child edge that is an expression.
+    resolve_expr(p, src, m, nd.a, 0u32, depth);
+    resolve_expr(p, src, m, nd.b, 0u32, depth);
+    return;
+}
+
+fn resolve_block_or_expr(p: write P, src: [u8], m: write M, id: u32, depth: i32) -> unit {
+    if id == 0u32 { return; }
+    let nd: Node = p.nodes[conv usize id];
+    if nd.tag == T_BLOCK { resolve_block(p, src, m, id, depth); return; }
+    resolve_expr(p, src, m, id, 0u32, depth);
+    return;
+}
+
+// ---- entry ------------------------------------------------------------------
+// Monomorphize the parsed program in place: emit a concrete instance per reached
+// (name, type-args) and rewrite each generic reference to its instance. A no-op
+// when the program contains no user generics.
+pub fn mono_program(p: write P, src: [u8], head: u32) -> unit {
+    // find the item-chain tail (append point) and snapshot the non-generic fns.
+    let mut m: M = M {
+        head: head, tail: 0u32,
+        inst_orig: [0u32; 512], inst_node: [0u32; 512],
+        inst_a0: [0u32; 512], inst_a1: [0u32; 512], inst_a2: [0u32; 512], inst_a3: [0u32; 512],
+        inst_na: [0; 512], inst_n: 0usize,
+        env_p0: [0usize; 32], env_p1: [0usize; 32], env_ty: [0u32; 32], env_n: 0usize,
+        loc_p0: [0usize; 512], loc_p1: [0usize; 512], loc_ty: [0u32; 512], loc_n: 0usize,
+        itp_p0: [0usize; 16], itp_p1: [0usize; 16], itp_n: 0,
+        targ: [0u32; 8], targ_n: 0,
+        ret_exp: 0u32,
+    };
+    if head == 0u32 { return; }
+    let mut tl: u32 = head;
+    while p.nodes[conv usize tl].nx != 0u32 { tl = p.nodes[conv usize tl].nx; }
+    m.tail = tl;
+    // snapshot the original monomorphic fns (before appending instances)
+    let mut orig_fns: [512]u32 = [0u32; 512];
+    let mut nfns: usize = 0usize;
+    let mut cur: u32 = head;
+    while cur != 0u32 {
+        let nd: Node = p.nodes[conv usize cur];
+        if nd.tag == T_FN && nd.a == 0u32 {
+            orig_fns[nfns] = cur;
+            nfns = nfns + 1usize;
+        }
+        cur = nd.nx;
+    }
+    let mut i: usize = 0usize;
+    while i < nfns {
+        let fnid: u32 = orig_fns[i];
+        let fnd: Node = p.nodes[conv usize fnid];
+        // A monomorphic fn can still name a generic-instance TYPE in its
+        // param/ret (`fn sink(w: Wrap[i64])`): emit + stash those instances too.
+        resolve_param_types(p, src, write m, fnd.c, 0i32);
+        let ret: u32 = ret_inner(p, fnd.e);
+        resolve_type(p, src, write m, ret, 0i32);
+        resolve_body(p, src, write m, fnid, ret, 0i32);
+        i = i + 1usize;
+    }
+    return;
+}

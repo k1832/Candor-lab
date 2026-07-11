@@ -1908,3 +1908,81 @@ except 11_5 (~75s under the tree-walker).
 
 Additive: `selfhost_lower` 71/71 byte-exact; `selfhost_interp` 71/71 unchanged;
 all self-check + mir_serial gates green; full suite green (0 failing); clippy clean.
+
+## OBL-G1-MONOMORPHIZER — the shared generic pre-pass: user generics resolved to concrete instances for self-interpret (2026-07-11)
+
+The first slice of the generic/std self-hosting tail: a shared Candor MONOMORPHIZER
+(`prototype/selfhost/mono/mono.cnr`, `use parser`), an engine-independent pre-pass
+mirroring the Rust oracle `src/generics.rs`. It resolves USER generics
+(`fn[T]`/`struct[T]`/`enum[T]`) into concrete instances over the parse arena, wired
+into the self-host interpreter (`interp.cnr`) so the tree-walker runs generic
+programs unchanged. Gated byte-exact (RET/TRACE/FAULT) against the Rust
+`monomorphize → tree-walker` oracle. The systems corpus is monomorphic, so this
+tail is cleanly separable from the S1–S6 interpreter milestone; L-gen (self-lowering)
+will reuse this same pass.
+
+STRUCTURE (mono.cnr, ~770 lines):
+- DECL TABLES: a decl is generic iff its type-param list (`T_FN.a`/`T_STRUCT.a`/
+  `T_ENUM.a`) is non-empty; `find_gfn`/`find_gstruct`/`find_genum` locate them by
+  name span, monomorphic fns are the discovery roots.
+- DISCOVERY + INFERENCE: the walk resolves each generic reference. Type args are
+  recovered by `unify(param-or-ret pattern, concrete)` — unwrapping borrows/`T_RET`,
+  binding a `T_NAMED` type-param, recursing `App` args pairwise. The primary signal
+  is RETURN-type-vs-EXPECTED (a `let x: TY` annotation); a minimal `ty_of`
+  (local-var env + `read`/paren) supplies ARG types for the residual cases
+  (e.g. `unwrap_or(a, 0)` unifies `Opt[T]` against the local `a: Opt[i64]`).
+  `T_GENERICVAL` (`f::[T]`) takes its args explicitly.
+- WORKLIST/FIXPOINT/DEDUP/DEPTH: instances are emitted EAGERLY and recursively;
+  each is registered in a dedup table BEFORE its body is cloned (cycle break), so a
+  reached (decl, type-args) is emitted once. Identity is (orig decl, type-args)
+  compared STRUCTURALLY (`same_type`) — exactly the equivalence class
+  `inst_fn_name`/`mangle_ty` encode, so dedup matches the oracle without
+  materializing the mangled string. `MONO_DEPTH_LIMIT = 64` backstops runaway
+  instantiation (design 0007 §5.1.1).
+- ARENA CLONE-WITH-SUBST: `clone_subst` deep-clones a decl subtree into fresh arena
+  nodes, replacing each type-parameter `T_NAMED` with a fresh copy of the concrete
+  type node (preserving the occurrence's sibling link). Cloned param/ret/field types
+  then `resolve_type` (emit + stash nested nominal instances). Vec/Map/String stay
+  `App` (no user generic decl → left untouched, resolved by the type table).
+- CALL-SITE REWRITE (the span-based-naming reality): the interp resolves names by
+  SOURCE SPAN, so a synthesized instance name is unaddressable. Instead each generic
+  REFERENCE node carries the RESOLVED INSTANCE NODE ID in a spare arena field and the
+  interp's lookups prefer it: `T_CALL.c`/`T_GENERICVAL.c` (fn instance),
+  `T_STRUCTLIT.b` (struct instance), `T_ENUMCTOR.c` (enum instance), `T_APP.b`
+  (a type reference → struct/enum instance). Dispatch is by node id, so instance
+  identity is the structural type-key above rather than a literal mangled name.
+
+INTERP WIRING (interp.cnr): `interp_dump` runs `mono_program(write p, src, head)`
+after `parse_program` and before the synth passes/tree-walk, so the walker sees the
+concrete arena. Five surgical, additive edits: a `T_APP && b != 0` redirect in
+`struct_of_ty`/`enum_of_ty`/`ty_size`/`ty_align` (routing an instance type ref to its
+concrete node), the stash reads in `eval_call`/`eval_struct_lit`/`eval_enum_ctor`, and
+a `T_GENERICVAL` case (its value is the resolved instance's node id, a fn-ptr).
+MONOMORPHIC programs are UNAFFECTED: `mono_program` is a no-op when no decl is
+generic (all 71 existing interp fixtures stay byte-exact), and every stash defaults
+to 0 (the pre-mono lookup path).
+
+RUNS via mono → interp, byte-exact vs the oracle (8 of the 13 generic fixtures):
+`mono3` (fn[T] at three types), `pair` (struct[T] + swap/mk), `genenum` (enum[T] +
+match), `arena` (struct[T: copy] with `[N]T` field), `gdrop` (generic drop hook,
+LIFO hook-then-field trace), `mixed` (region + type param list), `nameval`
+(`f::[T]` named-as-value + indirect call), `gdrop_groundfloor` (a generic-instance
+type named in a MONOMORPHIC fn's param — its annotation is stashed too).
+
+DEFERRED (5 fixtures — a FRONT-END gap, NOT a monomorphizer gap): `iface`, `gimpl`,
+`gbound` (interface/impl + method dispatch), `fromq`, `gfromq` (cross-type `?`/`From`).
+The self-host PARSER does not parse `interface`/`impl` items
+(`parse_item` handles only struct/enum/fn/static) and the interp has no method
+dispatch, `?`, or `From` machinery; mono correctly no-ops on them (it clones the
+generic struct/enum, but the method call resolves to nothing → RET 0 ≠ oracle).
+Reaching these needs impl/interface parsing + mangled impl-method dispatch + the
+`?`/`From` runtime — far beyond this slice. mono's mangling scheme (structural
+identity) is already the right foundation for the impl-method dispatch names L-gen
+and a future impl slice will need.
+
+Additive: `selfhost_interp` 79/79 byte-exact (71 monomorphic unchanged + 8 generics);
+self-check (checker E0102/E0103) and analyses fixpoints over `interp.cnr` stay green
+(mono.cnr added to those oracle trees so interp's `use mono` resolves; mono.cnr is
+check-clean); lower/mir_serial gates unaffected; whole suite green. mono.cnr does not
+self-check this slice (it runs in the tree-walker, which requires it to type-check;
+no fixpoint gate is claimed for it).

@@ -33,6 +33,8 @@ const ANALYSES_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/analyses/analyses.cnr"));
 const INTERP_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/interp/interp.cnr"));
+const MONO_SRC: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/mono/mono.cnr"));
 
 /// The code families the Candor checker covers this slice.
 const COVERED: &[&str] = &["E0102", "E0103"];
@@ -420,6 +422,7 @@ fn candor_checker_checks_interp_source_clean_via_import_resolution() {
             ("lexer.cnr", LEXER_SRC),
             ("parser.cnr", PARSER_SRC),
             ("checker.cnr", CHECKER_SRC),
+            ("mono.cnr", MONO_SRC),
             ("interp.cnr", INTERP_SRC),
         ];
         let oracle = module_oracle_dump_tree(&modules, INTERP_SRC);

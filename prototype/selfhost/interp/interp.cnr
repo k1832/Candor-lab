@@ -27,7 +27,8 @@
 // `interp.cnr` is NOT self-checked in this slice, so it uses the full language.
 
 use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl, decoded_len};
-use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_SC, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_STRUCT, T_NAMED, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_VARIANT, T_ENUMCTOR, T_MATCH, T_PVARIANT, T_WILD, T_BIND, T_STATIC, T_RAWPTR, T_FNPTR, T_UNSAFE, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_BOX, T_BOXRESULT, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_CONV, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT, T_BYTES, T_STR, T_PARAM};
+use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_SC, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_STRUCT, T_NAMED, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_VARIANT, T_ENUMCTOR, T_MATCH, T_PVARIANT, T_WILD, T_BIND, T_STATIC, T_RAWPTR, T_FNPTR, T_UNSAFE, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_BOX, T_BOXRESULT, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_CONV, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT, T_BYTES, T_STR, T_PARAM, T_APP, T_GENERICVAL};
+use mono::{mono_program};
 
 // ---- fault kind codes (shared with the Rust harness) ------------------------
 static FK_OVERFLOW: i32 = 0;
@@ -680,6 +681,7 @@ fn rawptr_inner(pp: read P, tn: u32) -> u32 {
 fn struct_of_ty(pp: read P, src: [u8], e: write E, tn: u32) -> u32 {
     if tn == 0u32 { return 0u32; }
     let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_APP && nd.b != 0u32 { return struct_of_ty(pp, src, e, nd.b); }
     if nd.tag == T_STRUCT { return tn; }
     if (nd.tag == T_NAMED || nd.tag == T_SC) {
         if sc_width(src, nd.p0, nd.p1) != 0 { return 0u32; }
@@ -693,6 +695,7 @@ fn struct_of_ty(pp: read P, src: [u8], e: write E, tn: u32) -> u32 {
 fn enum_of_ty(pp: read P, src: [u8], e: write E, tn: u32) -> u32 {
     if tn == 0u32 { return 0u32; }
     let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_APP && nd.b != 0u32 { return enum_of_ty(pp, src, e, nd.b); }
     if nd.tag == T_BOXRESULT { return nd.c; }
     if nd.tag == T_ENUM { return tn; }
     if (nd.tag == T_NAMED || nd.tag == T_SC) {
@@ -710,6 +713,7 @@ fn array_len_of(pp: read P, sn: u32) -> usize {
 fn ty_size(pp: read P, src: [u8], e: write E, tn: u32) -> usize {
     if tn == 0u32 { return 0usize; }
     let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_APP && nd.b != 0u32 { return ty_size(pp, src, e, nd.b); }
     if (nd.tag == T_NAMED || nd.tag == T_SC) {
         let w: i32 = sc_width(src, nd.p0, nd.p1);
         if w != 0 { return w_size(w); }
@@ -737,6 +741,7 @@ fn ty_size(pp: read P, src: [u8], e: write E, tn: u32) -> usize {
 fn ty_align(pp: read P, src: [u8], e: write E, tn: u32) -> usize {
     if tn == 0u32 { return 1usize; }
     let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_APP && nd.b != 0u32 { return ty_align(pp, src, e, nd.b); }
     if (nd.tag == T_NAMED || nd.tag == T_SC) {
         let w: i32 = sc_width(src, nd.p0, nd.p1);
         if w != 0 { return w_size(w); }
@@ -1596,7 +1601,8 @@ fn find_finit(pp: read P, src: [u8], head: u32, fs: usize, fen: usize) -> u32 {
 }
 fn eval_struct_lit(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
-    let sid: u32 = find_struct(pp, src, e, nd.p0, nd.p1);
+    let mut sid: u32 = nd.b;
+    if sid == 0u32 { sid = find_struct(pp, src, e, nd.p0, nd.p1); }
     let size: usize = struct_size(pp, src, e, sid);
     let align: usize = struct_align(pp, src, e, sid);
     let addr: usize = bump_alloc(e, size, align);
@@ -1734,7 +1740,8 @@ fn eval_array_lit(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
 // the enum decl node); a non-copy enum registers a temp like a struct literal.
 fn eval_enum_ctor(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
-    let mut eid: u32 = find_enum(pp, src, e, nd.p0, nd.p1);
+    let mut eid: u32 = nd.c;
+    if eid == 0u32 { eid = find_enum(pp, src, e, nd.p0, nd.p1); }
     if span_eq(src, nd.p0, nd.p1, b"BoxResult") {
         eid = enum_of_ty(pp, src, e, e.gen_boxresult);
     }
@@ -1970,6 +1977,14 @@ fn eval_expr(pp: read P, src: [u8], e: write E, i: u32, exp_w: i32) -> i32 {
     if tg == T_BOOL {
         e.*.cur_val = conv i64 nd.ival;
         e.*.cur_w = W_BOOL;
+        return 0;
+    }
+    if tg == T_GENERICVAL {
+        // A generic fn named as a value (`f::[T]`): its value is the resolved
+        // instance's arena node id (an 8-byte fn-ptr), like fn-name-as-value.
+        e.*.cur_val = conv i64 nd.c;
+        e.*.cur_w = W_USIZE;
+        e.*.cur_ty = 0u32;
         return 0;
     }
     if tg == T_ID {
@@ -2614,7 +2629,8 @@ fn eval_call(pp: read P, src: [u8], e: write E, i: u32) -> i32 {
     // Direct call (a declared fn) or, when the name is not a fn, an INDIRECT call
     // through a fn-ptr value: evaluate the callee expression -- which yields the
     // fn's arena node id -- and call that (the oracle's indirect path, :1604-1610).
-    let mut fnid: u32 = find_fn(pp, src, e, callee.p0, callee.p1);
+    let mut fnid: u32 = nd.c;
+    if fnid == 0u32 { fnid = find_fn(pp, src, e, callee.p0, callee.p1); }
     if fnid == 0u32 {
         let scc: i32 = eval_expr(pp, src, e, nd.a, W_USIZE);
         if scc != 0 { return scc; }
@@ -2974,6 +2990,7 @@ fn run_statics(pp: read P, src: [u8], e: write E) -> unit {
 pub fn interp_dump(src: [u8], buf: read Buf) -> unit {
     let mut p: P = P { nodes: [nnew(0); 32768], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
     let head: u32 = parse_program(write p, src, buf);
+    mono_program(write p, src, head);
     let mut e: E = E {
         head: head,
         loc_p0: [0usize; 1024],

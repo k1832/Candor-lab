@@ -23,6 +23,8 @@ const LEXER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/lexer/lexer.cnr"));
 const PARSER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/parser/parser.cnr"));
+const MONO_SRC: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/mono/mono.cnr"));
 const INTERP_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/interp/interp.cnr"));
 
@@ -88,6 +90,7 @@ fn candor_dump(src: &str) -> String {
     let modules = [
         ("lexer.cnr", LEXER_SRC),
         ("parser.cnr", PARSER_SRC),
+        ("mono.cnr", MONO_SRC),
         ("interp.cnr", INTERP_SRC),
     ];
     match run_module_tree(&modules, &main) {
@@ -192,6 +195,15 @@ const CORPUS: &[(&str, Shape)] = &[
     ("11_2_scheduler.cnr", Ret),
     ("11_5_arena.cnr", Ret),
     ("11_4_parser.cnr", Ret),
+    // ---- USER GENERICS via the monomorphizer pre-pass (mono.cnr) ----
+    ("generics/mono3.cnr", Ret),
+    ("generics/pair.cnr", Ret),
+    ("generics/genenum.cnr", Ret),
+    ("generics/arena.cnr", Ret),
+    ("generics/gdrop.cnr", Ret),
+    ("generics/gdrop_groundfloor.cnr", Ret),
+    ("generics/mixed.cnr", Ret),
+    ("generics/nameval.cnr", Ret),
 ];
 
 fn read_fixture(rel: &str) -> String {
