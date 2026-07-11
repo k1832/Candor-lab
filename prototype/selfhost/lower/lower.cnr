@@ -108,6 +108,7 @@ struct M {
     plc_base_tn: u32,
     luk_tn: u32,
     luk_box: i32,
+    str_tn: u32,
     mat_scrut: [64]u32,
     mat_tn: [64]u32,
     mat_hold: [64]i32,
@@ -454,6 +455,8 @@ fn variant_payload_ty(pp: read P, vid: u32, i: i32) -> u32 {
 fn needs_drop_ty(pp: read P, src: [u8], head: u32, tn: u32) -> bool {
     if tn == 0u32 { return false; }
     if scalar_width(pp, src, tn) != 0 { return false; }
+    // Compiler-known std collections are owning (allocator-bearing): always drop.
+    if tn_is_vec(pp, src, tn) || tn_is_map(pp, src, tn) || tn_is_string(pp, src, tn) { return true; }
     let nd: Node = pp.nodes[conv usize tn];
     if nd.tag == T_BOX || nd.tag == T_BOXRESULT { return true; }
     if nd.tag == T_RAWPTR || nd.tag == T_FNPTR || nd.tag == T_BORROW || nd.tag == T_BORROWMUT || nd.tag == T_SLICE || nd.tag == T_SLICEMUT { return false; }
@@ -490,6 +493,8 @@ fn needs_drop_ty(pp: read P, src: [u8], head: u32, tn: u32) -> bool {
 fn is_copy_ty(pp: read P, src: [u8], head: u32, tn: u32) -> bool {
     if tn == 0u32 { return true; }
     if scalar_width(pp, src, tn) != 0 { return true; }
+    // Compiler-known std collections own a heap buffer: never copy.
+    if tn_is_vec(pp, src, tn) || tn_is_map(pp, src, tn) || tn_is_string(pp, src, tn) { return false; }
     let nd: Node = pp.nodes[conv usize tn];
     if nd.tag == T_BOX || nd.tag == T_BOXRESULT { return false; }
     if nd.tag == T_RAWPTR || nd.tag == T_FNPTR || nd.tag == T_BORROW || nd.tag == T_BORROWMUT { return true; }
@@ -750,6 +755,15 @@ fn pool_ty(m: write M, pp: read P, src: [u8], tn: u32) -> unit {
     if nd.tag == T_SLICE { pool_lit(m, b"(slice "); pool_ty(m, pp, src, nd.a); pool_byte(m, 41); return; }
     if nd.tag == T_SLICEMUT { pool_lit(m, b"(slicemut "); pool_ty(m, pp, src, nd.a); pool_byte(m, 41); return; }
     if nd.tag == T_FNPTR { pool_fnptr(m, pp, src, tn); return; }
+    if tn_is_str_ty(pp, src, tn) { pool_lit(m, b"(str)"); return; }
+    if nd.tag == T_APP && nd.b == 0u32 {
+        pool_lit(m, b"(app ");
+        pool_qspan(m, src, nd.p0, nd.p1);
+        pool_byte(m, 32);
+        pool_ty(m, pp, src, nd.a);
+        pool_byte(m, 41);
+        return;
+    }
     if nd.tag == T_APP && nd.b != 0u32 {
         pool_lit(m, b"(named ");
         pool_qname(m, pp, src, nd.b);
@@ -1514,7 +1528,10 @@ fn lower_value(pp: read P, src: [u8], m: write M, i: u32, exp_w: i32) -> i32 {
     if nd.tag == T_ADDRTOPTR { return lower_addr_to_ptr(pp, src, m, i); }
     if nd.tag == T_PTRNULL { return lower_ptr_null(pp, src, m, i); }
     if nd.tag == T_PREFIX {
-        if nd.op == PF_DEREF { return lower_place_value(pp, src, m, i); }
+        if nd.op == PF_DEREF {
+            if is_coll_get_call(pp, src, m, nd.a) { return lower_deref_coll_get(pp, src, m, i); }
+            return lower_place_value(pp, src, m, i);
+        }
         if nd.op == PF_READ || nd.op == PF_WRITE { return lower_borrow_val(pp, src, m, i); }
         m.*.err = 1;
         return 1;
@@ -1848,6 +1865,470 @@ fn is_builtin_name(src: [u8], p0: usize, p1: usize) -> bool {
     if span_eq(src, p0, p1, b"len") { return true; }
     return false;
 }
+// ---- compiler-known std collections (Vec / Map / String): mirror build.rs
+// lower_collection_agg / lower_collection_value and the interp type-table. ------
+fn tn_is_vec(pp: read P, src: [u8], tn: u32) -> bool {
+    if tn == 0u32 { return false; }
+    let nd: Node = pp.nodes[conv usize tn];
+    return nd.tag == T_APP && span_eq(src, nd.p0, nd.p1, b"Vec");
+}
+fn tn_is_map(pp: read P, src: [u8], tn: u32) -> bool {
+    if tn == 0u32 { return false; }
+    let nd: Node = pp.nodes[conv usize tn];
+    return nd.tag == T_APP && span_eq(src, nd.p0, nd.p1, b"Map");
+}
+fn tn_is_string(pp: read P, src: [u8], tn: u32) -> bool {
+    if tn == 0u32 { return false; }
+    let nd: Node = pp.nodes[conv usize tn];
+    return nd.tag == T_NAMED && span_eq(src, nd.p0, nd.p1, b"String");
+}
+// The `str` byte-view type: a string literal node (T_STR) or the `str` keyword,
+// which the parser records as a T_NAMED/T_SC. build.rs resolves both to Type::Str.
+fn tn_is_str_ty(pp: read P, src: [u8], tn: u32) -> bool {
+    if tn == 0u32 { return false; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_STR { return true; }
+    if nd.tag == T_NAMED || nd.tag == T_SC { return span_eq(src, nd.p0, nd.p1, b"str"); }
+    return false;
+}
+// The element/value type node of a Vec/Map App (its sole type argument).
+fn coll_elem_tn(pp: read P, tn: u32) -> u32 {
+    return pp.nodes[conv usize tn].a;
+}
+// The collection type node a receiver arg names: peel a read/write prefix and any
+// borrow layer (mirrors build.rs collection_ty).
+fn coll_recv_tn(pp: read P, src: [u8], m: write M, a0: u32) -> u32 {
+    let nd: Node = pp.nodes[conv usize a0];
+    if nd.tag == T_PAREN { return coll_recv_tn(pp, src, m, nd.a); }
+    let mut inner: u32 = a0;
+    if nd.tag == T_PREFIX && (nd.op == PF_READ || nd.op == PF_WRITE) { inner = nd.a; }
+    let tn: u32 = resolve_place_tn(pp, src, m, inner);
+    if tn == 0u32 { return 0u32; }
+    let tnode: Node = pp.nodes[conv usize tn];
+    if tnode.tag == T_BORROW || tnode.tag == T_BORROWMUT { return tnode.a; }
+    return tn;
+}
+// Materialize a by-value collection element/value argument (build.rs
+// materialize_place): a place expr is used directly (returns -1, the caller renders
+// it), else a fresh temp of type `tn` filled by lower_into (returns the temp id).
+fn coll_val_mat(pp: read P, src: [u8], m: write M, e: u32, tn: u32) -> i32 {
+    if is_place_expr(pp, e) {
+        if !is_copy_ty(pp, src, m.head, tn) { mark_moved(pp, src, m, e); }
+        place_base_prep(pp, src, m, e);
+        m.*.idx_cnt = 0usize;
+        prep_place(pp, src, m, e);
+        return 0 - 1i32;
+    }
+    let w: i32 = scalar_width(pp, src, tn);
+    let mut tmp: i32 = 0;
+    if w != 0 { tmp = new_local(m, w, 0, 0, 0); }
+    else { tmp = new_local_tn(m, tn, 0, 0, 0); }
+    m.*.dbuf_n = 0usize;
+    let sc: i32 = lower_into(pp, src, m, e, tmp, tn);
+    if sc != 0 { m.*.err = 1; }
+    return tmp;
+}
+// Materialize a str/[u8] byte-view argument (build.rs coll_view_place): a place is
+// used directly (returns -1), else a fresh `str` temp built by lower_into.
+fn coll_view_mat(pp: read P, src: [u8], m: write M, e: u32) -> i32 {
+    if is_place_expr(pp, e) {
+        place_base_prep(pp, src, m, e);
+        m.*.idx_cnt = 0usize;
+        prep_place(pp, src, m, e);
+        return 0 - 1i32;
+    }
+    let tmp: i32 = new_local_tn(m, m.str_tn, 0, 0, 0);
+    m.*.dbuf_n = 0usize;
+    let sc: i32 = lower_into(pp, src, m, e, tmp, m.str_tn);
+    if sc != 0 { m.*.err = 1; }
+    return tmp;
+}
+// Render a value/key place inside a collop: a temp is `(place tmp (proj))`, a direct
+// place goes through render_place_read (prep already done by coll_*_mat).
+fn render_coll_place(pp: read P, src: [u8], m: write M, vt: i32, e: u32) -> unit {
+    if vt >= 0 {
+        pool_lit(m, b"(place ");
+        pool_num(m, conv u64 vt);
+        pool_lit(m, b" (proj))");
+        return;
+    }
+    render_place_read(pp, src, m, e);
+    return;
+}
+// A collection aggregate constructor: vec_new/map_new/string_new, `pop` on a Vec,
+// or `as_str` on a String (build.rs is_collection_agg).
+fn is_coll_agg_call(pp: read P, src: [u8], m: write M, cp0: usize, cp1: usize, a0: u32) -> bool {
+    if span_eq(src, cp0, cp1, b"vec_new") { return true; }
+    if span_eq(src, cp0, cp1, b"map_new") { return true; }
+    if span_eq(src, cp0, cp1, b"string_new") { return true; }
+    if a0 == 0u32 { return false; }
+    let rtn: u32 = coll_recv_tn(pp, src, m, a0);
+    if span_eq(src, cp0, cp1, b"pop") { return tn_is_vec(pp, src, rtn); }
+    if span_eq(src, cp0, cp1, b"as_str") { return tn_is_string(pp, src, rtn); }
+    return false;
+}
+// Lower an aggregate-producing collection intrinsic into the destination place
+// (root + current dbuf prefix), mirroring build.rs lower_collection_agg.
+fn lower_coll_agg_into(pp: read P, src: [u8], m: write M, e: u32, root: i32) -> i32 {
+    let nd: Node = pp.nodes[conv usize e];
+    let callee: Node = pp.nodes[conv usize nd.a];
+    let a0: u32 = nd.b;
+    let sp0: usize = nd.p0;
+    let sp1: usize = nd.p1;
+    let mut is_new: bool = false;
+    if span_eq(src, callee.p0, callee.p1, b"vec_new") { is_new = true; }
+    if span_eq(src, callee.p0, callee.p1, b"map_new") { is_new = true; }
+    if span_eq(src, callee.p0, callee.p1, b"string_new") { is_new = true; }
+    if is_new {
+        let sc: i32 = lower_value(pp, src, m, a0, 0 - 1i32);
+        if sc != 0 { return sc; }
+        let ak: i32 = m.res_kind; let av: u64 = m.res_val; let an: i32 = m.res_neg; let aw: i32 = m.res_w;
+        if m.reachable != 0 {
+            let s: usize = m.pool_n;
+            pool_lit(m, b"(stmt (collop ");
+            place_from_dbuf(m, root);
+            pool_lit(m, b" (new ");
+            pool_operand(m, ak, av, an, aw);
+            pool_lit(m, b")) ");
+            pool_num(m, conv u64 sp0);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 sp1);
+            pool_lit(m, b" false)");
+            chunk_end(m, s);
+        }
+        return 0;
+    }
+    if span_eq(src, callee.p0, callee.p1, b"pop") {
+        let rtn: u32 = coll_recv_tn(pp, src, m, a0);
+        let elem: u32 = coll_elem_tn(pp, rtn);
+        let sc: i32 = lower_value(pp, src, m, a0, 0 - 1i32);
+        if sc != 0 { return sc; }
+        let bk: i32 = m.res_kind; let bv: u64 = m.res_val; let bn: i32 = m.res_neg; let bw: i32 = m.res_w;
+        if m.reachable != 0 {
+            let s: usize = m.pool_n;
+            pool_lit(m, b"(stmt (collop ");
+            place_from_dbuf(m, root);
+            pool_lit(m, b" (vecpop ");
+            pool_operand(m, bk, bv, bn, bw);
+            pool_byte(m, 32);
+            pool_ty(m, pp, src, elem);
+            pool_lit(m, b")) ");
+            pool_num(m, conv u64 sp0);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 sp1);
+            pool_lit(m, b" false)");
+            chunk_end(m, s);
+        }
+        return 0;
+    }
+    if span_eq(src, callee.p0, callee.p1, b"as_str") {
+        let sc: i32 = lower_value(pp, src, m, a0, 0 - 1i32);
+        if sc != 0 { return sc; }
+        let bk: i32 = m.res_kind; let bv: u64 = m.res_val; let bn: i32 = m.res_neg; let bw: i32 = m.res_w;
+        if m.reachable != 0 {
+            let s: usize = m.pool_n;
+            pool_lit(m, b"(stmt (collop ");
+            place_from_dbuf(m, root);
+            pool_lit(m, b" (stringasstr ");
+            pool_operand(m, bk, bv, bn, bw);
+            pool_lit(m, b")) ");
+            pool_num(m, conv u64 sp0);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 sp1);
+            pool_lit(m, b" false)");
+            chunk_end(m, s);
+        }
+        return 0;
+    }
+    m.*.err = 1;
+    return 1;
+}
+// A `get` call on a Vec/Map (its `.*` deref needs the intrinsic lowered as a value).
+fn is_coll_get_call(pp: read P, src: [u8], m: write M, call: u32) -> bool {
+    let nd: Node = pp.nodes[conv usize call];
+    if nd.tag != T_CALL { return false; }
+    let callee: Node = pp.nodes[conv usize nd.a];
+    if callee.tag != T_ID { return false; }
+    if !span_eq(src, callee.p0, callee.p1, b"get") { return false; }
+    let a0: u32 = nd.b;
+    if a0 == 0u32 { return false; }
+    let rtn: u32 = coll_recv_tn(pp, src, m, a0);
+    return tn_is_vec(pp, src, rtn) || tn_is_map(pp, src, rtn);
+}
+// `get(read v/m, k).*`: lower the collection `get` (a borrow value), then read
+// through it (build.rs Prefix-Deref over a call result -> deref_place + Load).
+fn lower_deref_coll_get(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let call: u32 = nd.a;
+    let sc: i32 = lower_value(pp, src, m, call, 0 - 1i32);
+    if sc != 0 { return sc; }
+    let root: i32 = conv i32 m.res_val;
+    let inner: u32 = m.res_pointee;
+    let iw: i32 = scalar_width(pp, src, inner);
+    let mut id: i32 = 0;
+    if iw != 0 { id = new_local(m, iw, 0, 0, 0); }
+    else { id = new_local_tn(m, inner, 0, 0, 0); }
+    let cn: Node = pp.nodes[conv usize call];
+    if m.reachable != 0 {
+        let s: usize = m.pool_n;
+        pool_lit(m, b"(stmt (assign ");
+        pool_num(m, conv u64 id);
+        pool_lit(m, b" (load ");
+        render_deref_place(m, pp, src, root, inner);
+        pool_byte(m, 32);
+        pool_ty(m, pp, src, inner);
+        pool_lit(m, b")) ");
+        pool_num(m, conv u64 cn.p0);
+        pool_byte(m, 32);
+        pool_num(m, conv u64 cn.p1);
+        pool_lit(m, b" false)");
+        chunk_end(m, s);
+    }
+    if iw != 0 { set_res_local(m, id, iw); } else { set_res_local(m, id, 10); }
+    set_res_ptr(m, pp, inner);
+    return 0;
+}
+// Lower a word/unit/borrow-producing collection intrinsic (push/set/get/insert/
+// contains/append), mirroring build.rs lower_collection_value. Returns 0 handled,
+// 1 error, 2 not a collection op (so a same-named user fn wins).
+fn lower_coll_value(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    let callee: Node = pp.nodes[conv usize nd.a];
+    let a0: u32 = nd.b;
+    if a0 == 0u32 { return 2; }
+    let rtn: u32 = coll_recv_tn(pp, src, m, a0);
+    let is_vec: bool = tn_is_vec(pp, src, rtn);
+    let is_map: bool = tn_is_map(pp, src, rtn);
+    let is_string: bool = tn_is_string(pp, src, rtn);
+    if !is_vec && !is_map && !is_string { return 2; }
+    let csp0: usize = nd.p0;
+    let csp1: usize = nd.p1;
+    let a1: u32 = pp.nodes[conv usize a0].nx;
+    if is_vec && span_eq(src, callee.p0, callee.p1, b"push") {
+        let elem: u32 = coll_elem_tn(pp, rtn);
+        let sc: i32 = lower_value(pp, src, m, a0, 0 - 1i32);
+        if sc != 0 { return 1; }
+        let bk: i32 = m.res_kind; let bv: u64 = m.res_val; let bn: i32 = m.res_neg; let bw: i32 = m.res_w;
+        let a1n: Node = pp.nodes[conv usize a1];
+        let vt: i32 = coll_val_mat(pp, src, m, a1, elem);
+        let dst: i32 = new_local(m, 12, 0, 0, 0);
+        if m.reachable != 0 {
+            let s: usize = m.pool_n;
+            pool_lit(m, b"(stmt (collop (place ");
+            pool_num(m, conv u64 dst);
+            pool_lit(m, b" (proj)) (vecpush ");
+            pool_operand(m, bk, bv, bn, bw);
+            pool_byte(m, 32);
+            pool_ty(m, pp, src, elem);
+            pool_byte(m, 32);
+            render_coll_place(pp, src, m, vt, a1);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 a1n.p0);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 a1n.p1);
+            pool_lit(m, b")) ");
+            pool_num(m, conv u64 csp0);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 csp1);
+            pool_lit(m, b" false)");
+            chunk_end(m, s);
+        }
+        set_res_const(m, 0u64, 0, 0);
+        return 0;
+    }
+    if is_string && span_eq(src, callee.p0, callee.p1, b"push") {
+        let sc: i32 = lower_value(pp, src, m, a0, 0 - 1i32);
+        if sc != 0 { return 1; }
+        let bk: i32 = m.res_kind; let bv: u64 = m.res_val; let bn: i32 = m.res_neg; let bw: i32 = m.res_w;
+        let sc2: i32 = lower_value(pp, src, m, a1, 8);
+        if sc2 != 0 { return 1; }
+        let ck: i32 = m.res_kind; let cv: u64 = m.res_val; let cng: i32 = m.res_neg; let cw: i32 = m.res_w;
+        let dst: i32 = new_local(m, 12, 0, 0, 0);
+        if m.reachable != 0 {
+            let s: usize = m.pool_n;
+            pool_lit(m, b"(stmt (collop (place ");
+            pool_num(m, conv u64 dst);
+            pool_lit(m, b" (proj)) (stringpush ");
+            pool_operand(m, bk, bv, bn, bw);
+            pool_byte(m, 32);
+            pool_operand(m, ck, cv, cng, cw);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 csp0);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 csp1);
+            pool_lit(m, b")) ");
+            pool_num(m, conv u64 csp0);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 csp1);
+            pool_lit(m, b" false)");
+            chunk_end(m, s);
+        }
+        set_res_const(m, 0u64, 0, 0);
+        return 0;
+    }
+    if is_vec && span_eq(src, callee.p0, callee.p1, b"get") {
+        let elem: u32 = coll_elem_tn(pp, rtn);
+        let sc: i32 = lower_value(pp, src, m, a0, 0 - 1i32);
+        if sc != 0 { return 1; }
+        let bk: i32 = m.res_kind; let bv: u64 = m.res_val; let bn: i32 = m.res_neg; let bw: i32 = m.res_w;
+        let a1n: Node = pp.nodes[conv usize a1];
+        let sc2: i32 = lower_value(pp, src, m, a1, 10);
+        if sc2 != 0 { return 1; }
+        let ik: i32 = m.res_kind; let iv: u64 = m.res_val; let ing: i32 = m.res_neg; let iw: i32 = m.res_w;
+        let dst: i32 = new_local_borrow_sh(m, elem, 0, 0, 0);
+        if m.reachable != 0 {
+            let s: usize = m.pool_n;
+            pool_lit(m, b"(stmt (collop (place ");
+            pool_num(m, conv u64 dst);
+            pool_lit(m, b" (proj)) (vecget ");
+            pool_operand(m, bk, bv, bn, bw);
+            pool_byte(m, 32);
+            pool_ty(m, pp, src, elem);
+            pool_byte(m, 32);
+            pool_operand(m, ik, iv, ing, iw);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 a1n.p0);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 a1n.p1);
+            pool_lit(m, b")) ");
+            pool_num(m, conv u64 csp0);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 csp1);
+            pool_lit(m, b" false)");
+            chunk_end(m, s);
+        }
+        set_res_local(m, dst, 10);
+        m.*.res_pointee = elem;
+        return 0;
+    }
+    if is_map && span_eq(src, callee.p0, callee.p1, b"get") {
+        let valty: u32 = coll_elem_tn(pp, rtn);
+        let sc: i32 = lower_value(pp, src, m, a0, 0 - 1i32);
+        if sc != 0 { return 1; }
+        let bk: i32 = m.res_kind; let bv: u64 = m.res_val; let bn: i32 = m.res_neg; let bw: i32 = m.res_w;
+        let a1n: Node = pp.nodes[conv usize a1];
+        let kt: i32 = coll_view_mat(pp, src, m, a1);
+        let dst: i32 = new_local_borrow_sh(m, valty, 0, 0, 0);
+        if m.reachable != 0 {
+            let s: usize = m.pool_n;
+            pool_lit(m, b"(stmt (collop (place ");
+            pool_num(m, conv u64 dst);
+            pool_lit(m, b" (proj)) (mapget ");
+            pool_operand(m, bk, bv, bn, bw);
+            pool_byte(m, 32);
+            pool_ty(m, pp, src, valty);
+            pool_byte(m, 32);
+            render_coll_place(pp, src, m, kt, a1);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 a1n.p0);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 a1n.p1);
+            pool_lit(m, b")) ");
+            pool_num(m, conv u64 csp0);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 csp1);
+            pool_lit(m, b" false)");
+            chunk_end(m, s);
+        }
+        set_res_local(m, dst, 10);
+        m.*.res_pointee = valty;
+        return 0;
+    }
+    if is_map && span_eq(src, callee.p0, callee.p1, b"insert") {
+        let valty: u32 = coll_elem_tn(pp, rtn);
+        let sc: i32 = lower_value(pp, src, m, a0, 0 - 1i32);
+        if sc != 0 { return 1; }
+        let bk: i32 = m.res_kind; let bv: u64 = m.res_val; let bn: i32 = m.res_neg; let bw: i32 = m.res_w;
+        let a2: u32 = pp.nodes[conv usize a1].nx;
+        let a2n: Node = pp.nodes[conv usize a2];
+        let kt: i32 = coll_view_mat(pp, src, m, a1);
+        let vt: i32 = coll_val_mat(pp, src, m, a2, valty);
+        let dst: i32 = new_local(m, 12, 0, 0, 0);
+        if m.reachable != 0 {
+            let s: usize = m.pool_n;
+            pool_lit(m, b"(stmt (collop (place ");
+            pool_num(m, conv u64 dst);
+            pool_lit(m, b" (proj)) (mapinsert ");
+            pool_operand(m, bk, bv, bn, bw);
+            pool_byte(m, 32);
+            pool_ty(m, pp, src, valty);
+            pool_byte(m, 32);
+            render_coll_place(pp, src, m, kt, a1);
+            pool_byte(m, 32);
+            render_coll_place(pp, src, m, vt, a2);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 a2n.p0);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 a2n.p1);
+            pool_lit(m, b")) ");
+            pool_num(m, conv u64 csp0);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 csp1);
+            pool_lit(m, b" false)");
+            chunk_end(m, s);
+        }
+        set_res_const(m, 0u64, 0, 0);
+        return 0;
+    }
+    if is_map && span_eq(src, callee.p0, callee.p1, b"contains") {
+        let valty: u32 = coll_elem_tn(pp, rtn);
+        let sc: i32 = lower_value(pp, src, m, a0, 0 - 1i32);
+        if sc != 0 { return 1; }
+        let bk: i32 = m.res_kind; let bv: u64 = m.res_val; let bn: i32 = m.res_neg; let bw: i32 = m.res_w;
+        let kt: i32 = coll_view_mat(pp, src, m, a1);
+        let dst: i32 = new_local(m, W_BOOL, 0, 0, 0);
+        if m.reachable != 0 {
+            let s: usize = m.pool_n;
+            pool_lit(m, b"(stmt (collop (place ");
+            pool_num(m, conv u64 dst);
+            pool_lit(m, b" (proj)) (mapcontains ");
+            pool_operand(m, bk, bv, bn, bw);
+            pool_byte(m, 32);
+            pool_ty(m, pp, src, valty);
+            pool_byte(m, 32);
+            render_coll_place(pp, src, m, kt, a1);
+            pool_lit(m, b")) ");
+            pool_num(m, conv u64 csp0);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 csp1);
+            pool_lit(m, b" false)");
+            chunk_end(m, s);
+        }
+        set_res_local(m, dst, W_BOOL);
+        return 0;
+    }
+    if is_string && span_eq(src, callee.p0, callee.p1, b"append") {
+        let sc: i32 = lower_value(pp, src, m, a0, 0 - 1i32);
+        if sc != 0 { return 1; }
+        let bk: i32 = m.res_kind; let bv: u64 = m.res_val; let bn: i32 = m.res_neg; let bw: i32 = m.res_w;
+        let a1n: Node = pp.nodes[conv usize a1];
+        let vt: i32 = coll_view_mat(pp, src, m, a1);
+        let dst: i32 = new_local(m, 12, 0, 0, 0);
+        if m.reachable != 0 {
+            let s: usize = m.pool_n;
+            pool_lit(m, b"(stmt (collop (place ");
+            pool_num(m, conv u64 dst);
+            pool_lit(m, b" (proj)) (stringappend ");
+            pool_operand(m, bk, bv, bn, bw);
+            pool_byte(m, 32);
+            render_coll_place(pp, src, m, vt, a1);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 a1n.p0);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 a1n.p1);
+            pool_lit(m, b")) ");
+            pool_num(m, conv u64 csp0);
+            pool_byte(m, 32);
+            pool_num(m, conv u64 csp1);
+            pool_lit(m, b" false)");
+            chunk_end(m, s);
+        }
+        set_res_const(m, 0u64, 0, 0);
+        return 0;
+    }
+    return 2;
+}
+
 fn lower_call(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
     let callee: Node = pp.nodes[conv usize nd.a];
@@ -1864,6 +2345,9 @@ fn lower_call(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
     if is_builtin_name(src, callee.p0, callee.p1) {
         return lower_builtin_value(pp, src, m, i, callee.p0, callee.p1, nd.p0, nd.p1);
     }
+    let cvr: i32 = lower_coll_value(pp, src, m, i);
+    if cvr == 0 { return 0; }
+    if cvr == 1 { return 1; }
     let mut fnid: u32 = nd.c;
     if fnid == 0u32 { fnid = find_fn(pp, src, m.head, callee.p0, callee.p1); }
     if fnid == 0u32 {
@@ -2525,6 +3009,7 @@ fn lower_into(pp: read P, src: [u8], m: write M, e: u32, root: i32, tn: u32) -> 
         if callee.tag == T_ID {
             if span_eq(src, callee.p0, callee.p1, b"box") { return lower_builtin_into(pp, src, m, e, root, tn); }
             if is_builtin_name(src, callee.p0, callee.p1) { return lower_builtin_into(pp, src, m, e, root, tn); }
+            if is_coll_agg_call(pp, src, m, callee.p0, callee.p1, nd.b) { return lower_coll_agg_into(pp, src, m, e, root); }
         }
         return lower_call_agg(pp, src, m, e, root, tn);
     }
@@ -2758,12 +3243,36 @@ fn lower_builtin_value(pp: read P, src: [u8], m: write M, i: u32, cp0: usize, cp
         return 0;
     }
     if span_eq(src, cp0, cp1, b"len") {
+        let rtn: u32 = coll_recv_tn(pp, src, m, a0);
+        if tn_is_vec(pp, src, rtn) || tn_is_map(pp, src, rtn) {
+            // `len(read Vec[T]/Map[V])`: the length word lives at offset 8 of the
+            // collection the borrow names (build.rs deref + field-8 load).
+            let sc: i32 = lower_value(pp, src, m, a0, 0 - 1i32);
+            if sc != 0 { return sc; }
+            let broot: i32 = conv i32 m.res_val;
+            let tmp: i32 = new_local(m, 10, 0, 0, 0);
+            if m.reachable != 0 {
+                let s: usize = m.pool_n;
+                pool_lit(m, b"(stmt (assign ");
+                pool_num(m, conv u64 tmp);
+                pool_lit(m, b" (load (place ");
+                pool_num(m, conv u64 broot);
+                pool_lit(m, b" (proj (deref (scalar usize)) (field 8 (scalar usize)))) (scalar usize))) ");
+                pool_num(m, conv u64 sp0);
+                pool_byte(m, 32);
+                pool_num(m, conv u64 sp1);
+                pool_lit(m, b" false)");
+                chunk_end(m, s);
+            }
+            set_res_local(m, tmp, 10);
+            return 0;
+        }
         place_base_prep(pp, src, m, a0);
         m.*.idx_cnt = 0usize;
         prep_place(pp, src, m, a0);
         let ttn: u32 = resolve_place_tn(pp, src, m, a0);
         let tnode: Node = pp.nodes[conv usize ttn];
-        if tnode.tag == T_SLICE || tnode.tag == T_SLICEMUT {
+        if tnode.tag == T_SLICE || tnode.tag == T_SLICEMUT || tn_is_str_ty(pp, src, ttn) {
             let tmp: i32 = new_local(m, 10, 0, 0, 0);
             if m.reachable != 0 {
                 let s: usize = m.pool_n;
@@ -3290,6 +3799,15 @@ fn emit_ty(pp: read P, src: [u8], tn: u32) -> unit {
     if nd.tag == T_SLICE { emit_lit(b"(slice "); emit_ty(pp, src, nd.a); emit_byte(41); return; }
     if nd.tag == T_SLICEMUT { emit_lit(b"(slicemut "); emit_ty(pp, src, nd.a); emit_byte(41); return; }
     if nd.tag == T_FNPTR { emit_fnptr(pp, src, tn); return; }
+    if tn_is_str_ty(pp, src, tn) { emit_lit(b"(str)"); return; }
+    if nd.tag == T_APP && nd.b == 0u32 {
+        emit_lit(b"(app ");
+        emit_qspan(src, nd.p0, nd.p1);
+        emit_byte(32);
+        emit_ty(pp, src, nd.a);
+        emit_byte(41);
+        return;
+    }
     if nd.tag == T_APP && nd.b != 0u32 {
         emit_lit(b"(named ");
         emit_byte(34);
@@ -3956,6 +4474,10 @@ fn synth_scalar(pp: write P, src: [u8], m: write M, w: i32) -> u32 {
     nd.p1 = e;
     return add_node(pp, nd);
 }
+fn add_str(pp: write P) -> u32 {
+    let nd: Node = nnew(T_STR);
+    return add_node(pp, nd);
+}
 fn add_named(pp: write P, p0: usize, p1: usize) -> u32 {
     let mut nd: Node = nnew(T_NAMED);
     nd.p0 = p0;
@@ -4023,6 +4545,7 @@ fn find_fn_w(pp: write P, src: [u8], head: u32, p0: usize, p1: usize) -> u32 {
 }
 // Record the materialized-scrutinee type for every non-place `match` scrutinee.
 fn prep_synth(pp: write P, src: [u8], m: write M, head: u32) -> unit {
+    m.*.str_tn = add_str(pp);
     let orig_n: u32 = pp.n;
     let mut i: u32 = 1u32;
     while i < orig_n {
@@ -4159,6 +4682,7 @@ pub fn lower_dump(src: [u8], buf: read Buf) -> unit {
         plc_base_tn: 0u32,
         luk_tn: 0u32,
         luk_box: 0,
+        str_tn: 0u32,
         mat_scrut: [0u32; 64],
         mat_tn: [0u32; 64],
         mat_hold: [0; 64],

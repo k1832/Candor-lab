@@ -2038,3 +2038,54 @@ Additive: `selfhost_lower` 79/79 byte-exact (71 monomorphic UNCHANGED — `mono_
 is a no-op with no generics, every redirect/stash defaults to 0 — plus 8 generics);
 `mono.cnr`'s `ival` stash is inert to `selfhost_interp` (79/79 still green); clippy
 clean; whole suite green. Runtime: `selfhost_lower` ~140s.
+
+## OBL-L-STD — std collections lowered to MIR CollectionOp: the generic/std self-hosting tail is COMPLETE (2026-07-11)
+
+The FINAL slice of the generic/std tail: the self-hosted MIR lowering
+(`prototype/selfhost/lower/lower.cnr`) now lowers the compiler-known `Vec[T]` /
+`Map[V]` / `String` builtins to `StatementKind::CollectionOp { dst, op }`, so Candor
+COMPILES collection programs to MIR (not just interprets them). With user generics
+(L-gen) already lowering, Candor now compiles ANY in-subset program — user generics
+AND std collections — to MIR.
+
+Mirrors `src/mir/build.rs` `lower_collection_agg` / `lower_collection_value`, emitting
+`serial.rs`'s `collop_to` wire byte-for-byte (accepted by the Rust `collop_from`
+deserializer):
+- AGGREGATE CONSTRUCTORS (in `lower_into`, before the user-fn agg path): `vec_new`/
+  `map_new`/`string_new` → `CollOp::New { alloc }` (alloc = the `read Alloc` address,
+  same operand build.rs `alloc_addr_operand` produces); `pop` on a Vec → `VecPop`
+  into the `Opt[T]` destination; `as_str` on a String → `StringAsStr` into the `str`
+  destination.
+- VALUE OPS (in `lower_call`, before the user-fn lookup — receiver-type-gated, so a
+  same-named user fn wins when arg0 is not a collection): `push`/`get`/`insert`/
+  `contains`/`append`. Each emits the receiver ADDRESS operand (`(ref …)` of the
+  `read`/`write` receiver), the element/value type, materialized value/key places
+  (by-value args → a temp filled by `lower_into`; str/`[u8]` keys → a `{ptr@0,len@8}`
+  view), and the fault-relevant span = the ARG span (per P0's finding), while the
+  statement span stays the call span. `get`'s `read T` borrow result feeds the
+  `get(…).*` deref: a `PF_DEREF` over a collection-`get` call lowers the call to a
+  borrow local, then a `Load` through it (mirroring build.rs deref-of-call-result).
+- `len` on `Vec[T]`/`Map[V]` → the offset-8 length word via a deref + field-8 load
+  (build.rs), and on `str` via the fat-pointer field-8 load.
+- TYPE-TABLE SPECIAL-CASE (the interp.cnr App-40 / String-40 analogue): `emit_ty`/
+  `pool_ty` render an un-monomorphized `T_APP` (`b == 0`, i.e. Vec/Map) as
+  `(app "Vec"/"Map" <elem>)` and the `str` keyword (parsed as `T_NAMED "str"`) as
+  `(str)`; `needs_drop_ty` returns true and `is_copy_ty` false for Vec/Map/String
+  (owning, allocator-bearing) — so a collection LOCAL is a drop obligation and gets a
+  statically-scheduled `Drop`. COLLECTION DROP is the existing `Drop` op: the interp
+  resolves the local's `(app "Vec" (named "E"))` type and runs each element's hook in
+  reverse (vec_struct_drop's reverse element-drop trace is the load-bearing signal).
+
+All 6 collection fixtures LOWER → `mir::interp`, byte-exact RET/TRACE/FAULT vs the
+tree-walking oracle: `string_build` (push/append/as_str/len + buffer free on drop),
+`vec_push_get_sum` (vec_new/push/get/len), `vec_pop_opt` (pop → `Opt` match),
+`vec_struct_drop` (the 4→8 realloc raw-move then reverse per-element hook drops),
+`map_insert_contains_get` (FNV-1a insert/contains/get + owned-key copies + rehash),
+and `vec_get_oob_fault` (bounds fault at the arg span). No CollectionOp wire gap
+found — the Rust deserializer accepts every emitted collop.
+
+Additive: `selfhost_lower` 85/85 byte-exact (79 prior — the monomorphic + user-generic
+corpus — UNCHANGED, plus the 6 collections); `mir_serial` 2/2 green (the reference MIR
+boundary unaffected); clippy clean. Runtime: `selfhost_lower` ~154s, `mir_serial` ~2s.
+No edits to `interp.cnr` / `mono.cnr` / `src/mir/*`. The generic/std self-hosting tail
+is COMPLETE: Candor compiles user generics + std collections to MIR.
