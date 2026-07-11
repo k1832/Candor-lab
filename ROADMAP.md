@@ -284,3 +284,32 @@ vec_set, or trait generics) needs that arena raised (or interp.cnr split) first.
 **Remaining (unchanged, not gated by this tail):** trait-based generics need self-host
 front-end work (interface/impl/method-dispatch/?/From); the final tier is self-COMPILE
 to native (a Candor/ported code generator -- the true bootstrap, still a horizon).
+
+### Trait-based generics COMPLETE (2026-07-11)
+
+The 5 previously-deferred trait fixtures now run AND compile on both self-host tiers,
+closing the generic story: ALL 13 generic fixtures (plain fn[T]/struct[T]/enum[T] +
+trait interface/impl dispatch + generic impls + trait bounds + ?/From error widening)
+run on interp and compile to MIR on lower, byte-exact vs the Rust reference.
+
+5 slices (~1 day): T1 parser interface/impl (contextual identifiers, lexer parity kept);
+T2 mono impl-emission + generic-impl instantiation + interp method dispatch (the tall
+pole -- reused clone_subst/dedup, node-id dispatch table since synthesized names are
+unaddressable); T3 lower method dispatch (impl methods as free MIR fns); T4 mono From
+emission/instantiation + interp ?/From (eval_try, ok/err via the ok-marked variant);
+T5 lower ?/From (T_TRY CFG + From-call + early-return). T3‖T4 ran as a worktree pair.
+
+The arc validated the "solid foundation -> fast features" thesis: it fit inside the
+arena headroom the F-ARENA-CAP raise provided (interp.cnr ~14k tokens still free),
+reused the monomorphizer's existing infra, and every slice had a ready dual oracle
+(the fixtures already ran through the Rust monomorphize->interp/MIR pipelines).
+
+**Self-hosted coverage now:** the self-host toolchain checks its own source, and runs
+AND compiles-to-MIR: the systems corpus, std collections (Vec/Map/String), and the full
+generic/trait surface. What remains for "the whole language" is minor (associated-type
+members, multibyte push, vec_set -- all small, logged) and the systems-only corners.
+
+**Remaining horizons (unchanged):** the deferred quality-review debt (OBL-QUALITY-REVIEW:
+layout.cnr extraction before native codegen, the Vec::set order, the FAULT-trace harness
+blind spot, etc.); and the final tier -- self-COMPILE to native (a Candor/ported code
+generator, the true bootstrap).
