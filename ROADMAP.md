@@ -313,3 +313,34 @@ members, multibyte push, vec_set -- all small, logged) and the systems-only corn
 layout.cnr extraction before native codegen, the Vec::set order, the FAULT-trace harness
 blind spot, etc.); and the final tier -- self-COMPILE to native (a Candor/ported code
 generator, the true bootstrap).
+
+### Self-compile to NATIVE — systems-corpus MILESTONE REACHED (2026-07-12)
+
+The final self-hosting tier is closed over the systems corpus. selfhost/codegen/codegen.cnr
+(a Candor-written code generator) emits x86-64 assembly text; the system assembler links it
+against the unchanged aot_runtime.c and runs it as a real process, byte-exact (exit/trace/
+fault) vs the oracle -- NO Rust in the compile path. All five systems programs
+(11_1..11_5) native-compile, plus 71 targeted fixtures (76 total across N1-N6).
+
+Slices N1 scalar+CFG -> layout.cnr extraction (F-LAYOUT-EXTRACT paid) -> N2 aggregates ->
+N3 move/drop -> N4 enums/match -> N5 Box/alloc/rawptr/statics/indirect-calls -> N6 the
+corpus. Target = asm text (the self-host does instruction selection + stack allocation +
+SysV ABI; the assembler owns encoding/relocation/ELF -- can't reuse Cranelift, which is
+Rust-only). All-on-stack, no register allocator -- the SysV/stack pole held across the
+parser/arena recursion without one. The C runtime (MEM_BASE mmap, rt_trace/rt_fault/
+rt_stack_alloc) is language-agnostic and reused unchanged.
+
+**ALL FOUR self-hosting tiers now close over the same systems corpus:**
+- self-CHECK   -- the checker/analyses check the compiler's own source (5 modules)
+- self-INTERPRET -- interp.cnr runs the corpus (+ generics + collections)
+- self-LOWER   -- lower.cnr compiles the corpus to MIR (+ generics + collections)
+- self-COMPILE -- codegen.cnr compiles the corpus to a native executable
+
+Deliberately-simple codegen (no optimization) -- a bootstrap-credibility proof, not a
+replacement for the Rust/Cranelift production backend.
+
+**Remaining (honest):** the native codegen covers the systems corpus + its fixtures, NOT
+yet generics/collections/the ?/From surface (those run+compile-to-MIR self-hosted but
+have no native codegen fixtures); a register allocator (all-on-stack is correct but slow);
+and the deferred OBL-QUALITY-REVIEW debt (Vec::set order, the FAULT-trace harness blind
+spot, deserialize arity, test-dedup). The Rust compiler remains the production toolchain.

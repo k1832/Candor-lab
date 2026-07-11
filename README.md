@@ -46,13 +46,19 @@ paged pointer/MMIO memory model — and runs the entire systems-heavy corpus (a 
 allocator, an intrusive-list scheduler, MMIO registers, a recursive-descent
 parser, a `Box [4096]Node` arena) byte-exact against the Rust reference:
 `Run{ret, trace}` and fault identity alike, riding the prototype's proven
-four-engine equivalence. **Self-compiling to native has begun** (in progress): a
-Candor-written code generator (`codegen.cnr`) emits x86-64 assembly that the system
-assembler links against the language-agnostic C runtime and runs as a real process —
-the scalar subset native-compiles byte-exact against the oracle, the first native
-executable of a Candor program with no Rust in the compile path. This is the MVP of
-the final tier (the true bootstrap); the full systems-corpus native milestone is a
-sustained arc still underway, not yet reached. The self-check fixpoint closes over the interpreter too —
+four-engine equivalence. **Self-compiling to native is closed over the systems
+corpus** — the final tier, the true bootstrap: a Candor-written code generator
+(`codegen.cnr`) emits x86-64 assembly that the system assembler links against a
+language-agnostic C runtime and runs as a real process, and it native-compiles **all
+five systems-corpus programs** (allocator, scheduler, MMIO, parser, arena) to actual
+executables, byte-exact (exit code / trace / fault) against the oracle — with **no
+Rust anywhere in the compile path** (just Candor and `as`/`ld`). It does its own
+instruction selection, stack allocation, and SysV calling convention; only the
+mechanical encoding/linking is handed to the assembler. **So all four self-hosting
+tiers now close over the same corpus — Candor checks, interprets, lowers-to-MIR, and
+compiles-to-native its own hardest programs.** (The codegen is deliberately simple and
+unoptimized — a bootstrap-credibility proof, not a competitor to the Rust/Cranelift
+backend that remains the production toolchain.) The self-check fixpoint closes over the interpreter too —
 the checker and analyses check `interp.cnr` clean, so Candor checks the very
 program that runs Candor. Dogfooding on real self-host source and real corpus
 programs repeatedly earned its keep — it caught defects the fixture suites had
