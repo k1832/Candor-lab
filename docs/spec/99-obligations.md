@@ -1986,3 +1986,55 @@ self-check (checker E0102/E0103) and analyses fixpoints over `interp.cnr` stay g
 check-clean); lower/mir_serial gates unaffected; whole suite green. mono.cnr does not
 self-check this slice (it runs in the tree-walker, which requires it to type-check;
 no fixpoint gate is claimed for it).
+
+## OBL-L-GEN — the monomorphizer wired into the self-hosted MIR lowering: user generics compiled to MIR (2026-07-11)
+
+The LOWER-tier counterpart of OBL-G1: the shared `mono.cnr` pre-pass is now wired
+into the self-hosted MIR lowering (`prototype/selfhost/lower/lower.cnr`), so the
+self-host compiles USER generics (`fn[T]`/`struct[T]`/`enum[T]`) to MIR wire text,
+byte-exact vs the `monomorphize → build.rs → mir::interp` oracle. `lower_dump` runs
+`mono_program` right after `parse_program`, then lowers the CONCRETE arena.
+
+Mirrors interp's G1 wiring, adapted to a STATIC artifact keyed by NAMES (not runtime
+node-id dispatch):
+- LAYOUT REDIRECT: `struct_id_of`/`enum_id_of`/`ty_size`/`ty_align` follow
+  `T_APP.b != 0` to the stashed concrete instance, so offsets/sizes/strides over a
+  generic type are computed against its monomorphic instance.
+- CALL-SITE STASH READS: `T_CALL.c` (fn instance), `T_STRUCTLIT.b` (struct instance),
+  `T_ENUMCTOR.c` (enum instance), `T_APP.b` (type ref), and `T_GENERICVAL.c` (a
+  `name::[T]` fn value → its fn-pointer id) drive lowering to the right instance.
+- MANGLED INSTANCE NAMES: a MIR program has no struct table — `mir::interp` sizes
+  `(named N)` via `items`, which the gate now builds from the MONOMORPHIZED program
+  (mangled `id$i64`, `Pair$i64`, `Opt$i64`, …). So the wire must emit those exact
+  names. `mono.cnr` now stashes each instance's concrete type-arg tuple as a cons
+  chain in the instance node's `ival` (inert to the tree-walk interp, which never
+  reads a decl's `ival`); lower reconstructs `base$<mangle_ty(arg)>` per arg
+  (mirroring `src/generics.rs` `inst_fn_name`/`mangle_ty`) for fn defs, call callees,
+  `(named …)` type refs, drop-hook names + the `drop_hooks` table, and the `fn_ptrs`
+  list. Generic DECLS (`T_*.a != 0`) are skipped in every emission loop and the
+  fn-pointer id count (they are parametric — not lowerable callables/types).
+
+LOWER-SIDE GAP FOUND + FIXED (a real, pre-existing latent bug the `arena` fixture
+first exercised): `lower_agg_copy` rendered a by-value aggregate read of an indexed
+place (`return ar.mem[conv usize i]`) WITHOUT the `prep_place` pre-pass, so a
+statement-producing index operand (`conv usize i`) was re-lowered by `emit_projs`
+INTO the middle of the place projection — malformed wire (`unknown proj tag stmt`).
+Fixed minimally by pre-lowering the static base + index operands (`place_base_prep`
++ `prep_place`) before rendering, exactly as `lower_place_value` already does.
+
+ALL 8 of the G1-landed generic fixtures now LOWER → `mir::interp`, byte-exact vs the
+oracle: `mono3` (plain `fn[T]` at three type args), `mixed` (region + type params →
+`choose$i64`; regions excluded from the mangle), `nameval` (`dbl::[i64]` named-as-
+value + indirect call), `pair` (`struct[T]` + value-arg inference + App field access),
+`genenum` (`enum[T]` + match), `arena` (`struct[T: copy]` with `[N]T` field),
+`gdrop_groundfloor` (a generic-instance type in a monomorphic fn's param), and `gdrop`
+(a generic-struct drop hook — `Wrap$Noisy`'s hook runs then drops its `Noisy` field).
+
+DEFERRED (same 5 as G1 — a FRONT-END gap, not a lowering gap): `iface`, `gimpl`,
+`gbound`, `fromq`, `gfromq` need interface/impl parsing + mangled impl-method dispatch
++ `?`/`From`. Out of scope here.
+
+Additive: `selfhost_lower` 79/79 byte-exact (71 monomorphic UNCHANGED — `mono_program`
+is a no-op with no generics, every redirect/stash defaults to 0 — plus 8 generics);
+`mono.cnr`'s `ival` stash is inert to `selfhost_interp` (79/79 still green); clippy
+clean; whole suite green. Runtime: `selfhost_lower` ~140s.

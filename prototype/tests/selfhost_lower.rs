@@ -15,7 +15,7 @@ use candor_proto::ast;
 use candor_proto::interp::{Fault, FaultKind, Run};
 use candor_proto::mir::{self, serial};
 use candor_proto::resolve::Items;
-use candor_proto::{resolve, run_source_real, RunResult};
+use candor_proto::{check, generics, resolve, run_source_real, RunResult};
 
 mod selfhost_modtree;
 use selfhost_modtree::{run_module_tree, trace_text};
@@ -24,6 +24,8 @@ const LEXER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/lexer/lexer.cnr"));
 const PARSER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/parser/parser.cnr"));
+const MONO_SRC: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/mono/mono.cnr"));
 const LOWER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/lower/lower.cnr"));
 
@@ -65,7 +67,16 @@ fn oracle_dump(src: &str) -> String {
 
 /// The runtime `items`/`consts` for `src` (from SOURCE; the wire carries neither).
 fn items_and_consts(src: &str) -> (Items, HashMap<String, u64>) {
-    let program = candor_proto::real::parse_source(src).expect("parse");
+    let parsed = candor_proto::real::parse_source(src).expect("parse");
+    // For a generic fixture, the concrete `items` (struct/enum layouts, mangled
+    // instance names) come from the MONOMORPHIZED program -- the same pre-pass the
+    // self-hosted lowering runs -- exactly as the oracle's `run_generic` does.
+    let program = if generics::is_generic_program(&parsed) {
+        let (_d, insts, shapes) = check::check_generic_program(&parsed, true);
+        generics::monomorphize(&parsed, &insts, &shapes).program
+    } else {
+        parsed
+    };
     let mut resolve_diags = Vec::new();
     let items = resolve::resolve_program(&program, &mut resolve_diags);
     let mut consts = HashMap::new();
@@ -104,8 +115,12 @@ fn candor_main(src: &str) -> String {
 /// Run `lower.cnr` over `src` and return the emitted L0 wire text.
 fn candor_wire(src: &str) -> String {
     let main = candor_main(src);
-    let modules =
-        [("lexer.cnr", LEXER_SRC), ("parser.cnr", PARSER_SRC), ("lower.cnr", LOWER_SRC)];
+    let modules = [
+        ("lexer.cnr", LEXER_SRC),
+        ("parser.cnr", PARSER_SRC),
+        ("mono.cnr", MONO_SRC),
+        ("lower.cnr", LOWER_SRC),
+    ];
     match run_module_tree(&modules, &main) {
         RunResult::Ok(run) => trace_text(&run),
         RunResult::Fault(f) => panic!("lower.cnr faulted: {}", f.to_json()),
@@ -219,6 +234,16 @@ const CORPUS: &[(&str, Shape)] = &[
     ("11_2_scheduler.cnr", Ret),
     ("11_5_arena.cnr", Ret),
     ("11_4_parser.cnr", Ret),
+    // ---- USER GENERICS via the monomorphizer pre-pass (mono.cnr), lowered to
+    // MIR by the self-hosted lowering. Mirrors the interp G1 corpus.
+    ("generics/mono3.cnr", Ret),
+    ("generics/mixed.cnr", Ret),
+    ("generics/nameval.cnr", Ret),
+    ("generics/pair.cnr", Ret),
+    ("generics/genenum.cnr", Ret),
+    ("generics/arena.cnr", Ret),
+    ("generics/gdrop_groundfloor.cnr", Ret),
+    ("generics/gdrop.cnr", Ret),
 ];
 
 fn read_fixture(rel: &str) -> String {

@@ -25,7 +25,8 @@
 // It is NOT self-checked in this slice, so it uses the full language.
 
 use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl, emit_bytes, decoded_len};
-use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_PARAM, T_SC, T_NAMED, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, T_STRUCT, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, T_STR, T_BYTES, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_ENUMCTOR, T_MATCH, T_PVARIANT, T_WILD, T_BIND, T_VARIANT, T_ARM, T_NAME, T_STATIC, T_RAWPTR, T_BOX, T_BOXRESULT, T_FNPTR, T_FPPARAM, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT};
+use parser::{Node, P, nnew, parse_program, emit_lit, T_FN, T_PARAM, T_SC, T_NAMED, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, T_STRUCT, T_ARRAY, T_FIELD, T_INDEX, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, T_STR, T_BYTES, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_ENUM, T_ENUMCTOR, T_MATCH, T_PVARIANT, T_WILD, T_BIND, T_VARIANT, T_ARM, T_NAME, T_STATIC, T_RAWPTR, T_BOX, T_BOXRESULT, T_FNPTR, T_FPPARAM, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT, T_APP, T_GENERICVAL};
+use mono::{mono_program};
 
 // ---- fault kind codes (the wire keyword table in serial.rs) -----------------
 static FK_OVERFLOW: i32 = 0;
@@ -221,6 +222,7 @@ fn find_struct(pp: read P, src: [u8], head: u32, s: usize, en: usize) -> u32 {
 fn struct_id_of(pp: read P, src: [u8], head: u32, tn: u32) -> u32 {
     if tn == 0u32 { return 0u32; }
     let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_APP && nd.b != 0u32 { return struct_id_of(pp, src, head, nd.b); }
     if nd.tag == T_STRUCT { return tn; }
     if nd.tag == T_NAMED || nd.tag == T_SC {
         if sc_width(src, nd.p0, nd.p1) != 0 { return 0u32; }
@@ -236,6 +238,7 @@ fn array_len_of(pp: read P, sn: u32) -> usize {
 fn ty_size(pp: read P, src: [u8], head: u32, tn: u32) -> usize {
     if tn == 0u32 { return 0usize; }
     let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_APP && nd.b != 0u32 { return ty_size(pp, src, head, nd.b); }
     if nd.tag == T_NAMED || nd.tag == T_SC {
         let w: i32 = sc_width(src, nd.p0, nd.p1);
         if w != 0 { return w_size(w); }
@@ -262,6 +265,7 @@ fn ty_size(pp: read P, src: [u8], head: u32, tn: u32) -> usize {
 fn ty_align(pp: read P, src: [u8], head: u32, tn: u32) -> usize {
     if tn == 0u32 { return 1usize; }
     let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_APP && nd.b != 0u32 { return ty_align(pp, src, head, nd.b); }
     if nd.tag == T_NAMED || nd.tag == T_SC {
         let w: i32 = sc_width(src, nd.p0, nd.p1);
         if w != 0 { return w_size(w); }
@@ -354,6 +358,7 @@ fn find_enum(pp: read P, src: [u8], head: u32, s: usize, en: usize) -> u32 {
 fn enum_id_of(pp: read P, src: [u8], head: u32, tn: u32) -> u32 {
     if tn == 0u32 { return 0u32; }
     let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_APP && nd.b != 0u32 { return enum_id_of(pp, src, head, nd.b); }
     if nd.tag == T_ENUM { return tn; }
     if nd.tag == T_NAMED || nd.tag == T_SC {
         if sc_width(src, nd.p0, nd.p1) != 0 { return 0u32; }
@@ -537,12 +542,33 @@ fn fn_ptr_id_of(pp: read P, src: [u8], head: u32, p0: usize, p1: usize) -> i32 {
     while cur != 0u32 {
         let nd: Node = pp.nodes[conv usize cur];
         if nd.tag == T_STRUCT {
-            if nd.c != 0u32 { k = k + 1i32; }
+            if nd.c != 0u32 && nd.a == 0u32 { k = k + 1i32; }
         } else if nd.tag == T_STATIC {
             k = k + 1i32;
         } else if nd.tag == T_FN {
-            if name_eq(src, p0, p1, nd.p0, nd.p1) { return k; }
+            if nd.a == 0u32 {
+                if name_eq(src, p0, p1, nd.p0, nd.p1) { return k; }
+                k = k + 1i32;
+            }
+        }
+        cur = nd.nx;
+    }
+    return 0 - 1i32;
+}
+// The fn-pointer id of a specific fn NODE (a monomorphized instance named as a
+// value via `name::[T]`); counting mirrors `fn_ptr_id_of`.
+fn fn_ptr_id_of_node(pp: read P, head: u32, target: u32) -> i32 {
+    let mut cur: u32 = head;
+    let mut k: i32 = 0;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_STRUCT {
+            if nd.c != 0u32 && nd.a == 0u32 { if cur == target { return k; } k = k + 1i32; }
+        } else if nd.tag == T_STATIC {
+            if cur == target { return k; }
             k = k + 1i32;
+        } else if nd.tag == T_FN {
+            if nd.a == 0u32 { if cur == target { return k; } k = k + 1i32; }
         }
         cur = nd.nx;
     }
@@ -587,6 +613,38 @@ fn pool_qspan(m: write M, src: [u8], p0: usize, p1: usize) -> unit {
         pool_byte(m, conv i32 src[i]);
         i = i + 1usize;
     }
+    pool_byte(m, 34);
+    return;
+}
+// ---- monomorphized instance names (mirror src/generics.rs inst_fn_name/mangle_ty).
+// A generic decl's instance carries its concrete type-arg tuple as a cons chain
+// in `ival` (set by the monomorphizer); a monomorphic decl has ival == 0 and thus
+// keeps its bare name. The name is `base` then `$<mangle>` per type arg.
+fn pool_inst_name(m: write M, pp: read P, src: [u8], id: u32) -> unit {
+    let nd: Node = pp.nodes[conv usize id];
+    let mut i: usize = nd.p0;
+    while i < nd.p1 { pool_byte(m, conv i32 src[i]); i = i + 1usize; }
+    let mut cur: u32 = conv u32 nd.ival;
+    while cur != 0u32 {
+        let cell: Node = pp.nodes[conv usize cur];
+        pool_byte(m, 36);
+        pool_mangle_ty(m, pp, src, cell.a);
+        cur = cell.nx;
+    }
+    return;
+}
+fn pool_mangle_ty(m: write M, pp: read P, src: [u8], tn: u32) -> unit {
+    let w: i32 = scalar_width(pp, src, tn);
+    if w != 0 { pool_scalar(m, w); return; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_APP && nd.b != 0u32 { pool_inst_name(m, pp, src, nd.b); return; }
+    let mut i: usize = nd.p0;
+    while i < nd.p1 { pool_byte(m, conv i32 src[i]); i = i + 1usize; }
+    return;
+}
+fn pool_qname(m: write M, pp: read P, src: [u8], id: u32) -> unit {
+    pool_byte(m, 34);
+    pool_inst_name(m, pp, src, id);
     pool_byte(m, 34);
     return;
 }
@@ -692,6 +750,12 @@ fn pool_ty(m: write M, pp: read P, src: [u8], tn: u32) -> unit {
     if nd.tag == T_SLICE { pool_lit(m, b"(slice "); pool_ty(m, pp, src, nd.a); pool_byte(m, 41); return; }
     if nd.tag == T_SLICEMUT { pool_lit(m, b"(slicemut "); pool_ty(m, pp, src, nd.a); pool_byte(m, 41); return; }
     if nd.tag == T_FNPTR { pool_fnptr(m, pp, src, tn); return; }
+    if nd.tag == T_APP && nd.b != 0u32 {
+        pool_lit(m, b"(named ");
+        pool_qname(m, pp, src, nd.b);
+        pool_byte(m, 41);
+        return;
+    }
     pool_lit(m, b"(named ");
     pool_qspan(m, src, nd.p0, nd.p1);
     pool_byte(m, 41);
@@ -1434,6 +1498,12 @@ fn lower_value(pp: read P, src: [u8], m: write M, i: u32, exp_w: i32) -> i32 {
         m.*.err = 1;
         return 1;
     }
+    if nd.tag == T_GENERICVAL {
+        let gfid: i32 = fn_ptr_id_of_node(pp, m.head, nd.c);
+        if gfid >= 0 { set_res_const(m, conv u64 gfid, 0, 9); return 0; }
+        m.*.err = 1;
+        return 1;
+    }
     if nd.tag == T_OFFSETOF {
         let sid: u32 = struct_id_of(pp, src, m.head, nd.a);
         let off: usize = field_off(pp, src, m.head, sid, nd.p0, nd.p1);
@@ -1794,7 +1864,8 @@ fn lower_call(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
     if is_builtin_name(src, callee.p0, callee.p1) {
         return lower_builtin_value(pp, src, m, i, callee.p0, callee.p1, nd.p0, nd.p1);
     }
-    let fnid: u32 = find_fn(pp, src, m.head, callee.p0, callee.p1);
+    let mut fnid: u32 = nd.c;
+    if fnid == 0u32 { fnid = find_fn(pp, src, m.head, callee.p0, callee.p1); }
     if fnid == 0u32 {
         // An indirect call through a fn-pointer-valued local.
         if lookup(m, src, callee.p0, callee.p1) >= 0 {
@@ -1815,7 +1886,7 @@ fn lower_call(pp: read P, src: [u8], m: write M, i: u32) -> i32 {
     if retw != 0 { id = new_local(m, retw, 0, 0, 0); }
     else if is_wordy_tn(pp, src, retn) { id = new_local_tn(m, retn, 0, 0, 0); }
     else { id = new_local(m, 0, 0, 0, 0); }
-    emit_call(m, src, id, callee.p0, callee.p1, nd.p0, nd.p1);
+    emit_call(m, pp, src, id, fnid, nd.p0, nd.p1);
     if retw != 0 { set_res_local(m, id, retw); } else { set_res_local(m, id, 10); }
     return 0;
 }
@@ -2243,7 +2314,8 @@ fn emit_store_dbuf(m: write M, root: i32, sp0: usize, sp1: usize) -> unit {
 }
 fn lower_struct_lit(pp: read P, src: [u8], m: write M, i: u32, root: i32, tn: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
-    let sid: u32 = struct_id_of(pp, src, m.head, tn);
+    let mut sid: u32 = nd.b;
+    if sid == 0u32 { sid = struct_id_of(pp, src, m.head, tn); }
     if sid == 0u32 { m.*.err = 1; return 1; }
     let snode: Node = pp.nodes[conv usize sid];
     let base_n: usize = m.dbuf_n;
@@ -2363,7 +2435,8 @@ fn lower_call_agg(pp: read P, src: [u8], m: write M, i: u32, root: i32, tn: u32)
     let nd: Node = pp.nodes[conv usize i];
     let callee: Node = pp.nodes[conv usize nd.a];
     if callee.tag != T_ID { m.*.err = 1; return 1; }
-    let fnid: u32 = find_fn(pp, src, m.head, callee.p0, callee.p1);
+    let mut fnid: u32 = nd.c;
+    if fnid == 0u32 { fnid = find_fn(pp, src, m.head, callee.p0, callee.p1); }
     if fnid == 0u32 { m.*.err = 1; return 1; }
     let fnnd: Node = pp.nodes[conv usize fnid];
     let mut retn: u32 = 0u32;
@@ -2371,7 +2444,7 @@ fn lower_call_agg(pp: read P, src: [u8], m: write M, i: u32, root: i32, tn: u32)
     let sc: i32 = lower_args(pp, src, m, fnnd, nd.b);
     if sc != 0 { return sc; }
     let rt: i32 = new_local_ptr(m, retn, 0, 0, 0);
-    emit_call(m, src, rt, callee.p0, callee.p1, nd.p0, nd.p1);
+    emit_call(m, pp, src, rt, fnid, nd.p0, nd.p1);
     if m.reachable != 0 {
         let s: usize = m.pool_n;
         pool_lit(m, b"(stmt (copyval ");
@@ -2397,6 +2470,13 @@ fn lower_agg_copy(pp: read P, src: [u8], m: write M, i: u32, root: i32, tn: u32)
     if !is_copy_ty(pp, src, m.head, tn) {
         mark_moved(pp, src, m, i);
     }
+    // Pre-lower a static base + any index operands (a non-const index like
+    // `a[conv usize i]` produces its own statement) BEFORE rendering the source
+    // place, so `emit_projs` reads the registered operand instead of re-lowering
+    // it into the middle of the place projection (matches lower_place_value).
+    place_base_prep(pp, src, m, i);
+    m.*.idx_cnt = 0usize;
+    prep_place(pp, src, m, i);
     if m.reachable != 0 {
         let s: usize = m.pool_n;
         pool_lit(m, b"(stmt (copyval ");
@@ -2528,13 +2608,13 @@ fn lower_args(pp: read P, src: [u8], m: write M, fnnd: Node, arg_head: u32) -> i
     }
     return 0;
 }
-fn emit_call(m: write M, src: [u8], dst: i32, cp0: usize, cp1: usize, sp0: usize, sp1: usize) -> unit {
+fn emit_call(m: write M, pp: read P, src: [u8], dst: i32, fnid: u32, sp0: usize, sp1: usize) -> unit {
     if m.reachable == 0 { return; }
     let s: usize = m.pool_n;
     pool_lit(m, b"(stmt (assign ");
     pool_num(m, conv u64 dst);
     pool_lit(m, b" (call ");
-    pool_qspan(m, src, cp0, cp1);
+    pool_qname(m, pp, src, fnid);
     pool_lit(m, b" (args");
     let mut j: usize = 0usize;
     while j < m.na {
@@ -3210,6 +3290,14 @@ fn emit_ty(pp: read P, src: [u8], tn: u32) -> unit {
     if nd.tag == T_SLICE { emit_lit(b"(slice "); emit_ty(pp, src, nd.a); emit_byte(41); return; }
     if nd.tag == T_SLICEMUT { emit_lit(b"(slicemut "); emit_ty(pp, src, nd.a); emit_byte(41); return; }
     if nd.tag == T_FNPTR { emit_fnptr(pp, src, tn); return; }
+    if nd.tag == T_APP && nd.b != 0u32 {
+        emit_lit(b"(named ");
+        emit_byte(34);
+        emit_inst_name(pp, src, nd.b);
+        emit_byte(34);
+        emit_byte(41);
+        return;
+    }
     emit_lit(b"(named ");
     emit_qspan(src, nd.p0, nd.p1);
     emit_byte(41);
@@ -3273,6 +3361,40 @@ fn emit_block(m: write M, b: usize) -> unit {
     return;
 }
 // The synthesized hook name `"<drop Name>"` (name = the struct's name span).
+fn emit_inst_name(pp: read P, src: [u8], id: u32) -> unit {
+    let nd: Node = pp.nodes[conv usize id];
+    emit_bytes(src, nd.p0, nd.p1);
+    let mut cur: u32 = conv u32 nd.ival;
+    while cur != 0u32 {
+        let cell: Node = pp.nodes[conv usize cur];
+        emit_byte(36);
+        emit_mangle_ty(pp, src, cell.a);
+        cur = cell.nx;
+    }
+    return;
+}
+fn emit_mangle_ty(pp: read P, src: [u8], tn: u32) -> unit {
+    let w: i32 = scalar_width(pp, src, tn);
+    if w != 0 { emit_scalar(w); return; }
+    let nd: Node = pp.nodes[conv usize tn];
+    if nd.tag == T_APP && nd.b != 0u32 { emit_inst_name(pp, src, nd.b); return; }
+    emit_bytes(src, nd.p0, nd.p1);
+    return;
+}
+fn emit_qname(pp: read P, src: [u8], id: u32) -> unit {
+    emit_byte(34);
+    emit_inst_name(pp, src, id);
+    emit_byte(34);
+    return;
+}
+fn emit_hook_qname(pp: read P, src: [u8], id: u32) -> unit {
+    emit_byte(34);
+    emit_lit(b"<drop ");
+    emit_inst_name(pp, src, id);
+    emit_byte(62);
+    emit_byte(34);
+    return;
+}
 fn emit_hook_ref(src: [u8], p0: usize, p1: usize) -> unit {
     emit_byte(34);
     emit_lit(b"<drop ");
@@ -3290,14 +3412,15 @@ fn emit_init_ref(src: [u8], p0: usize, p1: usize) -> unit {
     return;
 }
 // kind: 0 = user fn (quoted name), 1 = drop hook (`<drop N>`), 2 = static init (`<init N>`).
-fn emit_fn(m: write M, pp: read P, src: [u8], name_p0: usize, name_p1: usize, kind: i32) -> unit {
+fn emit_fn(m: write M, pp: read P, src: [u8], defid: u32, kind: i32) -> unit {
+    let dn: Node = pp.nodes[conv usize defid];
     emit_lit(b"(fn ");
     if kind == 1 {
-        emit_hook_ref(src, name_p0, name_p1);
+        emit_hook_qname(pp, src, defid);
     } else if kind == 2 {
-        emit_init_ref(src, name_p0, name_p1);
+        emit_init_ref(src, dn.p0, dn.p1);
     } else {
-        emit_qspan(src, name_p0, name_p1);
+        emit_qname(pp, src, defid);
     }
     emit_byte(32);
     emit_num(conv u64 m.fn_np);
@@ -3359,7 +3482,7 @@ fn collect_fnptrs(pp: read P, src: [u8], m: write M) -> unit {
     let mut cur: u32 = m.head;
     while cur != 0u32 {
         let nd: Node = pp.nodes[conv usize cur];
-        if nd.tag == T_FN {
+        if nd.tag == T_FN && nd.a == 0u32 {
             let k: usize = m.fp_n;
             m.*.fp_p0[k] = nd.p0;
             m.*.fp_p1[k] = nd.p1;
@@ -3509,7 +3632,8 @@ fn lower_enum_ctor(pp: read P, src: [u8], m: write M, e: u32, root: i32, tn: u32
         m.*.dbuf_n = base;
         return 0;
     }
-    let eid: u32 = enum_id_of(pp, src, m.head, tn);
+    let mut eid: u32 = nd.c;
+    if eid == 0u32 { eid = enum_id_of(pp, src, m.head, tn); }
     if eid == 0u32 { m.*.err = 1; return 1; }
     let vname: Node = pp.nodes[conv usize nd.a];
     let idx: i32 = variant_index_by_name(pp, src, eid, vname.p0, vname.p1);
@@ -3964,6 +4088,7 @@ fn mat_lookup(m: write M, scrut: u32) -> i32 {
 pub fn lower_dump(src: [u8], buf: read Buf) -> unit {
     let mut p: P = P { nodes: [nnew(0); 32768], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
     let head: u32 = parse_program(write p, src, buf);
+    mono_program(write p, src, head);
     let mut m: M = M {
         head: head,
         loc_w: [0; 512],
@@ -4081,11 +4206,11 @@ pub fn lower_dump(src: [u8], buf: read Buf) -> unit {
     let mut ch: u32 = head;
     while ch != 0u32 {
         let cn: Node = p.nodes[conv usize ch];
-        if cn.tag == T_STRUCT && cn.c != 0u32 {
+        if cn.tag == T_STRUCT && cn.c != 0u32 && cn.a == 0u32 {
             reset_fn(write m);
             let _sh: i32 = lower_hook(read p, src, write m, ch);
             emit_byte(32);
-            emit_fn(write m, read p, src, cn.p0, cn.p1, 1);
+            emit_fn(write m, read p, src, ch, 1);
         }
         ch = cn.nx;
     }
@@ -4097,18 +4222,18 @@ pub fn lower_dump(src: [u8], buf: read Buf) -> unit {
             reset_fn(write m);
             let _ss: i32 = lower_static_init(read p, src, write m, si);
             emit_byte(32);
-            emit_fn(write m, read p, src, sn.p0, sn.p1, 2);
+            emit_fn(write m, read p, src, si, 2);
         }
         si = sn.nx;
     }
     let mut cur: u32 = head;
     while cur != 0u32 {
         let nd: Node = p.nodes[conv usize cur];
-        if nd.tag == T_FN {
+        if nd.tag == T_FN && nd.a == 0u32 {
             reset_fn(write m);
             let _sc: i32 = lower_fn(read p, src, write m, cur);
             emit_byte(32);
-            emit_fn(write m, read p, src, nd.p0, nd.p1, 0);
+            emit_fn(write m, read p, src, cur, 0);
         }
         cur = nd.nx;
     }
@@ -4116,11 +4241,11 @@ pub fn lower_dump(src: [u8], buf: read Buf) -> unit {
     let mut dh: u32 = head;
     while dh != 0u32 {
         let dn: Node = p.nodes[conv usize dh];
-        if dn.tag == T_STRUCT && dn.c != 0u32 {
+        if dn.tag == T_STRUCT && dn.c != 0u32 && dn.a == 0u32 {
             emit_lit(b" (hook ");
-            emit_qspan(src, dn.p0, dn.p1);
+            emit_qname(read p, src, dh);
             emit_byte(32);
-            emit_hook_ref(src, dn.p0, dn.p1);
+            emit_hook_qname(read p, src, dh);
             emit_byte(41);
         }
         dh = dn.nx;
@@ -4129,15 +4254,15 @@ pub fn lower_dump(src: [u8], buf: read Buf) -> unit {
     let mut fp: u32 = head;
     while fp != 0u32 {
         let f2: Node = p.nodes[conv usize fp];
-        if f2.tag == T_STRUCT && f2.c != 0u32 {
+        if f2.tag == T_STRUCT && f2.c != 0u32 && f2.a == 0u32 {
             emit_byte(32);
-            emit_hook_ref(src, f2.p0, f2.p1);
+            emit_hook_qname(read p, src, fp);
         } else if f2.tag == T_STATIC {
             emit_byte(32);
             emit_init_ref(src, f2.p0, f2.p1);
-        } else if f2.tag == T_FN {
+        } else if f2.tag == T_FN && f2.a == 0u32 {
             emit_byte(32);
-            emit_qspan(src, f2.p0, f2.p1);
+            emit_qname(read p, src, fp);
         }
         fp = f2.nx;
     }

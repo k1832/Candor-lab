@@ -175,7 +175,7 @@ fn find_inst(p: write P, src: [u8], m: write M, orig: u32) -> u32 {
     }
     return 0u32;
 }
-fn register_inst(m: write M, orig: u32, node: u32) -> unit {
+fn register_inst(p: write P, m: write M, orig: u32, node: u32) -> unit {
     let i: usize = m.inst_n;
     m.*.inst_orig[i] = orig;
     m.*.inst_node[i] = node;
@@ -185,6 +185,22 @@ fn register_inst(m: write M, orig: u32, node: u32) -> unit {
     m.*.inst_a2[i] = m.targ[2];
     m.*.inst_a3[i] = m.targ[3];
     m.*.inst_n = i + 1usize;
+    // Stash the concrete type-arg tuple on the instance so a later pass (the MIR
+    // lowering) can reconstruct its mangled instance name (`id$i64`, `Pair$i64`).
+    // A cons chain of the arg type nodes; head (0 if none) in `ival`. The
+    // tree-walk interp never reads `ival` on a decl node, so this is inert to it.
+    let mut head: u32 = 0u32;
+    let mut tail: u32 = 0u32;
+    let mut k: i32 = 0;
+    while k < m.targ_n {
+        let mut cell: Node = nnew(T_NAMED);
+        cell.a = m.targ[conv usize k];
+        let ci: u32 = m_push(p, cell);
+        if head == 0u32 { head = ci; } else { m_set_next(p, tail, ci); }
+        tail = ci;
+        k = k + 1i32;
+    }
+    p.*.nodes[conv usize node].ival = conv u64 head;
     return;
 }
 
@@ -340,7 +356,7 @@ fn emit_fn_inst(p: write P, src: [u8], m: write M, orig: u32, depth: i32) -> u32
     fnn.p0 = od.p0;
     fnn.p1 = od.p1;
     let fid: u32 = m_push(p, fnn);
-    register_inst(m, orig, fid);
+    register_inst(p, m, orig, fid);
     m_set_next(p, m.tail, fid);
     m.*.tail = fid;
     let saved_env: usize = m.env_n;
@@ -370,7 +386,7 @@ fn emit_struct_inst(p: write P, src: [u8], m: write M, orig: u32, depth: i32) ->
     sn.p0 = od.p0;
     sn.p1 = od.p1;
     let sid: u32 = m_push(p, sn);
-    register_inst(m, orig, sid);
+    register_inst(p, m, orig, sid);
     m_set_next(p, m.tail, sid);
     m.*.tail = sid;
     let saved_env: usize = m.env_n;
@@ -407,7 +423,7 @@ fn emit_enum_inst(p: write P, src: [u8], m: write M, orig: u32, depth: i32) -> u
     en.p0 = od.p0;
     en.p1 = od.p1;
     let eid: u32 = m_push(p, en);
-    register_inst(m, orig, eid);
+    register_inst(p, m, orig, eid);
     m_set_next(p, m.tail, eid);
     m.*.tail = eid;
     let saved_env: usize = m.env_n;
