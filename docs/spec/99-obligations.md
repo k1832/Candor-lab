@@ -1849,3 +1849,62 @@ This is the last infrastructure slice before the L6 systems-corpus milestone. Po
 
 Additive: new S5/S6 gate green in isolation (66/66 lower fixtures); full suite 589/589
 green (0 failing); clippy clean.
+
+## OBL-L6-SYSTEMS-CORPUS — THE MIR MILESTONE: the self-hosted lowering compiles all five systems-corpus programs to MIR (2026-07-11)
+
+L6 is the milestone: `selfhost/lower/lower.cnr` now lowers ALL FIVE systems-corpus
+programs to MIR wire text that the Rust MIR interpreter executes byte-exact
+(RET/TRACE/FAULT) against the tree-walking oracle (`run_source_real`). The
+`selfhost_lower` gate grows from 66 to 71 fixtures. Method per program: get
+lower.cnr's wire, Rust-`deserialize` it, run `mir::interp`, diff against the
+oracle AND a structural diff against `serialize(mir::build(source))` to localize
+each divergence, then fix minimally mirroring `src/mir/build.rs`.
+
+Per program (all PASS byte-exact):
+- 11_3_mmio (RET 42) — enums/match + addr_to_ptr + a `write Uart` borrow param.
+- 11_1_allocator (RET 1234) — box+match, `read a` borrow-value alloc handle.
+- 11_2_scheduler (RET 42) — rawptr intrusive list, offsetof/ptr_offset container_of.
+- 11_5_arena (RET 5) — `Box [4096]Node` arena, borrow return, deep recursion.
+- 11_4_parser (RET 17) — `[u8]`/`b"…"`/`len`/slice-index + enums + Box + recursion.
+
+Features implemented in lower.cnr, mirroring build.rs:
+- BORROW PARAMS (`read`/`write T`): a param with mode 1/2 becomes a word-sized
+  Borrow/BorrowMut local (loc_ptr 2=borrowmut, 3=borrow); a `read x`/`write x`
+  value is `(ref (place x …))` into a borrow temp (build.rs `lower_borrow`); at a
+  call it passes by value. Field/index/`.*` on a borrow use a DEFERRED peel
+  (`plc_borrow`, mirroring the `plc_box` Box auto-deref) so `d.*.field` derefs the
+  borrow ONCE — the earlier eager-deref-at-ident double-derefed. Wordy (rawptr/
+  fnptr/borrow) params now pass BY VALUE in `lower_args` (was: aggregate-`ref`).
+- NON-PLACE (materialized) MATCH SCRUTINEE (the L5 deferral): a pre-pass
+  (`prep_synth`, run while the parse arena is still writable) records each
+  non-place `match` scrutinee's type node — synthesizing a `BoxResult`/scalar/
+  array/`named` node for `box(…)`, or reusing the callee return node for a call —
+  then `lower_match_full` materializes the value into a temp (owned) or evaluates
+  the borrow address (borrowed), and a `vscrut_*` short-circuit in
+  resolve_place_root/emit_projs/collect_path/render_place_field renders every
+  scrutinee sub-place off that temp.
+- BORROW RETURN (`-> read T`): `prep_synth` synthesizes the Borrow node; lower_fn
+  and lower_call size `_0`/the call result as a word borrow.
+- BYTE-STRINGS + SLICES: `b"…"` (T_BYTES) / string (T_STR) materialize a `[u8]`
+  slice header {f0=`straddr`, f8=`decoded_len`}; `len(slice)` loads f8 (array →
+  const); a slice index emits `(index … 0 … true)` (bounds from the header).
+- Box-typed FIELDS auto-deref on further index/field (`ar.*.mem[i]` where
+  `mem: Box [N]Node`): `emit_projs`/`resolve_place_tn` peel a `T_BOX` leaf.
+- Aggregate array-repeat element (`[Node::leaf(0); 4096]`): the element temp is an
+  aggregate local, copyval'd into each slot (was: scalar-element only).
+- Computed array index hoisting: `s[conv usize i]` — the index expression can emit
+  its own statement chunk, which must land in the block, not inside the place
+  bytes; `prep_place` pre-lowers every index to an operand cache consumed by
+  `emit_projs`.
+- Synthetic `BoxResult` CTOR construction: `BoxResult::oom` = tag 1;
+  `BoxResult::boxed(x)` = tag 0 + copyval-move the Box payload at offset 8.
+- Per-function pool grown 64 KiB → 1 MiB (4096 array-repeat copyvals overflowed it).
+
+Nothing needed beyond the L1–L6 arc: all five programs are monomorphic and use only
+features present in `src/mir/build.rs` (interp.cnr already ran them). No lowering
+gap forced a `#[ignore]`. Runtime: the `selfhost_lower` gate ~131s (11_5's 4096-Node
+arena and 11_4's parser dominate); each systems program lowers+runs in a few s
+except 11_5 (~75s under the tree-walker).
+
+Additive: `selfhost_lower` 71/71 byte-exact; `selfhost_interp` 71/71 unchanged;
+all self-check + mir_serial gates green; full suite green (0 failing); clippy clean.

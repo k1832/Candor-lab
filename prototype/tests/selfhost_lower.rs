@@ -212,6 +212,13 @@ const CORPUS: &[(&str, Shape)] = &[
     ("boxresult_oom.cnr", Ret),
     ("box_drop_frees.cnr", Ret),
     ("nested_box.cnr", Ret),
+    // L6 MILESTONE: the SYSTEMS CORPUS (five real programs), lowered to MIR by the
+    // self-hosted lowering and executed byte-exact against the tree-walker oracle.
+    ("11_3_mmio.cnr", Ret),
+    ("11_1_allocator.cnr", Ret),
+    ("11_2_scheduler.cnr", Ret),
+    ("11_5_arena.cnr", Ret),
+    ("11_4_parser.cnr", Ret),
 ];
 
 fn read_fixture(rel: &str) -> String {
