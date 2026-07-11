@@ -243,3 +243,36 @@ mir::interp::run -> byte-exact, reusing L0's proven serialization boundary.
   ported backend) — the true native bootstrap that removes the Rust dependency. This
   is where a real code generator (Cranelift is Rust-only) must be ported or written;
   the largest remaining undertaking, still a horizon.
+
+### Generic/std self-hosting tail COMPLETE (2026-07-11)
+
+Both proven tiers now cover user generics + std collections, byte-exact vs the Rust
+reference:
+- **Monomorphizer** (selfhost/mono/mono.cnr, shared): resolves fn[T]/struct[T]/enum[T]
+  by discovery+inference+arena-clone-with-substitution; wired into BOTH interp (G1)
+  and lower (L-gen). 8 generic fixtures run AND compile byte-exact. The 5 trait-based
+  fixtures (iface/gimpl/gbound/fromq/gfromq) are deferred as a FRONT-END gap (the
+  self-host parser has no interface/impl, the interp no method-dispatch/?/From) -- NOT
+  a monomorphizer gap; mono correctly no-ops.
+- **Collections** Vec/Map/String: interp (I-std, ports the tree-walker's bi_* onto its
+  paged memory) + lower (L-std, emits the CollectionOp intrinsics) + the Rust MIR
+  reference (P0, the prerequisite that gave MIR collection support). 6 collection
+  fixtures run AND compile byte-exact.
+
+Parallelism note: G1/P0 and L-gen/I-std ran as two concurrent worktree pairs (disjoint
+files, isolated builds), cherry-picked clean -- the safe two-writer pattern.
+
+**Cross-model review (2026-07-11):** after a model mix-up (the self-hosting work was
+Opus 4.8, mis-signed Fable 5; corrected once Fable 5 was confirmed active), Fable 5 ran
+a fresh-context adversarial audit (four independent reviewers + a first-hand test run)
+of Opus 4.8's work. Verdict: GENUINE -- independent oracles, real teeth, no faking, no
+hidden ignores, results not hardcoded. Two committed honesty defects fixed (a README
+tier/corpus conflation; stale token-count comments). Foundation sound; clear to continue.
+
+**Known scaling constraint:** interp.cnr self-checks with only ~56 tokens under the
+parser's fixed [32768] arena. The next interp.cnr-growing feature (multibyte push,
+vec_set, or trait generics) needs that arena raised (or interp.cnr split) first.
+
+**Remaining (unchanged, not gated by this tail):** trait-based generics need self-host
+front-end work (interface/impl/method-dispatch/?/From); the final tier is self-COMPILE
+to native (a Candor/ported code generator -- the true bootstrap, still a horizon).
