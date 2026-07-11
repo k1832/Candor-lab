@@ -2593,3 +2593,68 @@ DEFERRED (later native slices): value-producing match into a result slot and
 whole-scrutinee `T_BIND` arms (no N4 fixture exercises them; `gen_match` leaves the
 arm result in %rax and, like lower.cnr, does not bind a whole-scrutinee name),
 materialized (call/ctor) scrutinees, and BoxResult/`?` (N5).
+
+## N5 — the native self-compile tier's FIFTH slice: the BOX/ALLOCATOR ABI + the rawptr/fnptr surface + statics, byte-exact vs the oracle (2026-07-12)
+
+The fifth native slice extends `prototype/selfhost/codegen/codegen.cnr` to emit
+x86-64 asm for the whole Box/alloc/rawptr/fnptr surface, reproducing the
+tree-walking oracle (`run_source_real`) byte-exact. Gated by the new
+`..._over_box_subset` test in `prototype/tests/selfhost_codegen.rs`; N1-N4 stay
+green. This is the last infrastructure slice before the systems-corpus native
+milestone (N6).
+
+ADDRESS MODEL (mirroring `src/backend/lower.rs` + the interp oracle): a rawptr is
+an 8-byte scalar whose value is the CANDOR FLAT OFFSET (not a host address); a
+fn-ptr is the callee's code address. `scalar_width` now returns `W_USIZE` for
+`rawptr`/`fnptr`/`borrow`, so pointers flow as word scalars. Through-pointer
+access computes `MEM_BASE+offset` and loads/stores inline (the same addressing as
+the N2 flat aggregates) — observably identical to the reference's `rt_mmio_*`
+barrier calls, so no new runtime helper is needed. `addr_of`/`addr_of_mut` return
+a place's flat offset; `ptr_read`/`ptr_write` load/store the pointee (scalar =
+load/store, aggregate = `rt_copy`); `cast_ptr`/`addr_to_ptr` reinterpret;
+`ptr_null`/`is_null` are 0 / (v==0); `ptr_offset` is base + n*size_of(inner)
+(wrapping); `ptr_to_addr` is identity; `offsetof` is a layout-derived field-offset
+const. A SCALAR local whose address is taken is FLAT-ALLOCATED (its slot holds the
+offset), so a through-pointer write aliases its real storage — detected by an
+arena scan for `addr_of`/`addr_of_mut` targets.
+
+BOX / BOXRESULT (24 / 32 bytes, reusing `layout.cnr`): the synthetic
+`{ boxed(Box T), oom }` enum is appended per `BoxResult T` annotation (mirroring
+interp `synth_boxresults`), so `enum_of_ty` routes a `T_BOXRESULT` to it and the
+N4 enum/match machinery is reused unchanged. `box(al, v)` reads `ctx`/`vt` from the
+Alloc handle (name-agnostic `field_off_lit`), INDIRECT-CALLs the vtable `alloc`
+fn-ptr (`call *reg`) for [size,align]; null -> `BoxResult::oom` (drop+consume v),
+else move v into the pointee + build `Box {ptr,ctx,vt}` inside `boxed`. `unbox`
+moves the pointee out, indirect-calls `free`, and consumes the box. `.*` /
+field-access AUTO-DEREF through a Box (load `ptr@0`, re-base). The Alloc handle /
+vtable are STRUCTURALLY identified (alloc+free fn-ptr fields / a `vt` rawptr),
+never by name.
+
+STATICS + FN-PTR VALUES + INDIRECT CALLS: each `static` gets a `.data` slot
+(`cnr_stat<i>`) holding its flat offset; `cnr_static_init` (called from
+`candor_entry` before `cnr_main`) rt_stack_allocs the storage and runs the
+initializer into it. A fn NAME used as a value lowers to its `cnr_<name>` code
+address (`leaq ... (%rip)`); an indirect call `fp(args)` loads the fn-ptr and
+`call *%rax` with SysV arg regs.
+
+ALLOC-ON-DROP: `emit_drop_at` routes a `T_BOX` to `drop_box` (if `ptr!=0`, drop
+the pointee recursively THEN indirect-call `free` — pointee-then-free order); a
+`T_BOXRESULT` routes through the N4 tag-directed enum drop to its `boxed` Box.
+Nested Boxes free bottom-up.
+
+GATE / VERIFICATION (isolation): `selfhost_codegen` green — N5: 16
+box/rawptr/fnptr/static programs (static_fnptr_indirect_call, ptr_roundtrip,
+cast_ptr_read, alloc_abi, box_unbox_scalar, box_struct, unbox_path, boxresult_oom,
+box_drop_frees, nested_box, high_addr_roundtrip, offsetof_first_field,
+offsetof_nonzero_field, ptr_offset_stride, enum_padding_copy, page_boundary)
+codegen -> assemble -> link -> run byte-exact to `run_source_real`. N1 (29 scalar)
++ N2 (12 aggregate) + N3 (8 drop) + N4 (6 enum) stay byte-exact. clippy clean. The
+`aot_runtime.c` mmap region (`MAX_ADDR` = 256 MiB) covers the high-address
+fixtures (3 MiB) with room for the systems corpus (~16.9 MiB); NO runtime change.
+NO edits to `interp.cnr`/`lower.cnr`/`mono.cnr`/`layout.cnr`/`src/backend/*` —
+contained to `codegen.cnr` + its gate.
+
+DEFERRED: value-producing match into a result slot and non-plain-local (call/ctor)
+scrutinees — NO N5 fixture exercises them (every box/enum match is
+statement-position with an explicit-`return`/assign arm over a plain-local
+scrutinee), so per the no-speculative-generality rule they are NOT added here.

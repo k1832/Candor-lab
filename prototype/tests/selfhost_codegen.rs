@@ -411,3 +411,61 @@ fn candor_native_codegen_equal_to_oracle_over_enum_subset() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// N5: BOX/ALLOCATOR ABI + rawptr/fnptr surface. The S5/S6a fixtures mirror
+// lower.cnr's L5: rawptr/fnptr scalars + the pointer intrinsics (address model,
+// MEM_BASE), statics + fn-ptr values + indirect `call *reg`, the alloc vtable
+// INDIRECT call for box/unbox/BoxResult, and alloc-on-drop (pointee-then-free).
+// Each codegen -> .s -> cc + aot_runtime.c -> run, byte-exact vs run_source_real.
+// ---------------------------------------------------------------------------
+
+agg_fixture!(N5_STATIC_FNPTR, "static_fnptr_indirect_call.cnr");
+agg_fixture!(N5_PTR_ROUNDTRIP, "ptr_roundtrip.cnr");
+agg_fixture!(N5_CAST_PTR_READ, "cast_ptr_read.cnr");
+agg_fixture!(N5_ALLOC_ABI, "alloc_abi.cnr");
+agg_fixture!(N5_BOX_UNBOX_SCALAR, "box_unbox_scalar.cnr");
+agg_fixture!(N5_BOX_STRUCT, "box_struct.cnr");
+agg_fixture!(N5_UNBOX_PATH, "unbox_path.cnr");
+agg_fixture!(N5_BOXRESULT_OOM, "boxresult_oom.cnr");
+agg_fixture!(N5_BOX_DROP_FREES, "box_drop_frees.cnr");
+agg_fixture!(N5_NESTED_BOX, "nested_box.cnr");
+agg_fixture!(N5_HIGH_ADDR, "high_addr_roundtrip.cnr");
+agg_fixture!(N5_OFFSETOF_FIRST, "offsetof_first_field.cnr");
+agg_fixture!(N5_OFFSETOF_NONZERO, "offsetof_nonzero_field.cnr");
+agg_fixture!(N5_PTR_OFFSET_STRIDE, "ptr_offset_stride.cnr");
+agg_fixture!(N5_ENUM_PADDING, "enum_padding_copy.cnr");
+agg_fixture!(N5_PAGE_BOUNDARY, "page_boundary.cnr");
+
+const BOX_OK: &[(&str, &str)] = &[
+    ("static_fnptr_indirect_call", N5_STATIC_FNPTR),
+    ("ptr_roundtrip", N5_PTR_ROUNDTRIP),
+    ("cast_ptr_read", N5_CAST_PTR_READ),
+    ("alloc_abi", N5_ALLOC_ABI),
+    ("box_unbox_scalar", N5_BOX_UNBOX_SCALAR),
+    ("box_struct", N5_BOX_STRUCT),
+    ("unbox_path", N5_UNBOX_PATH),
+    ("boxresult_oom", N5_BOXRESULT_OOM),
+    ("box_drop_frees", N5_BOX_DROP_FREES),
+    ("nested_box", N5_NESTED_BOX),
+    ("high_addr_roundtrip", N5_HIGH_ADDR),
+    ("offsetof_first_field", N5_OFFSETOF_FIRST),
+    ("offsetof_nonzero_field", N5_OFFSETOF_NONZERO),
+    ("ptr_offset_stride", N5_PTR_OFFSET_STRIDE),
+    ("enum_padding_copy", N5_ENUM_PADDING),
+    ("page_boundary", N5_PAGE_BOUNDARY),
+];
+
+#[test]
+fn candor_native_codegen_equal_to_oracle_over_box_subset() {
+    assert!(cc_available(), "cc/linker unavailable: cannot assemble+link the emitted .s");
+    on_big_stack(|| {
+        for (tag, src) in BOX_OK.iter() {
+            assert_native_eq_oracle(src, true, tag);
+        }
+        eprintln!(
+            "selfhost codegen (N5): {} box/rawptr/fnptr/static programs codegen -> assemble -> link -> run byte-exact vs oracle",
+            BOX_OK.len()
+        );
+    });
+}
