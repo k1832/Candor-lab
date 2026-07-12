@@ -194,3 +194,68 @@ fn perf_mem2reg_promotes_locals() {
         "mem2reg should have removed every alloca under -O2; optimized IR still spills:\n{opt}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 4. Aggregates (S1): the flat two-tier model — struct/array literals, field/
+//    index read+assign, nested aggregates, by-value struct params + struct
+//    returns, and the array-index bounds fault. Every fixture: clang -O2 build,
+//    run, and byte-exact (exit / trace / fault-JSON) against the oracle.
+// ---------------------------------------------------------------------------
+
+const AGG_OK: &[(&str, bool)] = &[
+    // Struct literal + field read, passed by borrow.
+    ("struct Point { x: i64, y: i64 } fn add(p: read Point) -> i64 { return p.x + p.y; } \
+      fn main() -> i64 { let pt: Point = Point { x: 40, y: 2 }; return add(read pt); }", true),
+    // Field assign + field read (trace order + exit).
+    ("struct P { x: i64, y: i64 } fn main() -> i64 { let mut p: P = P { x: 1, y: 2 }; \
+      p.x = 10; trace(p.x); trace(p.y); return p.x + p.y; }", true),
+    // Nested struct field read.
+    ("struct Inner { a: i64, b: i64 } struct Outer { p: Inner, c: i64 } \
+      fn main() -> i64 { let o: Outer = Outer { p: Inner { a: 3, b: 4 }, c: 5 }; \
+      return o.p.a + o.p.b + o.c; }", true),
+    // By-value struct param + struct return (the byte-copy ABI both ways).
+    ("struct P { x: i64, y: i64 } fn mk(a: i64, b: i64) -> P { return P { x: a, y: b }; } \
+      fn sum(p: P) -> i64 { return p.x + p.y; } \
+      fn main() -> i64 { let p: P = mk(30, 12); return sum(p); }", true),
+    // Array listed literal + index read (dynamic index).
+    ("fn main() -> i64 { let a: [3]i64 = [10, 20, 30]; let i: usize = 2; return a[i] + a[0]; }", true),
+    // Array-repeat literal `[e; N]` (scalar element via the byte-copy path).
+    ("fn main() -> i64 { let a: [4]i64 = [7; 4]; let i: usize = 3; return a[i] + a[1]; }", true),
+    // Array index-assign (mutating an element) + trace of each slot.
+    ("fn main() -> i64 { let mut a: [3]i64 = [1, 2, 3]; a[1] = 20; \
+      trace(a[0]); trace(a[1]); trace(a[2]); return a[0] + a[1] + a[2]; }", true),
+    // Array of structs: nested index + field projection.
+    ("struct P { x: i64, y: i64 } \
+      fn main() -> i64 { let a: [2]P = [P { x: 1, y: 2 }, P { x: 3, y: 4 }]; \
+      let i: usize = 1; return a[i].x + a[i].y; }", true),
+    // Sub-word (u8) array elements: byte-granular flat load/store.
+    ("fn main() -> i64 { let a: [3]u8 = [1u8, 2u8, 3u8]; let i: usize = 2; \
+      return conv i64 (a[i]) + conv i64 (a[0]); }", true),
+];
+
+#[test]
+fn gate_llvm_aggregates() {
+    assert!(clang_available(), "clang unavailable: cannot build the LLVM-S1 aggregate gate");
+    for (i, (src, real)) in AGG_OK.iter().enumerate() {
+        assert_llvm_eq_oracle(src, *real, &format!("agg{i}"));
+    }
+}
+
+// The array-index bounds fault (now in the S1 subset): kind + span must match the
+// oracle byte-exact — the same fixture the AOT gate carries.
+const AGG_FAULTS: &[(&str, bool)] = &[
+    ("fn main() -> i64 { let a: [3]i64 = [1, 2, 3]; let i: usize = 5; return a[i]; }", false),
+    ("struct P { x: i64, y: i64 } \
+      fn main() -> i64 { let a: [2]P = [P { x: 1, y: 2 }, P { x: 3, y: 4 }]; \
+      let i: usize = 9; return a[i].x; }", false),
+];
+
+#[test]
+fn gate_llvm_aggregate_bounds_fault() {
+    assert!(clang_available(), "clang unavailable");
+    for (i, (src, real)) in AGG_FAULTS.iter().enumerate() {
+        let o = oracle_src(src, *real).expect("faulting program should run");
+        assert!(matches!(o, Outcome::Fault { .. }), "expected a bounds fault:\n{src}");
+        assert_llvm_eq_oracle(src, *real, &format!("aggfault{i}"));
+    }
+}

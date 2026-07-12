@@ -2965,3 +2965,53 @@ reused UNCHANGED; no new crate dependency (format! + shelling clang). GAP: the
 array-bounds and enum/`?` axes of `tests/aot.rs`'s FAULTS array are OUT of the S0
 scalar subset (aggregates/enums) and are correctly rejected by the emitter with a
 precise "out of LLVM-S0 subset" error, not faked — deferred to a later slice.
+
+## LLVM-S1 — structs + arrays: the two-tier value model on the LLVM backend (2026-07-12)
+
+Extends `src/backend/llvm.rs` from the S0 scalar subset to STRUCTS and ARRAYS by
+introducing the two-tier value model that mirrors LLVM's own "is the address taken?"
+question, then mirrors `backend::lower`'s flat-aggregate SEMANTICS in `.ll` text. Same
+static C runtime (`aot_runtime.c`, still UNCHANGED); no Cranelift code reused.
+
+- TWO-TIER CLASSIFICATION (`classify_tiers`, a trivial per-fn MIR scan): each local is
+  Tier-R or Tier-F. **Tier-R (register)** = a word-sized (`is_wordy`) scalar/pointer
+  whose address is NEVER taken -> `alloca i64` (the S0 model; mem2reg promotes it to an
+  SSA register — the S0 perf win is PRESERVED verbatim: a scalar-only program emits the
+  identical alloca-per-local IR, no `rt_stack_alloc`). **Tier-F (flat)** = an aggregate
+  (`!is_wordy`) OR any local whose address is taken — the root of a `Ref`, or of a
+  `CopyVal` src/dst, whose projection does not begin with a `Deref` (a leading `Deref`
+  reads the local's pointer *value*, not its address). A Tier-F local lives in the flat
+  MEM_BASE buffer via `%off<id> = call rt_stack_alloc(size, align)` at fn entry; its
+  stable MEM_BASE-relative offset IS the Candor "address" that `Ref`/`Index`/borrows
+  pass around.
+- FLAT ACCESS (mirrors `lower::host_addr`/`load_scalar`/`store_scalar`): a scalar leaf
+  is `%p = inttoptr i64 (add MEM_BASE, %off) to ptr` then a typed `load`/`store i{bits}`
+  (sext/zext to the canonical i64); a whole aggregate is `call rt_copy(dst, src, len)`.
+  Aggregate loads/stores through `inttoptr` are correct but optimizer-opaque — the
+  documented flat-arena ceiling (making aggregates fast is a later ABI project).
+- PLACE PROJECTIONS (`place_addr`, op-for-op with `lower::place_addr`): `Field{offset}`
+  -> `add`; `Deref` -> `load` the pointer; `Index{stride,len,span}` -> the bounds check
+  (`icmp uge i64 %i, %len` -> `br` to a `Bounds` fault block, kind + span byte-exact)
+  then `%off = add base, (mul %i, stride)`. Offsets/strides/lens are already baked in
+  the MIR by the front end; only aggregate sizes/alignments come from `Layout`
+  (`emit_ll` now threads `items`/`consts`). Slice headers `{ptr@0,len@8}` handled too.
+- AGGREGATE ABI (mirrors `lower`): struct/array literals store each scalar leaf at its
+  field/element offset (`Store` with projections) and byte-copy aggregate leaves
+  (`CopyVal`); array-repeat `[e;N]` copies one temp N times. A by-value struct param
+  arrives as the caller's candor offset and is `rt_copy`-ed into the callee's Tier-F
+  slot; a struct return delivers the candor offset of `_0`'s slot (convention B), which
+  the caller `CopyVal`s from through a Tier-R pointer temp. `Rvalue::Ref` of a place is
+  its candor offset (an i64). A drop-inert aggregate's `Drop` is a no-op (gated on
+  `LocalDecl::drop_obligation`); a needs-drop value stays out of subset.
+- GATE / VERIFICATION (isolation): `tests/llvm.rs` green — 5 tests. New:
+  `gate_llvm_aggregates` (struct literal/field-read/field-assign, nested struct,
+  by-value struct param + struct return, array listed/repeat literal, array index read +
+  index-assign, array-of-structs, sub-word u8 elements) and
+  `gate_llvm_aggregate_bounds_fault` (array-index OOB, incl. array-of-struct) compile
+  via `clang -O2`, run as standalone processes, and compare (exit / trace / fault-JSON)
+  byte-exact to the oracle. The array-bounds fault — the S0 GAP — is now IN subset and
+  matches the oracle's `bounds` kind + span. All S0 fixtures + `perf_mem2reg_promotes_
+  locals` stay green (scalars remain Tier-R). `aot`/self-host gates untouched;
+  `aot_runtime.c` reused UNCHANGED; clippy clean. Out-of-S1 ops (enum/box/collections/
+  concurrency, needs-drop) still REJECTED precisely ("out of LLVM-S1 subset"), never
+  faked. NEXT: S2 (enums + statics).

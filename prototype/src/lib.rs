@@ -506,11 +506,11 @@ pub fn compile_path(path: &std::path::Path, out: &std::path::Path) -> Result<(),
     backend::object::emit_executable(&mp, &items, &consts, out)
 }
 
-/// Emit textual LLVM-IR for `path` (the LLVM-S0 scalar+control-flow backend).
+/// Emit textual LLVM-IR for `path` (the LLVM-S1 scalar+aggregate backend).
 /// Returns `Err` on parse/check errors or an out-of-subset construct.
 pub fn emit_llvm_ir(path: &std::path::Path) -> Result<String, String> {
-    let (mp, _items, _consts) = lower_path_for_object(path)?;
-    backend::llvm::emit_ll(&mp)
+    let (mp, items, consts) = lower_path_for_object(path)?;
+    backend::llvm::emit_ll(&mp, &items, &consts)
 }
 
 /// LLVM-S0 AOT: emit textual LLVM-IR from `path`'s MIR and build it with

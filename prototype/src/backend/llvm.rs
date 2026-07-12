@@ -1,52 +1,73 @@
-//! S0 — the first OPTIMIZED native backend (LLVM): MIR -> textual LLVM-IR, built
-//! by `clang -O2`, linked against the same static C runtime (`aot_runtime.c`) the
+//! S1 — the OPTIMIZED native backend (LLVM): MIR -> textual LLVM-IR, built by
+//! `clang -O2`, linked against the same static C runtime (`aot_runtime.c`) the
 //! Cranelift AOT object uses. This backend mirrors the *semantics* of
 //! `backend::lower` (the Cranelift reference) in `.ll` text — it does not reuse
 //! any Cranelift code.
 //!
-//! ## Scope (S0): scalar + control flow only
-//! Integer/bool scalars; let/assign; if/else/while/loop/break/continue/return;
+//! ## Scope
+//! S0: integer/bool scalars; let/assign; if/else/while/loop/break/continue/return;
 //! arithmetic (+ - * / %) with Checked/Wrapping/Saturating regimes and
 //! Overflow/DivByZero/ConvLoss faults; comparisons; &&/||; bitwise/shift; unary
-//! neg/not; `trace(x)`; assert/panic; requires/ensures; direct fn calls +
-//! recursion. Aggregates/pointers/box/collections/concurrency are out of subset
-//! and rejected with a precise error (never faked).
+//! neg/not; `trace(x)`; assert/panic; requires/ensures; direct fn calls + recursion.
+//! S1 adds STRUCTS and ARRAYS (the flat aggregate model): struct/array literals,
+//! field/index read+assign, the Index bounds fault, nested aggregates, by-value
+//! struct params + struct returns, and `Ref` (address-of). Enum/box/collections/
+//! concurrency remain out of subset and are rejected with a precise error.
 //!
-//! ## The perf recipe (Tier-R): alloca-per-local
-//! Every scalar local is an `alloca i64` in the entry block; a use is a `load`, a
-//! definition a `store`. No local's address is taken and there are no aggregates,
-//! so `clang -O2`'s mem2reg promotes every slot to an SSA register — that is where
-//! the optimization comes from. Scalars never route through the flat MEM_BASE
-//! buffer (that would defeat mem2reg), unlike the aggregate path in `lower`.
+//! ## The two-tier value model
+//! Each local is classified by a per-fn MIR scan (LLVM's own "is the address
+//! taken?"):
+//! * **Tier-R (register).** A scalar (`is_wordy`) local whose address is never
+//!   taken -> `alloca i64` in the entry block; a use is a `load`, a definition a
+//!   `store`. No such slot's address escapes and there are no aggregates in it, so
+//!   `clang -O2`'s mem2reg promotes every Tier-R slot to an SSA register — that is
+//!   where the optimization comes from (the S0 perf win, preserved).
+//! * **Tier-F (flat).** Aggregates (`!is_wordy`), any local whose address IS taken
+//!   (`Ref` / by-address param / byte-copied via `rt_copy`) -> live in the flat
+//!   MEM_BASE buffer via `rt_stack_alloc(size, align)` at fn entry, addressed as
+//!   `inttoptr(MEM_BASE + candor_off)`. Their stable MEM_BASE-relative offset is
+//!   the Candor "address" that `Ref`/`Index`/borrows pass around. Flat loads/stores
+//!   through `inttoptr` are correct but optimizer-opaque (the documented flat-arena
+//!   ceiling); making aggregates fast is a later ABI project.
 //!
 //! ## Correctness invariants preserved (mirroring `lower`)
 //! * **INV-CHECK.** Checked add/sub/mul use `llvm.{s,u}{add,sub,mul}.with.overflow`
 //!   — NEVER `add nsw`/`mul nsw` (LLVM would delete the overflow test as
 //!   UB-unreachable). The overflow bit is an explicit `br i1` to a fault block.
-//!   Conv/neg range checks are explicit `icmp` in i128 against the target range.
+//!   Conv/neg range checks and the array-index bounds check are explicit `icmp`.
 //! * **INV-FAULT-ID.** Every fault edge is `call void @rt_fault(kind, s_start,
 //!   s_end)` then `unreachable`, with the stable `kind_code` map.
-//! * **INV-OBS-ORDER.** `trace`/`rt_fault` are bare external declares (no
-//!   `readnone`/`memory(none)`): side-effecting external calls are optimization
-//!   barriers, so `-O2` preserves trace order and fault points.
+//! * **INV-OBS-ORDER.** `trace`/`rt_fault`/`rt_copy`/`rt_stack_alloc` are bare
+//!   external declares (no `readnone`/`memory(none)`): side-effecting external
+//!   calls are optimization barriers, so `-O2` preserves trace order and fault
+//!   points.
 
 use std::path::Path;
 use std::process::Command;
 
 use crate::ast::{BinOp, UnOp};
+use crate::interp::layout::Layout;
 use crate::interp::FaultKind;
 use crate::mir::{
-    FaultEdge, MirFn, MirProgram, Operand, Regime, Rvalue, Statement, StatementKind, Terminator,
+    FaultEdge, MirFn, MirProgram, Operand, Place, Proj, Regime, Rvalue, Statement, StatementKind,
+    Terminator,
 };
+use crate::resolve::Items;
 use crate::span::Span;
 use crate::token::ScalarTy;
 use crate::types::Type;
+
+use std::collections::HashMap;
 
 use super::lower::kind_code;
 
 /// The static C runtime, reused UNCHANGED (the AOT twin of `runtime.rs`). Linked
 /// by `clang` exactly as the Cranelift object links it.
 const RUNTIME_C: &str = include_str!("aot_runtime.c");
+
+/// Flat-buffer base: a host load/store of Candor address `a` is at `MEM_BASE + a`.
+/// Must match `aot_runtime.c`'s `MEM_BASE` and `interp::mem`/`backend::object`.
+const MEM_BASE: i64 = 0x0000_2000_0000_0000;
 
 /// (min, max, bits, signed) for a scalar type — the ranges the interpreter and the
 /// oracle use (a private mirror of `lower::ty_range`).
@@ -70,6 +91,15 @@ fn ty_range(sty: ScalarTy) -> (i128, i128, u32, bool) {
     (min, max, bits, signed)
 }
 
+/// A local's storage tier hinges on whether it is word-sized (a scalar/pointer that
+/// fits in an i64 register). Mirror of `lower::is_wordy`.
+fn is_wordy(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Scalar(_) | Type::Borrow(_) | Type::BorrowMut(_) | Type::RawPtr(_) | Type::FnPtr(_)
+    )
+}
+
 fn scalar_of(ty: &Type) -> ScalarTy {
     match ty {
         Type::Scalar(s) => *s,
@@ -89,14 +119,23 @@ fn overflow_intrinsic(op: BinOp, signed: bool, bits: u32) -> String {
 
 /// Emit the whole program as one textual LLVM-IR module: the `rt_*` + intrinsic
 /// declares, one `cnf_<name>` function per `MirFn`, then the `candor_entry` glue.
-pub fn emit_ll(prog: &MirProgram) -> Result<String, String> {
+/// `items`/`consts` supply the type layout (aggregate sizes/alignments for the flat
+/// `rt_stack_alloc`/`rt_copy` ABI; field offsets/strides are already baked in MIR).
+pub fn emit_ll(
+    prog: &MirProgram,
+    items: &Items,
+    consts: &HashMap<String, u64>,
+) -> Result<String, String> {
     if prog.get("main").is_none() {
         return Err("no `main` function to compile".to_string());
     }
+    let lay = Layout { items, consts };
     let mut out = String::new();
-    out.push_str("; Candor LLVM-S0 module\n");
+    out.push_str("; Candor LLVM-S1 module\n");
     out.push_str("declare void @rt_trace(i64)\n");
-    out.push_str("declare void @rt_fault(i32, i32, i32) #0\n\n");
+    out.push_str("declare void @rt_fault(i32, i32, i32) #0\n");
+    out.push_str("declare i64 @rt_stack_alloc(i64, i64)\n");
+    out.push_str("declare void @rt_copy(i64, i64, i64)\n\n");
     for bits in [8u32, 16, 32, 64] {
         for op in [BinOp::Add, BinOp::Sub, BinOp::Mul] {
             for signed in [true, false] {
@@ -110,7 +149,7 @@ pub fn emit_ll(prog: &MirProgram) -> Result<String, String> {
     out.push('\n');
 
     for f in &prog.fns {
-        emit_fn(&mut out, f)?;
+        emit_fn(&mut out, f, &lay)?;
     }
     emit_entry(&mut out, prog);
 
@@ -119,7 +158,7 @@ pub fn emit_ll(prog: &MirProgram) -> Result<String, String> {
 }
 
 /// The `candor_entry() -> i64` glue the runtime calls (mirrors `lower::lower_entry`
-/// for the scalar subset: no statics/strings, just call `main`).
+/// for the scalar+aggregate subset: no statics/strings, just call `main`).
 fn emit_entry(out: &mut String, prog: &MirProgram) {
     let main_is_i64 = matches!(
         prog.get("main").map(|f| &f.locals[0].ty),
@@ -155,19 +194,56 @@ fn assign_region(mf: &MirFn, entry: usize, target: &str, ret_target: &mut [Optio
     }
 }
 
+/// Classify every local into Tier-R (register: scalar, address never taken) or
+/// Tier-F (flat: aggregate or address-taken). A local is Tier-F iff it is a
+/// non-word type OR its own storage address is needed — i.e. it is the root of a
+/// `Ref` or a `CopyVal` whose projection does not begin with a `Deref` (a leading
+/// `Deref` reads the local's pointer *value*, not its address).
+fn classify_tiers(mf: &MirFn) -> Vec<bool> {
+    let mut tf = vec![false; mf.locals.len()];
+    for (i, l) in mf.locals.iter().enumerate() {
+        if !is_wordy(&l.ty) {
+            tf[i] = true;
+        }
+    }
+    let mark = |place: &Place, tf: &mut [bool]| {
+        if !matches!(place.proj.first(), Some(Proj::Deref { .. })) {
+            tf[place.root] = true;
+        }
+    };
+    for b in &mf.blocks {
+        for st in &b.stmts {
+            match &st.kind {
+                StatementKind::Assign(_, Rvalue::Ref(p))
+                | StatementKind::Store(_, Rvalue::Ref(p)) => mark(p, &mut tf),
+                StatementKind::CopyVal { dst, src, .. } => {
+                    mark(dst, &mut tf);
+                    mark(src, &mut tf);
+                }
+                _ => {}
+            }
+        }
+    }
+    tf
+}
+
 /// Per-function textual-IR emitter. Values are named `%v<n>`, synthetic blocks
 /// `L<n>`, MIR blocks `mbb<bid>`; naming everything sidesteps LLVM's implicit
-/// numbering of unnamed values/blocks.
+/// numbering of unnamed values/blocks. Tier-R locals are `%loc<id>` allocas;
+/// Tier-F locals are `%off<id>` flat candor offsets.
 struct FnEmit<'a> {
     out: String,
     tmp: usize,
     lbl: usize,
     mf: &'a MirFn,
+    lay: &'a Layout<'a>,
+    tier_f: Vec<bool>,
 }
 
 impl<'a> FnEmit<'a> {
-    fn new(mf: &'a MirFn) -> Self {
-        FnEmit { out: String::new(), tmp: 0, lbl: 0, mf }
+    fn new(mf: &'a MirFn, lay: &'a Layout<'a>) -> Self {
+        let tier_f = classify_tiers(mf);
+        FnEmit { out: String::new(), tmp: 0, lbl: 0, mf, lay, tier_f }
     }
     fn t(&mut self) -> String {
         let n = self.tmp;
@@ -192,16 +268,89 @@ impl<'a> FnEmit<'a> {
         self.out.push_str(":\n");
     }
 
-    /// A scalar operand as an LLVM i64 value (an immediate literal or a `%v<n>`
-    /// loaded from the local's slot). Locals always hold the canonical i64.
+    // ---- Tier-F flat memory access (mirrors lower::host_addr/load_scalar/store_scalar) ----
+
+    /// `inttoptr(MEM_BASE + candor)` — the host `ptr` for a flat candor address.
+    fn host_ptr(&mut self, candor: &str) -> String {
+        let a = self.t();
+        self.line(&format!("{a} = add i64 {MEM_BASE}, {candor}"));
+        let p = self.t();
+        self.line(&format!("{p} = inttoptr i64 {a} to ptr"));
+        p
+    }
+    /// Load a scalar leaf from a flat candor address as the canonical i64.
+    fn load_scalar(&mut self, candor: &str, sty: ScalarTy) -> String {
+        if Layout::scalar_size(sty) == 0 {
+            return "0".to_string();
+        }
+        let (_, _, bits, signed) = ty_range(sty);
+        let p = self.host_ptr(candor);
+        let raw = self.t();
+        self.line(&format!("{raw} = load i{bits}, ptr {p}"));
+        if bits >= 64 {
+            raw
+        } else {
+            let ex = self.t();
+            let opn = if signed { "sext" } else { "zext" };
+            self.line(&format!("{ex} = {opn} i{bits} {raw} to i64"));
+            ex
+        }
+    }
+    /// Store the canonical i64 `val` as a scalar leaf at a flat candor address.
+    fn store_scalar(&mut self, candor: &str, val: &str, sty: ScalarTy) {
+        if Layout::scalar_size(sty) == 0 {
+            return;
+        }
+        let (_, _, bits, _) = ty_range(sty);
+        let p = self.host_ptr(candor);
+        if bits >= 64 {
+            self.line(&format!("store i64 {val}, ptr {p}"));
+        } else {
+            let tr = self.t();
+            self.line(&format!("{tr} = trunc i64 {val} to i{bits}"));
+            self.line(&format!("store i{bits} {tr}, ptr {p}"));
+        }
+    }
+    /// Byte-copy `len` bytes src -> dst within the flat model (mirrors lower::call_copy).
+    fn rt_copy(&mut self, dst: &str, src: &str, len: u64) {
+        if len == 0 {
+            return;
+        }
+        self.line(&format!("call void @rt_copy(i64 {dst}, i64 {src}, i64 {len})"));
+    }
+
+    // ---- local access (tier-aware) ----
+
+    /// Read local `id`'s current i64 value: a `load` from its Tier-R alloca or a
+    /// `load_scalar` from its Tier-F flat slot.
+    fn load_local(&mut self, id: usize) -> String {
+        if self.tier_f[id] {
+            let sty = scalar_of(&self.mf.locals[id].ty);
+            let off = format!("%off{id}");
+            self.load_scalar(&off, sty)
+        } else {
+            let r = self.t();
+            self.line(&format!("{r} = load i64, ptr %loc{id}"));
+            r
+        }
+    }
+    /// Write i64 `val` into local `id`'s Tier-R alloca or Tier-F flat slot.
+    fn store_local(&mut self, id: usize, val: &str) {
+        if self.tier_f[id] {
+            let sty = scalar_of(&self.mf.locals[id].ty);
+            let off = format!("%off{id}");
+            self.store_scalar(&off, val, sty);
+        } else {
+            self.line(&format!("store i64 {val}, ptr %loc{id}"));
+        }
+    }
+
+    /// A scalar operand as an LLVM i64 value (an immediate literal or a load of the
+    /// local's canonical i64).
     fn operand(&mut self, op: &Operand) -> String {
         match op {
             Operand::Const(v, _) => format!("{}", *v as i64),
-            Operand::Local(id) => {
-                let r = self.t();
-                self.line(&format!("{r} = load i64, ptr %loc{id}"));
-                r
-            }
+            Operand::Local(id) => self.load_local(*id),
         }
     }
     fn operand_sty(&self, op: &Operand) -> ScalarTy {
@@ -209,6 +358,70 @@ impl<'a> FnEmit<'a> {
             Operand::Const(_, s) => *s,
             Operand::Local(id) => scalar_of(&self.mf.locals[*id].ty),
         }
+    }
+
+    /// Resolve a place to its flat candor address (i64), faulting on an OOB index
+    /// (INV-CHECK). Mirrors `lower::place_addr`. A Tier-R root is only valid with a
+    /// leading `Deref` (its pointer value is the starting address).
+    fn place_addr(&mut self, place: &Place) -> Result<(String, Type), String> {
+        let root = place.root;
+        let (mut addr, mut ty, rest): (String, Type, &[Proj]) = if self.tier_f[root] {
+            (format!("%off{root}"), self.mf.locals[root].ty.clone(), &place.proj[..])
+        } else {
+            match place.proj.first() {
+                Some(Proj::Deref { inner }) => {
+                    let v = self.load_local(root);
+                    (v, inner.clone(), &place.proj[1..])
+                }
+                _ => return Err("out of LLVM-S1 subset: address of a register local".to_string()),
+            }
+        };
+        for p in rest {
+            match p {
+                Proj::Field { offset, ty: fty } => {
+                    let a = self.t();
+                    self.line(&format!("{a} = add i64 {addr}, {offset}"));
+                    addr = a;
+                    ty = fty.clone();
+                }
+                Proj::Deref { inner } => {
+                    addr = self.load_scalar(&addr, ScalarTy::U64);
+                    ty = inner.clone();
+                }
+                Proj::Index { index, stride, len, span, slice } => {
+                    let i = self.operand(index);
+                    if *slice {
+                        let base = self.load_scalar(&addr, ScalarTy::U64);
+                        let lenaddr = self.t();
+                        self.line(&format!("{lenaddr} = add i64 {addr}, 8"));
+                        let n = self.load_scalar(&lenaddr, ScalarTy::U64);
+                        let oob = self.t();
+                        self.line(&format!("{oob} = icmp uge i64 {i}, {n}"));
+                        self.fault_if(&oob, FaultKind::Bounds, *span);
+                        let off = self.t();
+                        self.line(&format!("{off} = mul i64 {i}, {stride}"));
+                        let a = self.t();
+                        self.line(&format!("{a} = add i64 {base}, {off}"));
+                        addr = a;
+                    } else {
+                        let oob = self.t();
+                        self.line(&format!("{oob} = icmp uge i64 {i}, {len}"));
+                        self.fault_if(&oob, FaultKind::Bounds, *span);
+                        let off = self.t();
+                        self.line(&format!("{off} = mul i64 {i}, {stride}"));
+                        let a = self.t();
+                        self.line(&format!("{a} = add i64 {addr}, {off}"));
+                        addr = a;
+                    }
+                    ty = match &ty {
+                        Type::Array(e, _) => (**e).clone(),
+                        Type::Slice(e) | Type::SliceMut(e) => (**e).clone(),
+                        _ => Type::Error,
+                    };
+                }
+            }
+        }
+        Ok((addr, ty))
     }
 
     /// Reduce an i64 to the canonical i64 of `sty` (trunc then sign/zero extend) —
@@ -299,6 +512,15 @@ impl<'a> FnEmit<'a> {
     fn eval_rvalue(&mut self, rv: &Rvalue) -> Result<String, String> {
         match rv {
             Rvalue::Use(op) => Ok(self.operand(op)),
+            Rvalue::Ref(place) => Ok(self.place_addr(place)?.0),
+            Rvalue::Load { place, ty } => {
+                if place.proj.is_empty() {
+                    Ok(self.load_local(place.root))
+                } else {
+                    let (a, _) = self.place_addr(place)?;
+                    Ok(self.load_scalar(&a, scalar_of(ty)))
+                }
+            }
             Rvalue::Cmp { op, l, r } => {
                 let lsty = self.operand_sty(l);
                 let rsty = self.operand_sty(r);
@@ -364,7 +586,7 @@ impl<'a> FnEmit<'a> {
                 self.line(&format!("{r} = call i64 @cnf_{func}({argstr})"));
                 Ok(r)
             }
-            other => Err(format!("out of LLVM-S0 scalar subset: {other:?}")),
+            other => Err(format!("out of LLVM-S1 subset: {other:?}")),
         }
     }
 
@@ -546,41 +768,50 @@ impl<'a> FnEmit<'a> {
 
     fn lower_stmt(&mut self, st: &Statement) -> Result<(), String> {
         if st.observable && !matches!(st.kind, StatementKind::Trace(_)) {
-            return Err(format!("out of LLVM-S0 subset (observable): {:?}", st.kind));
+            return Err(format!("out of LLVM-S1 subset (observable): {:?}", st.kind));
         }
         match &st.kind {
             StatementKind::Assign(local, rv) => {
                 let v = self.eval_rvalue(rv)?;
-                self.line(&format!("store i64 {v}, ptr %loc{local}"));
+                self.store_local(*local, &v);
             }
             StatementKind::Trace(op) => {
                 let v = self.operand(op);
                 self.line(&format!("call void @rt_trace(i64 {v})"));
             }
             StatementKind::Store(place, rv) => {
-                if !place.proj.is_empty() {
-                    return Err("out of LLVM-S0 subset: projected store".to_string());
-                }
                 let v = self.eval_rvalue(rv)?;
-                self.line(&format!("store i64 {v}, ptr %loc{}", place.root));
-            }
-            // A scalar local carries no drop obligation, so its Drop is a no-op;
-            // an aggregate drop is out of subset.
-            StatementKind::Drop { local, .. } => {
-                if !matches!(self.mf.locals[*local].ty, Type::Scalar(_)) {
-                    return Err("out of LLVM-S0 subset: drop of a non-scalar".to_string());
+                if place.proj.is_empty() {
+                    self.store_local(place.root, &v);
+                } else {
+                    let (a, ty) = self.place_addr(place)?;
+                    self.store_scalar(&a, &v, scalar_of(&ty));
                 }
             }
-            other => return Err(format!("out of LLVM-S0 subset: {other:?}")),
+            StatementKind::CopyVal { dst, src, ty } => {
+                let (s, _) = self.place_addr(src)?;
+                let (d, _) = self.place_addr(dst)?;
+                self.rt_copy(&d, &s, self.lay.size_of(ty));
+            }
+            // A drop-inert local (a scalar, or a struct/array of drop-inert fields)
+            // carries no drop obligation, so its Drop is a no-op; a needs-drop value
+            // (its glue is enum/box territory) is out of subset.
+            StatementKind::Drop { local, .. } => {
+                if self.mf.locals[*local].drop_obligation {
+                    return Err("out of LLVM-S1 subset: drop of a needs-drop value".to_string());
+                }
+            }
+            other => return Err(format!("out of LLVM-S1 subset: {other:?}")),
         }
         Ok(())
     }
 }
 
 /// Emit one `cnf_<name>` function, replicating `lower::lower_fn`'s block/region
-/// structure (requires/ensures predicate regions, the shared final-return block).
-fn emit_fn(out: &mut String, mf: &MirFn) -> Result<(), String> {
-    let mut e = FnEmit::new(mf);
+/// structure (requires/ensures predicate regions, the shared final-return block)
+/// and its two-tier storage + aggregate ABI.
+fn emit_fn(out: &mut String, mf: &MirFn, lay: &Layout) -> Result<(), String> {
+    let mut e = FnEmit::new(mf, lay);
 
     let params = (0..mf.num_params)
         .map(|i| format!("i64 %a{i}"))
@@ -588,11 +819,30 @@ fn emit_fn(out: &mut String, mf: &MirFn) -> Result<(), String> {
         .join(", ");
     e.raw(&format!("define internal i64 @cnf_{}({params}) {{\n", mf.name));
     e.label("entry");
+    // Tier-R locals -> alloca (mem2reg-promotable); Tier-F locals -> flat slot.
     for i in 0..mf.locals.len() {
-        e.line(&format!("%loc{i} = alloca i64"));
+        if e.tier_f[i] {
+            let ty = &mf.locals[i].ty;
+            let size = lay.size_of(ty).max(1);
+            let align = lay.align_of(ty).max(1);
+            e.line(&format!("%off{i} = call i64 @rt_stack_alloc(i64 {size}, i64 {align})"));
+        } else {
+            e.line(&format!("%loc{i} = alloca i64"));
+        }
     }
+    // Bind params _1..=n: a word param carries its value; an aggregate param arrives
+    // as the caller's candor offset and is byte-copied into this frame's slot.
     for i in 0..mf.num_params {
-        e.line(&format!("store i64 %a{i}, ptr %loc{}", 1 + i));
+        let pid = 1 + i;
+        let pty = mf.locals[pid].ty.clone();
+        if is_wordy(&pty) {
+            let a = format!("%a{i}");
+            e.store_local(pid, &a);
+        } else {
+            let off = format!("%off{pid}");
+            let a = format!("%a{i}");
+            e.rt_copy(&off, &a, lay.size_of(&pty));
+        }
     }
 
     let final_return = "ret_final".to_string();
@@ -619,8 +869,7 @@ fn emit_fn(out: &mut String, mf: &MirFn) -> Result<(), String> {
 
     for (i, pred) in mf.requires.iter().enumerate() {
         e.label(&req_labels[i]);
-        let v = e.t();
-        e.line(&format!("{v} = load i64, ptr %loc{}", pred.value));
+        let v = e.load_local(pred.value);
         let c = e.t();
         e.line(&format!("{c} = trunc i64 {v} to i1"));
         let ok = if i + 1 < mf.requires.len() {
@@ -637,16 +886,14 @@ fn emit_fn(out: &mut String, mf: &MirFn) -> Result<(), String> {
     if has_ens {
         e.label(&ensures_start);
         if let Some(rl) = mf.result_local {
-            let v = e.t();
-            e.line(&format!("{v} = load i64, ptr %loc0"));
-            e.line(&format!("store i64 {v}, ptr %loc{rl}"));
+            let v = e.load_local(0);
+            e.store_local(rl, &v);
         }
         e.line(&format!("br label %mbb{}", mf.ensures[0].entry));
     }
     for (i, pred) in mf.ensures.iter().enumerate() {
         e.label(&ens_labels[i]);
-        let v = e.t();
-        e.line(&format!("{v} = load i64, ptr %loc{}", pred.value));
+        let v = e.load_local(pred.value);
         let c = e.t();
         e.line(&format!("{c} = trunc i64 {v} to i1"));
         let ok = if i + 1 < mf.ensures.len() {
@@ -661,9 +908,14 @@ fn emit_fn(out: &mut String, mf: &MirFn) -> Result<(), String> {
     }
 
     e.label(&final_return);
-    let v = e.t();
-    e.line(&format!("{v} = load i64, ptr %loc0"));
-    e.line(&format!("ret i64 {v}"));
+    // Convention (B): a word return delivers _0's value; an aggregate return
+    // delivers the candor offset of _0's caller-visible slot.
+    if is_wordy(&mf.locals[0].ty) {
+        let v = e.load_local(0);
+        e.line(&format!("ret i64 {v}"));
+    } else {
+        e.line("ret i64 %off0");
+    }
 
     for (bid, block) in mf.blocks.iter().enumerate() {
         e.label(&format!("mbb{bid}"));
