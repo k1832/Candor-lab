@@ -2856,3 +2856,55 @@ fixtures reproduce the oracle byte-exact with no Rust in the compile path.
   engines are proven to agree on the CONSTRUCTS the corpus uses (enough for the claim),
   not on those exact five programs. Softened the "transitively matching native" wording.
   OBL-QUALITY-REVIEW is now fully cleared.
+
+## OBL-N-REGALLOC — native self-compile: a register-allocator MVP for `codegen.cnr` (within-expression operand pairs in callee-saved registers) (2026-07-12)
+
+`selfhost/codegen/codegen.cnr` gained an OPERAND-REGISTER FILE so the hot
+left-operand spill/reload keeps the left operand ALIVE in a callee-saved register
+across evaluating the right operand, instead of a `%rbp` temp slot. This is a
+behavior-preserving optimization of the emitted asm only: all 89 codegen fixtures
+stay byte-exact (same exit / trace / fault) vs `run_source_real`. The five
+callee-saved regs `%rbx/%r12/%r13/%r14/%r15` were completely unused by codegen and
+are preserved across every `call` (runtime helpers, `cnr_*`, drop hooks, `call
+*reg`) and disjoint from every scratch the flat-mem helpers/arg conventions touch,
+which is why the MVP is non-invasive.
+
+- REGISTER FILE (`spill_reg`/`reload_reg`, beside `spill`/`reload_rax`): a LIFO
+  stack of the 5 regs with a depth counter (`rf_depth`). `spill_reg` parks `%rax`
+  in the next free reg and returns a NEGATIVE handle `-(reg+1)` when the file is
+  armed and depth < 5; otherwise it FALLS BACK to `spill` and returns the (>= 0)
+  slot handle. `reload_reg` moves a reg handle's value back to `%rax` and pops
+  (LIFO), or reloads the slot. Because the fallback is always correct, the file
+  being armed or not only changes performance, never behavior.
+- CONVERTED SITES (exactly the three straight-line left-operand pairs): `gen_two`,
+  `gen_binary` (arith/bitwise/shift), `gen_cmp` — the only uses of the local `ls`.
+  Every other spill site (aggregates, calls, drops, box/alloc, `gen_return`'s
+  spill-across-`emit_return_drops`, `gen_short_circuit`, place resolution) is left
+  on the slot path unchanged.
+- FIXED SAVE GROUP via `%rbp`-relative SLOTS (not push/pop, so `emit_epilogue`'s
+  `movq %rbp,%rsp; popq %rbp` stays alignment-agnostic): a per-fn used-flag
+  (`rf_used`) is decided UP FRONT by a cheap AST pre-pass (`subtree_uses_regfile`)
+  BEFORE the walk. If armed, `gen_fn` reserves save slots 0..4 (folded into
+  `slot_max`/the frame), `emit_fn_streaming` saves the 5 regs after `subq $frame`,
+  and `emit_epilogue` restores them at EVERY exit. `rf_used`/`rf_depth` are reset
+  in all four function generators; only `gen_fn` arms the file (hooks/glue/static-
+  init keep the slot baseline).
+- INVARIANTS: (1) LIFO balance — spill_reg/reload_reg are perfectly nested inside a
+  single `gen_*` call, so the reg handle encodes the exact reg and the pop always
+  matches. (2) The used-flag is a per-fn CONSTANT known before any epilogue is
+  emitted, which is required because a loop back-edge can reach an early `return`
+  after a register was clobbered — a walk-time flag would miss that restore. (3) A
+  fault label from a right-operand sub-eval falling between a `spill_reg` and its
+  `reload_reg` is safe: `fault_unless` is a forward branch over non-returning code
+  (`rt_fault` never returns), so no live alternate path reaches the reload with the
+  reg clobbered; drops clobber only caller-saved regs.
+
+GATE / VERIFICATION (isolation): `selfhost_codegen` green — 12 tests (the 11 fixture
+tests, all 89 fixtures byte-exact across N1-N6 + generics, plus a new
+`candor_native_codegen_uses_operand_register_file` spot-check asserting fib's emitted
+`.s` actually parks the outer `+`'s left operand in `%rbx`
+(`movq %rax, %rbx`/`movq %rbx, %rax`) and saves/restores the group
+(`movq %rbx, -8(%rbp)`/`movq -8(%rbp), %rbx`), distinguishing "regalloc runs" from
+"dead code"). clippy clean. Contained to `codegen.cnr` + its gate; NO edits to
+`interp.cnr`/`lower.cnr`/`mono.cnr`/`layout.cnr`/`src/backend/*`. The self-hosted
+native codegen now does real register allocation for scalar operand pairs.

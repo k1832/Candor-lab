@@ -261,6 +261,23 @@ fn candor_native_codegen_equal_to_oracle_over_scalar_subset() {
     });
 }
 
+#[test]
+fn candor_native_codegen_uses_operand_register_file() {
+    // Improvement spot-check: a scalar-heavy fixture must actually EXERCISE the
+    // callee-saved operand-register file (not just link it as dead code). spill_reg
+    // parks the outer `+`'s left operand in %rbx across evaluating the right operand
+    // (a `movq %rax, %rbx` / `movq %rbx, %rax` pair) instead of a %rbp temp slot, and
+    // a fn that uses the file saves the fixed 5-reg group in its prologue.
+    on_big_stack(|| {
+        let fib = "fn fib(n: i64) -> i64 { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); } fn main() -> i64 { let r: i64 = fib(10); trace(r); return r; }";
+        let asm = candor_asm(fib);
+        assert!(asm.contains("movq %rax, %rbx"), "operand register file never spilled into %rbx:\n{asm}");
+        assert!(asm.contains("movq %rbx, %rax"), "operand register file never reloaded from %rbx:\n{asm}");
+        assert!(asm.contains("movq %rbx, -8(%rbp)"), "prologue never saved the register file:\n{asm}");
+        assert!(asm.contains("movq -8(%rbp), %rbx"), "epilogue never restored the register file:\n{asm}");
+    });
+}
+
 // ---------------------------------------------------------------------------
 // N2: flat aggregates (structs + arrays). The S2 aggregate fixtures — struct
 // field read/write, nested structs, struct by-value params/returns, array

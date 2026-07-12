@@ -108,6 +108,8 @@ struct C {
     disp_fn: [128]u32,
     disp_n: usize,
     err: i32,
+    rf_depth: usize,
+    rf_used: i32,
 }
 
 // ---- byte-pool emit (function body) -----------------------------------------
@@ -201,6 +203,53 @@ fn store_slot(c: write C, s: i32) -> unit {
     bs(c, b"movq %rax, ");
     bslot(c, s);
     bc(c, 10);
+    return;
+}
+
+// ---- operand-register file (callee-saved %rbx/%r12/%r13/%r14/%r15) ----------
+// A within-expression left operand can be kept ALIVE across evaluating the right
+// operand in a callee-saved register instead of a %rbp slot. Used as a LIFO stack
+// (rf_depth) of at most 5 regs. spill_reg/reload_reg are drop-in replacements for
+// spill/reload_rax at STRAIGHT-LINE operand sites; they fall back to the slot path
+// when the file is exhausted or unavailable, so the slot path stays correct.
+// A function that uses the file saves the 5 regs into save slots 0..4 in its
+// prologue and restores them at every epilogue (see gen_fn / emit_fn_streaming /
+// emit_epilogue), honoring the callee-saved convention its own callers rely on.
+fn bregname(c: write C, idx: usize) -> unit {
+    if idx == 0usize { bs(c, b"%rbx"); return; }
+    if idx == 1usize { bs(c, b"%r12"); return; }
+    if idx == 2usize { bs(c, b"%r13"); return; }
+    if idx == 3usize { bs(c, b"%r14"); return; }
+    bs(c, b"%r15");
+    return;
+}
+// Park %rax in the next free callee reg; return a NEGATIVE reg handle (-(reg+1)).
+// If the file is unavailable/full, spill to a slot and return that (>= 0) handle.
+fn spill_reg(c: write C) -> i32 {
+    if c.rf_used != 0 && c.rf_depth < 5usize {
+        let r: usize = c.rf_depth;
+        bc(c, 9);
+        bs(c, b"movq %rax, ");
+        bregname(c, r);
+        bc(c, 10);
+        c.*.rf_depth = r + 1usize;
+        return 0i32 - (conv i32 r) - 1i32;
+    }
+    return spill(c);
+}
+// Move a spilled left operand back to %rax; free its reg (LIFO) or reload its slot.
+fn reload_reg(c: write C, h: i32) -> unit {
+    if h < 0 {
+        let r: usize = conv usize (0i32 - h - 1i32);
+        bc(c, 9);
+        bs(c, b"movq ");
+        bregname(c, r);
+        bs(c, b", %rax");
+        bc(c, 10);
+        c.*.rf_depth = c.rf_depth - 1usize;
+        return;
+    }
+    reload_rax(c, h);
     return;
 }
 
@@ -1272,10 +1321,10 @@ fn gen_unary(c: write C, pp: read P, src: [u8], i: u32, exp_w: i32) -> i32 {
 // left in %rax, right in %rcx after this helper.
 fn gen_two(c: write C, pp: read P, src: [u8], la: u32, ra: u32, lexp: i32, rexp: i32) -> unit {
     let _lw: i32 = gen_value(c, pp, src, la, lexp);
-    let ls: i32 = spill(c);
+    let ls: i32 = spill_reg(c);
     let _rw: i32 = gen_value(c, pp, src, ra, rexp);
     bi(c, b"movq %rax, %rcx");
-    reload_rax(c, ls);
+    reload_reg(c, ls);
     return;
 }
 
@@ -1288,14 +1337,14 @@ fn gen_binary(c: write C, pp: read P, src: [u8], i: u32, exp_w: i32) -> i32 {
     let mut opty: i32 = 0i32 - 1i32;
     if exp_w >= 1 && exp_w <= 10 { opty = exp_w; }
     let lw: i32 = gen_value(c, pp, src, nd.a, opty);
-    let ls: i32 = spill(c);
+    let ls: i32 = spill_reg(c);
     let mut sty: i32 = opty;
     if opty < 0 { sty = concretize(lw); }
     let mut rexp: i32 = sty;
     if op == OP_SHL || op == OP_SHR { rexp = 0i32 - 1i32; }
     let _rw: i32 = gen_value(c, pp, src, nd.b, rexp);
     bi(c, b"movq %rax, %rcx");
-    reload_rax(c, ls);
+    reload_reg(c, ls);
     gen_arith(c, op, sty, nd.p0, nd.p1);
     return sty;
 }
@@ -1452,11 +1501,11 @@ fn gen_cmp(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
     let nd: Node = pp.nodes[conv usize i];
     let op: i32 = nd.op;
     let lw: i32 = gen_value(c, pp, src, nd.a, 0i32 - 1i32);
-    let ls: i32 = spill(c);
+    let ls: i32 = spill_reg(c);
     let ot: i32 = concretize(lw);
     let _rw: i32 = gen_value(c, pp, src, nd.b, ot);
     bi(c, b"movq %rax, %rcx");
-    reload_rax(c, ls);
+    reload_reg(c, ls);
     bi(c, b"cmpq %rcx, %rax");
     let un: i32 = 1i32 - signedw(ot);
     if op == OP_EQ { bi(c, b"sete %al"); }
@@ -2205,6 +2254,13 @@ fn gen_assert(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
 }
 
 fn emit_epilogue(c: write C) -> unit {
+    if c.rf_used != 0 {
+        bi(c, b"movq -8(%rbp), %rbx");
+        bi(c, b"movq -16(%rbp), %r12");
+        bi(c, b"movq -24(%rbp), %r13");
+        bi(c, b"movq -32(%rbp), %r14");
+        bi(c, b"movq -40(%rbp), %r15");
+    }
     bi(c, b"movq %rbp, %rsp");
     bi(c, b"popq %rbp");
     bi(c, b"ret");
@@ -2331,6 +2387,48 @@ fn gen_block(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
     return 0;
 }
 
+// Would walking this subtree reach a spill_reg site (an arith/comparison binary)?
+// Sound as a driver of the used-flag either way: a false negative only forgoes the
+// optimization (spill_reg then falls back to a slot), never breaks correctness.
+fn subtree_uses_regfile(pp: read P, src: [u8], i: u32) -> bool {
+    if i == 0u32 { return false; }
+    let nd: Node = pp.nodes[conv usize i];
+    let t: i32 = nd.tag;
+    if t == T_BIN {
+        if nd.op == OP_AND || nd.op == OP_OR {
+            if subtree_uses_regfile(pp, src, nd.a) { return true; }
+            return subtree_uses_regfile(pp, src, nd.b);
+        }
+        return true;
+    }
+    if t == T_PAREN || t == T_UNARY || t == T_ASSERT || t == T_RETURN { return subtree_uses_regfile(pp, src, nd.a); }
+    if t == T_UNSAFE || t == T_WRAPPING || t == T_SATURATING || t == T_LOOP { return subtree_uses_regfile(pp, src, nd.a); }
+    if t == T_CONV || t == T_LET { return subtree_uses_regfile(pp, src, nd.b); }
+    if t == T_ASSIGN {
+        if subtree_uses_regfile(pp, src, nd.a) { return true; }
+        return subtree_uses_regfile(pp, src, nd.b);
+    }
+    if t == T_IF {
+        if subtree_uses_regfile(pp, src, nd.a) { return true; }
+        if subtree_uses_regfile(pp, src, nd.b) { return true; }
+        return subtree_uses_regfile(pp, src, nd.c);
+    }
+    if t == T_WHILE {
+        if subtree_uses_regfile(pp, src, nd.a) { return true; }
+        return subtree_uses_regfile(pp, src, nd.b);
+    }
+    if t == T_BLOCK { return chain_uses_regfile(pp, src, nd.a); }
+    if t == T_CALL { return chain_uses_regfile(pp, src, nd.b); }
+    return false;
+}
+fn chain_uses_regfile(pp: read P, src: [u8], head: u32) -> bool {
+    let mut cur: u32 = head;
+    while cur != 0u32 {
+        if subtree_uses_regfile(pp, src, cur) { return true; }
+        cur = pp.nodes[conv usize cur].nx;
+    }
+    return false;
+}
 fn gen_fn(c: write C, pp: read P, src: [u8], fnid: u32, kind: i32) -> unit {
     let nd: Node = pp.nodes[conv usize fnid];
     // reset per-function state
@@ -2354,6 +2452,16 @@ fn gen_fn(c: write C, pp: read P, src: [u8], fnid: u32, kind: i32) -> unit {
     if nd.e != 0u32 {
         let rmode: i32 = pp.nodes[conv usize nd.e].op;
         if rmode == 1 || rmode == 2 { c.*.ret_w = W_USIZE; c.*.ret_ty = 0u32; }
+    }
+    // Decide up front (before any epilogue is emitted) whether this fn uses the
+    // operand-register file; if so, reserve save slots 0..4 for the fixed 5-reg
+    // save group so its %rbp offsets are known at both prologue and epilogue.
+    c.*.rf_depth = 0usize;
+    c.*.rf_used = 0;
+    if subtree_uses_regfile(pp, src, nd.d) {
+        let mut rfsv: usize = 0usize;
+        while rfsv < 5usize { let _rsv: i32 = newslot(c); rfsv = rfsv + 1usize; }
+        c.*.rf_used = 1;
     }
     // params: slot per param (in declaration order), bound to their names. An owned
     // aggregate param (by value) that needs drop is registered in the param scope.
@@ -2445,6 +2553,13 @@ fn emit_fn_streaming(c: write C, pp: read P, src: [u8], kind: i32, defid: u32) -
         emit_bytes_direct(b", %rsp");
         trace(10);
     }
+    if c.rf_used != 0 {
+        emit_line(b"movq %rbx, -8(%rbp)");
+        emit_line(b"movq %r12, -16(%rbp)");
+        emit_line(b"movq %r13, -24(%rbp)");
+        emit_line(b"movq %r14, -32(%rbp)");
+        emit_line(b"movq %r15, -40(%rbp)");
+    }
     let mut bi2: usize = 0usize;
     while bi2 < c.bbuf_n {
         trace(conv i64 c.bbuf[bi2]);
@@ -2470,6 +2585,8 @@ fn gen_hook(c: write C, pp: read P, src: [u8], sid: u32) -> unit {
     c.*.dloc_n = 0usize;
     c.*.ret_w = 0;
     c.*.ret_ty = 0u32;
+    c.*.rf_used = 0;
+    c.*.rf_depth = 0usize;
     let selfslot: i32 = newslot(c);
     bc(c, 9); bs(c, b"movq %rdi, "); bslot(c, selfslot); bc(c, 10);
     let sp0: usize = find_self(src);
@@ -2498,6 +2615,8 @@ fn gen_enum_glue(c: write C, pp: read P, src: [u8], eid: u32) -> unit {
     c.*.dloc_n = 0usize;
     c.*.ret_w = 0;
     c.*.ret_ty = 0u32;
+    c.*.rf_used = 0;
+    c.*.rf_depth = 0usize;
     let selfslot: i32 = newslot(c);
     bc(c, 9); bs(c, b"movq %rdi, "); bslot(c, selfslot); bc(c, 10);
     emit_enum_drop(c, pp, src, selfslot, eid, 0i32 - 1i32);
@@ -3182,6 +3301,8 @@ fn gen_static_init(c: write C, pp: read P, src: [u8]) -> unit {
     c.*.dloc_n = 0usize;
     c.*.ret_w = 0;
     c.*.ret_ty = 0u32;
+    c.*.rf_used = 0;
+    c.*.rf_depth = 0usize;
     let mut k: usize = 0usize;
     while k < c.st_n {
         let ty: u32 = c.st_ty[k];
@@ -3364,6 +3485,8 @@ pub fn codegen_dump(src: [u8], buf: read Buf) -> unit {
         disp_fn: [0u32; 128],
         disp_n: 0usize,
         err: 0,
+        rf_depth: 0usize,
+        rf_used: 0,
     };
     // Record non-place match scrutinees (synthesizing their BoxResult/return types),
     // THEN materialize every BoxResult into a real enum.
