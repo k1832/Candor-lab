@@ -366,3 +366,47 @@ The publication-step-2 packaging is assembled and proven, ready to seed the stan
 a target dir, git init, and publish the standalone 0.x repo -- the deciding authority's call
 (it creates/owns the published artifact). Minor non-blocking: benches/p20.rs hardcodes a
 fixture path (benches don't affect build/run); --version reports the crate version 0.1.0.
+
+### LLVM backend + the road to a proper language (2026-07-12)
+
+**Performance path RULED: an LLVM backend behind the MIR seam** (the ROADMAP's long-named
+"LLVM second backend"). Cranelift is fast-COMPILING but non-optimizing; for C/C++/Rust/Zig-
+competitive runtime speed the answer is to emit textual LLVM-IR and let clang -O2 optimize
+(the Rust/Swift/Clang model). Cranelift STAYS for fast/debug builds; LLVM for optimized
+release -- both behind the same MIR seam, both gated by the four-engine differential harness
+(LLVM becomes the 5th verified engine). LLVM 18 (clang/llc/opt) confirmed installed; NO
+libLLVM linkage (emit .ll text, shell to clang -- the same emit-text pattern the self-host
+codegen uses); aot_runtime.c reused UNCHANGED.
+
+**Honest performance verdict (from scoping):** a MECHANICAL mirror (everything in the flat
+MEM_BASE arena via inttoptr) BEATS THE INTERPRETER BUT NOT C/RUST -- inttoptr defeats LLVM's
+alias analysis + mem2reg. The payoff is a TWO-TIER value model: address-not-taken SCALAR
+locals -> real alloca -> mem2reg -> SSA registers -> LLVM's full loop suite -> genuinely
+C/Rust-ballpark for scalar/compute/loop code. AGGREGATE/pointer-heavy code stays capped by the
+single shared arena's weak aliasing -- a PERMANENT ceiling of the flat-memory ABI, uncappable
+only by a large ABI change (per-object allocas + TBAA), not worth it now. The scalar MVP (S0)
+naturally captures the win (scalars have no aggregates -> straight to alloca->registers).
+Correctness trap: NEVER emit nsw/nuw (LLVM deletes overflow checks as UB) -- use
+llvm.*.with.overflow intrinsics + guarded div. -O2 preserves trace/fault observability
+(external rt_* calls are optimization barriers).
+
+Slices: S0 scalar+CFG (the MVP, ~400-600 lines, delivers the scalar perf win) -> S1 aggregates
+(forces Tier-F/R) -> S2 enums+statics -> S3 drop (tallest pole) -> S4 Box/alloc/rawptr -> S5
+FFI+concurrency -> S6 full corpus + LLVM as the 5th Stage-D engine. Collections are unimplemented
+in the Cranelift backend TOO -- same corpus boundary, not a new LLVM gap. Full emitter ~1500-2200
+lines.
+
+## ROADMAP to a "proper language" (prototype -> production), ordered
+
+1. **Performance -- the LLVM backend** (above). Optimized native code; the foundational perf move.
+2. **Real std + I/O.** Iterator adapters (map/filter/fold over the 0009 protocol), a formatting
+   story, and a std I/O layer over the P17 boundary (files/network). This is what lets people
+   write REAL programs (today's std is Opt/Res/Arena/List/Vec/Map/String).
+3. **Stability + packaging.** The 1.0 gate (editions/migrator exist via P15), a package manager,
+   dependency handling. What lets OTHERS build on it.
+4. **Reach.** More platforms (ARM/macOS/Windows/bare-metal; today x86-64 Linux), richer
+   diagnostics/LSP, docs. The eval campaign (P19) measures the human-LLM authorship thesis.
+
+Honest framing: the self-hosting arc (4 tiers) is a CREDIBILITY proof, done. The above is the
+gap from "impressive prototype" to "language people use." Performance (1) is the most
+foundational and the one with infra already in place (MIR seam + differential gate + emit-text).
