@@ -228,6 +228,52 @@ impl<'a> Checker<'a> {
         m.insert("Self".to_string(), ty.clone());
         Some(subst(aty, &m))
     }
+
+    /// Resolve a projection `Base::assoc` to a concrete type when `Base` is bound
+    /// to a concrete type (design 0009 §2.2). Mirrors the monomorphizer's
+    /// projection resolution (`generics::resolve_proj`): the associated-type
+    /// member name selects the interface, so a projection over a concrete base
+    /// resolves without the projection itself naming its interface.
+    pub(super) fn resolve_proj(&self, base: &Type, assoc: &str) -> Option<Type> {
+        for iface in self.items.interfaces.values() {
+            if iface.assoc_type.as_deref() == Some(assoc) {
+                if let Some(t) = self.resolve_assoc(base, &iface.name) {
+                    return Some(t);
+                }
+            }
+        }
+        None
+    }
+
+    /// Inject a resolution for every associated-type projection `Base::Assoc`
+    /// appearing in `tys` whose base is already pinned to a concrete type in
+    /// `smap`, so a subsequent `subst` normalizes the projection to the impl's
+    /// binding (design 0009 §2.2). A base still opaque (a `Param`, e.g. at a
+    /// def-site) is left untouched: the projection stays symbolic.
+    pub(super) fn normalize_projections<'t>(
+        &self,
+        tys: impl Iterator<Item = &'t Type>,
+        smap: &mut HashMap<String, Type>,
+    ) {
+        let mut projs = Vec::new();
+        for t in tys {
+            crate::generics::collect_projs(t, &mut projs);
+        }
+        for (base, assoc) in projs {
+            let key = format!("{base}::{assoc}");
+            if smap.contains_key(&key) {
+                continue;
+            }
+            if let Some(c) = smap.get(&base) {
+                if !matches!(c, Type::Error | Type::Param(_)) {
+                    let c = c.clone();
+                    if let Some(resolved) = self.resolve_proj(&c, &assoc) {
+                        smap.insert(key, resolved);
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -718,6 +764,16 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        // Normalize associated-type projections in the parameter and return types
+        // against the now-known type arguments BEFORE mode-checking the arguments
+        // (design 0009 §2.2): a parameter typed `fn(A, I::Item) -> A` with `I`
+        // pinned to a concrete iterator gets `I::Item` -> the impl's `Item`, so a
+        // concrete fn-pointer argument checks against the resolved signature. A
+        // still-opaque base (a self-call at a def-site) leaves the projection symbolic.
+        self.normalize_projections(
+            sig.params.iter().map(|p| &p.decl_ty).chain(std::iter::once(&sig.ret)),
+            &mut subst_map,
+        );
         // Emit argument accesses (moves/borrows/effects) against substituted modes.
         for (p, a) in sig.params.iter().zip(args) {
             self.clear_carried();
@@ -742,24 +798,6 @@ impl<'a> Checker<'a> {
         }
         if sig.alloc {
             self.note_alloc(span, format!("call to `alloc` generic function `{name}` (§4.1)"));
-        }
-        // Resolve any associated-type projection in the return (design 0009 §2.2):
-        // for each type parameter with a bound interface that declares an
-        // associated type, inject `T::Item` -> the concrete impl binding.
-        for (pname, bounds) in &sig.type_params {
-            let concrete = match subst_map.get(pname) {
-                Some(t) if !matches!(t, Type::Error | Type::Param(_)) => t.clone(),
-                _ => continue,
-            };
-            for b in bounds {
-                if let Some(info) = self.items.interfaces.get(b) {
-                    if let Some(aname) = &info.assoc_type {
-                        if let Some(resolved) = self.resolve_assoc(&concrete, b) {
-                            subst_map.insert(format!("{pname}::{aname}"), resolved);
-                        }
-                    }
-                }
-            }
         }
         self.record_inst(name, targs.clone());
         if !targs.iter().any(|t| matches!(t, Type::Error)) {
@@ -1054,6 +1092,12 @@ impl<'a> Checker<'a> {
                 smap.insert(p.clone(), t.clone());
             }
         }
+        // Normalize associated-type projections in the field types against the
+        // now-known concrete parameter bindings (design 0009 §2.2): a field typed
+        // `fn(I::Item) -> U` with `I` pinned to a concrete iterator resolves
+        // `I::Item` to the impl's `Item`, so the field value checks against the
+        // concrete signature rather than the opaque projection.
+        self.normalize_projections(g.fields.iter().map(|(_, t)| t), &mut smap);
         for fi in fields {
             match g.fields.iter().find(|(fn_, _)| fn_ == &fi.name) {
                 Some((_, fty)) => {

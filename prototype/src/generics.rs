@@ -571,7 +571,7 @@ fn resolve_impl(
 }
 
 /// Collect every associated-type projection `(base, assoc)` mentioned in `t`.
-fn collect_projs(t: &Type, out: &mut Vec<(String, String)>) {
+pub(crate) fn collect_projs(t: &Type, out: &mut Vec<(String, String)>) {
     match t {
         Type::Proj(b, a) => out.push((b.clone(), a.clone())),
         Type::App(_, args) => for x in args { collect_projs(x, out); },

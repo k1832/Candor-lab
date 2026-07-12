@@ -11,17 +11,16 @@
 //! allocator vtable stores `bump_alloc`/`bump_free`). Capturing closures remain
 //! unavailable (OBL-GENERICS-CLOSURE), so state travels as an explicit value.
 //!
-//! LIMIT (projection normalization). A *fully generic* adapter over an arbitrary
-//! `I: Iter` inner — `map[I: Iter, U](it: I, f: fn(I::Item) -> U)` or a
-//! `struct MapIter[I, U] { f: fn(I::Item) -> U, .. }` — does not check: a
-//! concrete fn pointer argument/field (`fn(i64) -> U`) will not unify against
-//! the projection `I::Item`, because call-site inference resolves `I::Item` to
-//! the impl's concrete binding only AFTER argument mode-checking has run
-//! (`src/check/generics.rs`, the resolution loop below the arg loop in
-//! `check_generic_call`). Adapters are therefore generic over their ELEMENT
-//! types with a CONCRETE inner iterator (whose `Item` resolves): `MapIter[T, U]`
-//! over `List[T]`, and the chain nests concrete adapters. Recorded for design
-//! 0009 §9 / OBL-GENERICS-ITER.
+//! FULLY GENERIC adapters (projection normalization). An adapter over an
+//! arbitrary `I: Iter` inner — `struct MapIter[I, U] { f: fn(I::Item) -> U, .. }`
+//! and `gmap`/`gfold[I: Iter, ..](it: I, f: fn(.., I::Item) -> ..)` — now checks
+//! and runs: a concrete fn-pointer argument/field (`fn(i64) -> U`) unifies
+//! against the projection `I::Item` because call-site inference NORMALIZES the
+//! parameter/field types (resolving `I::Item` to the impl's concrete binding)
+//! BEFORE argument mode-checking (`src/check/generics.rs`,
+//! `normalize_projections`). Adapters may therefore be generic over their inner
+//! iterator, not just its element type. See `generic_inner_adapter_over_any_iter`
+//! and design 0009 §9 / OBL-GENERICS-ITER.
 
 use candor_proto::{run_source_real, run_source_real_mir, run_source_real_native};
 use candor_proto::{check_source_real, MirRunResult, RunResult};
@@ -256,29 +255,43 @@ fn fold_mapfilter[U, A](it: MapFilter[U], init: A, f: fn(A, U) -> A) alloc -> A 
     assert_ret(&src, 12);
 }
 
-// ---- the projection-normalization limit, pinned as a negative test -----------
+// ---- fully generic adapter over an arbitrary `I: Iter` (projection normalized) --
 
 #[test]
-fn generic_inner_adapter_field_is_rejected() {
-    // A fully generic adapter — inner `I: Iter`, field `f: fn(I::Item) -> U` — is
-    // NOT expressible: constructing it with a concrete `fn(i64) -> i64` fails to
-    // unify against the projection `I::Item` (E0703). This pins the exact limit
-    // that forces the concrete-inner shape above; if projection normalization is
-    // ever completed at the argument/field boundary, this test flips.
+fn generic_inner_adapter_over_any_iter() {
+    // A fully generic adapter — inner `I: Iter`, field `f: fn(I::Item) -> U`, and
+    // itself `impl Iter` — now checks and runs. `gmap`/`gfold` are generic over
+    // ANY `Iter` (not a concrete inner): a concrete `fn(i64) -> i64` unifies
+    // against the projection `I::Item` because the call/struct-literal paths
+    // normalize `I::Item` to the impl's binding (`i64`) before checking the
+    // argument. Double [4, 3, 2, 1] -> [8, 6, 4, 2], summed = 20.
     let src = format!(
         "{ITER}\n\
          struct MapIter[I, U] {{ inner: I, f: fn(I::Item) -> U }}\n\
-         fn dbl(x: i64) -> i64 {{ return x * 2; }}\n\
+         impl[I: Iter, U] Iter for MapIter[I, U] {{\n\
+             type Item = U;\n\
+             fn next(take self) alloc -> IterStep[U, MapIter[I, U]] {{\n\
+                 match self.inner.next() {{\n\
+                     IterStep::More(x, rest) => {{ return IterStep::More((self.f)(x), MapIter {{ inner: rest, f: self.f }}); }}\n\
+                     IterStep::Done => {{ return IterStep::Done; }}\n\
+                 }}\n\
+             }}\n\
+         }}\n\
+         fn gmap[I: Iter, U](it: I, f: fn(I::Item) -> U) -> MapIter[I, U] {{ return MapIter {{ inner: it, f: f }}; }}\n\
+         fn gfold[I: Iter, A](it: I, init: A, f: fn(A, I::Item) -> A) alloc -> A {{\n\
+             let mut acc: A = init;\n\
+             let mut cur: I = it;\n\
+             loop {{ match cur.next() {{ IterStep::More(x, rest) => {{ acc = f(acc, x); cur = rest; }} IterStep::Done => {{ break; }} }} }}\n\
+             return acc;\n\
+         }}\n\
+         {}\n\
          fn main() alloc -> i64 {{\n{BUILD_1234}\n\
-             let m: MapIter[List[i64], i64] = MapIter {{ inner: l4, f: dbl }};\n\
-             return 0;\n\
-         }}"
+             let m: MapIter[List[i64], i64] = gmap(l4, dbl);\n\
+             return gfold(m, 0, add);\n\
+         }}",
+        dbl_add()
     );
-    let e: Vec<String> = match check_source_real(&src) {
-        Ok(diags) => diags.into_iter().filter(|d| d.severity == Severity::Error).map(|d| d.code).collect(),
-        Err(parse) => vec![parse.code],
-    };
-    assert!(e.contains(&"E0703".to_string()), "want E0703, got {e:?}");
+    assert_ret(&src, 20);
 }
 
 fn describe(r: RunResult) -> String {

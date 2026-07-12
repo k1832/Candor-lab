@@ -658,7 +658,8 @@ the loop, exactly the P2 / 0007 §3.4 partition.
   model found.
 - **OBL-GENERICS-CLOSURE (new).** Full capturing closures deferred with §5.4's
   two-part gate.
-- **Iterator adapters (2026-07-13) — LANDED (capture-free), one shape BLOCKED.**
+- **Iterator adapters (2026-07-13) — LANDED (capture-free); fully-generic
+  adapters RESOLVED (2026-07-13).**
   The std+I/O milestone's headline feature, built additively on §3.1's `Iter`
   protocol (`next(take self)` returning `IterStep::More(item, successor)`; the
   adapter is moved through each step and the successor is threaded back). All
@@ -672,19 +673,25 @@ the loop, exactly the P2 / 0007 §3.4 partition.
   (one fused pass, no intermediate list) to `12`. `filter`'s predicate is
   `fn(read T) -> bool` — it must BORROW the item, since a by-value predicate
   moves it and E0301 then bars yielding it.
-  *Blocked — a fully generic adapter over an arbitrary `I: Iter` inner.* A
-  `struct MapIter[I, U] { f: fn(I::Item) -> U, .. }` (or a `map[I: Iter, U](it: I,
-  f: fn(I::Item) -> U)` constructor) does not check: a concrete `fn(i64) -> U`
-  argument/field will not unify against the projection `I::Item` (E0703). Cause:
-  call-site inference resolves `I::Item` to the impl's concrete binding only
-  AFTER argument mode-checking runs (`check_generic_call` in
-  `src/check/generics.rs` — the projection-resolution loop sits below the
-  argument loop, so `subst_map` lacks `I::Item -> i64` when the fn-pointer arg is
-  checked). A completeness gap in call-site projection normalization, not a
-  design refusal; adapters are therefore generic over their ELEMENT types with a
-  CONCRETE inner iterator (whose `Item` resolves), and the chain nests concrete
-  adapters. Pinned by `generic_inner_adapter_field_is_rejected`, which flips when
-  the gap is closed. No compiler surface was touched.
+  *Fully generic adapters over an arbitrary `I: Iter` inner now check and run.*
+  A `struct MapIter[I, U] { f: fn(I::Item) -> U, .. }` that itself `impl Iter`,
+  and `gmap`/`gfold[I: Iter, ..](it: I, f: fn(.., I::Item) -> ..)`, check clean
+  and run to exact values on all three engines (`generic_inner_adapter_over_any_iter`,
+  = 20). The prior BLOCK was a projection-normalization *ordering* gap in the
+  checker: a concrete `fn(i64) -> U` argument/field would not unify against the
+  projection `I::Item` (E0703) because call-site inference resolved `I::Item` to
+  the impl's binding only AFTER argument/field mode-checking. Fixed surgically in
+  `src/check/generics.rs`: `normalize_projections` injects `I::Item -> i64` into
+  the inference map (via `resolve_proj`, mirroring the monomorphizer's already-
+  correct `generics::resolve_proj`) BEFORE the arg/field checks, in both
+  `check_generic_call` (moving the resolution above the arg loop) and
+  `check_generic_struct_lit`. The concrete `I` is already known at that point
+  (pinned by the other value arguments / the expected-type annotation), so this
+  is a normalization reorder, NOT a new constraint solver. Monomorphization and
+  lowering already resolved projections, so no compiler surface below the checker
+  changed. The old pin `generic_inner_adapter_field_is_rejected` flipped to the
+  passing `generic_inner_adapter_over_any_iter`. Remaining: capturing closures
+  (OBL-GENERICS-CLOSURE) still gate stateful transforms.
 - **Prototype inference note — RESOLVED (2026-07-12).** E1002 (infer a type
   parameter from a fn-pointer argument's *return* type) was a completeness gap
   within 0007 §2.2; closed by extending `unify` to descend `fn(..)->..` formal
