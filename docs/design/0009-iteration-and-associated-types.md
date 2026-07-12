@@ -658,6 +658,33 @@ the loop, exactly the P2 / 0007 §3.4 partition.
   model found.
 - **OBL-GENERICS-CLOSURE (new).** Full capturing closures deferred with §5.4's
   two-part gate.
+- **Iterator adapters (2026-07-13) — LANDED (capture-free), one shape BLOCKED.**
+  The std+I/O milestone's headline feature, built additively on §3.1's `Iter`
+  protocol (`next(take self)` returning `IterStep::More(item, successor)`; the
+  adapter is moved through each step and the successor is threaded back). All
+  transforms are capture-free bare fn pointers (§5.2), referenced by name and
+  stored in an adapter's struct field (as the allocator vtable stores
+  `bump_alloc`). *Landed, checked clean + run to exact values on the tree-walker,
+  MIR, and native engines* (`tests/adapters.rs`): an eager `fold[T, A]` (generic
+  over element and accumulator) driving `List::next`; a lazy `MapIter[T, U]` and
+  `FilterIter[T]`, each a generic struct that `impl Iter`, over `List`; and a
+  `list -> filter(even) -> map(double) -> fold(sum)` chain that composes lazily
+  (one fused pass, no intermediate list) to `12`. `filter`'s predicate is
+  `fn(read T) -> bool` — it must BORROW the item, since a by-value predicate
+  moves it and E0301 then bars yielding it.
+  *Blocked — a fully generic adapter over an arbitrary `I: Iter` inner.* A
+  `struct MapIter[I, U] { f: fn(I::Item) -> U, .. }` (or a `map[I: Iter, U](it: I,
+  f: fn(I::Item) -> U)` constructor) does not check: a concrete `fn(i64) -> U`
+  argument/field will not unify against the projection `I::Item` (E0703). Cause:
+  call-site inference resolves `I::Item` to the impl's concrete binding only
+  AFTER argument mode-checking runs (`check_generic_call` in
+  `src/check/generics.rs` — the projection-resolution loop sits below the
+  argument loop, so `subst_map` lacks `I::Item -> i64` when the fn-pointer arg is
+  checked). A completeness gap in call-site projection normalization, not a
+  design refusal; adapters are therefore generic over their ELEMENT types with a
+  CONCRETE inner iterator (whose `Item` resolves), and the chain nests concrete
+  adapters. Pinned by `generic_inner_adapter_field_is_rejected`, which flips when
+  the gap is closed. No compiler surface was touched.
 - **Prototype inference note — RESOLVED (2026-07-12).** E1002 (infer a type
   parameter from a fn-pointer argument's *return* type) was a completeness gap
   within 0007 §2.2; closed by extending `unify` to descend `fn(..)->..` formal
