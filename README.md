@@ -56,9 +56,14 @@ Rust anywhere in the compile path** (just Candor and `as`/`ld`). It does its own
 instruction selection, stack allocation, and SysV calling convention; only the
 mechanical encoding/linking is handed to the assembler. **So all four self-hosting
 tiers now close over the same corpus — Candor checks, interprets, lowers-to-MIR, and
-compiles-to-native its own hardest programs.** (The codegen is deliberately simple and
-unoptimized — a bootstrap-credibility proof, not a competitor to the Rust/Cranelift
-backend that remains the production toolchain.) The self-check fixpoint closes over the interpreter too —
+compiles-to-native its own hardest programs.** The native tier also covers the **full
+user-generic and trait surface** (all thirteen generic fixtures — `fn[T]`/`struct[T]`/
+`enum[T]`, `interface`/`impl` dispatch, generic impls, trait bounds, `?`/`From` — via the
+shared monomorphizer). The one surface it does not yet cover is the std collections
+(`Vec`/`Map`/`String`) — an honest boundary the Rust reference backend also leaves
+`unimplemented`. (The codegen is deliberately simple and unoptimized — a
+bootstrap-credibility proof, not a competitor to the Rust/Cranelift backend that remains
+the production toolchain.) The self-check fixpoint closes over the interpreter too —
 the checker and analyses check `interp.cnr` clean, so Candor checks the very
 program that runs Candor. Dogfooding on real self-host source and real corpus
 programs repeatedly earned its keep — it caught defects the fixture suites had

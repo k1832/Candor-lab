@@ -339,7 +339,7 @@ rt_stack_alloc) is language-agnostic and reused unchanged.
 Deliberately-simple codegen (no optimization) -- a bootstrap-credibility proof, not a
 replacement for the Rust/Cranelift production backend.
 
-**Remaining (honest):** the native codegen covers the systems corpus + its fixtures, NOT
+**Remaining (honest):** the native codegen now also covers the full user-generic/trait surface (all 13 generic fixtures, via the shared monomorphizer + method dispatch + ?/From). It does NOT
 yet generics/collections/the ?/From surface (those run+compile-to-MIR self-hosted but
 have no native codegen fixtures); a register allocator (all-on-stack is correct but slow);
 and the deferred OBL-QUALITY-REVIEW debt (Vec::set order, the FAULT-trace harness blind
