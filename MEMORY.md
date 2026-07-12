@@ -525,3 +525,17 @@ One lesson per entry, one-line summary first.
   arithmetic payload ("cannot infer box value type") — bind it first
   (`let p: i64 = ...; box(read a, p)`). And adding a file to the corelib module
   tree bumps `tests/stage_c.rs`'s hardcoded module count (8→9). (2026-07-13).
+
+- **An ADDRESS-ORDERED intrusive free list gives both-sided coalescing with no
+  boundary-tag footer.** For the `FreeBlock { next: rawptr u8, size: usize }`
+  rawptr model, keeping the free list sorted by address (insert-in-order in
+  `free`) makes forward coalescing (merge `cur` when `addr + cap == addr(cur)`)
+  AND backward coalescing (extend `prev` when `addr(prev) + prev.size == addr`)
+  fall out of the single insertion walk — no per-block footer, no header
+  redesign, layout unchanged. Splitting stays compatible: the remainder takes the
+  split block's slot (its address is > cur and < the successor), preserving order
+  and the "no two free blocks physically adjacent" invariant. A merge fires only
+  on an EXACT byte-span boundary using the identical `block_span` rounding alloc
+  used, so it can only ever join physically-adjacent blocks (no overlap, no gap).
+  All addressing via `ptr_to_addr`/`addr_to_ptr` — no new primitive, lowers
+  natively like the existing MVP. (FREELIST-ALLOC split+coalesce, 2026-07-13).

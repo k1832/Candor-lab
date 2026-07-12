@@ -3682,12 +3682,29 @@ and `alloc` reuses.
   justified rawptr manipulation exactly as §4.2 intends.
 - `alloc`: round the request up to a header-sized, `align`-ed span (`block_span`,
   applied identically by `free` so the recorded capacity matches); first-fit walk
-  of the free list (unlink the first block whose stored size fits — whole block
-  returned, splitting DEFERRED, internal-fragmentation tradeoff noted); on no fit,
-  carve from the bump frontier; if the frontier would pass `end`, return null
-  (BoxResult::oom contract, §6.2).
-- `free`: write the freed block's header (next = current head, size = capacity),
-  set head = this block (LIFO push).
+  of the ADDRESS-ORDERED free list, unlinking the first block whose stored size
+  fits. SPLITTING (landed): when the fitting block's excess >= MIN_SPLIT (32 = a
+  16-byte `FreeBlock` header + a 16-byte minimum block) the front `need`-sized
+  piece is handed out and a NEW `FreeBlock` header for the trailing remainder is
+  written into the block's own tail and takes the block's slot in the ordered list
+  (remainder addr is > cur and < the successor, so order + non-adjacency hold);
+  below MIN_SPLIT the whole block is returned (bounded internal fragmentation). On
+  no fit, carve from the bump frontier; if the frontier would pass `end`, return
+  null (BoxResult::oom contract, §6.2).
+- `free`: keep the free list ADDRESS-ORDERED. Walk to the insertion point (`prev`
+  = last block below the freed address, `cur` = first above), then COALESCE
+  (landed, FORWARD + BACKWARD): forward-merge `cur` when it begins exactly at
+  `addr + cap`, backward-merge into `prev` when `prev` ends exactly at `addr`;
+  otherwise splice the (possibly forward-merged) block in at its ordered position.
+  Address ordering both makes first-fit deterministic and gives both-sided
+  coalescing with NO boundary-tag footer or header redesign — the `FreeBlock
+  { next, size }` layout is unchanged. A merge fires ONLY on an exact byte-span
+  boundary (`addr + size == neighbour addr`), where sizes are the identical
+  `block_span` rounding used at alloc, so a merge can only ever join two
+  PHYSICALLY-adjacent free blocks — never overlap live memory nor bridge a gap.
+  The invariant "no two free blocks are physically adjacent" is established on the
+  empty list and preserved by every free (merges on contact) and every split
+  (remainder stays strictly inside the old block's span).
 - HANDLE: `mk_alloc(state: write FreeList) -> Alloc` builds
   `Alloc { ctx: addr_of_mut(state), vt: addr_of(FREELIST_VT) }` inside the §6.1
   liveness-obligation `unsafe` justification, mirroring bump.
@@ -3702,16 +3719,25 @@ and `alloc` reuses.
   alloc reuses; bump-only would OOM on box #2 — RET 100), OOM (`freelist_oom.cnr`:
   zero-headroom window takes the `BoxResult::oom` arm — RET 42), and a non-box
   direct `alloc`/`free` drive (alloc two, free one, alloc again reuses the freed
-  address while the live block is untouched — RET 111). All asserted byte-exact on
-  the tree-walking oracle, the MIR interpreter, and Cranelift native no-opt + opt.
-  The two box fixtures live in `tests/fixtures/run/`, so the Cranelift-AOT ELF
-  (`tests/aot.rs`) and LLVM clang-`-O2` ELF (`tests/llvm.rs`) full-corpus gates
-  and the four-engine `tests/stage_d.rs` gate cover them transitively — six
-  engines agree.
-- DEFERRED: coalescing adjacent free blocks, best-fit, realloc. First-fit with
-  exact-or-larger reuse already demonstrates real reclaim.
+  address while the live block is untouched — RET 111), SPLITTING
+  (`freelist_split.cnr`: a 160-byte window carved into one block then freed with
+  the frontier exhausted; 9 sixteen-byte allocations succeed by splitting that one
+  block, where a no-split allocator yields 1 then OOMs — RET 9), and COALESCING
+  (`freelist_coalesce.cnr`: a 192-byte window fragmented into three adjacent
+  64-byte blocks, freed ends-then-middle so freeing the middle merges both sides
+  into one 192-byte block; the subsequent 192-byte alloc succeeds and its span is
+  written end-to-end, where without coalescing it OOMs — RET 111). All asserted
+  byte-exact on the tree-walking oracle, the MIR interpreter, and Cranelift native
+  no-opt + opt. The box fixtures AND the split/coalesce fixtures live in
+  `tests/fixtures/run/`, so the Cranelift-AOT ELF (`tests/aot.rs`) and LLVM
+  clang-`-O2` ELF (`tests/llvm.rs`) full-corpus gates and the four-engine
+  `tests/stage_d.rs` gate cover them transitively — six engines agree.
+- DEFERRED: best-fit, and realloc (an ABI decision — the `std::alloc` vtable has
+  no `realloc` slot). Splitting + forward/backward coalescing landed, so the
+  allocator no longer fragments under churn; first-fit (not best-fit) is retained
+  as the simplest policy that the split/coalesce tests prove non-fragmenting.
 - The corelib module tree grew 8 -> 9 modules (`std::freelist` discovered +
   checked clean by the module-tree checker); `tests/stage_c.rs`'s incremental-
   build module counts updated 8 -> 9 accordingly.
-- Full `cargo nextest` green (655 tests); clippy clean. This is the foundation
+- Full `cargo nextest` green (657 tests); clippy clean. This is the foundation
   for native growable collections + buffered I/O.

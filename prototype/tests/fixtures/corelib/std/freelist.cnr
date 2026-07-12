@@ -7,8 +7,10 @@
 // Freed blocks are chained through a `FreeBlock` header written into each block's
 // OWN storage: design 0001 §3.4 forbids a borrow-typed field, so the free list is
 // threaded through `rawptr` (the single sanctioned valve, §4.2), kept minimal and
-// justified. Coalescing, best-fit, and realloc are DEFERRED; a first-fit list with
-// exact-or-larger reuse already demonstrates real reclaim.
+// justified. The list is kept ADDRESS-ORDERED so `alloc` can SPLIT a too-large
+// block (returning the front piece, re-linking the trailing remainder) and `free`
+// can COALESCE the freed block with its physically-adjacent free neighbours on both
+// sides — non-fragmenting reclaim. Best-fit and realloc are DEFERRED.
 use std::alloc::{Alloc, AllocVtable};
 
 pub struct FreeList {
@@ -43,7 +45,7 @@ fn block_span(size: usize, align: usize) -> usize {
 }
 
 fn freelist_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
-    unsafe "ctx points at the live FreeList whose [next, end) window and free chain are reserved to this arena alone (no other code hands out addresses from it); every carved block stays inside [next, end) and is >= header-sized" {
+    unsafe "ctx points at the live FreeList whose [next, end) window and address-ordered free chain are reserved to this arena alone; every carved block stays inside [next, end) and is >= header-sized, and a split remainder (kept only when >= MIN_SPLIT) is written into the block's own tail" {
         let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
         let need: usize = block_span(size, align);
         let mut prev: rawptr u8 = ptr_null[u8]();
@@ -51,11 +53,28 @@ fn freelist_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
         while !is_null(cur) {
             let blk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
             if blk.size >= need {
-                if is_null(prev) {
-                    ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: blk.next });
+                // Split only when the remainder can hold its own FreeBlock header
+                // AND a minimum payload (MIN_SPLIT = 32 = a 16-byte header + a
+                // 16-byte minimum block); below that, hand out the whole block and
+                // accept the small internal fragmentation. The remainder takes the
+                // block's slot in the address-ordered list (its address is > cur and
+                // < blk.next, so the ordering and non-adjacency invariants hold).
+                if blk.size - need >= 32usize {
+                    let rem: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(cur) + need);
+                    ptr_write(cast_ptr[FreeBlock](rem), FreeBlock { next: blk.next, size: blk.size - need });
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: rem });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: rem, size: pblk.size });
+                    }
                 } else {
-                    let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
-                    ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: blk.next, size: pblk.size });
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: blk.next });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: blk.next, size: pblk.size });
+                    }
                 }
                 return cur;
             }
@@ -72,11 +91,43 @@ fn freelist_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
 }
 
 fn freelist_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
-    unsafe "push the freed block onto the list; its own storage (>= header-sized, guaranteed by block_span in alloc) holds the FreeBlock header {next = old head, size = capacity}" {
+    unsafe "the free list is kept ADDRESS-ORDERED; the freed block's own storage (>= header-sized, guaranteed by block_span in alloc) holds its FreeBlock header {next, size}, and a merge joins two blocks ONLY when their byte spans are exactly adjacent (addr + size == neighbour addr), so a merge can never overlap live memory nor bridge a gap" {
         let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
-        let cap: usize = block_span(size, align);
-        ptr_write(cast_ptr[FreeBlock](ptr), FreeBlock { next: st.head, size: cap });
-        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: ptr });
+        let mut cap: usize = block_span(size, align);
+        let a: usize = ptr_to_addr(ptr);
+        // Insertion point: prev = last free block below `a`, cur = first above it.
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) && ptr_to_addr(cur) < a {
+            let cblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            prev = cur;
+            cur = cblk.next;
+        }
+        // Forward coalesce: absorb `cur` when it begins exactly at a + cap.
+        let mut link: rawptr u8 = cur;
+        if !is_null(cur) {
+            let nblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if a + cap == ptr_to_addr(cur) {
+                cap = cap + nblk.size;
+                link = nblk.next;
+            }
+        }
+        // Backward coalesce: extend `prev` when it ends exactly at `a`.
+        if !is_null(prev) {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            if ptr_to_addr(prev) + pblk.size == a {
+                ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: link, size: pblk.size + cap });
+                return;
+            }
+        }
+        // No backward merge: insert the (possibly forward-merged) block at `a`.
+        ptr_write(cast_ptr[FreeBlock](ptr), FreeBlock { next: link, size: cap });
+        if is_null(prev) {
+            ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: ptr });
+        } else {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: ptr, size: pblk.size });
+        }
     }
 }
 
