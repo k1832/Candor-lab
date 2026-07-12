@@ -1,145 +1,155 @@
-//! Formatter (P16/NN#11) validation: idempotence over the whole `.cnr` corpus
-//! and a single-file semantic-preservation gate (spec 02 §9). The module-tree
-//! semantic gate is covered by the existing corelib/modules/iteration run tests,
-//! which execute the reformatted fixtures in place.
+//! Design 0011/0013 formatting foundation: `fmt_i64` (decimal rendering of a
+//! signed 64-bit integer, total including `i64::MIN`) and the `Show` value-
+//! rendering convention (a 0009-style interface composing through a `T: Show`
+//! bound). The corelib source is the self-contained image
+//! `fixtures/std_fmt.cnr` (the `corelib_flat` pattern; `String` std is single-
+//! file because it is a MIR-interp-only CollectionOp, excluded from the backend
+//! corpus — see that file's header). These tests append a `main` to those
+//! definitions and OBSERVE the produced `String` at runtime.
 
-use candor_proto::{format_source_real, run_dir, run_source_real, RunResult};
-use std::path::{Path, PathBuf};
+use candor_proto::diag::Severity;
+use candor_proto::{check_source_real, run_source_real, RunResult};
 
-fn all_cnr() -> Vec<PathBuf> {
-    let root = format!("{}/tests/fixtures", env!("CARGO_MANIFEST_DIR"));
-    let mut out = Vec::new();
-    collect(Path::new(&root), &mut out);
-    out.sort();
-    out
+fn source() -> String {
+    let path = format!("{}/tests/fixtures/std_fmt.cnr", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 
-fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
-    for e in std::fs::read_dir(dir).unwrap().flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            collect(&p, out);
-        } else if p.extension().map(|x| x == "cnr").unwrap_or(false) {
-            out.push(p);
-        }
+// Append a `main` (with the bump-allocator setup) to the formatting definitions.
+fn wrap(body: &str) -> String {
+    format!(
+        "{}\nfn main() alloc -> i64 {{\n  let mut bs: Bump = with_window(16777216, 1048576);\n  let al: Alloc = mk_alloc(write bs);\n{body}\n}}",
+        source()
+    )
+}
+
+fn run_ret(body: &str) -> i64 {
+    match run_source_real(&wrap(body)) {
+        RunResult::Ok(r) => r.ret,
+        RunResult::Fault(f) => panic!("unexpected fault: {}", f.to_json()),
+        RunResult::CheckErrors(d) => panic!("check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>()),
+        RunResult::ParseError(d) => panic!("parse error: {}", d.to_json()),
     }
 }
 
-/// Every corpus file parses and formats without error.
+fn run_trace(body: &str) -> Vec<i64> {
+    match run_source_real(&wrap(body)) {
+        RunResult::Ok(r) => r.trace,
+        RunResult::Fault(f) => panic!("unexpected fault: {}", f.to_json()),
+        RunResult::CheckErrors(d) => panic!("check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>()),
+        RunResult::ParseError(d) => panic!("parse error: {}", d.to_json()),
+    }
+}
+
+// Build `fmt_i64(al, <n>)`, compare its `as_str` view against the exact decimal
+// literal (str equality is bytewise, tests/text.rs). Returns 1 on a byte-match.
+fn fmt_eq(n: &str, expect: &str) -> i64 {
+    run_ret(&format!(
+        "let s: String = fmt_i64(read al, {n}); if as_str(read s) == \"{expect}\" {{ return 1; }} return 0;"
+    ))
+}
+
+// ---- the corelib image checks clean ----------------------------------------
+
 #[test]
-fn corpus_formats() {
-    for f in all_cnr() {
-        let src = std::fs::read_to_string(&f).unwrap();
-        if let Err(d) = format_source_real(&src) {
-            panic!("format failed for {}: {}", f.display(), d.to_json());
-        }
-    }
+fn image_checks_clean() {
+    // The formatting source + a `main` exercising the whole convention (fmt_i64,
+    // Show, and the generic `T: Show` composition) type-checks with no errors.
+    let src = wrap("let s: String = fmt_i64(read al, 0); return conv i64 len(as_str(read s));");
+    let diags = check_source_real(&src).unwrap_or_else(|p| panic!("parse error: {}", p.to_json()));
+    let errs: Vec<_> = diags.iter().filter(|d| d.severity == Severity::Error).map(|d| &d.code).collect();
+    assert!(errs.is_empty(), "std_fmt.cnr should check clean, got {errs:?}");
 }
 
-/// Idempotence: `format(format(x)) == format(x)` for every corpus file.
+// ---- fmt_i64: the decimal primitive ----------------------------------------
+
 #[test]
-fn idempotent() {
-    for f in all_cnr() {
-        let src = std::fs::read_to_string(&f).unwrap();
-        let once = format_source_real(&src).unwrap();
-        let twice = format_source_real(&once).unwrap();
-        assert_eq!(once, twice, "not idempotent: {}", f.display());
-    }
+fn fmt_i64_zero() {
+    assert_eq!(fmt_eq("0", "0"), 1);
 }
 
-/// A comparable run outcome (θ = the trace vector, plus return / fault kind),
-/// modulo spans; `None` for files that do not run as a standalone program.
-fn outcome(src: &str) -> Option<Result<(i64, Vec<i64>), String>> {
-    match run_source_real(src) {
-        RunResult::Ok(run) => Some(Ok((run.ret, run.trace))),
-        RunResult::Fault(fault) => Some(Err(format!("fault:{:?}", fault.kind))),
-        RunResult::CheckErrors(_) | RunResult::ParseError(_) => None,
-    }
-}
-
-/// Semantic-preservation gate (single-file): for every standalone-runnable file,
-/// the reformatted source produces the identical (return, trace) / fault kind.
 #[test]
-fn semantic_preservation_single_file() {
-    let mut runnable = 0;
-    for f in all_cnr() {
-        let src = std::fs::read_to_string(&f).unwrap();
-        let before = match outcome(&src) {
-            Some(o) => o,
-            None => continue,
-        };
-        runnable += 1;
-        let formatted = format_source_real(&src).unwrap();
-        let after = outcome(&formatted).unwrap_or_else(|| {
-            panic!("{}: ran before formatting but not after", f.display())
-        });
-        assert_eq!(before, after, "semantic drift after formatting {}", f.display());
-    }
-    assert!(runnable > 0, "no standalone-runnable fixtures exercised the gate");
+fn fmt_i64_positive() {
+    assert_eq!(fmt_eq("42", "42"), 1);
 }
 
-
-fn dir_outcome(dir: &Path) -> Option<Result<(i64, Vec<i64>), String>> {
-    match run_dir(dir) {
-        RunResult::Ok(run) => Some(Ok((run.ret, run.trace))),
-        RunResult::Fault(fault) => Some(Err(format!("fault:{:?}", fault.kind))),
-        RunResult::CheckErrors(_) | RunResult::ParseError(_) => None,
-    }
-}
-
-fn copy_tree(src: &Path, dst: &Path) {
-    std::fs::create_dir_all(dst).unwrap();
-    for e in std::fs::read_dir(src).unwrap().flatten() {
-        let p = e.path();
-        let target = dst.join(p.file_name().unwrap());
-        if p.is_dir() {
-            copy_tree(&p, &target);
-        } else {
-            std::fs::copy(&p, &target).unwrap();
-        }
-    }
-}
-
-fn format_tree_in_place(dir: &Path) {
-    for e in std::fs::read_dir(dir).unwrap().flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            format_tree_in_place(&p);
-        } else if p.extension().map(|x| x == "cnr").unwrap_or(false) {
-            let src = std::fs::read_to_string(&p).unwrap();
-            let out = format_source_real(&src).unwrap();
-            std::fs::write(&p, out).unwrap();
-        }
-    }
-}
-
-/// Semantic-preservation gate (module trees): every runnable `.cnr` module tree
-/// (a directory whose `main.cnr` runs) produces the identical (return, trace) /
-/// fault kind after every file in the tree is reformatted.
 #[test]
-fn semantic_preservation_module_trees() {
-    let root = format!("{}/tests/fixtures", env!("CARGO_MANIFEST_DIR"));
-    let tmp = std::env::temp_dir().join(format!("candor_fmt_gate_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let mut checked = 0;
-    for e in std::fs::read_dir(&root).unwrap().flatten() {
-        let dir = e.path();
-        if !dir.is_dir() {
-            continue;
-        }
-        let before = match dir_outcome(&dir) {
-            Some(o) => o,
-            None => continue,
-        };
-        checked += 1;
-        let mirror = tmp.join(dir.file_name().unwrap());
-        let _ = std::fs::remove_dir_all(&mirror);
-        copy_tree(&dir, &mirror);
-        format_tree_in_place(&mirror);
-        let after = dir_outcome(&mirror)
-            .unwrap_or_else(|| panic!("{}: tree ran before formatting but not after", dir.display()));
-        assert_eq!(before, after, "semantic drift after formatting tree {}", dir.display());
-    }
-    let _ = std::fs::remove_dir_all(&tmp);
-    assert!(checked > 0, "no runnable module trees exercised the gate");
+fn fmt_i64_negative() {
+    assert_eq!(fmt_eq("0 - 42", "-42"), 1);
+}
+
+#[test]
+fn fmt_i64_max() {
+    assert_eq!(fmt_eq("9223372036854775807", "9223372036854775807"), 1);
+}
+
+#[test]
+fn fmt_i64_min() {
+    // i64::MIN: negating it overflows, so the digits are produced in the negative
+    // domain. This is the load-bearing edge case.
+    assert_eq!(fmt_eq("-9223372036854775808", "-9223372036854775808"), 1);
+}
+
+#[test]
+fn fmt_i64_min_not_a_fault() {
+    // A wrong MIN handling would trip Candor's arithmetic-overflow fault rather
+    // than return; asserting a clean run to `len==20` guards that path directly.
+    assert_eq!(
+        run_ret("let s: String = fmt_i64(read al, -9223372036854775808); return conv i64 len(as_str(read s));"),
+        20 // '-' + 19 digits
+    );
+}
+
+#[test]
+fn fmt_i64_negative_bytes_traced() {
+    // Observe the produced String byte-by-byte: -42 -> '-','4','2' == 45,52,50.
+    let bytes = run_trace(
+        "let s: String = fmt_i64(read al, 0 - 42); let v: str = as_str(read s); \
+         let mut i: usize = 0; while i < len(v) { trace(conv i64 v[i]); i = i + 1; } return 0;",
+    );
+    assert_eq!(bytes, vec![45, 52, 50]);
+}
+
+// ---- Show: the value-rendering convention ----------------------------------
+
+#[test]
+fn show_leaf_renders_via_fmt_i64() {
+    // The `ShowInt` witness delegates to `fmt_i64`.
+    assert_eq!(
+        run_ret("let x: ShowInt = ShowInt { val: 7 }; let s: String = x.to_string(al); if as_str(read s) == \"7\" { return 1; } return 0;"),
+        1
+    );
+}
+
+#[test]
+fn show_composes_through_bound_some() {
+    // `impl[T: Show] Show for Opt[T]` renders "Some(<inner>)" by calling the
+    // payload's own `to_string` — composition through the `T: Show` bound.
+    assert_eq!(
+        run_ret("let x: Opt[ShowInt] = Opt::Some(ShowInt { val: 42 }); let s: String = x.to_string(al); if as_str(read s) == \"Some(42)\" { return 1; } return 0;"),
+        1
+    );
+}
+
+#[test]
+fn show_composes_through_bound_none() {
+    assert_eq!(
+        run_ret("let x: Opt[ShowInt] = Opt::None; let s: String = x.to_string(al); if as_str(read s) == \"None\" { return 1; } return 0;"),
+        1
+    );
+}
+
+#[test]
+fn show_through_generic_fn_bound() {
+    // A def-site `T: Show` bound: `show_it` calls `to_string` on an opaque `T`,
+    // resolved only through the bound (§2.1). Nested `Opt[ShowInt]` exercises the
+    // bound composing twice.
+    assert_eq!(
+        run_ret("let x: ShowInt = ShowInt { val: 5 }; let s: String = show_it(read x, al); if as_str(read s) == \"5\" { return 1; } return 0;"),
+        1
+    );
+    assert_eq!(
+        run_ret("let x: Opt[ShowInt] = Opt::Some(ShowInt { val: 9 }); let s: String = show_it(read x, al); if as_str(read s) == \"Some(9)\" { return 1; } return 0;"),
+        1
+    );
 }

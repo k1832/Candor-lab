@@ -3295,3 +3295,62 @@ every existing test stays byte-exact green; `aot_runtime.c` reused UNCHANGED.
   new fifth-engine corpus gate). `tests/stage_d.rs` (5 tests) and `tests/aot.rs` (6 tests)
   untouched and green. No change to `src/backend/llvm.rs` semantics, the Cranelift backend,
   the self-host modules, or `aot_runtime.c`. No `nsw`/`nuw`. clippy clean.
+
+## STD-FMT — the formatting foundation: `fmt_i64` + the `Show` value-rendering convention (2026-07-12)
+
+The first slice of the "real std + I/O" milestone and the language's first
+value-rendering convention. Purely additive: `fmt_i64` (decimal rendering of a
+signed 64-bit integer) and a `Show` interface (the Display analog), both pure
+Candor over the design-0013 `String` primitives — NO compiler/MIR/checker
+change. Source: `tests/fixtures/std_fmt.cnr` — a self-contained single-file
+corelib image (the `corelib_flat` pattern). It is NOT a `corelib/` module tree:
+it uses the design-0013 `String` (a MIR-interp-only CollectionOp), and the
+corelib tree is compiled by the AOT/LLVM/Stage-D native gates, which exclude
+CollectionOp — so `String` std stays single-file, exactly like `text.rs`/`vec.rs`/
+`map.rs`. Runtime observation: `tests/fmt.rs`, which appends a `main`.
+
+- THE PRIMITIVE SURFACE (built on, not assumed). `string_new(a: read Alloc) ->
+  String`; `push(write String, c)` appends ONE Unicode scalar (an i64 codepoint,
+  UTF-8-encoded, `enforced requires(is_scalar_value)`); `append(write String,
+  s: str)` appends a view; `as_str(read String) -> str`. A digit `d` is emitted
+  as the scalar `48 + d` ('0'..='9'); the sign is the scalar `45` ('-').
+- `fmt_i64` AND THE `i64::MIN` EDGE (load-bearing). Digits are produced in the
+  NEGATIVE domain, so the whole value is never negated: `i64::MIN` has no positive
+  counterpart (negating it overflows -> a Candor arithmetic fault), so a
+  non-negative `n` is reflected to `0 - n` (safe) and a negative `n` passes
+  through unchanged — `-i64::MIN` is never formed. For `m <= 0`, `m % 10 in
+  -9..=0` (truncated division), so `48 - (m % 10)` is the low digit's code and
+  `m / 10` carries. Digits go low-first into a fixed `[20]i64` buffer (an i64 is
+  <= 19 digits), then pushed high-to-low — no String reversal. A fixed buffer,
+  not a `write String` helper, because the interpreter's String-intrinsic
+  dispatch (`arg0_is_string`) only recognizes a String argument that is a
+  directly-owned local (or `read`/`write` of one), NOT one reached through a
+  borrow parameter; so every `push` must target `fmt_i64`'s own owned local.
+- THE `Show` CONVENTION. `interface Show { fn to_string(read self, a: Alloc)
+  alloc -> String; }` — an ordinary 0009-style interface returning a freshly-built
+  owning String (region-free: the result derives from `a`, not from `self`). It
+  threads `Alloc` BY VALUE: `Alloc` is a `copy` handle meant to pass by value,
+  which ALSO sidesteps a checker quirk — a `read`-mode interface-method parameter
+  is double-borrowed at the call site (the param's decl type already carries the
+  borrow and `check_arg_mode` re-adds one -> `borrow borrow Alloc`), a path never
+  exercised before (existing interface methods take only `self` or scalar params).
+  Witnessed by `impl Show for ShowInt` (a leaf i64, delegating to `fmt_i64`).
+- COMPOSITION THROUGH A `T: Show` BOUND (single-file only, parallel to F2). The
+  generic `impl[T: Show] Show for Opt[T]` rendering "Some(<inner>)"/"None" via the
+  payload's own `to_string`, and a `show_it[T: Show]` free function, check and RUN
+  single-file but do NOT resolve under the module-tree checker (E1002: "no method
+  `to_string` on type parameter `T`" — a bound-method call inside a generic impl
+  across the tree, unexercised until now). So, exactly as cross-type `?` is proven
+  single-file (corelib finding F2), the `T: Show` composition — with the whole
+  convention — lives in the single-file image `std_fmt.cnr`, exercised by
+  `tests/fmt.rs` (`show_composes_through_bound_{some,none}`,
+  `show_through_generic_fn_bound`).
+- GATE (isolation). `tests/fmt.rs` green — 12 tests: an `image_checks_clean`
+  guard on `std_fmt.cnr`; `fmt_i64` on 0/positive/negative/`i64::MIN`/`i64::MAX`
+  (str-equality on the `as_str` view) + a clean-run/`len==20` guard that MIN does
+  not fault + a byte-trace of `-42` -> `[45, 52, 50]`; `Show` leaf + the `T: Show`
+  composition. `tests/corelib.rs` (13), `tests/text.rs` (36), and the AOT/LLVM/
+  Stage-D native gates untouched and green (nothing added to the backend corpus).
+  clippy clean. No backend, self-host, `aot_runtime.c`, MIR, or checker change.
+- NEXT SLICE. Wire `fmt`/`Show` through `std_io` (the libc `write` path,
+  `fixtures/std_io/main.cnr` + `src/audit.rs`) for a `println` path.

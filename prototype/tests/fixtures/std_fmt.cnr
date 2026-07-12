@@ -1,0 +1,137 @@
+// FORMATTING FOUNDATION (design 0011/0013 text surface + 0009 interfaces) — the
+// language's first value-rendering convention, as a self-contained single-file
+// corelib IMAGE (the `corelib_flat.cnr` pattern). It cannot live in the
+// backend-swept `corelib/` module tree: it uses the design-0013 `String`
+// (a compiler-known CollectionOp) which is MIR-interpreter-only, and the corelib
+// tree is compiled by the AOT/LLVM/Stage-D native gates, which exclude
+// CollectionOp. The `String` std is therefore single-file, exactly like
+// `tests/text.rs`/`vec.rs`/`map.rs`. Runtime observation lives in `tests/fmt.rs`,
+// which appends a `main` to these definitions.
+//
+// This file carries the WHOLE convention, including the generic
+// `impl[T: Show] Show for Opt[T]` and `show_it[T: Show]` — those check and RUN
+// here (single-file) but do NOT resolve under the module-tree checker (E1002 on
+// a bound-method call inside a generic impl, parallel to the corelib `?` finding
+// F2), which is the other reason this is a single-file image rather than a tree.
+
+// core/opt (design 0008 §5), inlined: `Opt[T]` with `Some` the `ok`-marked arm.
+enum Opt[T] { ok Some(T), None }
+
+// std/alloc + std/bump (design 0008 §5), inlined: a bump allocator over a
+// caller-provided window, producing the `copy` `Alloc` handle (design 0001 §6.1).
+// The two `unsafe` valves are the standard bump-arena promises (see std/bump.cnr).
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize }
+fn with_window(base: usize, size: usize) -> Bump {
+    return Bump { next: base, end: base + size };
+}
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live Bump whose [next, end) window is reserved to this arena alone; the carved block stays inside [next, end)" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let aligned: usize = (b.next + align - 1) / align * align;
+        if aligned + size > b.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {}
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+fn mk_alloc(state: write Bump) -> Alloc {
+    unsafe "ctx (the caller's Bump local) and vt (the static BUMP_VT) outlive every copy of this handle and every String it serves" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) };
+    }
+}
+
+// ---- the formatting foundation ---------------------------------------------
+
+// Render a signed 64-bit integer to its decimal `String`. Total over the whole
+// range, INCLUDING `i64::MIN`: the digits are produced in the NEGATIVE domain,
+// so the whole value is never negated. `i64::MIN` has no positive counterpart
+// (negating it overflows, a Candor arithmetic fault), but a non-negative `n` is
+// reflected to `0 - n` (safe, since `n >= 0`) and a negative `n` passes through
+// unchanged, so the overflow-prone `-i64::MIN` is never formed. For `m <= 0`,
+// `m % 10` is in `-9..=0` (division truncates toward zero), so `48 - (m % 10)`
+// is the ASCII code of the low digit and `m / 10` carries the rest. Digits are
+// emitted low-first into a fixed buffer (an i64 is at most 19 digits), then
+// pushed high-to-low, so the built String reads left-to-right with no reversal.
+// A fixed buffer, not a `write String` helper: the String primitives operate on
+// this function's own owned local `s` (a String reached through a borrow is not
+// recognized by the intrinsic dispatch).
+fn fmt_i64(a: read Alloc, n: i64) alloc -> String {
+    let mut s: String = string_new(a);
+    if n < 0 {
+        push(write s, 45);
+    }
+    let mut m: i64 = n;
+    if n >= 0 {
+        m = 0 - n;
+    }
+    let mut digits: [20]i64 = [0i64; 20];
+    let mut count: usize = 0;
+    let mut more: bool = true;
+    while more {
+        digits[count] = 48 - (m % 10);
+        count = count + 1;
+        m = m / 10;
+        more = m != 0;
+    }
+    let mut i: usize = count;
+    while i > 0 {
+        i = i - 1;
+        push(write s, digits[i]);
+    }
+    return s;
+}
+
+// `Show` is Candor's value-rendering convention — the Display analog. An ordinary
+// design-0009 interface: one method rendering the receiver into a freshly-built
+// owning `String`. It is `alloc` (building a String allocates) and threads the
+// `Alloc` BY VALUE — `Alloc` is a `copy` handle meant to be passed by value,
+// which also sidesteps the checker's double-borrow of a `read`-mode interface-
+// method parameter. A `T: Show` bound composes it through generics.
+interface Show {
+    fn to_string(read self, a: Alloc) alloc -> String;
+}
+
+// A minimal `Show` witness over an `i64`, delegating to `fmt_i64`.
+struct ShowInt { val: i64 }
+impl Show for ShowInt {
+    fn to_string(read self, a: Alloc) alloc -> String {
+        return fmt_i64(read a, self.val);
+    }
+}
+
+// `Show` composing THROUGH a generic bound: `Opt[T]` is renderable exactly when
+// its payload is (`T: Show`), rendering "Some(<inner>)" / "None". The `Some` arm
+// calls `T`'s own `to_string`, proving the convention threads through the bound.
+impl[T: Show] Show for Opt[T] {
+    fn to_string(read self, a: Alloc) alloc -> String {
+        match self {
+            Opt::Some(v) => {
+                let mut s: String = string_new(read a);
+                append(write s, "Some(");
+                let inner: String = v.to_string(a);
+                append(write s, as_str(read inner));
+                append(write s, ")");
+                return s;
+            },
+            Opt::None => {
+                let mut s: String = string_new(read a);
+                append(write s, "None");
+                return s;
+            },
+        }
+    }
+}
+
+// A def-site `T: Show` bound: `show_it` renders an opaque `T` through the bound
+// (§2.1) — the convention composing at a generic call site, not just an impl.
+fn show_it[T: Show](x: read T, a: Alloc) alloc -> String {
+    return x.to_string(a);
+}
