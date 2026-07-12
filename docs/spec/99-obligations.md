@@ -2849,3 +2849,10 @@ now covering 13 fixtures (NG1's 11 + `fromq` + `gfromq`), each codegen -> `.s` -
 `interp.cnr`/`lower.cnr`/`mono.cnr`/`layout.cnr`/`src/backend/*` — contained to
 `codegen.cnr` + its gate. USER GENERICS ARE NOW FULLY NATIVE-COMPILED: all 13 generic
 fixtures reproduce the oracle byte-exact with no Rust in the compile path.
+
+- **F-FOUR-ENGINE-CLAIM: ADDRESSED (2026-07-12).** Design 0014 §2.2 now states the
+  transitivity honestly as FEATURE-level, not program-level: the four-engine gate covers
+  tests/fixtures/{run,parity,real,generics}+corelib, not 11_1..11_5 directly, so the
+  engines are proven to agree on the CONSTRUCTS the corpus uses (enough for the claim),
+  not on those exact five programs. Softened the "transitively matching native" wording.
+  OBL-QUALITY-REVIEW is now fully cleared.

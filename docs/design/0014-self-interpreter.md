@@ -101,11 +101,21 @@ four-engine gate proves the trace survives," lib.rs:333). The tree-walker is the
 reference the other three are proven equal to.
 
 The consequence is load-bearing for the credibility claim: **matching the
-tree-walker is, transitively, matching native execution.** `interp.cnr` needs to
-be differentially tested against only *one* engine (the cheapest, most direct one),
-and the existing gate guarantees that agreement with the tree-walker is agreement
-with the optimized native backend. The self-interpreter did not have to re-prove
-equivalence across engines; it inherited it.
+tree-walker is, transitively, matching native execution — at the level of the
+language features exercised.** `interp.cnr` needs to be differentially tested
+against only *one* engine (the cheapest, most direct one), and the four-engine gate
+guarantees that agreement with the tree-walker is agreement with the optimized
+native backend *for every construct that gate covers*. One precision, to state it
+honestly rather than round up (per the OBL-QUALITY-REVIEW audit): the four-engine
+equivalence gate runs over `tests/fixtures/{run,parity,real,generics}` + the
+corelib, **not** over the self-interpreter's own systems-corpus fixtures
+(`11_1..11_5`) directly. So the transitivity is **feature-level** — the four engines
+are proven to agree on the constructs the systems corpus uses — rather than
+program-level for those exact five programs. That is enough for the credibility
+claim (the corpus uses no construct the four-engine gate hasn't equated), but it is
+a feature-coverage argument, not a claim that `11_1..11_5` themselves ride all four
+engines. The self-interpreter did not have to re-prove equivalence across engines;
+it inherited it at that granularity.
 
 ### 2.3 The self-interpreter is gated on execution — and (since this doc was drafted) ALSO self-checks
 
