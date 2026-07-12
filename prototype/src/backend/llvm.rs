@@ -15,8 +15,13 @@
 //! ENUMS (tag + payload-union in the flat model; construction = tag+payload stores,
 //! `match` = tag read -> icmp/branch chain -> per-variant payload projection) and
 //! STATIC/CONST data (the static region: string-literal bytes + `static` initializers
-//! run before `main`, addressed via `StaticAddr`/`StrAddr`). Box/collections/
-//! concurrency remain out of subset and are rejected with a precise error.
+//! run before `main`, addressed via `StaticAddr`/`StrAddr`). S3 adds the MOVE/DROP
+//! SCHEDULE (drop glue at each `Drop`, trace-on-drop, static move-mask pruning). S4
+//! adds HEAP ALLOCATION: `Box[T]`/`unbox` through a Candor allocator handle's vtable
+//! (the fn-pointer dispatch table), raw-pointer load/store (observable rt_mmio
+//! barriers), and drop-through-Box (free-on-drop via per-pointee drop glue).
+//! FFI/extern and concurrency/spawn remain out of subset, rejected with a precise
+//! "out of LLVM-S4 subset" error.
 //!
 //! ## The two-tier value model
 //! Each local is classified by a per-fn MIR scan (LLVM's own "is the address
@@ -54,8 +59,8 @@ use crate::interp::layout::Layout;
 use crate::interp::mem::{round_up, STATIC_BASE};
 use crate::interp::FaultKind;
 use crate::mir::{
-    FaultEdge, MirFn, MirProgram, Operand, Place, Proj, Regime, Rvalue, Statement, StatementKind,
-    Terminator,
+    FaultEdge, MirFn, MirProgram, Operand, Place, Proj, Regime, ReplayPolicy, Rvalue, Statement,
+    StatementKind, Terminator,
 };
 use crate::resolve::Items;
 use crate::span::Span;
@@ -176,7 +181,9 @@ pub fn emit_ll(
     out.push_str("declare void @rt_trace(i64)\n");
     out.push_str("declare void @rt_fault(i32, i32, i32) #0\n");
     out.push_str("declare i64 @rt_stack_alloc(i64, i64)\n");
-    out.push_str("declare void @rt_copy(i64, i64, i64)\n\n");
+    out.push_str("declare void @rt_copy(i64, i64, i64)\n");
+    out.push_str("declare i64 @rt_mmio_load(i64, i64)\n");
+    out.push_str("declare void @rt_mmio_store(i64, i64, i64)\n\n");
     for bits in [8u32, 16, 32, 64] {
         for op in [BinOp::Add, BinOp::Sub, BinOp::Mul] {
             for signed in [true, false] {
@@ -189,8 +196,23 @@ pub fn emit_ll(
     }
     out.push('\n');
 
+    // Per-Box-pointee drop-glue (INV-DROP, design 0010 §5): a recursive Box type's
+    // drop is runtime recursion through a synthesized glue fn (terminating on the
+    // null pointer), never infinite compile-time unrolling. The fn-pointer dispatch
+    // table maps each fn-ptr id (a `u64` baked into vtable/handle statics) to the
+    // callee's address, so box/unbox alloc/free dispatch is an indirect call.
+    let glue_types = super::lower::collect_glue_types(prog, items, consts);
+    let mut glue_index: HashMap<String, usize> = HashMap::new();
+    for (i, ty) in glue_types.iter().enumerate() {
+        glue_index.insert(type_key(ty), i);
+    }
+    emit_fnptr_table(&mut out, prog);
+
     for f in &prog.fns {
-        emit_fn(&mut out, f, &lay, &statics, &strings, &prog.drop_hooks)?;
+        emit_fn(&mut out, f, &lay, &statics, &strings, &prog.drop_hooks, &glue_index)?;
+    }
+    for (i, ty) in glue_types.iter().enumerate() {
+        emit_glue_fn(&mut out, i, ty, &lay, &statics, &strings, &prog.drop_hooks, &glue_index)?;
     }
     emit_entry(&mut out, prog, &lay, &statics, &strings);
 
@@ -313,6 +335,20 @@ fn classify_tiers(mf: &MirFn) -> Vec<bool> {
                     mark(dst, &mut tf);
                     mark(src, &mut tf);
                 }
+                // Box/unbox/subslice copy through place ADDRESSES, so their
+                // operand slots must live flat (a boxed scalar payload too).
+                StatementKind::BoxOp { dst, value, .. } => {
+                    mark(dst, &mut tf);
+                    mark(value, &mut tf);
+                }
+                StatementKind::UnboxOp { dst, boxed, .. } => {
+                    mark(dst, &mut tf);
+                    mark(boxed, &mut tf);
+                }
+                StatementKind::Subslice { dst, src, .. } => {
+                    mark(dst, &mut tf);
+                    mark(src, &mut tf);
+                }
                 _ => {}
             }
         }
@@ -333,16 +369,20 @@ struct FnEmit<'a> {
     statics: &'a HashMap<String, u64>,
     strings: &'a HashMap<String, u64>,
     drop_hooks: &'a HashMap<String, String>,
+    /// type_key(pointee) -> its drop-glue index (`@__drop_glue_<i>`).
+    glue_index: &'a HashMap<String, usize>,
     tier_f: Vec<bool>,
 }
 
 impl<'a> FnEmit<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         mf: &'a MirFn,
         lay: &'a Layout<'a>,
         statics: &'a HashMap<String, u64>,
         strings: &'a HashMap<String, u64>,
         drop_hooks: &'a HashMap<String, String>,
+        glue_index: &'a HashMap<String, usize>,
     ) -> Self {
         let tier_f = classify_tiers(mf);
         FnEmit {
@@ -354,6 +394,7 @@ impl<'a> FnEmit<'a> {
             statics,
             strings,
             drop_hooks,
+            glue_index,
             tier_f,
         }
     }
@@ -715,7 +756,30 @@ impl<'a> FnEmit<'a> {
                     .ok_or_else(|| format!("unknown string literal `{sv}`"))?;
                 Ok(format!("{}", a as i64))
             }
-            other => Err(format!("out of LLVM-S3 subset: {other:?}")),
+            Rvalue::IsNull(op) => {
+                let v = self.operand(op);
+                let c = self.t();
+                self.line(&format!("{c} = icmp eq i64 {v}, 0"));
+                let r = self.t();
+                self.line(&format!("{r} = zext i1 {c} to i64"));
+                Ok(r)
+            }
+            Rvalue::PtrArith { base, index, stride } => {
+                let b = self.operand(base);
+                let i = self.operand(index);
+                let m = self.t();
+                self.line(&format!("{m} = mul i64 {i}, {stride}"));
+                let r = self.t();
+                self.line(&format!("{r} = add i64 {b}, {m}"));
+                Ok(r)
+            }
+            // An indirect call through a fn-pointer id (design 0007 §6.2): resolve
+            // the id to a callee address via the dispatch table, then call.
+            Rvalue::CallIndirect { func, args } => {
+                let id = self.operand(func);
+                let vals: Vec<String> = args.iter().map(|a| self.operand(a)).collect();
+                Ok(self.call_fnptr_id(&id, &vals))
+            }
         }
     }
 
@@ -954,12 +1018,8 @@ impl<'a> FnEmit<'a> {
                     self.emit_drop(&ea, elem, moved, path)?;
                 }
             }
-            Type::Box(_) | Type::BoxResult(_) => {
-                return Err(
-                    "out of LLVM-S3 subset: drop through Box/alloc (needs the allocator; S4)"
-                        .to_string(),
-                );
-            }
+            Type::Box(inner) => self.drop_box(addr, inner),
+            Type::BoxResult(_) => self.drop_enum(addr, ty, moved, path)?,
             Type::Named(n) if self.lay.items.lookup_struct(n).is_some() => {
                 // A partially-moved struct skips its whole-value hook (the moved
                 // field carried the ownership the hook would observe).
@@ -1024,9 +1084,261 @@ impl<'a> FnEmit<'a> {
         Ok(())
     }
 
+    // ---- allocator ABI + Box/unbox (design 0010 §5; mirrors lower::box_op) ----
+
+    fn load_u64(&mut self, candor: &str) -> String {
+        self.load_scalar(candor, ScalarTy::U64)
+    }
+    fn store_u64(&mut self, candor: &str, val: &str) {
+        self.store_scalar(candor, val, ScalarTy::U64);
+    }
+    fn field_off(&self, sname: &str, field: &str) -> u64 {
+        self.lay.field_offset(sname, field).map(|(_, o)| o).unwrap_or(0)
+    }
+
+    /// Structurally identify the allocator handle / vtable structs (design 0010
+    /// §5; identical to `lower`/`mir::interp`), so box/unbox find `ctx`/`vt`/
+    /// `alloc`/`free` regardless of module qualification.
+    fn alloc_vtable_name(&self) -> String {
+        self.lay
+            .items
+            .structs
+            .iter()
+            .find(|(_, s)| {
+                s.fields.iter().any(|(n, t)| n == "alloc" && matches!(t, Type::FnPtr(_)))
+                    && s.fields.iter().any(|(n, t)| n == "free" && matches!(t, Type::FnPtr(_)))
+            })
+            .map(|(name, _)| name.clone())
+            .unwrap_or_else(|| "AllocVtable".to_string())
+    }
+    fn alloc_struct_name(&self) -> String {
+        let vt = self.alloc_vtable_name();
+        self.lay
+            .items
+            .structs
+            .iter()
+            .find(|(_, s)| {
+                s.fields.iter().any(|(n, t)| {
+                    n == "vt"
+                        && matches!(t, Type::RawPtr(inner) if matches!(&**inner, Type::Named(x) if *x == vt))
+                })
+            })
+            .map(|(name, _)| name.clone())
+            .unwrap_or_else(|| "Alloc".to_string())
+    }
+
+    /// Indirect call by fn-pointer id: index the dispatch table for the callee's
+    /// address, then `call` it (mirrors `lower::call_fnptr_id`).
+    fn call_fnptr_id(&mut self, id: &str, args: &[String]) -> String {
+        let slot = self.t();
+        self.line(&format!("{slot} = getelementptr ptr, ptr @\"cn_fnptr_table\", i64 {id}"));
+        let fp = self.t();
+        self.line(&format!("{fp} = load ptr, ptr {slot}"));
+        let argstr =
+            args.iter().map(|a| format!("i64 {a}")).collect::<Vec<_>>().join(", ");
+        let r = self.t();
+        self.line(&format!("{r} = call i64 {fp}({argstr})"));
+        r
+    }
+
+    fn call_free(&mut self, ctx: &str, vt: &str, ptr: &str, size: u64, align: u64) {
+        let free_off = self.field_off(&self.alloc_vtable_name(), "free");
+        let fa = self.add_off_candor(vt, free_off);
+        let ffn = self.load_u64(&fa);
+        self.call_fnptr_id(&ffn, &[ctx.to_string(), ptr.to_string(), format!("{size}"), format!("{align}")]);
+    }
+
+    fn call_mmio_load(&mut self, addr: &str, size: u64) -> String {
+        let r = self.t();
+        self.line(&format!("{r} = call i64 @rt_mmio_load(i64 {addr}, i64 {size})"));
+        r
+    }
+    fn call_mmio_store(&mut self, addr: &str, val: &str, size: u64) {
+        self.line(&format!("call void @rt_mmio_store(i64 {addr}, i64 {val}, i64 {size})"));
+    }
+
+    /// `box(alloc, value)` (design 0001 §6.2): allocate through the handle's vtable,
+    /// move `value` into the block, and build the `BoxResult` at `dst` — the boxed
+    /// arm carries `{ptr, ctx, vt}`; a null return is out-of-memory (payload dropped,
+    /// `oom` arm). Mirrors `lower::box_op` op-for-op.
+    fn box_op(
+        &mut self,
+        dst: &Place,
+        inner_ty: &Type,
+        result_ty: &Type,
+        alloc: &Operand,
+        value: &Place,
+    ) -> Result<(), String> {
+        let alloc_addr = self.operand(alloc);
+        let astruct = self.alloc_struct_name();
+        let vtstruct = self.alloc_vtable_name();
+        let ctx_off = self.field_off(&astruct, "ctx");
+        let vt_off = self.field_off(&astruct, "vt");
+        let ca = self.add_off_candor(&alloc_addr, ctx_off);
+        let ctx = self.load_u64(&ca);
+        let va = self.add_off_candor(&alloc_addr, vt_off);
+        let vt = self.load_u64(&va);
+        let size = self.lay.size_of(inner_ty);
+        let align = self.lay.align_of(inner_ty);
+        let alloc_off = self.field_off(&vtstruct, "alloc");
+        let aa = self.add_off_candor(&vt, alloc_off);
+        let afn = self.load_u64(&aa);
+        let ret = self.call_fnptr_id(&afn, &[ctx.clone(), format!("{size}"), format!("{align}")]);
+        let (value_addr, _) = self.place_addr(value)?;
+        let (daddr, _) = self.place_addr(dst)?;
+
+        let einfo = self.lay.enum_info(result_ty);
+        let (boxed_idx, oom_idx) = match &einfo {
+            Some(v) => (
+                v.iter().position(|(_, p)| !p.is_empty()).unwrap_or(0),
+                v.iter().position(|(_, p)| p.is_empty()).unwrap_or(1),
+            ),
+            None => (0, 1),
+        };
+
+        let is_oom = self.t();
+        self.line(&format!("{is_oom} = icmp eq i64 {ret}, 0"));
+        let oom_b = self.l();
+        let boxed_b = self.l();
+        let cont = self.l();
+        self.line(&format!("br i1 {is_oom}, label %{oom_b}, label %{boxed_b}"));
+
+        self.label(&oom_b);
+        self.emit_drop(&value_addr, inner_ty, &[], &mut Vec::new())?;
+        self.store_u64(&daddr, &format!("{oom_idx}"));
+        self.line(&format!("br label %{cont}"));
+
+        self.label(&boxed_b);
+        self.rt_copy(&ret, &value_addr, size);
+        self.store_u64(&daddr, &format!("{boxed_idx}"));
+        let d8 = self.add_off_candor(&daddr, 8);
+        self.store_u64(&d8, &ret);
+        let d16 = self.add_off_candor(&daddr, 16);
+        self.store_u64(&d16, &ctx);
+        let d24 = self.add_off_candor(&daddr, 24);
+        self.store_u64(&d24, &vt);
+        self.line(&format!("br label %{cont}"));
+
+        self.label(&cont);
+        Ok(())
+    }
+
+    /// `unbox(b)` (design 0001 §6.2): copy the pointee into `dst`, then free the
+    /// block through its stored vtable handle (mirrors `lower::unbox_op`).
+    fn unbox_op(&mut self, dst: &Place, inner_ty: &Type, boxed: &Place) -> Result<(), String> {
+        let (baddr, _) = self.place_addr(boxed)?;
+        let ptr = self.load_u64(&baddr);
+        let b8 = self.add_off_candor(&baddr, 8);
+        let ctx = self.load_u64(&b8);
+        let b16 = self.add_off_candor(&baddr, 16);
+        let vt = self.load_u64(&b16);
+        let size = self.lay.size_of(inner_ty);
+        let align = self.lay.align_of(inner_ty);
+        let (daddr, _) = self.place_addr(dst)?;
+        self.rt_copy(&daddr, &ptr, size);
+        self.call_free(&ctx, &vt, &ptr, size, align);
+        Ok(())
+    }
+
+    /// `subslice(s, lo, hi)` (design 0004): a bounds-checked slice re-header into
+    /// `dst`; `lo > hi || hi > len` faults `Bounds` (mirrors `lower::subslice_op`).
+    #[allow(clippy::too_many_arguments)]
+    fn subslice_op(
+        &mut self,
+        dst: &Place,
+        src: &Place,
+        lo: &Operand,
+        hi: &Operand,
+        stride: u64,
+        span: Span,
+    ) -> Result<(), String> {
+        let (saddr, _) = self.place_addr(src)?;
+        let ptr = self.load_u64(&saddr);
+        let s8 = self.add_off_candor(&saddr, 8);
+        let len = self.load_u64(&s8);
+        let lo = self.operand(lo);
+        let hi = self.operand(hi);
+        let lo_gt_hi = self.t();
+        self.line(&format!("{lo_gt_hi} = icmp ugt i64 {lo}, {hi}"));
+        let hi_gt_len = self.t();
+        self.line(&format!("{hi_gt_len} = icmp ugt i64 {hi}, {len}"));
+        let bad = self.t();
+        self.line(&format!("{bad} = or i1 {lo_gt_hi}, {hi_gt_len}"));
+        self.fault_if(&bad, FaultKind::Bounds, span);
+        let (daddr, _) = self.place_addr(dst)?;
+        let losc = self.t();
+        self.line(&format!("{losc} = mul i64 {lo}, {stride}"));
+        let newptr = self.t();
+        self.line(&format!("{newptr} = add i64 {ptr}, {losc}"));
+        self.store_u64(&daddr, &newptr);
+        let newlen = self.t();
+        self.line(&format!("{newlen} = sub i64 {hi}, {lo}"));
+        let d8 = self.add_off_candor(&daddr, 8);
+        self.store_u64(&d8, &newlen);
+        Ok(())
+    }
+
+    /// Drop a Box pointee at flat address `addr` (mirrors `lower::drop_box`):
+    /// recursively drop the pointee through its glue fn, then free the block —
+    /// guarded by `ptr != 0` (a null / OOM Box owns nothing).
+    fn drop_box(&mut self, addr: &str, inner: &Type) {
+        let ptr = self.load_u64(addr);
+        let a8 = self.add_off_candor(addr, 8);
+        let ctx = self.load_u64(&a8);
+        let a16 = self.add_off_candor(addr, 16);
+        let vt = self.load_u64(&a16);
+        let nz = self.t();
+        self.line(&format!("{nz} = icmp ne i64 {ptr}, 0"));
+        let dob = self.l();
+        let cont = self.l();
+        self.line(&format!("br i1 {nz}, label %{dob}, label %{cont}"));
+        self.label(&dob);
+        self.call_drop_glue(&ptr, inner);
+        let size = self.lay.size_of(inner);
+        let align = self.lay.align_of(inner);
+        self.call_free(&ctx, &vt, &ptr, size, align);
+        self.line(&format!("br label %{cont}"));
+        self.label(&cont);
+    }
+
+    /// Drop a Box pointee at `addr` by calling its synthesized glue fn (runtime
+    /// recursion; the glue fn terminates on a null inner pointer).
+    fn call_drop_glue(&mut self, addr: &str, inner: &Type) {
+        if !self.needs_drop(inner) {
+            return;
+        }
+        if let Some(i) = self.glue_index.get(&type_key(inner)) {
+            let r = self.t();
+            self.line(&format!("{r} = call i64 @\"__drop_glue_{i}\"(i64 {addr})"));
+        }
+    }
+
     fn lower_stmt(&mut self, st: &Statement) -> Result<(), String> {
-        if st.observable && !matches!(st.kind, StatementKind::Trace(_)) {
-            return Err(format!("out of LLVM-S3 subset (observable): {:?}", st.kind));
+        // INV-OBS-ORDER: an observable rawptr/MMIO scalar access lowers to a barrier
+        // CALL (rt_mmio_load/store), not an inline load/store, so `-O2` keeps its
+        // program order and never coalesces/elides it. An observable aggregate copy
+        // (CopyVal) already lowers to the `rt_copy` barrier, so it falls through.
+        if st.observable {
+            match &st.kind {
+                StatementKind::Assign(local, Rvalue::Load { place, ty }) => {
+                    let (a, _) = self.place_addr(place)?;
+                    let sty = scalar_of(ty);
+                    let size = Layout::scalar_size(sty);
+                    let raw = self.call_mmio_load(&a, size);
+                    let v = self.canon(&raw, sty);
+                    self.store_local(*local, &v);
+                    return Ok(());
+                }
+                StatementKind::Store(place, rv) => {
+                    let val = self.eval_rvalue(rv)?;
+                    let (a, ty) = self.place_addr(place)?;
+                    let sty = scalar_of(&ty);
+                    let size = Layout::scalar_size(sty);
+                    self.call_mmio_store(&a, &val, size);
+                    return Ok(());
+                }
+                _ => {}
+            }
         }
         match &st.kind {
             StatementKind::Assign(local, rv) => {
@@ -1063,7 +1375,16 @@ impl<'a> FnEmit<'a> {
                     self.emit_drop(&addr, &ty, moved, &mut Vec::new())?;
                 }
             }
-            other => return Err(format!("out of LLVM-S3 subset: {other:?}")),
+            StatementKind::BoxOp { dst, inner_ty, result_ty, alloc, value } => {
+                self.box_op(dst, inner_ty, result_ty, alloc, value)?;
+            }
+            StatementKind::UnboxOp { dst, inner_ty, boxed } => {
+                self.unbox_op(dst, inner_ty, boxed)?;
+            }
+            StatementKind::Subslice { dst, src, lo, hi, stride, span } => {
+                self.subslice_op(dst, src, lo, hi, *stride, *span)?;
+            }
+            other => return Err(format!("out of LLVM-S4 subset: {other:?}")),
         }
         Ok(())
     }
@@ -1084,6 +1405,7 @@ fn prefix(a: &[String], b: &[String]) -> bool {
 /// Emit one `cnf_<name>` function, replicating `lower::lower_fn`'s block/region
 /// structure (requires/ensures predicate regions, the shared final-return block)
 /// and its two-tier storage + aggregate ABI.
+#[allow(clippy::too_many_arguments)]
 fn emit_fn(
     out: &mut String,
     mf: &MirFn,
@@ -1091,8 +1413,9 @@ fn emit_fn(
     statics: &HashMap<String, u64>,
     strings: &HashMap<String, u64>,
     drop_hooks: &HashMap<String, String>,
+    glue_index: &HashMap<String, usize>,
 ) -> Result<(), String> {
-    let mut e = FnEmit::new(mf, lay, statics, strings, drop_hooks);
+    let mut e = FnEmit::new(mf, lay, statics, strings, drop_hooks, glue_index);
 
     let params = (0..mf.num_params)
         .map(|i| format!("i64 %a{i}"))
@@ -1225,6 +1548,75 @@ fn emit_fn(
         }
     }
 
+    e.raw("}\n\n");
+    out.push_str(&e.out);
+    Ok(())
+}
+
+/// A canonical key for a monomorphized type (mirrors `lower::type_key`), used to
+/// map a Box pointee to its drop-glue index.
+fn type_key(ty: &Type) -> String {
+    format!("{ty:?}")
+}
+
+/// Emit the fn-pointer dispatch table: a module global `[N x ptr]` whose slot `i`
+/// is the address of `fn_ptrs[i]`'s compiled body. A fn value baked into a
+/// vtable/handle static is the `u64` id `i`; an indirect / vtable call indexes
+/// this table to recover the callee address (the AOT twin of
+/// `object::compile_object`'s `cn_fnptr_table` data object).
+fn emit_fnptr_table(out: &mut String, prog: &MirProgram) {
+    if prog.fn_ptrs.is_empty() {
+        return;
+    }
+    let n = prog.fn_ptrs.len();
+    let elems: Vec<String> = prog
+        .fn_ptrs
+        .iter()
+        .map(|name| {
+            if prog.get(name).is_some() {
+                format!("ptr {}", cnf_sym(name))
+            } else {
+                "ptr null".to_string()
+            }
+        })
+        .collect();
+    out.push_str(&format!(
+        "@\"cn_fnptr_table\" = internal global [{n} x ptr] [{}]\n\n",
+        elems.join(", ")
+    ));
+}
+
+/// Emit a per-Box-pointee drop-glue function `@__drop_glue_<i>(addr)`: run the
+/// value-of-`ty` drop schedule at the address param, then return 0 (INV-DROP,
+/// design 0010 §5). Recursive Box types bottom out at the runtime null-pointer
+/// guard inside `drop_box`, so this is finite recursion, not infinite unrolling.
+#[allow(clippy::too_many_arguments)]
+fn emit_glue_fn(
+    out: &mut String,
+    i: usize,
+    ty: &Type,
+    lay: &Layout,
+    statics: &HashMap<String, u64>,
+    strings: &HashMap<String, u64>,
+    drop_hooks: &HashMap<String, String>,
+    glue_index: &HashMap<String, usize>,
+) -> Result<(), String> {
+    let glue_mf = MirFn {
+        name: format!("__drop_glue_{i}"),
+        num_params: 1,
+        result_local: None,
+        locals: Vec::new(),
+        blocks: Vec::new(),
+        entry: 0,
+        requires: Vec::new(),
+        ensures: Vec::new(),
+        replay: ReplayPolicy::Precise,
+    };
+    let mut e = FnEmit::new(&glue_mf, lay, statics, strings, drop_hooks, glue_index);
+    e.raw(&format!("define internal i64 @\"__drop_glue_{i}\"(i64 %a0) {{\n"));
+    e.label("entry");
+    e.emit_drop("%a0", ty, &[], &mut Vec::new())?;
+    e.line("ret i64 0");
     e.raw("}\n\n");
     out.push_str(&e.out);
     Ok(())

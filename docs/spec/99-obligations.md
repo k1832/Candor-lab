@@ -3121,3 +3121,63 @@ static C runtime (`aot_runtime.c`, still UNCHANGED), no Cranelift code reused, n
   correctness axis. All S0+S1+S2 fixtures + `perf_mem2reg_promotes_locals` stay
   green; `tests/aot.rs` (6 tests) untouched and green; `aot_runtime.c` reused
   UNCHANGED; clippy clean. NEXT: S4 (Box/alloc/rawptr — drop through the allocator).
+
+## LLVM-S4 — HEAP ALLOCATION: Box[T], the allocator ABI, rawptr load/store, and drop-through-Box (2026-07-12)
+
+Extends `src/backend/llvm.rs` from S0..S3 to the systems corpus: heap allocation
+through a Candor allocator handle, raw-pointer memory access, and the free-on-drop
+that completes the arena drop story — purely additive, same static C runtime
+(`aot_runtime.c`, still UNCHANGED), no Cranelift code reused, no `nsw`/`nuw`.
+
+- ALREADY-IN-MIR vs NEW EMITTER WORK (the S1/S2/S3 lesson holds). `mir::build` bakes
+  the whole shape: `box(a, v)` is a `BoxOp { dst, inner_ty, result_ty, alloc, value }`
+  statement, `unbox(b)` an `UnboxOp { dst, inner_ty, boxed }`, `ptr_read`/`ptr_write`
+  through a `rawptr` are `Load`/`Store`/`CopyVal` with `observable = true`, and a fn
+  named as a value is `Operand::Const(id, u64)` — a `u64` index into `prog.fn_ptrs`.
+  The allocator handle is NOT a C `rt_alloc`; it is a Candor `Alloc { ctx, vt }` whose
+  `vt` points at an `AllocVtable { alloc, free }` of fn-pointer ids (design 0010 §5).
+  NEW emitter work: the fn-pointer dispatch table, the vtable-indirect alloc/free
+  calls, the box/unbox/subslice payload moves, observable rawptr/MMIO barriers, and
+  the per-Box-pointee drop-glue functions.
+- BOX MODEL (`FnEmit::box_op`/`unbox_op`, mirror of `lower`). `box`: load `ctx`/`vt`
+  from the `Alloc` handle at the `alloc` operand's address, load the `alloc` fn-ptr id
+  from the vtable, call it `(ctx, size, align)` -> a flat block address (0 == OOM). On
+  OOM: drop the payload, write the `oom` tag. On success: `rt_copy` the payload into
+  the block, then build the boxed arm `{tag, ptr@8, ctx@16, vt@24}`. A `Box` value is
+  the 24-byte `{ptr@0, ctx@8, vt@16}`; `bx.*` is a `Load`/place through a `Deref` of
+  `ptr@0`. `unbox`: `rt_copy` the pointee into `dst`, then free the block.
+- ALLOCATOR-ABI THREADING (the CopyVal that used to reject). The handle is passed by
+  borrow: the `alloc` operand is a wordy local holding the `Alloc` struct's flat
+  address; `operand()` loads it, and `box`/`unbox`/`free` read `ctx`/`vt` and the
+  vtable fn-ptr ids relative to it. A fn-ptr id `i` dispatches through the emitted
+  module global `@cn_fnptr_table = [N x ptr]` (slot `i` = `@cnf_<fn_ptrs[i]>`), the
+  textual-IR twin of `object.rs`'s `cn_fnptr_table` data object: `getelementptr` the
+  slot, `load ptr`, indirect `call`. The observable `CopyVal`/`Load`/`Store` reading
+  the handle-backing (`ptr_read(cast_ptr[Pool](ctx))`) now lower normally (aggregate
+  copy -> `rt_copy` barrier), removing the S3 reject.
+- RAWPTR LOAD/STORE (INV-OBS-ORDER). An `observable` scalar `Assign(Load)` /`Store`
+  through a `rawptr` lowers to a barrier CALL `rt_mmio_load(addr,size)` /
+  `rt_mmio_store(addr,val,size)` (declared bare, so `-O2` never reorders/elides the
+  device access), canonicalized like an S1 scalar; an observable aggregate `CopyVal`
+  falls through to the `rt_copy` barrier. `IsNull`/`PtrArith` rvalues and the
+  `CallIndirect` rvalue join the emitter. `rt_mmio_load`/`rt_mmio_store` already exist
+  in `aot_runtime.c` (reused UNCHANGED).
+- DROP-THROUGH-BOX (free-on-drop completes the arena story). `emit_drop`'s Box/BoxResult
+  reject is replaced: `Box(inner)` -> `drop_box` (guard `ptr != 0`; recursively drop the
+  pointee through its glue fn, then `free(ctx, vt, ptr, size, align)`); `BoxResult` ->
+  `drop_enum`. A recursive Box type drops through a synthesized per-pointee glue fn
+  `@__drop_glue_<i>(addr)` (`collect_glue_types` from `lower`), so recursion terminates
+  at the runtime null guard — never infinite compile-time unrolling. The free / pointee
+  hook is observable exactly where `lower` makes it so.
+- GATE / VERIFICATION (isolation): `tests/llvm.rs` green — 11 tests. New:
+  `gate_llvm_systems_corpus` (all five design 0001 §11 programs: `11_1_allocator` pool
+  free-list, `11_2_scheduler` intrusive-list `container_of`, `11_3_mmio` device
+  register FSM, `11_4_parser` recursive-descent over a bump arena with recursive
+  `Box Expr`, `11_5_arena` `Box [4096]Node` arena) and `gate_llvm_drop_through_box` (a
+  drop-hooked `Res` boxed then DROPPED, so free-on-drop fires the pointee hook: trace
+  ends `... 77`) compile via `clang -O2`, run standalone, and compare (exit / TRACE /
+  fault-JSON) byte-exact to the oracle. ALL FIVE corpus programs pass. All S0..S3
+  fixtures + `perf_mem2reg_promotes_locals` stay green; `tests/aot.rs` (6 tests)
+  untouched and green; `aot_runtime.c` reused UNCHANGED; clippy clean. Out-of-S4 ops
+  (FFI/extern, concurrency/spawn) still REJECTED precisely ("out of LLVM-S4 subset"),
+  never faked. NEXT: S5 (FFI + concurrency).

@@ -404,3 +404,45 @@ fn gate_llvm_drop_trace_corpus() {
         assert_llvm_eq_oracle(&src, true, &tag);
     }
 }
+
+// ---------------------------------------------------------------------------
+// 7. HEAP ALLOCATION — Box[T], the allocator ABI, rawptr load/store, and
+//    drop-through-Box (S4). The systems corpus (design 0001 §11): a bump/pool
+//    allocator dispatched through the `Alloc` handle's vtable (fn-pointer table),
+//    `box`/`unbox` moving payloads through the returned block address, observable
+//    rawptr/MMIO load/store (rt_mmio_load/store barriers), and the recursive
+//    parser/arena whose Box pointees are freed (and their pointee drop schedule
+//    run) on drop. Every fixture: clang -O2 build, run, byte-exact (exit / trace /
+//    fault-JSON) against the oracle — the same programs the AOT corpus carries.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn gate_llvm_systems_corpus() {
+    assert!(clang_available(), "clang unavailable: cannot build the LLVM-S4 systems gate");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/selfhost_interp");
+    for name in [
+        "11_1_allocator",
+        "11_2_scheduler",
+        "11_3_mmio",
+        "11_4_parser",
+        "11_5_arena",
+    ] {
+        let src = std::fs::read_to_string(dir.join(format!("{name}.cnr")))
+            .expect("read systems-corpus fixture");
+        assert_llvm_eq_oracle(&src, true, name);
+    }
+}
+
+// Drop-through-Box made OBSERVABLE: a `Res { drop -> trace(id) }` boxed through the
+// bump allocator and then DROPPED (not unboxed) at scope exit. The Box's free-on-drop
+// recurses into the pointee's drop hook, so the trace ends with the pointee id (77) —
+// the arena drop story completed and proven byte-exact against the oracle.
+#[test]
+fn gate_llvm_drop_through_box() {
+    assert!(clang_available(), "clang unavailable");
+    let src = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/systems_llvm/box_drop_free.cnr"),
+    )
+    .expect("read box-drop fixture");
+    assert_llvm_eq_oracle(&src, true, "boxdropfree");
+}

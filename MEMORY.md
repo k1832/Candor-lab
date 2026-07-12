@@ -439,3 +439,25 @@ One lesson per entry, one-line summary first.
   diffs. Enums carry no drop hook — enum drop is WHOLLY the interp's tag-directed
   `drop_value`; the lowerer emits one `Drop` per needs-drop enum local (self-lower L4,
   2026-07-11).
+
+- **LLVM-S3 (drop schedule + trace-on-drop): the ENTIRE schedule is already baked
+  into the MIR — the only new emitter work is drop-glue expansion, and there are NO
+  runtime drop flags.** The S1/S2 "MIR bakes it in" lesson holds strongest here.
+  `mir::build` already places each `Drop` at scope exit / early-return / break in
+  reverse declaration order and stamps a STATIC move mask (`moved: Vec<Vec<String>>`,
+  the field-name sub-paths moved out at that point); conditional-move correctness is
+  compile-time, and the checker forbids inconsistent move state at CFG joins (E0302),
+  so every drop site has ONE deterministic mask (design 0010 §2 INV-DROP). So the
+  LLVM backend only needed `emit_drop`/`drop_enum`/`needs_drop` as an op-for-op mirror
+  of `lower::emit_drop`: struct = fire the `drop` hook (`call cnf_<drop Name>(addr)` —
+  the hook body, already an ordinary MIR fn, is where the observable `trace` lives)
+  THEN fields reverse; array = elements reverse; enum = load u64 tag@0, per droppable
+  variant `icmp eq` -> per-variant block dropping payload reverse -> merge; pruned by
+  the same `is_moved`/`partially`/`prefix` mask predicates (a partial move skips the
+  struct's whole-value hook). Box/BoxResult drop needs the allocator's vtable `free`
+  (S4) — reject precisely. TRAP when authoring fixtures: an enum `match` that
+  move-binds a needs-drop payload with a sibling arm that doesn't is E0302 (the
+  MEMORY enum trap) — never reaches codegen; use a struct/array/enum-scope drop
+  instead. The value-drop corpus fixtures (`generics/gdrop*.cnr`) are in-subset; the
+  Box corpus (`11_1_allocator`/`11_5_arena`/`11_4_parser`) rejects BEFORE any drop, on
+  the allocator-handle `CopyVal`. (LLVM-S3, 2026-07-12).
