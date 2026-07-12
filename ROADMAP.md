@@ -396,9 +396,29 @@ FFI+concurrency -> S6 full corpus + LLVM as the 5th Stage-D engine. Collections 
 in the Cranelift backend TOO -- same corpus boundary, not a new LLVM gap. Full emitter ~1500-2200
 lines.
 
+**DELIVERED (2026-07-12), all six slices S0-S6 committed.** `candor compile --backend=llvm`
+emits textual LLVM-IR through clang -O2 on the two-tier value model. S0 scalars->SSA registers
+(mem2reg promotion proven); S1 aggregates (Tier-F flat arena); S2 enums+statics; S3 the
+move/drop schedule with trace-on-drop (the tallest pole -- mostly free, mir::build bakes the
+schedule + static move masks, no runtime drop flags); S4 Box/alloc/rawptr (all 5 systems-corpus
+programs byte-exact); S5 FFI (real libc I/O) + structured concurrency (rt_spawn/rt_scope,
+spawn-order-deterministic trace). S6: gate_llvm_full_corpus_fifth_engine asserts all 31 corpus
+fixtures compile via clang -O2 to the byte-identical observable (exit byte / trace / fault
+(kind,span)) as the tree-walking oracle -- the SAME 31 stage_d and aot close on (CollectionOp
+excluded from all engines alike, so LLVM coverage == Cranelift coverage). Honest framing: the
+five-engine agreement is transitive-through-a-shared-oracle (each engine == the oracle), NOT a
+unified all-pairs diff, and is an empirical corpus-bounded determinism guarantee, not a formal
+whole-program refinement. Recurring lesson across all six slices: Candor's MIR carries so much
+structure (drop schedules, match lowering, box ops, offsets) that each slice reduced to walking
+MIR and mirroring the Cranelift backend op-for-op. Emitter landed ~2100 lines.
+
 ## ROADMAP to a "proper language" (prototype -> production), ordered
 
 1. **Performance -- the LLVM backend** (above). Optimized native code; the foundational perf move.
+   *DONE (S0-S6, 2026-07-12): the optimizing LLVM backend ships behind the MIR seam, covers the
+   whole Cranelift-equivalent surface, and is the 5th differentially-verified engine over the
+   corpus. Remaining perf work is the aggregate-ABI ceiling (per-object allocas + TBAA), deferred
+   as not worth it now.*
 2. **Real std + I/O.** Iterator adapters (map/filter/fold over the 0009 protocol), a formatting
    story, and a std I/O layer over the P17 boundary (files/network). This is what lets people
    write REAL programs (today's std is Opt/Res/Arena/List/Vec/Map/String).

@@ -91,9 +91,15 @@ OS threads with compile-time race freedom, across all engines including
 standalone AOT binaries. The compilation architecture is fully realized (design 0010,
 stages A-D closed). Candor compiles through a checked MIR to optimized native x86-64
 via Cranelift, with the fault-window reordering license enforced by an
-executable validator and the P5 invariant made empirical: four engines -
-interpreter, MIR, native, native-optimized - produce identical observable
-traces and identical fault identity across the entire corpus. Incremental
+executable validator and the P5 invariant made empirical: **five independently-built
+Stage-D backends** - tree-walking interpreter, MIR interpreter, Cranelift (no-opt),
+Cranelift optimized, and an LLVM `clang -O2` linked ELF - produce the byte-identical
+observable (return/exit byte, trace, and fault identity as `(kind, span)`) across the
+entire corpus. Each engine is verified byte-exact against one shared tree-walking
+oracle, so their mutual agreement is transitive through that oracle rather than a
+direct all-pairs diff; it is an empirical, corpus-bounded cross-backend determinism
+guarantee — a fifth, differently-built optimizing native codegen preserving the exact
+observable semantics — not a formal whole-program refinement. Incremental
 builds prove zero-downstream re-analysis on body edits (P20's mechanism,
 measured); the P17 boundary and audit command run; the P20 measurement
 instrument reports baselines; and `candor compile` emits standalone
@@ -110,9 +116,11 @@ registers (so the compute hot path gets genuine LLVM optimization), while aggreg
 and address-taken values use the flat memory arena. It already compiles the **entire
 systems corpus** (allocator, scheduler, MMIO, parser, `Box [4096]Node` arena)
 byte-exact — exit code, trace, and fault identity — against the reference oracle, with
-heap allocation, the move/drop schedule with trace-on-drop, enums, and statics all
-in-subset; FFI and structured concurrency are the remaining slices before it joins the
-proven-equivalence set as a fifth engine. The language's
+heap allocation, the move/drop schedule with trace-on-drop, enums, statics, FFI (real
+libc I/O), and structured concurrency all in-subset — the whole Cranelift-equivalent
+surface. It is now the **fifth** differentially-verified Stage-D engine (below): all 31
+corpus fixtures compile through `clang -O2` to the byte-identical observable. The
+language's
 central bet (value-first memory model, Bet 5) was tested against a frozen,
 pre-registered kill criterion: killed as first registered, re-examined under a
 corrected successor registration (both on the public record), and **provisionally
