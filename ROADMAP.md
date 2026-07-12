@@ -344,3 +344,25 @@ yet generics/collections/the ?/From surface (those run+compile-to-MIR self-hoste
 have no native codegen fixtures); a register allocator (all-on-stack is correct but slow);
 and the deferred OBL-QUALITY-REVIEW debt (Vec::set order, the FAULT-trace harness blind
 spot, deserialize arity, test-dedup). The Rust compiler remains the production toolchain.
+
+### 0.x distribution — staging COMPLETE + standalone-verified (2026-07-12)
+
+The publication-step-2 packaging is assembled and proven, ready to seed the standalone repo.
+- **Toolchain renamed** candor-proto -> candor (Cargo [[bin]]; the candor_proto LIBRARY name
+  stays; ~25 user-facing strings swept; the dist shim deleted). candor --version / --help
+  added. 602 tests green, clippy clean.
+- **dist/seed.sh** assembles a standalone 0.x from the lab's MANIFEST SHIPS rows: prototype/
+  -> toolchain/ (tests/ + selfhost/ excluded, still builds), docs/spec -> spec/, the corelib
+  seed -> stdlib/ (first-class), tools/{vscode-candor,candor-lsp} -> editor/ (LSP path-dep
+  rewritten to the seeded toolchain), dist/ docs+examples -> repo root. No permanent spec/
+  stdlib duplication in the lab (drift) -- copied at seed time.
+- **Standalone-verified** from a scratch seed with NOTHING pointing back at the lab:
+  cargo build --release -> candor; candor run hello -> 42; check clean; candor run stdlib
+  (module tree) -> 380; candor build stdlib -> 8 modules, no diagnostics. All 7 examples work.
+- Docs (README/INSTALL/LANGUAGE-TOUR) re-pointed to the seeded layout; formerly-dangling
+  spec/stdlib/editor references now resolve in the seeded repo.
+
+**Remaining (the operator/publishing action, deliberately out of the lab):** run seed.sh into
+a target dir, git init, and publish the standalone 0.x repo -- the deciding authority's call
+(it creates/owns the published artifact). Minor non-blocking: benches/p20.rs hardcodes a
+fixture path (benches don't affect build/run); --version reports the crate version 0.1.0.
