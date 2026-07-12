@@ -4,7 +4,10 @@
 //! the orphan and cross-module cases use the module-tree driver (design 0008).
 
 use candor_proto::diag::Severity;
-use candor_proto::{check_dir, check_source_real, run_dir, run_source_real, RunResult};
+use candor_proto::{
+    check_dir, check_source_real, run_dir, run_dir_mir, run_dir_native, run_dir_native_opt,
+    run_source_real, MirRunResult, RunResult,
+};
 use std::path::PathBuf;
 
 fn fixture(rel: &str) -> String {
@@ -525,5 +528,43 @@ fn conformance_conforming_impl_checks_clean_and_runs() {
         RunResult::Fault(f) => panic!("faulted: {}", f.to_json()),
         RunResult::CheckErrors(d) => panic!("check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>()),
         RunResult::ParseError(d) => panic!("parse error: {}", d.to_json()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-module monomorphization key (design 0007 §5 / 0008): the shape map must
+// be keyed by a GLOBALLY-unique identity, not a bare per-file `span.start`.
+// ---------------------------------------------------------------------------
+
+/// A generic enum instantiated from two sibling modules whose `Opt::Some` /
+/// `unwrap_or` nodes sit at IDENTICAL per-file byte offsets. Under the old
+/// `span.start` shape key those nodes collided across modules, so `ga`'s
+/// `Opt[i64]` was miscompiled as `b`'s `Opt[i32]` (an 8-byte payload read as 4
+/// bytes -> a truncated/garbage value that differed between engines). The
+/// `(item_index, span.start)` key makes the two nodes distinct, so every engine
+/// monomorphizes each module's instantiation to its own concrete type.
+#[test]
+fn cross_module_generic_instantiation_no_span_collision() {
+    let dir = moddir("generic_span_collision");
+    assert!(
+        check_dir(&dir).unwrap().iter().all(|d| d.severity != Severity::Error),
+        "generic_span_collision should check clean, got {:?}",
+        check_dir(&dir).unwrap()
+    );
+    // ga(1000000000000) keeps its i64 width (no i32 truncation) + gb(20) = ...020.
+    let expected = 1000000000020i64;
+    match run_dir(&dir) {
+        RunResult::Ok(r) => assert_eq!(r.ret, expected, "tree-walker"),
+        other => panic!("tree-walker did not run: {:?}", matches!(other, RunResult::Ok(_))),
+    }
+    for (label, r) in [
+        ("mir", run_dir_mir(&dir)),
+        ("native", run_dir_native(&dir)),
+        ("native-opt", run_dir_native_opt(&dir)),
+    ] {
+        match r {
+            MirRunResult::Ok(run) => assert_eq!(run.ret, expected, "{label}"),
+            other => panic!("{label} did not run: ok={}", matches!(other, MirRunResult::Ok(_))),
+        }
     }
 }

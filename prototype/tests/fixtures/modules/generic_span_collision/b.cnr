@@ -1,0 +1,5 @@
+use opt::{Opt, unwrap_or};
+pub fn gb(x: i32) -> i32 {
+    let o: Opt[i32] = Opt::Some(x);
+    return unwrap_or(o, 0);
+}

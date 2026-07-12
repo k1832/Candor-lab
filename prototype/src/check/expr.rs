@@ -2180,7 +2180,7 @@ impl<'a> Checker<'a> {
             if !gargs.iter().any(|t| matches!(t, Type::Error)) {
                 self.record_inst(&gname, gargs.clone());
                 for arm in arms {
-                    self.shapes.insert(arm.pattern.span.start, crate::generics::Shape::Type(gname.clone(), gargs.clone()));
+                    self.shapes.insert((self.cur_item, arm.pattern.span.start), crate::generics::Shape::Type(gname.clone(), gargs.clone()));
                 }
             }
         }

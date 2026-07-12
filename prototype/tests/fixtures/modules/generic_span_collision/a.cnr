@@ -1,0 +1,5 @@
+use opt::{Opt, unwrap_or};
+pub fn ga(x: i64) -> i64 {
+    let o: Opt[i64] = Opt::Some(x);
+    return unwrap_or(o, 0);
+}

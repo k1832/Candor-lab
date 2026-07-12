@@ -3503,3 +3503,50 @@ reported here with evidence for a follow-up compiler slice to authorize.
   DONE (see BLOCKED (3) above; `expr_static_ty` gained the call-return-type case).
   Then carry the `T: Show` module-tree resolution (STD-FMT finding F2 / E1002) so
   the whole convention leaves the single-file image.
+
+## MONO-SPAN-KEY — the cross-module monomorphization-key collision (memory-safety fix, 2026-07-12)
+
+The REAL blocker for generics/`Show` leaving the single-file image — mis-attributed
+to E1002 by the STD-FMT slice above. The whole-program monomorphizer's *shape map*
+(`check::generics` records a per-node `Shape`; `generics::monomorphize` replays it to
+lower each generic call/ctor/pattern to its concrete instance) was keyed by a bare
+`span.start: usize`. But design 0008 merges every module's AST into one program
+**without rebasing spans** (`modules::build_tree` just `extend`s items), and each
+`.cnr` file is parsed with byte offsets numbered from ~0. So two nodes in DIFFERENT
+modules routinely share a `span.start` and COLLIDE in the map (`insert` overwrites) —
+a generic instantiation then resolves to the WRONG shape. Confirmed with a fixture of
+two sibling modules whose `Opt::Some`/`unwrap_or` sites are byte-aligned: `ga`'s
+`Opt[i64]` was monomorphized as `gb`'s `Opt[i32]` (an 8-byte payload read as 4 bytes),
+returning a truncated/garbage value that even DIFFERED between the tree-walker
+(`3567587348`) and MIR (`-727379948`) — an uninitialized/mis-sized-memory fault, hence
+memory-safety, not a mere wrong answer.
+
+- FIX (surgical, both replay sites + all five record sites). The key is now
+  `pub type ShapeKey = (usize, usize)` = `(top-level item index in the merged program,
+  node span.start)` (`src/generics.rs`). The item index disambiguates modules; within
+  one item's file `span.start` stays unique (the exact invariant the single-file path
+  already relied on), so the key is GENUINELY globally collision-free — NOT a wider hash
+  that could still alias. The checker threads `cur_item` (set per top-level item, inherited
+  by every def-site sub-checker and drop-hook check) so each recorded shape is keyed by its
+  owning item; the monomorphizer threads `cur_item` too (set before rewriting each concrete
+  item, each generic-fn/type instance via a name->item-index table, and each app-impl
+  instance via a stored `def_item`), so an emitted instance replays its body under the
+  DEF's own key namespace — matching how all instances already shared one parametric shape.
+  Spans themselves are untouched (fault reporting, the `mir::mod` observable-order invariant,
+  and the byte-exact self-host MIR differential all still see raw per-file `span.start`).
+- UNIQUENESS ARGUMENT. Collision requires equal `(item, start)`. Equal `item` => same
+  top-level item => same source file (0008: file = module) => `start` is the per-file byte
+  offset, unique across that file's nodes (single-file monomorphization is correct today,
+  which is precisely this property). Distinct `item` can never share a key regardless of
+  span overlap. Hence no two distinct recording sites map to one key.
+- GATE. New regression `tests/generics.rs::cross_module_generic_instantiation_no_span_collision`
+  (fixture `tests/fixtures/modules/generic_span_collision`) — the byte-aligned two-module
+  case — checks clean and returns `1000000000020` on tree-walker + MIR + native + native-opt.
+  Full `cargo nextest` green incl. the self-host suite (33/33 — the self-host modules ARE a
+  multi-module generic program, the exact scenario) and the AOT/LLVM/Stage-D native gates.
+  clippy clean. No span, backend, or self-host source change.
+- UNBLOCKS. Generics — and the `Show`/`fmt` convention — can now leave the single-file
+  image and resolve across a module tree (the STD-FMT F2 / SHOW-DISPLAY "next slice" goal;
+  the E1002 attribution there was the surface symptom, this was the cause). STILL OPEN and
+  independent: the `impl Show for Vec[T]` / element-abstractable-`Vec` impl-target surface
+  (SHOW-DISPLAY BLOCKED (1)/(2) — `Vec`/`Map` are CollectionOps, not impl-able nominals).

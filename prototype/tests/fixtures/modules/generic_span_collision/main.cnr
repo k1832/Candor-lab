@@ -1,0 +1,7 @@
+use a::{ga};
+use b::{gb};
+// 1000000000000 does not fit in i32: a wrong `Opt[i32]` monomorphization of `ga`
+// truncates it, so the correct total 1000000000020 pins the fix.
+fn main() -> i64 {
+    return ga(1000000000000) + conv i64 gb(20);
+}

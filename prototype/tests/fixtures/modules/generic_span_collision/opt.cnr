@@ -1,0 +1,20 @@
+// A generic enum instantiated from two sibling modules whose call sites land at
+// identical per-file byte offsets (see a.cnr / b.cnr). Regression fixture for the
+// cross-module `ShapeKey` collision: under the old bare-`span.start` key the two
+// `Opt::Some` nodes (and the two `unwrap_or` calls) collided in the monomorphizer's
+// shape map, so one module's `Opt[i64]` was miscompiled as the other's `Opt[i32]`
+// (an 8-byte payload read as 4 bytes -> truncated/garbage, engine-dependent).
+pub enum Opt[T] {
+    None,
+    Some(T),
+}
+pub fn unwrap_or[T: copy](o: Opt[T], d: T) -> T {
+    match o {
+        Opt::None => {
+            return d;
+        },
+        Opt::Some(v) => {
+            return v;
+        },
+    }
+}

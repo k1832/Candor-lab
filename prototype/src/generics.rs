@@ -29,6 +29,15 @@ pub enum Shape {
     Type(String, Vec<Type>),
 }
 
+/// The key identifying where a monomorphization [`Shape`] was recorded:
+/// `(top-level item index in the merged program, node `span.start`)`. The item
+/// index is what makes the key globally unique across modules: design 0008 merges
+/// each module's AST *without rebasing spans*, so a bare per-file `span.start`
+/// (numbered from ~0 in every file) collides between two nodes in different
+/// modules. The item index disambiguates them, while `span.start` stays unique
+/// *within* one item's file (the invariant the single-file path already relies on).
+pub type ShapeKey = (usize, usize);
+
 /// Does the program contain any generic construct (design 0007)?
 pub fn is_generic_program(prog: &Program) -> bool {
     prog.items.iter().any(|it| match it {
@@ -728,7 +737,15 @@ pub struct Mono {
 }
 
 struct Monomorphizer<'a> {
-    shapes: &'a HashMap<usize, Shape>,
+    shapes: &'a HashMap<ShapeKey, Shape>,
+    /// Item index (into `prog.items`) of the def whose body is being rewritten —
+    /// the first half of every [`ShapeKey`] lookup, so a node resolves to the
+    /// shape the checker recorded for *this* item even when a per-file `span.start`
+    /// collides with a node in another module.
+    cur_item: usize,
+    /// Each generic def name -> its item index, so an emitted instance rewrites its
+    /// body under the generic def's own [`ShapeKey`] namespace.
+    generic_item: HashMap<String, usize>,
     fn_done: HashSet<String>,
     type_done: HashSet<String>,
     fn_work: Vec<(String, Vec<Type>)>,
@@ -767,6 +784,9 @@ struct AppImpl {
     target_head: String,
     target_args: Vec<Type>,
     iface_args: Vec<Type>,
+    /// Item index of this impl in `prog.items` — the [`ShapeKey`] namespace its
+    /// method bodies were checked under (design 0008 cross-module span disambig).
+    def_item: usize,
 }
 
 /// Monomorphize `prog` into a concrete program using the checker-recorded shapes
@@ -774,21 +794,25 @@ struct AppImpl {
 pub fn monomorphize(
     prog: &Program,
     insts: &[(String, Vec<Type>)],
-    shapes: &HashMap<usize, Shape>,
+    shapes: &HashMap<ShapeKey, Shape>,
 ) -> Mono {
     let mut generic_fns_ast = HashMap::new();
     let mut generic_structs_ast = HashMap::new();
     let mut generic_enums_ast = HashMap::new();
-    for it in &prog.items {
+    let mut generic_item: HashMap<String, usize> = HashMap::new();
+    for (i, it) in prog.items.iter().enumerate() {
         match it {
             Item::Fn(f) if !f.type_params.is_empty() => {
                 generic_fns_ast.insert(f.name.clone(), f.clone());
+                generic_item.insert(f.name.clone(), i);
             }
             Item::Struct(s) if !s.type_params.is_empty() => {
                 generic_structs_ast.insert(s.name.clone(), s.clone());
+                generic_item.insert(s.name.clone(), i);
             }
             Item::Enum(e) if !e.type_params.is_empty() => {
                 generic_enums_ast.insert(e.name.clone(), e.clone());
+                generic_item.insert(e.name.clone(), i);
             }
             _ => {}
         }
@@ -800,7 +824,7 @@ pub fn monomorphize(
     let mut qitems = crate::resolve::resolve_program(prog, &mut qd);
     resolve_tables(prog, &mut qitems, &mut qd);
     let mut app_impls: Vec<AppImpl> = Vec::new();
-    for it in &prog.items {
+    for (i, it) in prog.items.iter().enumerate() {
         if let Item::Impl(im) = it {
             if !matches!(&im.target.kind, TyKind::App { .. }) {
                 continue; // bare-nominal target: emitted by `emit_impl`
@@ -812,6 +836,7 @@ pub fn monomorphize(
                     target_head: info.target.clone(),
                     target_args: info.target_args.clone(),
                     iface_args: info.iface_args.clone(),
+                    def_item: i,
                 });
             }
         }
@@ -830,6 +855,8 @@ pub fn monomorphize(
     }
     let mut m = Monomorphizer {
         shapes,
+        cur_item: 0,
+        generic_item,
         fn_done: HashSet::new(),
         type_done: HashSet::new(),
         fn_work: Vec::new(),
@@ -853,7 +880,8 @@ pub fn monomorphize(
 
     // Rewrite and emit the concrete (non-generic) items.
     let empty: HashMap<String, Type> = HashMap::new();
-    for it in &prog.items {
+    for (i, it) in prog.items.iter().enumerate() {
+        m.cur_item = i;
         match it {
             Item::Fn(f) if f.type_params.is_empty() => {
                 let mut f2 = f.clone();
@@ -974,6 +1002,7 @@ impl<'a> Monomorphizer<'a> {
     }
 
     fn emit_fn_instance(&mut self, name: &str, args: &[Type]) {
+        self.cur_item = self.generic_item[name];
         let decl = self.generic_fns_ast.get(name).unwrap().clone();
         let pnames: Vec<String> = decl.type_params.iter().map(|p| p.name.clone()).collect();
         let map = Self::param_map(&pnames, args);
@@ -985,6 +1014,7 @@ impl<'a> Monomorphizer<'a> {
     }
 
     fn emit_type_instance(&mut self, name: &str, args: &[Type]) {
+        self.cur_item = self.generic_item[name];
         if let Some(s) = self.generic_structs_ast.get(name).cloned() {
             let pnames: Vec<String> = s.type_params.iter().map(|p| p.name.clone()).collect();
             let map = Self::param_map(&pnames, args);
@@ -1055,6 +1085,7 @@ impl<'a> Monomorphizer<'a> {
     /// lower each method to a concrete free function plus a signature stub in the
     /// kept impl block (for the interpreter's dispatch table).
     fn emit_impl_instance(&mut self, idx: usize, cargs: &[Type]) {
+        self.cur_item = self.app_impls[idx].def_item;
         let ai = &self.app_impls[idx];
         let im = ai.decl.clone();
         let pnames = ai.param_names.clone();
@@ -1259,7 +1290,7 @@ impl<'a> Monomorphizer<'a> {
 
     fn rewrite_expr(&mut self, e: &mut Expr, map: &HashMap<String, Type>) {
         // Apply a recorded monomorphization shape at this node, if any.
-        if let Some(shape) = self.shapes.get(&e.span.start).cloned() {
+        if let Some(shape) = self.shapes.get(&(self.cur_item, e.span.start)).cloned() {
             match shape {
                 Shape::Fn(name, sargs) => {
                     let cargs: Vec<Type> = sargs.iter().map(|t| subst(t, map)).collect();
@@ -1379,7 +1410,7 @@ impl<'a> Monomorphizer<'a> {
     /// Lower a match pattern's generic enum name to the concrete instance, using
     /// the shape recorded at the pattern's span (design 0007 §5).
     fn rewrite_pattern(&mut self, pat: &mut Pattern, map: &HashMap<String, Type>) {
-        if let Some(Shape::Type(name, sargs)) = self.shapes.get(&pat.span.start).cloned() {
+        if let Some(Shape::Type(name, sargs)) = self.shapes.get(&(self.cur_item, pat.span.start)).cloned() {
             let cargs: Vec<Type> = sargs.iter().map(|t| subst(t, map)).collect();
             self.enqueue(&name, cargs.clone());
             let inst = inst_type_name(&name, &cargs);

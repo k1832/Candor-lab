@@ -63,7 +63,7 @@ impl<'a> Checker<'a> {
         self.check_bounds(&sig, &map, span);
         self.record_inst(name, args.clone());
         if !args.iter().any(|t| matches!(t, Type::Error)) {
-            self.shapes.insert(span.start, crate::generics::Shape::Fn(name.to_string(), args.clone()));
+            self.shapes.insert((self.cur_item, span.start), crate::generics::Shape::Fn(name.to_string(), args.clone()));
         }
         // The value is a fn-pointer over the substituted signature.
         let params: Vec<(ParamMode, Type)> = sig
@@ -238,7 +238,7 @@ use crate::resolve::{resolve_program, FnSig, GenericFnSig as GFS};
 use super::FnState;
 
 /// Diagnostics, reached instantiations, and per-node monomorphization shapes.
-pub type GenericCheck = (Vec<Diag>, Vec<(String, Vec<Type>)>, std::collections::HashMap<usize, crate::generics::Shape>);
+pub type GenericCheck = (Vec<Diag>, Vec<(String, Vec<Type>)>, std::collections::HashMap<crate::generics::ShapeKey, crate::generics::Shape>);
 
 /// Check a program that contains generics (design 0007): resolve the generic
 /// tables, definition-site-check each generic body once against its bounds with
@@ -308,20 +308,22 @@ pub fn check_generic_program_own(prog: &Program, real: bool, own_len: usize) -> 
         }
     }
 
-    let mut c = Checker { items: &items, diags, f: FnState::empty(), real, insts: Vec::new(), def_site: false, shapes: std::collections::HashMap::new(), type_params: Vec::new(), param_bounds: Vec::new(), expected_ty: None, cur_generic: None, foreign_report: Vec::new() };
+    let mut c = Checker { items: &items, diags, f: FnState::empty(), real, insts: Vec::new(), def_site: false, shapes: std::collections::HashMap::new(), cur_item: 0, type_params: Vec::new(), param_bounds: Vec::new(), expected_ty: None, cur_generic: None, foreign_report: Vec::new() };
 
     // --- Definition-site checks (opaque T, once per generic) ---
-    for it in &prog.items[..own_len] {
+    for (idx, it) in prog.items[..own_len].iter().enumerate() {
         if let Item::Fn(f) = it {
             if !f.type_params.is_empty() {
                 if let Some(sig) = c.items.generic_fns.get(&f.name).cloned() {
+                    c.cur_item = idx;
                     c.check_generic_fn_def_site(f, &sig);
                 }
             }
         }
     }
-    for it in &prog.items[..own_len] {
+    for (idx, it) in prog.items[..own_len].iter().enumerate() {
         if let Item::Impl(im) = it {
+            c.cur_item = idx;
             c.check_impl_methods_def_site(im);
         }
     }
@@ -329,7 +331,8 @@ pub fn check_generic_program_own(prog: &Program, real: bool, own_len: usize) -> 
     // emitted by the final hook pass below; the alloc fixpoint ran on a snapshot).
 
     // --- Concrete code (typing generic uses, collecting instantiations) ---
-    for it in &prog.items[..own_len] {
+    for (idx, it) in prog.items[..own_len].iter().enumerate() {
+        c.cur_item = idx;
         match it {
             Item::Fn(f) if f.type_params.is_empty() => c.check_fn(f),
             Item::Static(s) => c.check_static(s),
@@ -340,7 +343,7 @@ pub fn check_generic_program_own(prog: &Program, real: bool, own_len: usize) -> 
         if *idx >= own_len {
             continue;
         }
-        check_one_hook(&mut c, &items, h, real);
+        check_one_hook(&mut c, &items, h, real, *idx);
     }
 
     (c.diags, c.insts, c.shapes)
@@ -437,6 +440,7 @@ fn hook_is_alloc(items: &crate::resolve::Items, h: &HookInfo, real: bool) -> boo
         insts: Vec::new(),
         def_site: !pnames.is_empty(),
         shapes: std::collections::HashMap::new(),
+        cur_item: 0,
         type_params: pnames,
         param_bounds: h.type_params.clone(),
         expected_ty: None,
@@ -447,7 +451,7 @@ fn hook_is_alloc(items: &crate::resolve::Items, h: &HookInfo, real: bool) -> boo
 }
 
 /// Definition-site check of one hook body (emitting diagnostics into `outer`).
-fn check_one_hook(outer: &mut Checker, items: &crate::resolve::Items, h: &HookInfo, real: bool) {
+fn check_one_hook(outer: &mut Checker, items: &crate::resolve::Items, h: &HookInfo, real: bool, item: usize) {
     let (fdecl, sig, copy_view, pnames) = synth_hook(h);
     let mut view = items.clone();
     view.type_param_copy = copy_view;
@@ -464,6 +468,7 @@ fn check_one_hook(outer: &mut Checker, items: &crate::resolve::Items, h: &HookIn
         insts: Vec::new(),
         def_site: !pnames.is_empty(),
         shapes: std::collections::HashMap::new(),
+        cur_item: item,
         type_params: pnames,
         param_bounds: h.type_params.clone(),
         expected_ty: None,
@@ -511,6 +516,7 @@ impl<'a> Checker<'a> {
             insts: Vec::new(),
             def_site: true,
             shapes: std::collections::HashMap::new(),
+            cur_item: self.cur_item,
             type_params: Vec::new(),
             param_bounds: Vec::new(),
             expected_ty: None,
@@ -551,6 +557,7 @@ impl<'a> Checker<'a> {
                     insts: Vec::new(),
                     def_site: false,
                     shapes: std::collections::HashMap::new(),
+                    cur_item: self.cur_item,
                     type_params: Vec::new(),
                     param_bounds: Vec::new(),
                     expected_ty: None,
@@ -591,6 +598,7 @@ impl<'a> Checker<'a> {
                 insts: Vec::new(),
                 def_site: generic,
                 shapes: std::collections::HashMap::new(),
+                cur_item: self.cur_item,
                 type_params: tp_names.clone(),
                 param_bounds: param_bounds.clone(),
                 expected_ty: None,
@@ -755,7 +763,7 @@ impl<'a> Checker<'a> {
         }
         self.record_inst(name, targs.clone());
         if !targs.iter().any(|t| matches!(t, Type::Error)) {
-            self.shapes.insert(span.start, crate::generics::Shape::Fn(name.to_string(), targs.clone()));
+            self.shapes.insert((self.cur_item, span.start), crate::generics::Shape::Fn(name.to_string(), targs.clone()));
         }
         self.clear_carried();
         subst(&sig.ret, &subst_map)
@@ -1064,7 +1072,7 @@ impl<'a> Checker<'a> {
         }
         if !targs.iter().any(|t| matches!(t, Type::Error)) {
             self.record_inst(name, targs.clone());
-            self.shapes.insert(span.start, crate::generics::Shape::Type(name.to_string(), targs.clone()));
+            self.shapes.insert((self.cur_item, span.start), crate::generics::Shape::Type(name.to_string(), targs.clone()));
         }
         Type::App(name.to_string(), targs)
     }
@@ -1117,7 +1125,7 @@ impl<'a> Checker<'a> {
         }
         if !targs.iter().any(|t| matches!(t, Type::Error)) {
             self.record_inst(enum_name, targs.clone());
-            self.shapes.insert(span.start, crate::generics::Shape::Type(enum_name.to_string(), targs.clone()));
+            self.shapes.insert((self.cur_item, span.start), crate::generics::Shape::Type(enum_name.to_string(), targs.clone()));
         }
         Type::App(enum_name.to_string(), targs)
     }

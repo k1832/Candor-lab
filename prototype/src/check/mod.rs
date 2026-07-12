@@ -161,7 +161,11 @@ pub struct Checker<'a> {
     /// Monomorphization shapes recorded per expression-node span start: the
     /// generic construct and its (possibly parametric) type arguments (design
     /// 0007 §5). Consumed by `generics::monomorphize`.
-    pub shapes: std::collections::HashMap<usize, crate::generics::Shape>,
+    pub shapes: std::collections::HashMap<crate::generics::ShapeKey, crate::generics::Shape>,
+    /// Index of the top-level item currently being checked, in the merged program's
+    /// item list — the first half of a [`crate::generics::ShapeKey`], making a
+    /// recorded shape's key globally unique across modules despite per-file spans.
+    cur_item: usize,
     /// Type-parameter names in scope while checking a generic body at its
     /// definition site (design 0007); a bare type name resolves to `Type::Param`.
     type_params: Vec<String>,
@@ -279,6 +283,7 @@ fn check_program_collect_own(prog: &Program, real: bool, own_len: usize) -> (Vec
                     insts: Vec::new(),
                     def_site: false,
                     shapes: std::collections::HashMap::new(),
+                    cur_item: 0,
                     type_params: Vec::new(),
                     param_bounds: Vec::new(),
                     expected_ty: None,
@@ -313,6 +318,7 @@ fn check_program_collect_own(prog: &Program, real: bool, own_len: usize) -> (Vec
         insts: Vec::new(),
         def_site: false,
         shapes: std::collections::HashMap::new(),
+        cur_item: 0,
         type_params: Vec::new(),
         param_bounds: Vec::new(),
         expected_ty: None,
