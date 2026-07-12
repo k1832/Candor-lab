@@ -1,0 +1,26 @@
+# cargo-nextest configuration.
+#
+#   cargo nextest run                    # full suite (what CI runs; ~3 min)
+#   cargo nextest run --profile fast     # inner dev loop (~2 s, see below)
+#
+# nextest runs every test in its own process across a global parallel pool,
+# so the whole suite finishes in the time of its slowest single test rather
+# than the sum of 44 sequentially-run binaries (plain `cargo test`). The
+# floor is the self-hosted-compiler integration tests, which run the
+# interpreted Candor toolchain over the systems corpus and legitimately take
+# a couple of minutes each.
+#
+# The `fast` profile drops those slow integration binaries (self-host, the
+# native AOT/LLVM/stage gates, freestanding, native concurrency, golden) for
+# a sub-second edit-check loop. It changes NOTHING that runs in CI — the
+# default profile still runs the entire suite. Plain `cargo test` is
+# unaffected by this file.
+
+[profile.default]
+# The self-host corpus tests are genuinely slow; widen the "slow" warning
+# threshold so they stop showing up as noise. This only affects reporting —
+# no test is ever terminated (no terminate-after).
+slow-timeout = "150s"
+
+[profile.fast]
+default-filter = "not (binary(/selfhost/) | binary(aot) | binary(llvm) | binary(/stage_/) | binary(freestanding) | binary(concurrency_native) | binary(golden) | binary(run_golden))"
