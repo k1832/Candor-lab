@@ -3352,19 +3352,23 @@ CollectionOp — so `String` std stays single-file, exactly like `text.rs`/`vec.
   composition. `tests/corelib.rs` (13), `tests/text.rs` (36), and the AOT/LLVM/
   Stage-D native gates untouched and green (nothing added to the backend corpus).
   clippy clean. No backend, self-host, `aot_runtime.c`, MIR, or checker change.
-- NEXT SLICE. Wire `fmt`/`Show` through `std_io` (the libc `write` path,
-  `fixtures/std_io/main.cnr` + `src/audit.rs`) for a `println` path.
+- NEXT SLICE (DELIVERED). `fmt`/`Show` are wired through `std_io` (the libc
+  `write` path) in STD-IO-PRINT below: the non-generic `println_i64` and the
+  generic `print_show[T: Show]` both produce real captured stdout, byte-for-byte
+  identical on the tree-walker and the MIR engine.
 
 ## STD-IO-PRINT — the println path: `print_str`/`println_i64` wiring `fmt_i64` through `std_io` to real captured stdout (2026-07-12)
 
 The second slice of "real std + I/O": the `fmt_i64` formatting primitive (STD-FMT)
 wired through the `std_io` libc-`write` boundary (`fixtures/std_io/main.cnr`,
 `write_all(fd: i32, s: read [u8]) -> IoResult` over the `sys_write` extern) to
-produce REAL, host-captured stdout on the `foreign_io` shims. Purely additive: NO
-compiler/MIR/checker/backend change. Source: `tests/fixtures/std_print.cnr` (the
-print layer) composed with the `std_io` module prefix (minus its `main`) and the
-non-generic `fmt_i64` core sliced verbatim from `std_fmt.cnr`; observed by
-`tests/print.rs` on the host-backed shims.
+produce REAL, host-captured stdout on the `foreign_io` shims. Source:
+`tests/fixtures/std_print.cnr` (the print layer) composed with the `std_io` module
+prefix (minus its `main`) and `fmt_i64`/`Show` from `std_fmt.cnr`; observed by
+`tests/print.rs` on the host-backed shims. A follow-up carries TWO surgical
+compiler fixes (below) — an `as_bytes` MIR lowering and a monomorphizer that keeps
+`extern`/`export` — that make the whole path (including the generic `print_show`)
+run byte-for-byte on the tree-walker AND the MIR engine.
 
 - THE LAYER (capture-free, discharges nothing). `print_str(s: str) -> IoResult`
   retypes the view to bytes (`as_bytes`) and calls `write_all(stdout(), .)`.
@@ -3375,37 +3379,36 @@ non-generic `fmt_i64` core sliced verbatim from `std_fmt.cnr`; observed by
   double-borrow at `fmt_i64(read a, .)` -> `borrow borrow Alloc`, E0703). String
   text reaches `write_all` as `[u8]` via `as_bytes(as_str(read s))`, each step
   bound to a local (a call-expression used directly as a place does not lower).
-- GATE (isolation). `tests/print.rs` green — 6 tests on the TREE-WALKER via the
-  captured-stdout shims: an `image_checks_clean` guard; `println_i64` over
-  0/positive/negative/`i64::MIN` asserting the EXACT bytes
-  `"0\n42\n-42\n-9223372036854775808\n"`; `print_str` verbatim (no newline);
-  `print_str`+`println_i64` composing (`"n=7\n"`); and the pinned MIR boundary
-  below. `tests/fmt.rs` (12) and `tests/std_io.rs` (13) untouched and green.
-- BLOCKER 1 — `as_bytes` HAS NO MIR LOWERING (why this slice is tree-walker-only).
-  `write_all` requires `[u8]`, and the only bridge from a built `String`'s text to
-  `[u8]` is `as_bytes` (str -> [u8]). MIR lowering knows `as_str` (a String
-  CollectionOp view) but NOT `as_bytes`: it is absent from `is_builtin`
-  (`src/mir/build.rs`) and has no special case, so `let b: [u8] = as_bytes(v)`
-  falls to the generic-call arm and yields `Unsupported("indirect/unknown
-  aggregate call")` (build.rs ~1517); nested inside another call it yields
-  `Unsupported("unsupported place")` (build.rs ~994). `as_bytes` had never run on
-  MIR (`text.rs`/`fmt.rs` are tree-walker-only). So the both-engines parity the
-  slice targets is BLOCKED pending an `as_bytes` MIR lowering. Per the slice's
-  standing order (no unprompted compiler surface), that primitive was NOT added;
-  `println_mir_boundary_is_unsupported_as_bytes` PINS the current boundary so it
-  cannot regress silently and flips red the moment MIR gains `as_bytes`.
-- BLOCKER 2 — the `Show` convention CANNOT be wired through an `extern` boundary
-  (why there is no `print_show`). `generics::monomorphize` (`src/generics.rs`) DROPS
-  `Item::Extern`/`Item::Export` (its item loop's `_ => {}` catch-all handles only
-  Fn/Struct/Enum/Static/Impl), and `is_generic_program` classifies ANY
-  `interface`/`impl` as generic. So the instant the `Show` interface (or a
-  `print_show[T: Show]`) joins the image, the program is "generic", monomorphizes,
-  the `sys_*` externs vanish, and `write_all` faults `Panic("unknown name
-  \`sys_write\`")` at runtime. The composed image therefore excludes `Show`/`Opt[T]`
-  and uses only the non-generic `fmt_i64` core. Reported, not worked around.
-- NEXT SLICE. Either (a) give the MIR lowering an `as_bytes` (str/String -> [u8])
-  rule + fix the monomorphizer to carry `Item::Extern`/`Item::Export` through — the
-  two primitives that would let the println path (and `print_show`) run on BOTH
-  engines with byte-for-byte parity; or (b) extend the layer with `print_show[T:
-  Show]`/`println_show` once (b) lands. Both are compiler-surface changes, out of
-  this additive slice's scope.
+- GATE (isolation). `tests/print.rs` green — 7 tests via the captured-stdout
+  shims: an `image_checks_clean` guard; `println_i64` over 0/positive/negative/
+  `i64::MIN` asserting the EXACT bytes `"0\n42\n-42\n-9223372036854775808\n"`;
+  `print_str` verbatim (no newline); `print_str`+`println_i64` composing
+  (`"n=7\n"`); `println_both_engines_byte_parity` (the whole println path on the
+  tree-walker AND the MIR engine, byte-for-byte identical); and
+  `print_show_through_boundary_renders_bytes` (the generic path — see below).
+  `tests/fmt.rs` (12), `tests/std_io.rs` (13), and the AOT/LLVM/Stage-D native
+  gates (which consume the same monomorphized program) untouched and green.
+- BOTH-ENGINE PARITY — `as_bytes` NOW LOWERS ON MIR. `write_all` requires `[u8]`,
+  and the only bridge from a built `String`'s text to `[u8]` is `as_bytes`
+  (str -> [u8]). `as_bytes` is now recognized in `is_builtin` (`src/mir/build.rs`)
+  and lowered in `lower_builtin_into` as a FREE retype: a `str`'s `{ptr@0, len@8}`
+  fat pointer IS its `[u8]` byte view (design 0013 §1.3), so it copies the 16-byte
+  header verbatim (`CopyVal`), mirroring the tree-walker's `move_bytes` — MIR-interp
+  only, since the native backends already reject CollectionOp `String`/`as_str`.
+  The former `println_mir_boundary_is_unsupported_as_bytes` pin is flipped to the
+  positive `println_both_engines_byte_parity`.
+- GENERIC PATH — `print_show[T: Show]` NOW SURVIVES THE `extern` BOUNDARY.
+  `generics::monomorphize` (`src/generics.rs`) previously DROPPED
+  `Item::Extern`/`Item::Export` via its item loop's `_ => {}` catch-all, so the
+  instant the `Show` interface made the image "generic" the `sys_*` externs
+  vanished and `write_all` faulted `Panic("unknown name \`sys_write\`")`. The loop
+  now carries `Item::Extern`/`Item::Export` through UNCHANGED (they are never
+  generic and need no substitution; not re-added elsewhere, so no duplication;
+  the native gates already handle externs). `print_show[T: Show]` — rendering a
+  `Show` leaf (`ShowInt` -> `"42"`) and a `T: Show` composition (`Opt[ShowInt]` ->
+  `"Some(9)"`) straight to stdout — now runs byte-for-byte on both engines
+  (`print_show_through_boundary_renders_bytes`).
+- NEXT SLICE. Add the trailing-newline `println_show[T: Show]` and route
+  `print_str`/`println_i64` and `print_show` into a single `Display`-style print
+  surface; carry the `T: Show` module-tree resolution (STD-FMT finding F2 / E1002)
+  so the convention leaves the single-file image.

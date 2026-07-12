@@ -169,25 +169,107 @@ fn println_i64_exact_spec_bytes() {
     assert_eq!(String::from_utf8(out).unwrap(), "0\n42\n-42\n-9223372036854775808\n");
 }
 
-// ---- 6. the MIR coverage boundary: blocked on an `as_bytes` MIR lowering ----
+// ---- 6. both engines produce the exact spec bytes (`as_bytes` now lowers) ---
 #[test]
-fn println_mir_boundary_is_unsupported_as_bytes() {
+fn println_both_engines_byte_parity() {
     let _g = lock();
-    // Pin the honest boundary (see the module header / STD-IO-PRINT obligation):
-    // `write_all` needs `[u8]`, the only String-text -> `[u8]` bridge is `as_bytes`,
-    // and `as_bytes` has no MIR lowering. When MIR gains `as_bytes`, this flips and
-    // the test must be upgraded to a both-engines byte-for-byte parity assertion.
+    // `as_bytes` now has a MIR lowering (a free `str` -> `[u8]` retype, mirroring
+    // the tree-walker), so the whole println path reaches the write boundary on
+    // BOTH engines. Assert byte-for-byte parity of the captured stdout.
+    const EXPECT: &[u8] = b"0\n42\n-42\n-9223372036854775808\n";
+    let src = image(&print_main(SPEC_MAIN));
+
     foreign_io::reset();
     foreign_io::register_std_io();
-    let r = run_source_real_mir(&image(&print_main(SPEC_MAIN)));
+    let tret = run_tree_ok(&src);
+    let tout = foreign_io::take_stdout();
     foreign_io::unregister_std_io();
-    match r {
-        MirRunResult::Unsupported(msg) => {
-            assert!(
-                msg.contains("indirect/unknown aggregate call"),
-                "unexpected MIR boundary message: {msg}"
-            );
+
+    foreign_io::reset();
+    foreign_io::register_std_io();
+    let mres = run_source_real_mir(&src);
+    let mout = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+
+    assert_eq!(tret, 0);
+    assert_eq!(tout, EXPECT, "tree-walker spec bytes");
+    match mres {
+        MirRunResult::Ok(run) => {
+            assert_eq!(run.ret, 0);
+            assert_eq!(mout, EXPECT, "MIR spec bytes");
         }
-        other => panic!("expected MIR Unsupported (as_bytes gap), got ok={}", matches!(other, MirRunResult::Ok(_))),
+        MirRunResult::Fault(f) => panic!("mir fault: {}", f.to_json()),
+        MirRunResult::Unsupported(msg) => panic!("mir unsupported: {msg}"),
+        other => panic!("mir not ok: {}", matches!(other, MirRunResult::Ok(_))),
+    }
+    assert_eq!(tout, mout, "both engines byte-for-byte");
+}
+
+// ---- 7. `print_show[T: Show]` through the I/O boundary ----------------------
+// The generic path the println slice had to skip: the `Show` convention wired
+// through `write_all`. It exercises BOTH just-landed fixes at once — the `Show`
+// interface makes the image generic (so it goes through the monomorphizer, which
+// now KEEPS the `sys_write` extern), and rendering to bytes goes through
+// `as_bytes` (which now lowers on MIR).
+
+/// The FULL `std_fmt.cnr` (allocator + `fmt_i64` + the `Show` interface/impls +
+/// `show_it`) so the image is generic — unlike `fmt_core`, which slices Show out.
+fn fmt_full() -> String {
+    read_fixture("std_fmt.cnr")
+}
+
+/// A generic `print_show[T: Show]` that renders `x` into an owning `String` and
+/// writes its byte view to stdout (no newline). `s` is this fn\'s own owned local,
+/// so the `as_str`/`as_bytes` bridge applies (the owned-String constraint).
+const PRINT_SHOW: &str = "fn print_show[T: Show](x: read T, a: Alloc) alloc -> IoResult {
+  let s: String = x.to_string(a);
+  let view: str = as_str(read s);
+  let bytes: [u8] = as_bytes(view);
+  return write_all(stdout(), bytes);
+}";
+
+/// Compose the generic print_show image: io wrappers + full formatting (with
+/// Show) + the print_show layer + the test\'s `main`.
+fn show_image(main_body: &str) -> String {
+    format!("{}\n{}\n{}\n{}", io_prefix(), fmt_full(), PRINT_SHOW, main_body)
+}
+
+#[test]
+fn print_show_through_boundary_renders_bytes() {
+    let _g = lock();
+    // A `Show` leaf (`ShowInt`) and a `T: Show` composition (`Opt[ShowInt]`),
+    // rendered straight to stdout through the boundary. Tree-walker is the
+    // load-bearing observation; MIR must match now that externs survive mono
+    // and `as_bytes` lowers.
+    let body = print_main(
+        "  let x: ShowInt = ShowInt { val: 42 };
+           let _a: IoResult = print_show(read x, al);
+           let y: Opt[ShowInt] = Opt::Some(ShowInt { val: 9 });
+           let _b: IoResult = print_show(read y, al);",
+    );
+    let src = show_image(&body);
+    const EXPECT: &[u8] = b"42Some(9)";
+
+    foreign_io::reset();
+    foreign_io::register_std_io();
+    let tret = run_tree_ok(&src);
+    let tout = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+    assert_eq!(tret, 0);
+    assert_eq!(tout, EXPECT, "tree-walker print_show bytes");
+
+    foreign_io::reset();
+    foreign_io::register_std_io();
+    let mres = run_source_real_mir(&src);
+    let mout = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+    match mres {
+        MirRunResult::Ok(run) => {
+            assert_eq!(run.ret, 0);
+            assert_eq!(mout, EXPECT, "MIR print_show bytes");
+        }
+        MirRunResult::Fault(f) => panic!("mir fault: {}", f.to_json()),
+        MirRunResult::Unsupported(msg) => panic!("mir unsupported: {msg}"),
+        other => panic!("mir not ok: {}", matches!(other, MirRunResult::Ok(_))),
     }
 }

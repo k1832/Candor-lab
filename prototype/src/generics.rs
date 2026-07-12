@@ -884,6 +884,10 @@ pub fn monomorphize(
                 m.out.push(Item::Static(s2));
             }
             Item::Impl(im) if !matches!(&im.target.kind, TyKind::App { .. }) => m.emit_impl(im),
+            // `extern`/`export` FFI decls are never generic and need no substitution;
+            // carry them through so a generic image that also does I/O keeps its
+            // foreign symbols live (they would otherwise vanish, faulting at the call).
+            Item::Extern(_) | Item::Export(_) => m.out.push(it.clone()),
             _ => {}
         }
     }

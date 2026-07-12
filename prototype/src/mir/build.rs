@@ -2513,6 +2513,13 @@ impl<'a> Lowerer<'a> {
                 );
                 Ok(())
             }
+            "as_bytes" => {
+                // Free retype: a `str`'s `{ptr@0, len@8}` fat pointer IS its `[u8]`
+                // byte view (design 0013 §1.3), so copy the 16-byte header verbatim.
+                let src = self.materialize_place(&args[0], &Type::Str)?;
+                self.emit(StatementKind::CopyVal { dst: dst.clone(), src, ty: ty.clone() }, span, false);
+                Ok(())
+            }
             _ => unsupported(format!("aggregate builtin `{name}`")),
         }
     }
@@ -2625,7 +2632,7 @@ fn is_builtin(name: &str) -> bool {
     matches!(
         name,
         "box" | "unbox" | "ptr_read" | "ptr_write" | "ptr_offset" | "addr_of" | "addr_of_mut"
-            | "is_null" | "ptr_to_addr" | "slice_of" | "slice_of_mut" | "subslice" | "len"
+            | "is_null" | "ptr_to_addr" | "slice_of" | "slice_of_mut" | "subslice" | "as_bytes" | "len"
     )
 }
 
