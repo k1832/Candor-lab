@@ -3665,3 +3665,53 @@ where a generic `Res[T, IoError]` I/O wrapper would live.
   teeth. The allocator direction remains the separate deciding-authority fork.
 - GATE. Full `cargo nextest` green (652 tests, incl. `tests/foreign.rs`,
   `tests/std_io.rs`, generics, and the native gates); clippy clean.
+
+## FREELIST-ALLOC — a reclaiming first-fit free-list allocator on the existing vtable (2026-07-13)
+
+The first allocator that RECLAIMS: a fixed-window first-fit free-list `std`
+module (`tests/fixtures/corelib/std/freelist.cnr`), a NEW impl on the EXISTING
+`std::alloc` vtable (design 0001 §6.1) — NO ABI change. Structural sibling of
+`std::bump`: same caller-provided window `[base, end)`, state in `ctx`, vtable
+construction, and the same liveness `unsafe` justification — but `free` reclaims
+and `alloc` reuses.
+- STATE (`ctx`): `FreeList { next: usize, end: usize, head: rawptr u8 }` — the
+  bump frontier, the window end, and the free-list head (null when empty).
+- FREE BLOCK via the rawptr valve (design 0001 §3.4, forbidding a borrow-typed
+  field): each freed block stores a `FreeBlock { next: rawptr u8, size: usize }`
+  header IN ITS OWN memory (`ptr_write`/`ptr_read` of the header struct). Minimal,
+  justified rawptr manipulation exactly as §4.2 intends.
+- `alloc`: round the request up to a header-sized, `align`-ed span (`block_span`,
+  applied identically by `free` so the recorded capacity matches); first-fit walk
+  of the free list (unlink the first block whose stored size fits — whole block
+  returned, splitting DEFERRED, internal-fragmentation tradeoff noted); on no fit,
+  carve from the bump frontier; if the frontier would pass `end`, return null
+  (BoxResult::oom contract, §6.2).
+- `free`: write the freed block's header (next = current head, size = capacity),
+  set head = this block (LIFO push).
+- HANDLE: `mk_alloc(state: write FreeList) -> Alloc` builds
+  `Alloc { ctx: addr_of_mut(state), vt: addr_of(FREELIST_VT) }` inside the §6.1
+  liveness-obligation `unsafe` justification, mirroring bump.
+- NATIVE: the rawptr-threaded free list LOWERS NATIVELY — no gap. `ptr_read`/
+  `ptr_write` of the two-field `FreeBlock` (with its rawptr field) from a heap
+  block, and of the three-field `FreeList` from `ctx`, lower on every engine
+  (same shape as `11_1_allocator`'s Pool, already native). One MIR nit surfaced:
+  `box`'s payload type must be inferable from a `let`-bound local, not an inline
+  arithmetic expression (`let payload: i64 = i * 10;` then `box(read a, payload)`).
+- GATE (all engines): `tests/freelist.rs` — REUSE (`freelist_reuse.cnr`: a 16-byte
+  one-block window serves five sequential boxes only because drop reclaims and
+  alloc reuses; bump-only would OOM on box #2 — RET 100), OOM (`freelist_oom.cnr`:
+  zero-headroom window takes the `BoxResult::oom` arm — RET 42), and a non-box
+  direct `alloc`/`free` drive (alloc two, free one, alloc again reuses the freed
+  address while the live block is untouched — RET 111). All asserted byte-exact on
+  the tree-walking oracle, the MIR interpreter, and Cranelift native no-opt + opt.
+  The two box fixtures live in `tests/fixtures/run/`, so the Cranelift-AOT ELF
+  (`tests/aot.rs`) and LLVM clang-`-O2` ELF (`tests/llvm.rs`) full-corpus gates
+  and the four-engine `tests/stage_d.rs` gate cover them transitively — six
+  engines agree.
+- DEFERRED: coalescing adjacent free blocks, best-fit, realloc. First-fit with
+  exact-or-larger reuse already demonstrates real reclaim.
+- The corelib module tree grew 8 -> 9 modules (`std::freelist` discovered +
+  checked clean by the module-tree checker); `tests/stage_c.rs`'s incremental-
+  build module counts updated 8 -> 9 accordingly.
+- Full `cargo nextest` green (655 tests); clippy clean. This is the foundation
+  for native growable collections + buffered I/O.

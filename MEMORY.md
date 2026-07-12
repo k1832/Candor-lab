@@ -498,3 +498,30 @@ One lesson per entry, one-line summary first.
   gap. Equivalence is transitive-through-one-oracle (each engine == tree-walker), not an
   all-pairs diff — state it that way, don't overclaim. Next backend (ARM/etc.) should
   start from this same walk-MIR-mirror-lower.rs playbook. (LLVM S0-S6 arc, 2026-07-12).
+
+- **The generic check path silently drops per-fn side-reports (`foreign_report`) that the
+  concrete path returns.** `check_program_real_foreign` returned `Vec::new()` for any
+  generic program, so `candor audit` reported empty foreign discharge/reach for a boundary
+  module that was ALSO generic — teeth lost exactly where a generic I/O wrapper lives. The
+  info is NOT lost pre-monomorphization: the trust boundary is a source-level property, and
+  `check_generic_program_own` already runs `check_fn_with_sig` on every fn (concrete, generic
+  def-site, impl method, hook), each pushing its `ForeignFnInfo`. The def-site inner
+  `Checker`s just dropped their `foreign_report` while propagating `diags`/`insts`/`shapes`.
+  Fix = propagate it too + return it (new `GenericForeignCheck`/`check_generic_program_foreign`).
+  LESSON: when a report is computed per-`check_fn` and one path forks into inner `Checker`s,
+  audit that EVERY inner-checker field the outer needs is propagated back, not just diags.
+  (P17 audit-generic, 2026-07-13).
+
+- **Dropping a self-contained `.cnr` into `tests/fixtures/run/` auto-enlists it in
+  every native gate.** `tests/stage_d.rs` (four-engine: oracle·MIR·native-noopt·
+  native-opt), `tests/aot.rs` (Cranelift ELF), and `tests/llvm.rs` (clang -O2 ELF)
+  all scan `run/parity/real/generics` — so one fixture proves an allocator/box
+  program on six engines for free. But those corpus gates only assert cross-engine
+  AGREEMENT with the tree-walker oracle, NOT a specific value; to prove SEMANTICS
+  (e.g. that a freed block was reused) you must add an explicit test asserting the
+  RET (e.g. `tests/freelist.rs` via `run_source_real{,_mir,_native,_native_opt}`),
+  because a broken program that returns the wrong value consistently still passes
+  the agreement gates. Also: `box(a, expr)` fails MIR type-inference on an inline
+  arithmetic payload ("cannot infer box value type") — bind it first
+  (`let p: i64 = ...; box(read a, p)`). And adding a file to the corelib module
+  tree bumps `tests/stage_c.rs`'s hardcoded module count (8→9). (2026-07-13).

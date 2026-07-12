@@ -69,11 +69,11 @@ fn gate_a_rebuild_reuses_every_module() {
     let dir = temp_copy("corelib");
     let first = build(&dir);
     assert!(first.reused().is_empty(), "first build should reuse nothing");
-    assert_eq!(first.checked().len(), 8, "first build should check all 8 modules");
+    assert_eq!(first.checked().len(), 9, "first build should check all 9 modules");
 
     let second = build(&dir);
     assert!(second.checked().is_empty(), "second build re-analyzed {:?}", second.checked());
-    assert_eq!(second.reused().len(), 8, "second build should reuse all 8 modules");
+    assert_eq!(second.reused().len(), 9, "second build should reuse all 9 modules");
 }
 
 // ---- (b) a body edit re-checks ONLY that module ----------------------------
@@ -139,7 +139,7 @@ fn gate_d_clean_rebuild_is_bit_identical() {
     let b = build(&dir);
     let bytes_b = read_cache(&b.cache_dir);
 
-    assert_eq!(bytes_a.len(), 8, "expected one artifact per module");
+    assert_eq!(bytes_a.len(), 9, "expected one artifact per module");
     assert_eq!(bytes_a, bytes_b, "two clean rebuilds must produce byte-identical artifacts");
 }
 

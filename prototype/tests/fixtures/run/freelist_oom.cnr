@@ -1,0 +1,96 @@
+// OOM path: a ZERO-headroom window (next == end) with an empty free list, so
+// `alloc` returns null and `box` takes the BoxResult::oom arm. Same free-list
+// allocator as freelist_reuse.cnr; only the window and driver differ.
+//
+// A reclaiming FIRST-FIT FREE-LIST allocator over a caller-reserved window
+// [next, end). Freed blocks are chained through a `FreeBlock` header written
+// into each block's OWN storage (the rawptr valve of design 0001 §3.4 — a
+// borrow-typed field is disallowed, so the next-pointer + capacity live in the
+// freed memory itself). Reuse proof: the window is sized to hold EXACTLY ONE
+// block, so a pure bump allocator serves one box and then OOMs; this allocator
+// reclaims on drop, so five sequential boxes all succeed by reusing the block.
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+
+struct FreeList { next: usize, end: usize, head: rawptr u8 }
+struct FreeBlock { next: rawptr u8, size: usize }
+
+// The caller reserves the backing window [base, base + size); the free list
+// starts empty (null head).
+fn with_window(base: usize, size: usize) -> FreeList {
+    unsafe "the empty free list starts with a null head; no block is threaded yet" {
+        return FreeList { next: base, end: base + size, head: ptr_null[u8]() };
+    }
+}
+
+// Round a request up to the block actually carved: at least the intrusive header
+// (so a freed block can hold its `FreeBlock`), then up to `align`.
+fn block_span(size: usize, align: usize) -> usize {
+    let mut need: usize = size;
+    if need < 16usize {
+        need = 16usize;
+    }
+    return (need + align - 1usize) / align * align;
+}
+
+fn freelist_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live FreeList whose [next,end) window and free chain are this arena's alone; every carved block stays in [next,end) and is >= header-sized" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let need: usize = block_span(size, align);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) {
+            let blk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if blk.size >= need {
+                if is_null(prev) {
+                    ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: blk.next });
+                } else {
+                    let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                    ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: blk.next, size: pblk.size });
+                }
+                return cur;
+            }
+            prev = cur;
+            cur = blk.next;
+        }
+        let aligned: usize = (st.next + align - 1usize) / align * align;
+        if aligned + need > st.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: aligned + need, end: st.end, head: st.head });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+
+fn freelist_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    unsafe "push the freed block onto the list; its own storage (>= header-sized, guaranteed by block_span in alloc) holds the FreeBlock header {next = old head, size = capacity}" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let cap: usize = block_span(size, align);
+        ptr_write(cast_ptr[FreeBlock](ptr), FreeBlock { next: st.head, size: cap });
+        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: ptr });
+    }
+}
+
+static FREELIST_VT: AllocVtable = AllocVtable { alloc: freelist_alloc, free: freelist_free };
+
+fn mk_alloc(state: write FreeList) -> Alloc {
+    unsafe "ctx (the caller's FreeList local) and vt (the static FREELIST_VT) outlive every copy of this handle and every Box it serves; the caller keeps the window and FREELIST_VT alive for the whole run and drops every Box before the window dies" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(FREELIST_VT) };
+    }
+}
+
+fn main() alloc -> i64 {
+    // next == end: no headroom and no freed block, so alloc must return null.
+    let mut st: FreeList = with_window(16777216usize, 0usize);
+    let a: Alloc = mk_alloc(write st);
+    match box(read a, 5i64) {
+        BoxResult::oom => return 42i64,
+        BoxResult::boxed(b) => {
+            let v: i64 = b.*;
+            return 0 - 1i64;
+        },
+    }
+}
