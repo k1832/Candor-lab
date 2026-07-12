@@ -61,9 +61,10 @@ user-generic and trait surface** (all thirteen generic fixtures — `fn[T]`/`str
 `enum[T]`, `interface`/`impl` dispatch, generic impls, trait bounds, `?`/`From` — via the
 shared monomorphizer). The one surface it does not yet cover is the std collections
 (`Vec`/`Map`/`String`) — an honest boundary the Rust reference backend also leaves
-`unimplemented`. (The codegen is deliberately simple and unoptimized — a
-bootstrap-credibility proof, not a competitor to the Rust/Cranelift backend that remains
-the production toolchain.) The self-check fixpoint closes over the interpreter too —
+`unimplemented`. (The codegen is deliberately simple — it does local register allocation
+over the callee-saved registers but no global optimization; it is a bootstrap-credibility
+proof, not a competitor to the Rust/Cranelift backend that remains the production
+toolchain.) The self-check fixpoint closes over the interpreter too —
 the checker and analyses check `interp.cnr` clean, so Candor checks the very
 program that runs Candor. Dogfooding on real self-host source and real corpus
 programs repeatedly earned its keep — it caught defects the fixture suites had
