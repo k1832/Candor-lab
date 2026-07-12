@@ -1475,6 +1475,32 @@ impl<'a> Interp<'a> {
                 Type::Box(e) | Type::Borrow(e) | Type::BorrowMut(e) | Type::RawPtr(e) => Some(*e),
                 _ => None,
             },
+            // The static type of a call is the callee's declared return type, so a
+            // method call on a call-shaped receiver (`f(x).m()`, `f(x).*.m()`)
+            // resolves. Post-monomorphization the callee's signature is already
+            // concrete, so no generic substitution is needed here.
+            ExprKind::Call { callee, args } => self.call_static_ret(callee, args),
+            _ => None,
+        }
+    }
+
+    /// The return type of a statically-resolvable call: a free function, a
+    /// nominal-dispatched interface method, or an `extern` shim. An indirect
+    /// call through a fn-pointer value has no statically-known callee here, so
+    /// it yields `None` (unchanged from before).
+    fn call_static_ret(&self, callee: &Expr, _args: &[Expr]) -> Option<Type> {
+        match &callee.kind {
+            ExprKind::Ident(name) => {
+                if let Some(sig) = self.items.fns.get(name.as_str()) {
+                    return Some(sig.ret.clone());
+                }
+                self.items.externs.get(name.as_str()).map(|es| es.to_fn_sig().ret)
+            }
+            ExprKind::Field { base, field } => {
+                let nominal = self.expr_static_nominal(base)?;
+                let fnname = self.impl_dispatch.get(&(nominal, field.clone()))?;
+                self.items.fns.get(fnname.as_str()).map(|sig| sig.ret.clone())
+            }
             _ => None,
         }
     }

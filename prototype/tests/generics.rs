@@ -140,6 +140,34 @@ fn distinct_target_impls_of_one_interface_coexist_and_dispatch() {
 }
 
 #[test]
+fn method_dispatches_on_call_shaped_receiver() {
+    // A method call whose receiver is itself a CALL expression. The tree-walker
+    // must resolve the receiver's static type from the callee's return type to
+    // pick the impl (the checker already did, via its full type walk). Covers a
+    // bare call `make_*().m()` and a deref-of-call `pick(read a).*.m()`; each
+    // dispatches to its target's own impl.
+    let src = "interface I { fn m(read self) -> i64; }
+struct A { v: i64 }
+struct B { v: i64 }
+         impl I for A { fn m(read self) -> i64 { return self.v * 10; } }
+         impl I for B { fn m(read self) -> i64 { return self.v + 1; } }
+         fn make_a() -> A { return A { v: 4 }; }
+         fn make_b() -> B { return B { v: 8 }; }
+         fn pick(a: read A) -> read A { return a; }
+         fn main() -> i64 {
+             let a: A = A { v: 5 };
+             return make_a().m() + make_b().m() + pick(read a).*.m();
+         }
+";
+    assert!(codes(src).is_empty(), "call-shaped receiver dispatch should check clean, got {:?}", codes(src));
+    match run_source_real(src) {
+        // make_a().m() = 4*10 = 40; make_b().m() = 8+1 = 9; pick(read a).*.m() = 5*10 = 50.
+        RunResult::Ok(r) => assert_eq!(r.ret, 99, "each call-shaped receiver dispatches to its own impl"),
+        other => panic!("did not run: ok={}", matches!(other, RunResult::Ok(_))),
+    }
+}
+
+#[test]
 fn borrow_type_argument_is_rejected() {
     assert_code(
         "fn id[T](x: T) -> T { return x; }\n\

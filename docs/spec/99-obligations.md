@@ -3469,14 +3469,18 @@ reported here with evidence for a follow-up compiler slice to authorize.
   ALSO fails — in a generic signature `Vec[T]` is `E1004 \`Vec\` is not a generic
   type` (`resolve_gty`: `Vec` is not in `generic_types`), so a `Vec` cannot be
   abstracted over its element type at all; only a CONCRETE `Vec[ShowInt]` param
-  resolves. (3) Even a concrete `vec_show_int(Vec[ShowInt])` cannot render via the
-  convention: the tree-walker's method dispatch resolves the receiver nominal
-  through `expr_static_ty`, which handles only place expressions (ident/field/
-  deref), NOT a call — so `get(read v, i).*.to_string(a)` fails to find the impl,
-  falls through to the indirect fn-ptr path, and reads a garbage callee
-  (`fn_names[..]` out of bounds / `unknown name align`). (A loop-carried owning
-  `String` local also trips `E0309` unless pre-initialized before the loop.) So
-  `Vec` cannot render through `Show` without compiler work; not forced/faked.
+  resolves. (3) RESOLVED (2026-07-12) — the tree-walker's `expr_static_ty`
+  (`src/interp/eval.rs`) now resolves a CALL receiver to the callee's declared
+  return type (free fn / nominal-dispatched method / `extern`; post-mono the sig
+  is already concrete, so no substitution here), and the existing deref case
+  recurses into it, so a method on a call-shaped receiver (`get(read v, i).*` or a
+  bare `f(x)`) dispatches. Only an indirect fn-pointer call still has no
+  statically-known callee (unchanged; it never worked). The CHECKER never had this
+  gap — its method dispatch resolves the receiver via the full `check_expr` walk,
+  which types a call as `sig.ret`. Proven by `method_dispatches_on_call_shaped_receiver`
+  (tests/generics.rs), both engines. (A loop-carried owning `String` local also
+  trips `E0309` unless pre-initialized before the loop.) So `Vec` STILL cannot
+  render through `Show` without compiler work — but only on (1)/(2) below, not (3).
 - BLOCKED (as predicted) — `Show for Map` (design point 3). The `Map[V]` CollectionOp
   surface is `map_new`/`insert`/`contains`/`get`/`len` only (`CollOp` in
   `src/mir/mod.rs`; `src/check/expr.rs`) — there is NO key iteration / `keys()`
@@ -3486,7 +3490,8 @@ reported here with evidence for a follow-up compiler slice to authorize.
   `heads_overlap` to compare the target constructor name — is DONE (above; unblocked
   `Show for String`). Remaining, to broaden `Show` to the collections: (b) make
   `Vec`/`Map` impl-able and element-abstractable (register them for impl targets and
-  in `generic_types`, or add a blessed generic-collection impl path); (c) let the
-  tree-walker dispatch a method on a call-shaped receiver (`get(..).*`). Then carry
-  the `T: Show` module-tree resolution (STD-FMT finding F2 / E1002) so the whole
-  convention leaves the single-file image.
+  in `generic_types`, or add a blessed generic-collection impl path). Step (c) —
+  tree-walker dispatch of a method on a call-shaped receiver (`get(..).*`) — is
+  DONE (see BLOCKED (3) above; `expr_static_ty` gained the call-return-type case).
+  Then carry the `T: Show` module-tree resolution (STD-FMT finding F2 / E1002) so
+  the whole convention leaves the single-file image.
