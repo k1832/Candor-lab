@@ -35,12 +35,24 @@ fn main() -> ExitCode {
         (Some("compile"), Some(_)) => run_compile(&args[2..]),
         (Some("migrate"), Some(path)) => run_migrate(path, &args[3..]),
         (Some("fmt"), Some(path)) => run_fmt(path, &args[3..]),
+        (Some("--version" | "-V" | "version"), _) => {
+            println!("candor {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
+        (Some("--help" | "-h" | "help"), _) => {
+            println!("{USAGE}");
+            ExitCode::SUCCESS
+        }
         _ => {
-            eprintln!("usage: candor (parse|check|run|count) <file>  |  run [--engine=mir] <file>  |  compile <file_or_dir> -o <prog>  |  migrate <file.cn> [-o <out.cnr>]  |  fmt <file_or_dir.cnr> [--check|--stdout]  (.cnr = real syntax, .cn = throwaway)");
+            eprintln!("{USAGE}");
             ExitCode::from(2)
         }
     }
 }
+
+/// The CLI usage text, shared by `--help` (stdout, exit 0) and the unknown-command
+/// error path (stderr, exit 2).
+const USAGE: &str = "usage: candor (parse|check|run|count|audit|build) <file>  |  run [--engine=mir] <file>  |  compile <file_or_dir> -o <prog> [--freestanding]  |  migrate <file.cn> [-o <out.cnr>]  |  fmt <file_or_dir.cnr> [--check|--stdout]  |  --version  |  --help   (.cnr = real syntax, .cn = throwaway)";
 
 /// True when the path names a real-syntax (`.cnr`) source file.
 fn is_real(path: &str) -> bool {
