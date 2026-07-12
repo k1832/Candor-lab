@@ -6,6 +6,21 @@ One lesson per entry, one-line summary first.
 
 ## Lessons
 
+- **Use `cargo nextest run --profile fast` for the inner dev loop (~2.3 s).** Plain
+  `cargo test` runs the 44 test binaries sequentially (~15 min); `cargo nextest run`
+  parallelizes all tests in one process pool → ~3.2 min full suite (gated by the
+  self-host corpus integration tests, each a couple of minutes of interpreted Candor
+  over the corpus — that's the floor without optimizing the build). The `fast` nextest
+  profile (`prototype/.config/nextest.toml`) drops the slow integration binaries
+  (self-host, aot/llvm/stage native gates, freestanding, concurrency_native, golden)
+  for a ~2.3 s / 518-test edit-check loop; CI still runs the full default profile.
+  Deliberately did NOT add `[profile.test] opt-level` — it speeds the interpreted
+  self-host tests but slows every compile, and the fast profile already fixes the
+  loop pain. nextest is process-per-test, and the suite is green under it with no
+  serial group (the foreign-io/shell-out tests are already process-isolated). Do NOT
+  lower the llvm gate fixtures to `-O0` to save clang time — the whole point of that
+  gate is that `clang -O2` preserves observable semantics (LLVM S6). (2026-07-12).
+
 - **The philosophy dictates sequencing — check §8 before planning.** The
   critical path (Bet 5 prototype → semantic core/spec skeleton → minimal
   toolchain → breadth) is normative, not advisory. No stability commitment
