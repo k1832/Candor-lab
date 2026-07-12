@@ -2760,3 +2760,44 @@ clippy clean. `aot_runtime.c` reused UNCHANGED. NO edits to
 `interp.cnr`/`lower.cnr`/`mono.cnr`/`layout.cnr`/`src/backend/*` — contained to
 `codegen.cnr` + its gate. `?`/`From` (fromq/gfromq) and collections are OUT of scope
 (NG2 + native-deferred). NG1 + NG2 close user generics on the native tier.
+
+## OBL-NG2-TRYFROM — native self-compile: the `?` operator + `From`-widening reach codegen.cnr — user generics fully native-compile (all 13 generic fixtures) (2026-07-12)
+
+NG2 lowers the `?` operator (`T_TRY`) with `From`-widening to x86-64 asm in
+`selfhost/codegen/codegen.cnr`, so `fromq`/`gfromq` native-compile byte-exact. This
+closes user generics on the native tier: all 13 generic fixtures now codegen ->
+assemble -> link -> run byte-exact vs the oracle. It mirrors `lower.cnr` T5
+(`lower_try`/`lower_try_from`/`find_from_impl`) and `interp.cnr` T4
+(`eval_try`/`find_from_fn`) — no new type machinery, reusing N4's enum layout + NG1's
+mono + `cnr_meth.<fnid>` dispatch.
+
+- OK/ERR DISCRIMINATION (via the ok-marked variant): a result-shaped enum marks its ok
+  variant with `T_VARIANT.op == 1`. `gen_try` materializes the operand into a fresh enum
+  temp (`gen_agg` leaves its flat OFFSET in a slot), reads `tag@0`, and `cmpq`s the ok
+  index (`ok_variant_index_cg`). The ok arm loads the word-sized ok payload at its
+  `variant_payload_off` as the `?` value and joins; the err arm early-returns.
+- FROM RESOLUTION (`find_from_impl_cg` mirrors lower/interp): scan concrete (`a == 0`)
+  `T_IMPL` blocks whose iface name span is `From`, target enum (`nd.c`) == the return
+  error payload's enum (e2), and iface arg-0 enum (`nd.b`) == the operand error payload's
+  enum (e1); `from_method_of_cg` picks its `from` method node. mono has already
+  instantiated a generic `impl[T] From[..] for ..[T]` (gfromq) into a concrete `T_IMPL`,
+  so the same scan finds it with no generic-specific code.
+- ERR-ARM ASM (`gen_try_from`): call `from(e1)` over the established impl-method ABI —
+  e1 by value when word-sized, else by address (its flat offset = `s_local + e1off`) in
+  `%rdi` — via `call cnr_meth.<from_fn>` (the same symbol NG1's dispatch emits, so a
+  mono-instantiated `from` matches its definition). The call returns e2's flat offset
+  (aggregate return convention). Build the enclosing fn's return enum: `rt_stack_alloc`
+  its `enum_size`, store `tag = err_variant_index_cg(reid)` at `@0`, `rt_copy` the widened
+  e2 into `variant_payload_off`, leave its offset in `%rax`. Same-error-type `?` (no
+  widening, `reid == eid`) leaves the operand offset in `%rax` unchanged (early-return the
+  operand directly). Then the N3 return sequence: spill, `emit_return_drops`, reload,
+  `leave`/`ret`.
+
+GATE / VERIFICATION (isolation): `selfhost_codegen` green — 11 tests, the generics test
+now covering 13 fixtures (NG1's 11 + `fromq` + `gfromq`), each codegen -> `.s` -> `cc` +
+`aot_runtime.c` -> run, byte-exact (exit / trace / fault) vs `run_source_real`
+(fromq/gfromq exit 7). All N1-N6 + NG1 codegen fixtures stay byte-exact. clippy clean.
+`aot_runtime.c` reused UNCHANGED. NO edits to
+`interp.cnr`/`lower.cnr`/`mono.cnr`/`layout.cnr`/`src/backend/*` — contained to
+`codegen.cnr` + its gate. USER GENERICS ARE NOW FULLY NATIVE-COMPILED: all 13 generic
+fixtures reproduce the oracle byte-exact with no Rust in the compile path.

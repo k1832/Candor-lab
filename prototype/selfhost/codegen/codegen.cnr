@@ -25,7 +25,7 @@
 // is NOT self-checked in this slice, so it uses the full language.
 
 use lexer::{Buf, span_eq, decoded_len};
-use parser::{Node, P, nnew, parse_program, T_FN, T_PARAM, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, T_NAMED, T_SC, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_FIELD, T_INDEX, T_STRUCTLIT, T_ARRAYLIT, T_ARRAYREP, T_FINIT, T_STRUCT, T_ENUMCTOR, T_MATCH, T_PVARIANT, T_WILD, T_BIND, T_STATIC, T_RAWPTR, T_FNPTR, T_FPPARAM, T_BOX, T_BOXRESULT, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_ENUM, T_VARIANT, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT, T_BYTES, T_ARRAY, T_STR, T_IMPL, T_GENERICVAL};
+use parser::{Node, P, nnew, parse_program, T_FN, T_PARAM, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_BOOL, T_ID, T_UNARY, T_BIN, T_CALL, T_BLOCK, T_IF, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_PAREN, T_CONV, T_UNSAFE, T_WRAPPING, T_SATURATING, T_NAMED, T_SC, OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_REM, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_BITAND, OP_BITOR, OP_BITXOR, OP_SHL, OP_SHR, UN_NEG, UN_NOT, UN_BITNOT, T_FIELD, T_INDEX, T_STRUCTLIT, T_ARRAYLIT, T_ARRAYREP, T_FINIT, T_STRUCT, T_ENUMCTOR, T_MATCH, T_PVARIANT, T_WILD, T_BIND, T_STATIC, T_RAWPTR, T_FNPTR, T_FPPARAM, T_BOX, T_BOXRESULT, T_PREFIX, PF_DEREF, PF_READ, PF_WRITE, T_OFFSETOF, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_ENUM, T_VARIANT, T_BORROW, T_BORROWMUT, T_SLICE, T_SLICEMUT, T_BYTES, T_ARRAY, T_STR, T_IMPL, T_GENERICVAL, T_TRY};
 use layout::{ty_size, ty_align, struct_size, struct_align, field_off, field_off_lit, field_ty, struct_of_ty, array_len_of, needs_drop, is_copy, enum_size, enum_of_ty, variant_by_index, variant_index_by_name, variant_payload_off, variant_payload_ty};
 use mono::{mono_program};
 
@@ -1185,6 +1185,7 @@ fn gen_value(c: write C, pp: read P, src: [u8], i: u32, exp_w: i32) -> i32 {
     if nd.tag == T_BIN { return gen_binary(c, pp, src, i, exp_w); }
     if nd.tag == T_CONV { return gen_conv(c, pp, src, i); }
     if nd.tag == T_CALL { return gen_call(c, pp, src, i); }
+    if nd.tag == T_TRY { return gen_try(c, pp, src, i); }
     if nd.tag == T_BLOCK { let _s: i32 = gen_block(c, pp, src, i); return 12; }
     if nd.tag == T_IF { let _s: i32 = gen_if(c, pp, src, i); return 12; }
     if nd.tag == T_WHILE { let _s: i32 = gen_while(c, pp, src, i); return 12; }
@@ -1815,6 +1816,151 @@ fn gen_call(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
     return 12;
 }
 
+// ---- NG2: the `?` operator + From-widening ----------------------------------
+// `expr?` (T_TRY): evaluate the operand to a result-shaped enum, then branch on its
+// ok/err tag. The ok arm unwraps the word-sized ok payload as the `?` value and joins;
+// the err arm From-widens the error payload to the enclosing fn's error type and early-
+// returns the widened result enum. Mirrors lower.cnr lower_try + interp.cnr eval_try. The
+// result-enum shape marks its ok variant with T_VARIANT.op == 1 (0-based variant index).
+fn ok_variant_index_cg(pp: read P, eid: u32) -> i32 {
+    if eid == 0u32 { return 0i32 - 1i32; }
+    let enode: Node = pp.nodes[conv usize eid];
+    let mut cur: u32 = enode.b;
+    let mut k: i32 = 0;
+    while cur != 0u32 {
+        let vd: Node = pp.nodes[conv usize cur];
+        if vd.op == 1 { return k; }
+        k = k + 1i32;
+        cur = vd.nx;
+    }
+    return 0i32 - 1i32;
+}
+fn err_variant_index_cg(pp: read P, eid: u32) -> i32 {
+    if eid == 0u32 { return 0i32 - 1i32; }
+    let enode: Node = pp.nodes[conv usize eid];
+    let mut cur: u32 = enode.b;
+    let mut k: i32 = 0;
+    while cur != 0u32 {
+        let vd: Node = pp.nodes[conv usize cur];
+        if vd.op != 1 { return k; }
+        k = k + 1i32;
+        cur = vd.nx;
+    }
+    return 0i32 - 1i32;
+}
+// `impl From[src] for tgt`'s owning concrete T_IMPL node (0 if none): iface name `From`,
+// target enum == tgt_eid, iface arg-0 enum == src_eid (mirrors lower.cnr find_from_impl).
+// mono has already instantiated a generic From impl into a concrete (a == 0) T_IMPL.
+fn find_from_impl_cg(pp: read P, src: [u8], head: u32, src_eid: u32, tgt_eid: u32) -> u32 {
+    let mut cur: u32 = head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_IMPL && nd.a == 0u32 && span_eq(src, nd.p0, nd.p1, b"From") {
+            let te: u32 = enum_of_ty(pp, src, head, nd.c);
+            let mut se: u32 = 0u32;
+            if nd.b != 0u32 { se = enum_of_ty(pp, src, head, nd.b); }
+            if te == tgt_eid && se == src_eid { return cur; }
+        }
+        cur = pp.nodes[conv usize cur].nx;
+    }
+    return 0u32;
+}
+fn from_method_of_cg(pp: read P, src: [u8], impl_id: u32) -> u32 {
+    let nd: Node = pp.nodes[conv usize impl_id];
+    let mut mc: u32 = nd.d;
+    while mc != 0u32 {
+        let mnd: Node = pp.nodes[conv usize mc];
+        if span_eq(src, mnd.p0, mnd.p1, b"from") { return mc; }
+        mc = mnd.nx;
+    }
+    return 0u32;
+}
+// The err arm: From-widen the operand's active error payload (e1) into the enclosing fn's
+// error type (e2), build the return enum (tag = error variant, payload = the widened e2),
+// and leave its flat offset in %rax (aggregate return convention). Same result type (no
+// widening) leaves the operand offset in %rax as-is. Mirrors lower.cnr lower_try_from +
+// interp.cnr eval_try_from. The `from(e1)` call rides the established impl-method ABI:
+// e1 by value when word-sized, else by address (its flat offset), in %rdi.
+fn gen_try_from(c: write C, pp: read P, src: [u8], s_local: i32, eid: u32) -> unit {
+    let err_idx: i32 = err_variant_index_cg(pp, eid);
+    let evid: u32 = variant_by_index(pp, eid, err_idx);
+    let e1ty: u32 = variant_payload_ty(pp, evid, 0);
+    let e1off: usize = variant_payload_off(pp, src, c.head, evid, 0);
+    let e1_eid: u32 = enum_of_ty(pp, src, c.head, e1ty);
+    let rty: u32 = c.ret_ty;
+    let reid: u32 = enum_of_ty(pp, src, c.head, rty);
+    if reid == eid {
+        reload_rax(c, s_local);
+        return;
+    }
+    let ret_err_idx: i32 = err_variant_index_cg(pp, reid);
+    let rvid: u32 = variant_by_index(pp, reid, ret_err_idx);
+    let e2ty: u32 = variant_payload_ty(pp, rvid, 0);
+    let e2off: usize = variant_payload_off(pp, src, c.head, rvid, 0);
+    let e2_eid: u32 = enum_of_ty(pp, src, c.head, e2ty);
+    let impl_id: u32 = find_from_impl_cg(pp, src, c.head, e1_eid, e2_eid);
+    if impl_id == 0u32 { c.*.err = 1; return; }
+    let from_fn: u32 = from_method_of_cg(pp, src, impl_id);
+    if from_fn == 0u32 { c.*.err = 1; return; }
+    let pw: i32 = scalar_width(pp, src, e1ty);
+    reload_rax(c, s_local);
+    if e1off != 0usize { bc(c, 9); bs(c, b"addq $"); bn(c, conv u64 e1off); bs(c, b", %rax"); bc(c, 10); }
+    if pw != 0 { emit_load_flat(c, pw); }
+    bi(c, b"movq %rax, %rdi");
+    bc(c, 9); bs(c, b"call cnr_meth."); bn(c, conv u64 from_fn); bc(c, 10);
+    let from_slot: i32 = spill(c);
+    let size: usize = enum_size(pp, src, c.head, reid);
+    let align: usize = ty_align(pp, src, c.head, rty);
+    emit_alloc(c, size, align);
+    let ret_slot: i32 = spill(c);
+    emit_const(c, conv u64 ret_err_idx, 0);
+    emit_store_flat(c, 9, ret_slot, 0usize);
+    reload_rax(c, from_slot);
+    emit_copy_to(c, ret_slot, e2off, ty_size(pp, src, c.head, e2ty));
+    reload_rax(c, ret_slot);
+    return;
+}
+fn gen_try(c: write C, pp: read P, src: [u8], i: u32) -> i32 {
+    let nd: Node = pp.nodes[conv usize i];
+    // Materialize the operand enum; its flat offset lives in s_local.
+    let op_ty: u32 = gen_agg(c, pp, src, nd.a, 0u32);
+    let s_local: i32 = spill(c);
+    let eid: u32 = enum_of_ty(pp, src, c.head, op_ty);
+    if eid == 0u32 { c.*.err = 1; return 4; }
+    let ok_idx: i32 = ok_variant_index_cg(pp, eid);
+    if ok_idx < 0 { c.*.err = 1; return 4; }
+    // Read tag@0 once and compare against the ok index.
+    reload_rax(c, s_local);
+    emit_load_flat(c, 9);
+    let tag_slot: i32 = spill(c);
+    let errl: i32 = newlbl(c);
+    let join: i32 = newlbl(c);
+    reload_rax(c, tag_slot);
+    bc(c, 9); bs(c, b"cmpq $"); bn(c, conv u64 ok_idx); bs(c, b", %rax"); bc(c, 10);
+    bc(c, 9); bs(c, b"jne "); blabel_ref(c, errl); bc(c, 10);
+    // Ok arm: unwrap the word-sized ok payload as the `?` value, store it, join.
+    let okvid: u32 = variant_by_index(pp, eid, ok_idx);
+    let okpty: u32 = variant_payload_ty(pp, okvid, 0);
+    let okoff: usize = variant_payload_off(pp, src, c.head, okvid, 0);
+    let okw: i32 = scalar_width(pp, src, okpty);
+    if okw == 0 { c.*.err = 1; return 4; }
+    let res_slot: i32 = newslot(c);
+    reload_rax(c, s_local);
+    if okoff != 0usize { bc(c, 9); bs(c, b"addq $"); bn(c, conv u64 okoff); bs(c, b", %rax"); bc(c, 10); }
+    emit_load_flat(c, okw);
+    store_slot(c, res_slot);
+    bc(c, 9); bs(c, b"jmp "); blabel_ref(c, join); bc(c, 10);
+    // Err arm: From-widen the error payload, then run the fn's return sequence early.
+    blabel_def(c, errl);
+    gen_try_from(c, pp, src, s_local, eid);
+    let rs: i32 = spill(c);
+    emit_return_drops(c, pp, src);
+    reload_rax(c, rs);
+    emit_epilogue(c);
+    blabel_def(c, join);
+    reload_rax(c, res_slot);
+    return okw;
+}
 // One match arm: bind the matched variant's payload sub-patterns in a fresh drop-scope
 // (scalar copy loads the value; an aggregate payload byte-copies into a fresh local; a
 // non-copy payload additionally marks the scrutinee's `_i` path moved and registers the

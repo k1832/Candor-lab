@@ -539,6 +539,8 @@ const GENERIC_FIXTURES: &[&str] = &[
     "iface.cnr",
     "gimpl.cnr",
     "gbound.cnr",
+    "fromq.cnr",
+    "gfromq.cnr",
 ];
 
 #[test]
@@ -551,7 +553,7 @@ fn candor_native_codegen_equal_to_oracle_over_generics() {
             assert_native_eq_oracle(&src, true, tag);
         }
         eprintln!(
-            "selfhost codegen (NG1): {} generic programs (plain generics + method dispatch) codegen -> assemble -> link -> run byte-exact vs oracle",
+            "selfhost codegen (NG2): {} generic programs (plain generics + method dispatch + ?/From widening) codegen -> assemble -> link -> run byte-exact vs oracle",
             GENERIC_FIXTURES.len()
         );
     });
