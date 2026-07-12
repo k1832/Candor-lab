@@ -26,6 +26,8 @@ const PARSER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/parser/parser.cnr"));
 const CODEGEN_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/codegen/codegen.cnr"));
+const MONO_SRC: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/mono/mono.cnr"));
 const LAYOUT_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/layout/layout.cnr"));
 
@@ -110,6 +112,7 @@ fn candor_asm(src: &str) -> String {
     let modules = [
         ("lexer.cnr", LEXER_SRC),
         ("parser.cnr", PARSER_SRC),
+        ("mono.cnr", MONO_SRC),
         ("layout.cnr", LAYOUT_SRC),
         ("codegen.cnr", CODEGEN_SRC),
     ];
@@ -506,3 +509,50 @@ fn n6_11_4_parser() { run_corpus("11_4_parser.cnr", "n6_parser"); }
 #[test]
 fn n6_11_5_arena() { run_corpus("11_5_arena.cnr", "n6_arena"); }
 
+// ---------------------------------------------------------------------------
+// NG1: USER GENERICS + method dispatch. codegen.cnr now runs the shared
+// monomorphizer (`mono.cnr`) after parse, emits the concrete instances (skipping
+// generic decls), and reads mono's call-site stashes; the T_APP redirect (b != 0)
+// comes free from layout.cnr. Method dispatch mirrors lower T3: a dispatch table
+// from concrete T_IMPL nodes, impl methods emitted as `cnr_meth.<id>` asm fns, and a
+// T_FIELD-callee T_CALL lowered to a `call` with the receiver's address as `self`.
+// The 8 plain generic fixtures + iface/gimpl/gbound, each codegen -> .s -> cc +
+// aot_runtime.c -> run, byte-exact (exit / trace / fault) vs run_source_real.
+// ---------------------------------------------------------------------------
+
+fn generic_src(name: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/selfhost_interp/generics")
+        .join(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"))
+}
+
+const GENERIC_FIXTURES: &[&str] = &[
+    "mono3.cnr",
+    "pair.cnr",
+    "genenum.cnr",
+    "arena.cnr",
+    "gdrop.cnr",
+    "gdrop_groundfloor.cnr",
+    "mixed.cnr",
+    "nameval.cnr",
+    "iface.cnr",
+    "gimpl.cnr",
+    "gbound.cnr",
+];
+
+#[test]
+fn candor_native_codegen_equal_to_oracle_over_generics() {
+    assert!(cc_available(), "cc/linker unavailable: cannot assemble+link the emitted .s");
+    on_big_stack(|| {
+        for name in GENERIC_FIXTURES.iter() {
+            let src = generic_src(name);
+            let tag = name.trim_end_matches(".cnr");
+            assert_native_eq_oracle(&src, true, tag);
+        }
+        eprintln!(
+            "selfhost codegen (NG1): {} generic programs (plain generics + method dispatch) codegen -> assemble -> link -> run byte-exact vs oracle",
+            GENERIC_FIXTURES.len()
+        );
+    });
+}

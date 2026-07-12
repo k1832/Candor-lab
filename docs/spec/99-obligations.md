@@ -2714,3 +2714,49 @@ covers `11_5`'s ~16.8 MiB arena). NO edits to
 `interp.cnr`/`lower.cnr`/`mono.cnr`/`layout.cnr`/`src/backend/*` — contained to
 `codegen.cnr` + its gate. Gate runtime ~27 s (dominated by `11_5`'s 4096-element
 array literal; the emitted `.s` assembles/links/runs without choking `cc`).
+
+## OBL-NG1-GENERICS — native self-compile: USER GENERICS + method dispatch reach codegen.cnr (2026-07-12)
+
+NG1 brings USER generics (`fn[T]`/`struct[T]`/`enum[T]`) and impl-method dispatch to
+the Candor NATIVE code generator `selfhost/codegen/codegen.cnr`, so the generic
+fixtures native-compile byte-exact. It mirrors the interp/lower wiring of the shared
+monomorphizer — no new type machinery, just the same pre-pass + stashes lowered to asm.
+
+- MONO INTO CODEGEN: `codegen_dump` now runs `mono_program(write p, src, head)` right
+  after parse (as `lower_dump` does), so it emits the MONOMORPHIZED arena — concrete
+  fn/struct/enum instances appended to the item chain and generic references rewritten
+  to carry their resolved instance node id. The fn-emission loop skips generic decls
+  (`T_FN` with `a != 0`) and emits every concrete instance (`a == 0`). Call sites read
+  mono's stashes: `T_CALL.c` (concrete callee fn), `T_GENERICVAL.c` (`name::[T]` value).
+- THE T_APP REDIRECT COMES FREE: `layout.cnr`'s `struct_of_ty`/`enum_of_ty`/`ty_size`/
+  `ty_align` already redirect a `T_APP` type node with `b != 0` to its stashed concrete
+  instance, and codegen routes ALL layout through `layout.cnr`, so a generic type ref
+  resolves with no codegen-side change.
+- SYMBOL MANGLING (codegen-internal): a generic instance's fn symbol is `cnr_<name>.<nodeid>`
+  (the `.<nodeid>` tag only when `ival != 0`, i.e. mono's type-arg cons chain is present);
+  a period cannot occur in a Candor identifier, so an instance symbol never collides with
+  a plain fn's. Drop hooks likewise gain a `.<sid>` tag for generic struct instances
+  (`cnr_drophk_<Name>.<sid>`). The names are private labels (only `candor_entry` + the
+  `rt_*` runtime are the ABI), so the mangling need not match lower's `$`-mangled MIR
+  names — def and call sites just agree.
+- METHOD DISPATCH (mirrors lower T3): `build_dispatch_cg` builds a table from every
+  concrete (`a == 0`) `T_IMPL` — key `(target struct-instance node, method-name span)`
+  -> method fn node; generic impl templates (`a != 0`) are skipped (mono has
+  instantiated them). Impl methods emit as free asm fns `cnr_meth.<fnid>`. A
+  T_FIELD-callee `T_CALL` lowers to `gen_method_call`: resolve the receiver place's
+  nominal (`gen_place_addr` leaves its flat OFFSET in `%rax`, peel borrow/box for the
+  nominal), look up `(sid, method)`, then `call cnr_meth.<fnid>` passing the receiver's
+  address as the leading `self` arg. codegen already hands borrow params by address
+  (N6), and `gen_place_addr`'s flat offset IS `self`'s address whether the base is a
+  value place or an already-borrow local — so no borrow/non-borrow split is needed.
+
+GATE / VERIFICATION (isolation): `selfhost_codegen` green — 11 tests, incl. the new
+`candor_native_codegen_equal_to_oracle_over_generics` (11 fixtures: the 8 plain —
+`mono3`, `pair`, `genenum`, `arena`, `gdrop`, `gdrop_groundfloor`, `mixed`, `nameval`
+— plus `iface`, `gimpl`, `gbound`), each codegen -> `.s` -> `cc` + `aot_runtime.c` ->
+run, byte-exact (exit / trace / fault) vs `run_source_real`. All N1-N6 codegen
+fixtures stay byte-exact. The gate now composes `mono.cnr` into the module tree.
+clippy clean. `aot_runtime.c` reused UNCHANGED. NO edits to
+`interp.cnr`/`lower.cnr`/`mono.cnr`/`layout.cnr`/`src/backend/*` — contained to
+`codegen.cnr` + its gate. `?`/`From` (fromq/gfromq) and collections are OUT of scope
+(NG2 + native-deferred). NG1 + NG2 close user generics on the native tier.
