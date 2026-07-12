@@ -119,6 +119,15 @@ fn head(sx: &Sexp) -> Result<(&str, &[Sexp]), String> {
     }
 }
 
+/// Bounds-checked positional access into a tagged list's children. A truncated
+/// wire (fewer args than a variant needs) yields a descriptive `Err` instead of
+/// an out-of-bounds panic — the deserializer's `Result` contract made honest now
+/// that a Candor-emitted wire feeds it.
+fn arg(args: &[Sexp], i: usize) -> Result<&Sexp, String> {
+    args.get(i)
+        .ok_or_else(|| format!("wire truncated: need arg #{i}, have {}", args.len()))
+}
+
 // ---------------------------------------------------------------------------
 // Printer: canonical, deterministic indentation.
 // ---------------------------------------------------------------------------
@@ -446,36 +455,36 @@ fn ty_to(t: &Type) -> Sexp {
 fn ty_from(sx: &Sexp) -> Result<Type, String> {
     let (tag, args) = head(sx)?;
     Ok(match tag {
-        "scalar" => Type::Scalar(scalar_from(args[0].as_atom()?)?),
+        "scalar" => Type::Scalar(scalar_from(arg(args, 0)?.as_atom()?)?),
         "intlit" => Type::IntLit,
-        "named" => Type::Named(args[0].as_str()?.to_string()),
-        "param" => Type::Param(args[0].as_str()?.to_string()),
+        "named" => Type::Named(arg(args, 0)?.as_str()?.to_string()),
+        "param" => Type::Param(arg(args, 0)?.as_str()?.to_string()),
         "app" => {
-            let name = args[0].as_str()?.to_string();
+            let name = arg(args, 0)?.as_str()?.to_string();
             let items = args[1..].iter().map(ty_from).collect::<Result<Vec<_>, _>>()?;
             Type::App(name, items)
         }
-        "typroj" => Type::Proj(args[0].as_str()?.to_string(), args[1].as_str()?.to_string()),
-        "array" => Type::Array(Box::new(ty_from(&args[0])?), arraylen_from(&args[1])?),
-        "slice" => Type::Slice(Box::new(ty_from(&args[0])?)),
-        "slicemut" => Type::SliceMut(Box::new(ty_from(&args[0])?)),
+        "typroj" => Type::Proj(arg(args, 0)?.as_str()?.to_string(), arg(args, 1)?.as_str()?.to_string()),
+        "array" => Type::Array(Box::new(ty_from(arg(args, 0)?)?), arraylen_from(arg(args, 1)?)?),
+        "slice" => Type::Slice(Box::new(ty_from(arg(args, 0)?)?)),
+        "slicemut" => Type::SliceMut(Box::new(ty_from(arg(args, 0)?)?)),
         "str" => Type::Str,
-        "rawptr" => Type::RawPtr(Box::new(ty_from(&args[0])?)),
-        "box" => Type::Box(Box::new(ty_from(&args[0])?)),
-        "boxresult" => Type::BoxResult(Box::new(ty_from(&args[0])?)),
-        "borrow" => Type::Borrow(Box::new(ty_from(&args[0])?)),
-        "borrowmut" => Type::BorrowMut(Box::new(ty_from(&args[0])?)),
+        "rawptr" => Type::RawPtr(Box::new(ty_from(arg(args, 0)?)?)),
+        "box" => Type::Box(Box::new(ty_from(arg(args, 0)?)?)),
+        "boxresult" => Type::BoxResult(Box::new(ty_from(arg(args, 0)?)?)),
+        "borrow" => Type::Borrow(Box::new(ty_from(arg(args, 0)?)?)),
+        "borrowmut" => Type::BorrowMut(Box::new(ty_from(arg(args, 0)?)?)),
         "fnptr" => {
-            let alloc = args[0].as_bool()?;
-            let foreign = args[1].as_bool()?;
-            let ret = Box::new(ty_from(&args[2])?);
-            let param_items = tagged(&args[3], "params")?;
-            let params = param_items[0]
+            let alloc = arg(args, 0)?.as_bool()?;
+            let foreign = arg(args, 1)?.as_bool()?;
+            let ret = Box::new(ty_from(arg(args, 2)?)?);
+            let param_items = tagged(arg(args, 3)?, "params")?;
+            let params = arg(param_items, 0)?
                 .as_list()?
                 .iter()
                 .map(|p| {
                     let (m, rest) = head(p)?;
-                    Ok((parammode_from(m)?, ty_from(&rest[0])?))
+                    Ok((parammode_from(m)?, ty_from(arg(rest, 0)?)?))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             Type::FnPtr(FnPtrTy { params, alloc, foreign, ret })
@@ -496,8 +505,8 @@ fn arraylen_to(len: &ArrayLen) -> Sexp {
 fn arraylen_from(sx: &Sexp) -> Result<ArrayLen, String> {
     let (tag, args) = head(sx)?;
     Ok(match tag {
-        "litlen" => ArrayLen::Lit(args[0].num()?),
-        "namedlen" => ArrayLen::Named(args[0].as_str()?.to_string()),
+        "litlen" => ArrayLen::Lit(arg(args, 0)?.num()?),
+        "namedlen" => ArrayLen::Named(arg(args, 0)?.as_str()?.to_string()),
         "unknownlen" => ArrayLen::Unknown,
         other => return Err(format!("unknown array-len tag `{other}`")),
     })
@@ -516,8 +525,8 @@ fn operand_to(op: &Operand) -> Sexp {
 fn operand_from(sx: &Sexp) -> Result<Operand, String> {
     let (tag, args) = head(sx)?;
     Ok(match tag {
-        "const" => Operand::Const(args[0].num()?, scalar_from(args[1].as_atom()?)?),
-        "oplocal" => Operand::Local(args[0].num()?),
+        "const" => Operand::Const(arg(args, 0)?.num()?, scalar_from(arg(args, 1)?.as_atom()?)?),
+        "oplocal" => Operand::Local(arg(args, 0)?.num()?),
         other => return Err(format!("unknown operand tag `{other}`")),
     })
 }
@@ -540,14 +549,14 @@ fn proj_to(p: &Proj) -> Sexp {
 fn proj_from(sx: &Sexp) -> Result<Proj, String> {
     let (tag, args) = head(sx)?;
     Ok(match tag {
-        "field" => Proj::Field { offset: args[0].num()?, ty: ty_from(&args[1])? },
-        "deref" => Proj::Deref { inner: ty_from(&args[0])? },
+        "field" => Proj::Field { offset: arg(args, 0)?.num()?, ty: ty_from(arg(args, 1)?)? },
+        "deref" => Proj::Deref { inner: ty_from(arg(args, 0)?)? },
         "index" => Proj::Index {
-            index: operand_from(&args[0])?,
-            stride: args[1].num()?,
-            len: args[2].num()?,
-            span: Span { start: args[3].num()?, end: args[4].num()? },
-            slice: args[5].as_bool()?,
+            index: operand_from(arg(args, 0)?)?,
+            stride: arg(args, 1)?.num()?,
+            len: arg(args, 2)?.num()?,
+            span: Span { start: arg(args, 3)?.num()?, end: arg(args, 4)?.num()? },
+            slice: arg(args, 5)?.as_bool()?,
         },
         other => return Err(format!("unknown proj tag `{other}`")),
     })
@@ -559,8 +568,8 @@ fn place_to(p: &Place) -> Sexp {
 }
 fn place_from(sx: &Sexp) -> Result<Place, String> {
     let args = tagged(sx, "place")?;
-    let root = args[0].num()?;
-    let proj = tagged(&args[1], "proj")?.iter().map(proj_from).collect::<Result<Vec<_>, _>>()?;
+    let root = arg(args, 0)?.num()?;
+    let proj = tagged(arg(args, 1)?, "proj")?.iter().map(proj_from).collect::<Result<Vec<_>, _>>()?;
     Ok(Place { root, proj })
 }
 
@@ -570,8 +579,8 @@ fn faultedge_to(fe: &FaultEdge) -> Sexp {
 fn faultedge_from(sx: &Sexp) -> Result<FaultEdge, String> {
     let args = tagged(sx, "fedge")?;
     Ok(FaultEdge {
-        kind: fault_from(args[0].as_atom()?)?,
-        span: Span { start: args[1].num()?, end: args[2].num()? },
+        kind: fault_from(arg(args, 0)?.as_atom()?)?,
+        span: Span { start: arg(args, 1)?.num()?, end: arg(args, 2)?.num()? },
     })
 }
 
@@ -584,7 +593,7 @@ fn fault_opt_to(fe: &Option<FaultEdge>) -> Sexp {
 fn fault_opt_from(sx: &Sexp) -> Result<Option<FaultEdge>, String> {
     let (tag, args) = head(sx)?;
     Ok(match tag {
-        "some" => Some(faultedge_from(&args[0])?),
+        "some" => Some(faultedge_from(arg(args, 0)?)?),
         "none" => None,
         other => return Err(format!("expected some/none, got `{other}`")),
     })
@@ -646,48 +655,48 @@ fn rvalue_to(rv: &Rvalue) -> Sexp {
 fn rvalue_from(sx: &Sexp) -> Result<Rvalue, String> {
     let (tag, args) = head(sx)?;
     Ok(match tag {
-        "use" => Rvalue::Use(operand_from(&args[0])?),
+        "use" => Rvalue::Use(operand_from(arg(args, 0)?)?),
         "bin" => Rvalue::Bin {
-            op: binop_from(args[0].as_atom()?)?,
-            regime: regime_from(args[1].as_atom()?)?,
-            ty: scalar_from(args[2].as_atom()?)?,
-            l: operand_from(&args[3])?,
-            r: operand_from(&args[4])?,
-            span: Span { start: args[5].num()?, end: args[6].num()? },
-            fault: fault_opt_from(&args[7])?,
+            op: binop_from(arg(args, 0)?.as_atom()?)?,
+            regime: regime_from(arg(args, 1)?.as_atom()?)?,
+            ty: scalar_from(arg(args, 2)?.as_atom()?)?,
+            l: operand_from(arg(args, 3)?)?,
+            r: operand_from(arg(args, 4)?)?,
+            span: Span { start: arg(args, 5)?.num()?, end: arg(args, 6)?.num()? },
+            fault: fault_opt_from(arg(args, 7)?)?,
         },
         "un" => Rvalue::Un {
-            op: unop_from(args[0].as_atom()?)?,
-            regime: regime_from(args[1].as_atom()?)?,
-            ty: scalar_from(args[2].as_atom()?)?,
-            v: operand_from(&args[3])?,
-            fault: fault_opt_from(&args[4])?,
+            op: unop_from(arg(args, 0)?.as_atom()?)?,
+            regime: regime_from(arg(args, 1)?.as_atom()?)?,
+            ty: scalar_from(arg(args, 2)?.as_atom()?)?,
+            v: operand_from(arg(args, 3)?)?,
+            fault: fault_opt_from(arg(args, 4)?)?,
         },
         "cmp" => Rvalue::Cmp {
-            op: binop_from(args[0].as_atom()?)?,
-            l: operand_from(&args[1])?,
-            r: operand_from(&args[2])?,
+            op: binop_from(arg(args, 0)?.as_atom()?)?,
+            l: operand_from(arg(args, 1)?)?,
+            r: operand_from(arg(args, 2)?)?,
         },
         "conv" => Rvalue::Conv {
-            to: scalar_from(args[0].as_atom()?)?,
-            regime: regime_from(args[1].as_atom()?)?,
-            v: operand_from(&args[2])?,
-            fault: fault_opt_from(&args[3])?,
+            to: scalar_from(arg(args, 0)?.as_atom()?)?,
+            regime: regime_from(arg(args, 1)?.as_atom()?)?,
+            v: operand_from(arg(args, 2)?)?,
+            fault: fault_opt_from(arg(args, 3)?)?,
         },
-        "ref" => Rvalue::Ref(place_from(&args[0])?),
-        "load" => Rvalue::Load { place: place_from(&args[0])?, ty: ty_from(&args[1])? },
-        "call" => Rvalue::Call { func: args[0].as_str()?.to_string(), args: args_from(&args[1])? },
+        "ref" => Rvalue::Ref(place_from(arg(args, 0)?)?),
+        "load" => Rvalue::Load { place: place_from(arg(args, 0)?)?, ty: ty_from(arg(args, 1)?)? },
+        "call" => Rvalue::Call { func: arg(args, 0)?.as_str()?.to_string(), args: args_from(arg(args, 1)?)? },
         "callindirect" => {
-            Rvalue::CallIndirect { func: operand_from(&args[0])?, args: args_from(&args[1])? }
+            Rvalue::CallIndirect { func: operand_from(arg(args, 0)?)?, args: args_from(arg(args, 1)?)? }
         }
         "ptrarith" => Rvalue::PtrArith {
-            base: operand_from(&args[0])?,
-            index: operand_from(&args[1])?,
-            stride: args[2].num()?,
+            base: operand_from(arg(args, 0)?)?,
+            index: operand_from(arg(args, 1)?)?,
+            stride: arg(args, 2)?.num()?,
         },
-        "isnull" => Rvalue::IsNull(operand_from(&args[0])?),
-        "staticaddr" => Rvalue::StaticAddr(args[0].as_str()?.to_string()),
-        "straddr" => Rvalue::StrAddr(args[0].as_str()?.to_string()),
+        "isnull" => Rvalue::IsNull(operand_from(arg(args, 0)?)?),
+        "staticaddr" => Rvalue::StaticAddr(arg(args, 0)?.as_str()?.to_string()),
+        "straddr" => Rvalue::StrAddr(arg(args, 0)?.as_str()?.to_string()),
         other => return Err(format!("unknown rvalue tag `{other}`")),
     })
 }
@@ -780,97 +789,97 @@ fn collop_to(op: &CollOp) -> Sexp {
 fn collop_from(sx: &Sexp) -> Result<CollOp, String> {
     let (tag, args) = head(sx)?;
     Ok(match tag {
-        "new" => CollOp::New { alloc: operand_from(&args[0])? },
+        "new" => CollOp::New { alloc: operand_from(arg(args, 0)?)? },
         "vecpush" => CollOp::VecPush {
-            base: operand_from(&args[0])?,
-            elem: ty_from(&args[1])?,
-            value: place_from(&args[2])?,
-            span: Span { start: args[3].num()?, end: args[4].num()? },
+            base: operand_from(arg(args, 0)?)?,
+            elem: ty_from(arg(args, 1)?)?,
+            value: place_from(arg(args, 2)?)?,
+            span: Span { start: arg(args, 3)?.num()?, end: arg(args, 4)?.num()? },
         },
-        "vecpop" => CollOp::VecPop { base: operand_from(&args[0])?, elem: ty_from(&args[1])? },
+        "vecpop" => CollOp::VecPop { base: operand_from(arg(args, 0)?)?, elem: ty_from(arg(args, 1)?)? },
         "vecget" => CollOp::VecGet {
-            base: operand_from(&args[0])?,
-            elem: ty_from(&args[1])?,
-            index: operand_from(&args[2])?,
-            span: Span { start: args[3].num()?, end: args[4].num()? },
+            base: operand_from(arg(args, 0)?)?,
+            elem: ty_from(arg(args, 1)?)?,
+            index: operand_from(arg(args, 2)?)?,
+            span: Span { start: arg(args, 3)?.num()?, end: arg(args, 4)?.num()? },
         },
         "vecset" => CollOp::VecSet {
-            base: operand_from(&args[0])?,
-            elem: ty_from(&args[1])?,
-            index: operand_from(&args[2])?,
-            value: place_from(&args[3])?,
-            span: Span { start: args[4].num()?, end: args[5].num()? },
+            base: operand_from(arg(args, 0)?)?,
+            elem: ty_from(arg(args, 1)?)?,
+            index: operand_from(arg(args, 2)?)?,
+            value: place_from(arg(args, 3)?)?,
+            span: Span { start: arg(args, 4)?.num()?, end: arg(args, 5)?.num()? },
         },
         "mapinsert" => CollOp::MapInsert {
-            base: operand_from(&args[0])?,
-            valty: ty_from(&args[1])?,
-            key: place_from(&args[2])?,
-            value: place_from(&args[3])?,
-            span: Span { start: args[4].num()?, end: args[5].num()? },
+            base: operand_from(arg(args, 0)?)?,
+            valty: ty_from(arg(args, 1)?)?,
+            key: place_from(arg(args, 2)?)?,
+            value: place_from(arg(args, 3)?)?,
+            span: Span { start: arg(args, 4)?.num()?, end: arg(args, 5)?.num()? },
         },
         "mapcontains" => CollOp::MapContains {
-            base: operand_from(&args[0])?,
-            valty: ty_from(&args[1])?,
-            key: place_from(&args[2])?,
+            base: operand_from(arg(args, 0)?)?,
+            valty: ty_from(arg(args, 1)?)?,
+            key: place_from(arg(args, 2)?)?,
         },
         "mapget" => CollOp::MapGet {
-            base: operand_from(&args[0])?,
-            valty: ty_from(&args[1])?,
-            key: place_from(&args[2])?,
-            span: Span { start: args[3].num()?, end: args[4].num()? },
+            base: operand_from(arg(args, 0)?)?,
+            valty: ty_from(arg(args, 1)?)?,
+            key: place_from(arg(args, 2)?)?,
+            span: Span { start: arg(args, 3)?.num()?, end: arg(args, 4)?.num()? },
         },
         "stringpush" => CollOp::StringPush {
-            base: operand_from(&args[0])?,
-            ch: operand_from(&args[1])?,
-            span: Span { start: args[2].num()?, end: args[3].num()? },
+            base: operand_from(arg(args, 0)?)?,
+            ch: operand_from(arg(args, 1)?)?,
+            span: Span { start: arg(args, 2)?.num()?, end: arg(args, 3)?.num()? },
         },
         "stringappend" => CollOp::StringAppend {
-            base: operand_from(&args[0])?,
-            view: place_from(&args[1])?,
-            span: Span { start: args[2].num()?, end: args[3].num()? },
+            base: operand_from(arg(args, 0)?)?,
+            view: place_from(arg(args, 1)?)?,
+            span: Span { start: arg(args, 2)?.num()?, end: arg(args, 3)?.num()? },
         },
-        "stringasstr" => CollOp::StringAsStr { base: operand_from(&args[0])? },
+        "stringasstr" => CollOp::StringAsStr { base: operand_from(arg(args, 0)?)? },
         other => return Err(format!("unknown collection op `{other}`")),
     })
 }
 fn stmtkind_from(sx: &Sexp) -> Result<StatementKind, String> {
     let (tag, args) = head(sx)?;
     Ok(match tag {
-        "assign" => StatementKind::Assign(args[0].num()?, rvalue_from(&args[1])?),
-        "trace" => StatementKind::Trace(operand_from(&args[0])?),
-        "store" => StatementKind::Store(place_from(&args[0])?, rvalue_from(&args[1])?),
+        "assign" => StatementKind::Assign(arg(args, 0)?.num()?, rvalue_from(arg(args, 1)?)?),
+        "trace" => StatementKind::Trace(operand_from(arg(args, 0)?)?),
+        "store" => StatementKind::Store(place_from(arg(args, 0)?)?, rvalue_from(arg(args, 1)?)?),
         "copyval" => StatementKind::CopyVal {
-            dst: place_from(&args[0])?,
-            src: place_from(&args[1])?,
-            ty: ty_from(&args[2])?,
+            dst: place_from(arg(args, 0)?)?,
+            src: place_from(arg(args, 1)?)?,
+            ty: ty_from(arg(args, 2)?)?,
         },
-        "drop" => StatementKind::Drop { local: args[0].num()?, moved: moved_from(&args[1])? },
+        "drop" => StatementKind::Drop { local: arg(args, 0)?.num()?, moved: moved_from(arg(args, 1)?)? },
         "boxop" => StatementKind::BoxOp {
-            dst: place_from(&args[0])?,
-            inner_ty: ty_from(&args[1])?,
-            result_ty: ty_from(&args[2])?,
-            alloc: operand_from(&args[3])?,
-            value: place_from(&args[4])?,
+            dst: place_from(arg(args, 0)?)?,
+            inner_ty: ty_from(arg(args, 1)?)?,
+            result_ty: ty_from(arg(args, 2)?)?,
+            alloc: operand_from(arg(args, 3)?)?,
+            value: place_from(arg(args, 4)?)?,
         },
         "unboxop" => StatementKind::UnboxOp {
-            dst: place_from(&args[0])?,
-            inner_ty: ty_from(&args[1])?,
-            boxed: place_from(&args[2])?,
+            dst: place_from(arg(args, 0)?)?,
+            inner_ty: ty_from(arg(args, 1)?)?,
+            boxed: place_from(arg(args, 2)?)?,
         },
         "subslice" => StatementKind::Subslice {
-            dst: place_from(&args[0])?,
-            src: place_from(&args[1])?,
-            lo: operand_from(&args[2])?,
-            hi: operand_from(&args[3])?,
-            stride: args[4].num()?,
-            span: Span { start: args[5].num()?, end: args[6].num()? },
+            dst: place_from(arg(args, 0)?)?,
+            src: place_from(arg(args, 1)?)?,
+            lo: operand_from(arg(args, 2)?)?,
+            hi: operand_from(arg(args, 3)?)?,
+            stride: arg(args, 4)?.num()?,
+            span: Span { start: arg(args, 5)?.num()?, end: arg(args, 6)?.num()? },
         },
         "collop" => StatementKind::CollectionOp {
-            dst: place_from(&args[0])?,
-            op: collop_from(&args[1])?,
+            dst: place_from(arg(args, 0)?)?,
+            op: collop_from(arg(args, 1)?)?,
         },
         "spawn" => {
-            StatementKind::Spawn { func: args[0].as_str()?.to_string(), args: args_from(&args[1])? }
+            StatementKind::Spawn { func: arg(args, 0)?.as_str()?.to_string(), args: args_from(arg(args, 1)?)? }
         }
         "scopebegin" => StatementKind::ScopeBegin,
         "scopeend" => StatementKind::ScopeEnd,
@@ -884,9 +893,9 @@ fn stmt_to(st: &Statement) -> Sexp {
 fn stmt_from(sx: &Sexp) -> Result<Statement, String> {
     let args = tagged(sx, "stmt")?;
     Ok(Statement {
-        kind: stmtkind_from(&args[0])?,
-        span: Span { start: args[1].num()?, end: args[2].num()? },
-        observable: args[3].as_bool()?,
+        kind: stmtkind_from(arg(args, 0)?)?,
+        span: Span { start: arg(args, 1)?.num()?, end: arg(args, 2)?.num()? },
+        observable: arg(args, 3)?.as_bool()?,
     })
 }
 
@@ -903,14 +912,14 @@ fn term_to(t: &Terminator) -> Sexp {
 fn term_from(sx: &Sexp) -> Result<Terminator, String> {
     let (tag, args) = head(sx)?;
     Ok(match tag {
-        "goto" => Terminator::Goto(args[0].num()?),
+        "goto" => Terminator::Goto(arg(args, 0)?.num()?),
         "branch" => Terminator::Branch {
-            cond: operand_from(&args[0])?,
-            then_bb: args[1].num()?,
-            else_bb: args[2].num()?,
+            cond: operand_from(arg(args, 0)?)?,
+            then_bb: arg(args, 1)?.num()?,
+            else_bb: arg(args, 2)?.num()?,
         },
         "return" => Terminator::Return,
-        "faultterm" => Terminator::Fault(faultedge_from(&args[0])?),
+        "faultterm" => Terminator::Fault(faultedge_from(arg(args, 0)?)?),
         other => return Err(format!("unknown terminator `{other}`")),
     })
 }
@@ -921,8 +930,8 @@ fn block_to(b: &BasicBlock) -> Sexp {
 }
 fn block_from(sx: &Sexp) -> Result<BasicBlock, String> {
     let args = tagged(sx, "block")?;
-    let stmts = tagged(&args[0], "stmts")?.iter().map(stmt_from).collect::<Result<Vec<_>, _>>()?;
-    Ok(BasicBlock { stmts, term: term_from(&args[1])? })
+    let stmts = tagged(arg(args, 0)?, "stmts")?.iter().map(stmt_from).collect::<Result<Vec<_>, _>>()?;
+    Ok(BasicBlock { stmts, term: term_from(arg(args, 1)?)? })
 }
 
 // ---------------------------------------------------------------------------
@@ -938,7 +947,7 @@ fn name_opt_to(name: &Option<String>) -> Sexp {
 fn name_opt_from(sx: &Sexp) -> Result<Option<String>, String> {
     let (tag, args) = head(sx)?;
     Ok(match tag {
-        "some" => Some(args[0].as_str()?.to_string()),
+        "some" => Some(arg(args, 0)?.as_str()?.to_string()),
         "none" => None,
         other => return Err(format!("expected some/none, got `{other}`")),
     })
@@ -950,9 +959,9 @@ fn local_to(d: &LocalDecl) -> Sexp {
 fn local_from(sx: &Sexp) -> Result<LocalDecl, String> {
     let args = tagged(sx, "local")?;
     Ok(LocalDecl {
-        ty: ty_from(&args[0])?,
-        name: name_opt_from(&args[1])?,
-        drop_obligation: args[2].as_bool()?,
+        ty: ty_from(arg(args, 0)?)?,
+        name: name_opt_from(arg(args, 1)?)?,
+        drop_obligation: arg(args, 2)?.as_bool()?,
     })
 }
 
@@ -965,7 +974,7 @@ fn usize_opt_to(v: &Option<usize>) -> Sexp {
 fn usize_opt_from(sx: &Sexp) -> Result<Option<usize>, String> {
     let (tag, args) = head(sx)?;
     Ok(match tag {
-        "some" => Some(args[0].num()?),
+        "some" => Some(arg(args, 0)?.num()?),
         "none" => None,
         other => return Err(format!("expected some/none, got `{other}`")),
     })
@@ -977,10 +986,10 @@ fn pred_to(p: &Predicate) -> Sexp {
 fn pred_from(sx: &Sexp) -> Result<Predicate, String> {
     let args = tagged(sx, "pred")?;
     Ok(Predicate {
-        entry: args[0].num()?,
-        value: args[1].num()?,
-        span: Span { start: args[2].num()?, end: args[3].num()? },
-        kind: fault_from(args[4].as_atom()?)?,
+        entry: arg(args, 0)?.num()?,
+        value: arg(args, 1)?.num()?,
+        span: Span { start: arg(args, 2)?.num()?, end: arg(args, 3)?.num()? },
+        kind: fault_from(arg(args, 4)?.as_atom()?)?,
     })
 }
 
@@ -1016,21 +1025,21 @@ fn fn_to(f: &MirFn) -> Sexp {
 }
 fn fn_from(sx: &Sexp) -> Result<MirFn, String> {
     let args = tagged(sx, "fn")?;
-    let locals = tagged(&args[3], "locals")?.iter().map(local_from).collect::<Result<Vec<_>, _>>()?;
-    let blocks = tagged(&args[4], "blocks")?.iter().map(block_from).collect::<Result<Vec<_>, _>>()?;
+    let locals = tagged(arg(args, 3)?, "locals")?.iter().map(local_from).collect::<Result<Vec<_>, _>>()?;
+    let blocks = tagged(arg(args, 4)?, "blocks")?.iter().map(block_from).collect::<Result<Vec<_>, _>>()?;
     let requires =
-        tagged(&args[6], "requires")?.iter().map(pred_from).collect::<Result<Vec<_>, _>>()?;
-    let ensures = tagged(&args[7], "ensures")?.iter().map(pred_from).collect::<Result<Vec<_>, _>>()?;
+        tagged(arg(args, 6)?, "requires")?.iter().map(pred_from).collect::<Result<Vec<_>, _>>()?;
+    let ensures = tagged(arg(args, 7)?, "ensures")?.iter().map(pred_from).collect::<Result<Vec<_>, _>>()?;
     Ok(MirFn {
-        name: args[0].as_str()?.to_string(),
-        num_params: args[1].num()?,
-        result_local: usize_opt_from(&args[2])?,
+        name: arg(args, 0)?.as_str()?.to_string(),
+        num_params: arg(args, 1)?.num()?,
+        result_local: usize_opt_from(arg(args, 2)?)?,
         locals,
         blocks,
-        entry: args[5].num()?,
+        entry: arg(args, 5)?.num()?,
         requires,
         ensures,
-        replay: replay_from(args[8].as_atom()?)?,
+        replay: replay_from(arg(args, 8)?.as_atom()?)?,
     })
 }
 
@@ -1040,9 +1049,9 @@ fn static_to(st: &StaticInit) -> Sexp {
 fn static_from(sx: &Sexp) -> Result<StaticInit, String> {
     let args = tagged(sx, "static")?;
     Ok(StaticInit {
-        name: args[0].as_str()?.to_string(),
-        ty: ty_from(&args[1])?,
-        init_fn: args[2].as_str()?.to_string(),
+        name: arg(args, 0)?.as_str()?.to_string(),
+        ty: ty_from(arg(args, 1)?)?,
+        init_fn: arg(args, 2)?.as_str()?.to_string(),
     })
 }
 
@@ -1065,20 +1074,20 @@ fn program_to(prog: &MirProgram) -> Sexp {
 }
 fn program_from(sx: &Sexp) -> Result<MirProgram, String> {
     let args = tagged(sx, "mir")?;
-    let fns = tagged(&args[0], "fns")?.iter().map(fn_from).collect::<Result<Vec<_>, _>>()?;
+    let fns = tagged(arg(args, 0)?, "fns")?.iter().map(fn_from).collect::<Result<Vec<_>, _>>()?;
 
     let mut drop_hooks = HashMap::new();
-    for h in tagged(&args[1], "drop_hooks")? {
+    for h in tagged(arg(args, 1)?, "drop_hooks")? {
         let hp = tagged(h, "hook")?;
-        drop_hooks.insert(hp[0].as_str()?.to_string(), hp[1].as_str()?.to_string());
+        drop_hooks.insert(arg(hp, 0)?.as_str()?.to_string(), arg(hp, 1)?.as_str()?.to_string());
     }
 
-    let fn_ptrs = tagged(&args[2], "fn_ptrs")?
+    let fn_ptrs = tagged(arg(args, 2)?, "fn_ptrs")?
         .iter()
         .map(|p| p.as_str().map(String::from))
         .collect::<Result<Vec<_>, _>>()?;
     let statics =
-        tagged(&args[3], "statics")?.iter().map(static_from).collect::<Result<Vec<_>, _>>()?;
+        tagged(arg(args, 3)?, "statics")?.iter().map(static_from).collect::<Result<Vec<_>, _>>()?;
 
     // `fn_index` is derived (name -> position in `fns`), rebuilt on load exactly
     // as the lowering builds it.
@@ -1103,4 +1112,19 @@ pub fn serialize(prog: &MirProgram) -> String {
 /// [`serialize`]: `serialize(deserialize(serialize(p))) == serialize(p)`.
 pub fn deserialize(text: &str) -> Result<MirProgram, String> {
     program_from(&parse_sexp(text)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deserialize;
+
+    /// A parseable-but-truncated wire (a `fn` list missing its locals/blocks/…
+    /// tail) must deserialize to `Err`, not panic on an out-of-bounds arg index.
+    /// Guards the arity checks that front every positional access.
+    #[test]
+    fn truncated_wire_errs_not_panics() {
+        let wire = r#"(mir (fns (fn "main" 0)) (drop_hooks) (fn_ptrs) (statics))"#;
+        let err = deserialize(wire).expect_err("truncated fn must be an error");
+        assert!(err.contains("wire truncated"), "expected an arity error, got: {err}");
+    }
 }

@@ -294,10 +294,10 @@ impl<'a> Interp<'a> {
             match self.eval_value(expr, Some(ty)) {
                 Ok(rv) => {
                     if let Err(Ctl::Fault(f)) = self.move_to(addr, rv) {
-                        return Err(f);
+                        return Err(self.attach_trace(f));
                     }
                 }
-                Err(Ctl::Fault(f)) => return Err(f),
+                Err(Ctl::Fault(f)) => return Err(self.attach_trace(f)),
                 Err(_) => {}
             }
         }
@@ -320,8 +320,10 @@ impl<'a> Interp<'a> {
                     trace: std::mem::take(&mut self.trace),
                 })
             }
-            Err(Ctl::Fault(f)) => Err(f),
-            Err(_) => Err(Fault::new(FaultKind::Panic, Span::point(0), "escaped `main`")),
+            Err(Ctl::Fault(f)) => Err(self.attach_trace(f)),
+            Err(_) => {
+                Err(self.attach_trace(Fault::new(FaultKind::Panic, Span::point(0), "escaped `main`")))
+            }
         }
     }
 
@@ -411,6 +413,14 @@ impl<'a> Interp<'a> {
     // ---- memory helpers ----
     fn fault(&self, kind: FaultKind, msg: impl Into<String>) -> Ctl {
         Ctl::Fault(Fault::new(kind, self.cur_span, msg))
+    }
+
+    /// Thread the trace accumulated so far into a fault escaping to the run
+    /// boundary, so the differential harness compares the pre-fault trace, not
+    /// just kind+span (F-FAULT-TRACE).
+    fn attach_trace(&self, mut f: Fault) -> Fault {
+        f.trace = self.trace.clone();
+        f
     }
     fn write_bytes(&mut self, addr: u64, data: &[u8]) -> R<()> {
         self.mem

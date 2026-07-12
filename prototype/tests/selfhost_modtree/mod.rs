@@ -55,3 +55,58 @@ pub fn trace_text(run: &candor_proto::interp::Run) -> String {
     let bytes: Vec<u8> = run.trace.iter().map(|&v| v as u8).collect();
     String::from_utf8(bytes).expect("dump is ASCII")
 }
+
+use candor_proto::interp::{Fault, FaultKind, Run};
+
+/// Canonical fault kind-code map — the schema every self-host differential gate
+/// renders `FAULT kind span` with. Total over `FaultKind` (codes 0..=9, matching
+/// the interp/backend kind codes) so the mapping cannot drift between gates.
+pub fn fault_code(k: FaultKind) -> i64 {
+    match k {
+        FaultKind::Overflow => 0,
+        FaultKind::DivByZero => 1,
+        FaultKind::Assert => 2,
+        FaultKind::Panic => 3,
+        FaultKind::Bounds => 4,
+        FaultKind::ConvLoss => 5,
+        FaultKind::Requires => 6,
+        FaultKind::Ensures => 7,
+        FaultKind::BadPointer => 8,
+        FaultKind::NoForeignRuntime => 9,
+    }
+}
+
+/// Render a non-faulting run in the canonical dump schema (`RET`, then a `TRACE`
+/// line per traced value).
+pub fn dump_ok(run: &Run) -> String {
+    let mut s = format!("RET {}\n", run.ret);
+    for v in &run.trace {
+        s.push_str(&format!("TRACE {v}\n"));
+    }
+    s
+}
+
+/// Render a fault in the canonical dump schema: the trace emitted BEFORE the
+/// fault (`TRACE` lines, threaded into the fault at the run boundary) followed by
+/// `FAULT kind span.start span.end`. Including the pre-fault trace closes the
+/// F-FAULT-TRACE blind spot — two engines that trace differently before an
+/// identical fault now diverge in the dump.
+pub fn dump_fault(f: &Fault) -> String {
+    let mut s = String::new();
+    for v in &f.trace {
+        s.push_str(&format!("TRACE {v}\n"));
+    }
+    s.push_str(&format!("FAULT {} {} {}\n", fault_code(f.kind), f.span.start, f.span.end));
+    s
+}
+
+/// Run `f` on a 256 MiB stack. The self-host tools recurse deeply (parser and
+/// checker over the largest modules), overflowing the default test-thread stack.
+pub fn on_big_stack<F: FnOnce() + Send + 'static>(f: F) {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(f)
+        .expect("spawn big-stack thread")
+        .join()
+        .expect("gate thread panicked");
+}

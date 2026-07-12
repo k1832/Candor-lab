@@ -18,37 +18,12 @@
 use std::collections::HashMap;
 
 use candor_proto::ast;
-use candor_proto::interp::{Fault, FaultKind, Run};
 use candor_proto::mir::{self, serial};
 use candor_proto::resolve::Items;
 use candor_proto::{check, diag, generics, real, resolve, run_source_real, RunResult};
 
-/// Integer kind-code map shared with `selfhost_interp` — the same rendering schema.
-fn fault_code(k: FaultKind) -> i64 {
-    match k {
-        FaultKind::Overflow => 0,
-        FaultKind::DivByZero => 1,
-        FaultKind::Assert => 2,
-        FaultKind::Panic => 3,
-        FaultKind::Bounds => 4,
-        FaultKind::ConvLoss => 5,
-        FaultKind::Requires => 6,
-        FaultKind::Ensures => 7,
-        FaultKind::BadPointer => 8,
-        FaultKind::NoForeignRuntime => 9,
-    }
-}
-
-fn dump_ok(run: &Run) -> String {
-    let mut s = format!("RET {}\n", run.ret);
-    for v in &run.trace {
-        s.push_str(&format!("TRACE {v}\n"));
-    }
-    s
-}
-fn dump_fault(f: &Fault) -> String {
-    format!("FAULT {} {} {}\n", fault_code(f.kind), f.span.start, f.span.end)
-}
+mod selfhost_modtree;
+use selfhost_modtree::{dump_fault, dump_ok, on_big_stack};
 
 /// The tree-walking oracle's dump for `src`, in the canonical schema.
 fn oracle_dump(src: &str) -> String {
@@ -130,6 +105,7 @@ const CORPUS: &[(&str, Shape)] = &[
     ("u64_add_overflow.cnr", Fault),
     ("u64_sub_underflow.cnr", Fault),
     ("i64_mul_overflow.cnr", Fault),
+    ("trace_then_fault.cnr", Fault),
     // aggregates: structs + arrays (field offsets, strides, copyval)
     ("struct_field.cnr", Ret),
     ("nested_struct.cnr", Ret),
@@ -203,20 +179,12 @@ const COLLECTION_CORPUS: &[(&str, Shape)] = &[
     ("map_insert_contains_get.cnr", Ret),
     ("string_build.cnr", Ret),
     ("vec_get_oob_fault.cnr", Fault),
+    ("vec_set_oob_fault.cnr", Fault),
 ];
 
 fn read_fixture_lower(rel: &str) -> String {
     let path = format!("{}/tests/fixtures/selfhost_lower/{}", env!("CARGO_MANIFEST_DIR"), rel);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
-}
-
-fn on_big_stack<F: FnOnce() + Send + 'static>(f: F) {
-    std::thread::Builder::new()
-        .stack_size(256 * 1024 * 1024)
-        .spawn(f)
-        .expect("spawn big-stack thread")
-        .join()
-        .expect("gate thread panicked");
 }
 
 #[test]
@@ -251,7 +219,9 @@ fn mir_serialization_boundary_execution_equal_to_oracle() {
                     rets += 1;
                 }
                 Fault => {
-                    assert!(oracle.starts_with("FAULT "), "expected FAULT on {rel}, got {oracle:?}");
+                    // A fault dump may be preceded by the pre-fault `TRACE` lines
+                    // (F-FAULT-TRACE), so check for the `FAULT` line, not a prefix.
+                    assert!(oracle.contains("FAULT "), "expected FAULT on {rel}, got {oracle:?}");
                     faults += 1;
                 }
             }
@@ -298,7 +268,9 @@ fn mir_collection_boundary_execution_equal_to_oracle() {
                     rets += 1;
                 }
                 Fault => {
-                    assert!(oracle.starts_with("FAULT "), "expected FAULT on {rel}, got {oracle:?}");
+                    // A fault dump may be preceded by the pre-fault `TRACE` lines
+                    // (F-FAULT-TRACE), so check for the `FAULT` line, not a prefix.
+                    assert!(oracle.contains("FAULT "), "expected FAULT on {rel}, got {oracle:?}");
                     faults += 1;
                 }
             }

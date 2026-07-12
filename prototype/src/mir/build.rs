@@ -2338,6 +2338,26 @@ impl<'a> Lowerer<'a> {
                 let elem = first_targ;
                 let (base, _) = self.lower_value(&args[0], None)?;
                 let (index, _) = self.lower_value(&args[1], Some(&Type::usize()))?;
+                // Mirror `bi_vec_set`'s order: bounds-check BEFORE evaluating the
+                // value arg, so an out-of-bounds set faults without running the
+                // value's side effects. `VecGet` performs exactly that check (read
+                // len, eval index, fault `Bounds` at the index span); its slot-borrow
+                // result is discarded. Materializing the value only afterwards keeps
+                // the fault path byte-exact to the oracle (no pre-fault side effects).
+                let probe = Place::local(self.new_local(Type::Borrow(Box::new(elem.clone())), None));
+                self.emit(
+                    StatementKind::CollectionOp {
+                        dst: probe,
+                        op: CollOp::VecGet {
+                            base,
+                            elem: elem.clone(),
+                            index,
+                            span: args[1].span,
+                        },
+                    },
+                    span,
+                    false,
+                );
                 let value = self.materialize_place(&args[2], &elem)?;
                 if !is_copy(&elem, self.items) {
                     self.mark_moved(&args[2]);

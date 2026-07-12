@@ -88,19 +88,30 @@ pub fn run(prog: &MirProgram, items: &Items, consts: &HashMap<String, u64>) -> R
         let _ = engine.mem.write(addr, &vec![0u8; size as usize]);
         engine.statics.insert(st.name.clone(), addr);
     }
-    for st in &prog.statics {
-        let out = engine.call(&st.init_fn, &[])?;
-        let addr = engine.statics[&st.name];
-        let size = engine.size_of(&st.ty);
-        engine.copy_bytes(addr, out, size)?;
+    let outcome: Result<i64, Fault> = (|| {
+        for st in &prog.statics {
+            let out = engine.call(&st.init_fn, &[])?;
+            let addr = engine.statics[&st.name];
+            let size = engine.size_of(&st.ty);
+            engine.copy_bytes(addr, out, size)?;
+        }
+        let ret_addr = engine.call("main", &[])?;
+        let ret_i64 = match prog.get("main").map(|f| &f.locals[0].ty) {
+            Some(Type::Scalar(ScalarTy::I64)) => engine.read_int(ret_addr, ScalarTy::I64)? as i64,
+            _ => 0,
+        };
+        Ok(ret_i64)
+    })();
+    match outcome {
+        Ok(ret_i64) => Ok(Run { ret: ret_i64, trace: engine.trace }),
+        // Thread the pre-fault trace into the escaping fault so the differential
+        // harness compares the trace emitted BEFORE the fault, not just kind+span
+        // (F-FAULT-TRACE).
+        Err(mut f) => {
+            f.trace = std::mem::take(&mut engine.trace);
+            Err(f)
+        }
     }
-
-    let ret_addr = engine.call("main", &[])?;
-    let ret_i64 = match prog.get("main").map(|f| &f.locals[0].ty) {
-        Some(Type::Scalar(ScalarTy::I64)) => engine.read_int(ret_addr, ScalarTy::I64)? as i64,
-        _ => 0,
-    };
-    Ok(Run { ret: ret_i64, trace: engine.trace })
 }
 
 struct Engine<'a> {

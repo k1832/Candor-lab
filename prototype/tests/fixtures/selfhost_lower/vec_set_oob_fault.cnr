@@ -1,0 +1,24 @@
+// Vec[i64]: an out-of-bounds `set` faults `Bounds` at the index span WITHOUT
+// evaluating the value arg — mirroring `bi_vec_set` (bounds-check first, value
+// second). The value arg `tapped(7)` traces 99 when evaluated, so had the MIR
+// lowering materialized the value before the bounds check the dump would carry a
+// spurious `TRACE 99` before the fault. Byte-exact to the oracle proves the order.
+struct AllocVtable { alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8, free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit }
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize, live: i64 }
+fn with_window(base: usize, size: usize) -> Bump { return Bump { next: base, end: base + size, live: 0 }; }
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 { unsafe "reserved window" { let b: Bump = ptr_read(cast_ptr[Bump](ctx)); let a: usize = (b.next + align - 1) / align * align; if a + size > b.end { return ptr_null[u8](); } ptr_write(cast_ptr[Bump](ctx), Bump { next: a + size, end: b.end, live: b.live + 1 }); return addr_to_ptr[u8](a); } }
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit { unsafe "reserved window" { let b: Bump = ptr_read(cast_ptr[Bump](ctx)); ptr_write(cast_ptr[Bump](ctx), Bump { next: b.next, end: b.end, live: b.live - 1 }); } }
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+fn mk_alloc(state: write Bump) -> Alloc { unsafe "outlives every alloc" { return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) }; } }
+
+fn tapped(x: i64) -> i64 { trace(99); return x; }
+
+fn main() alloc -> i64 {
+  let mut bs: Bump = with_window(16777216, 1048576);
+  let al: Alloc = mk_alloc(write bs);
+  let mut v: Vec[i64] = vec_new(read al);
+  push(write v, 1);
+  set(write v, 5, tapped(7));
+  return 0;
+}

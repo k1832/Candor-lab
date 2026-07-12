@@ -13,11 +13,10 @@
 //! system) and the dump reconstructed from `Run.trace`, compared to the oracle
 //! rendering from `run_source_real`.
 
-use candor_proto::interp::FaultKind;
 use candor_proto::{run_source_real, RunResult};
 
 mod selfhost_modtree;
-use selfhost_modtree::{run_module_tree, trace_text};
+use selfhost_modtree::{fault_code, on_big_stack, run_module_tree, trace_text};
 
 const LEXER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/lexer/lexer.cnr"));
@@ -29,20 +28,6 @@ const MONO_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/mono/mono.cnr"));
 const INTERP_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/interp/interp.cnr"));
-
-/// Integer kind-code map shared with the Candor interpreter's `FK_*` statics. Only
-/// the four faults reachable in the scalar MVP subset appear here.
-fn fault_code(k: FaultKind) -> i64 {
-    match k {
-        FaultKind::Overflow => 0,
-        FaultKind::DivByZero => 1,
-        FaultKind::Assert => 2,
-        FaultKind::Panic => 3,
-        FaultKind::Bounds => 4,
-        FaultKind::ConvLoss => 5,
-        other => panic!("out-of-subset fault kind reached the gate: {other:?}"),
-    }
-}
 
 /// Render the Rust reference interpreter's result in the canonical dump schema.
 fn oracle_dump(src: &str) -> String {
@@ -229,15 +214,6 @@ const CORPUS: &[(&str, Shape)] = &[
 fn read_fixture(rel: &str) -> String {
     let path = format!("{}/tests/fixtures/selfhost_interp/{}", env!("CARGO_MANIFEST_DIR"), rel);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
-}
-
-fn on_big_stack<F: FnOnce() + Send + 'static>(f: F) {
-    std::thread::Builder::new()
-        .stack_size(256 * 1024 * 1024)
-        .spawn(f)
-        .expect("spawn big-stack thread")
-        .join()
-        .expect("gate thread panicked");
 }
 
 #[test]

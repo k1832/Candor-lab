@@ -29,7 +29,7 @@ use candor_proto::check_source_real;
 use candor_proto::RunResult;
 
 mod selfhost_modtree;
-use selfhost_modtree::{check_module_tree, run_module_tree, trace_text};
+use selfhost_modtree::{check_module_tree, on_big_stack, run_module_tree, trace_text};
 
 const LEXER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/lexer/lexer.cnr"));
@@ -133,15 +133,6 @@ fn read_fixture(rel: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 
-fn on_big_stack<F: FnOnce() + Send + 'static>(f: F) {
-    std::thread::Builder::new()
-        .stack_size(256 * 1024 * 1024)
-        .spawn(f)
-        .expect("spawn big-stack thread")
-        .join()
-        .expect("gate thread panicked");
-}
-
 #[test]
 fn candor_move_init_diagnostics_equal_to_oracle_over_corpus() {
     on_big_stack(|| {
@@ -166,7 +157,6 @@ fn candor_move_init_diagnostics_equal_to_oracle_over_corpus() {
         );
     });
 }
-
 
 // ---- ANALYSES-CLEAN FIXPOINT GATES (self-checking self-hosting, step 3) -------
 //
@@ -281,7 +271,6 @@ fn candor_analyses_check_checker_source_clean_fixpoint() {
         );
     });
 }
-
 
 /// FIXPOINT GATE: the self-hosted ANALYSES core, run over ITS OWN source
 /// (`analyses.cnr`, a non-leaf module importing ~70 names from lexer+parser and the

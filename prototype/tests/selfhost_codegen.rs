@@ -18,7 +18,7 @@ use candor_proto::interp::{Fault, FaultKind};
 use candor_proto::{run_source, run_source_real, RunResult};
 
 mod selfhost_modtree;
-use selfhost_modtree::{run_module_tree, trace_text};
+use selfhost_modtree::{on_big_stack, run_module_tree, trace_text};
 
 const LEXER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/lexer/lexer.cnr"));
@@ -236,15 +236,6 @@ const FAULTS: &[&str] = &[
     "fn main() -> i64 { let a: u64 = 3u64; let b: u64 = 5u64; let c: u64 = a - b; return 0i64; }",
     "fn main() -> i64 { let a: i64 = 4000000000000i64; let b: i64 = 4000000000i64; let c: i64 = a * b; return c; }",
 ];
-
-fn on_big_stack<F: FnOnce() + Send + 'static>(f: F) {
-    std::thread::Builder::new()
-        .stack_size(256 * 1024 * 1024)
-        .spawn(f)
-        .expect("spawn big-stack thread")
-        .join()
-        .expect("gate thread panicked");
-}
 
 #[test]
 fn candor_native_codegen_equal_to_oracle_over_scalar_subset() {

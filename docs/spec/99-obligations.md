@@ -2198,6 +2198,54 @@ until N2, when it too will `use layout`. Every gate byte-exact green: selfhost_i
 (28s), selfhost_lower (59s), selfhost_codegen (4s), selfhost_checker (6/6), and
 selfhost_analyses (6/6) each in isolation; clippy clean.
 
+### Addressed — OBL-QUALITY-REVIEW deferred batch (Opus 4.8, 2026-07-12)
+
+Four of the deferred findings are resolved; each verified per-gate in isolation, byte-exact.
+
+- **F-VECSET-ORDER — FIXED.** `src/mir/build.rs` (the `"set" if is_vec` arm) now mirrors
+  `bi_vec_set`'s order: it emits a `VecGet` bounds-probe (read len, eval index, fault `Bounds`
+  at the index span; slot-borrow discarded) BEFORE `materialize_place` for the value arg, then
+  the `VecSet` store. So an out-of-bounds `set` faults WITHOUT running the value's side effects,
+  matching the oracle. Reuses the already-serialized, fault-capable `VecGet` op (never DCE'd) —
+  no new MIR surface. Fixture `tests/fixtures/selfhost_lower/vec_set_oob_fault.cnr`
+  (`set(write v, 5, tapped(7))`, `tapped` traces 99, `v` has len 1) is gated through
+  `mir_serial` COLLECTION_CORPUS: pre-fix the MIR ran the value first (dump `TRACE 99\nFAULT`),
+  the oracle only `FAULT`; post-fix both are `FAULT 4 <index-span>` byte-exact. `mir_serial` 8/8.
+
+- **F-DESERIALIZE-ARITY — FIXED.** `src/mir/serial.rs` adds a bounds-checked accessor
+  `arg(args, i) -> Result<&Sexp, String>` and routes every positional index in the `*_from`
+  deserializers through it (185 sites), so a parseable-but-truncated wire returns a descriptive
+  `Err("wire truncated: need arg #N, have M")` instead of an index-OOB panic — the `Result`
+  contract made honest now a Candor-emitted wire feeds `deserialize`. Well-formed wires index
+  the same slots, so every existing round-trip still succeeds. Unit test
+  `mir::serial::tests::truncated_wire_errs_not_panics` feeds `(mir (fns (fn "main" 0)) …)` and
+  asserts a graceful `Err`.
+
+- **F-TEST-DEDUP — FIXED.** The copy-pasted helpers are hoisted into
+  `tests/selfhost_modtree/mod.rs` (`pub fn` `fault_code`, `dump_ok`, `dump_fault`,
+  `on_big_stack`); the gate files `use` them and deleted their local copies (10 gates for
+  `on_big_stack`; `fault_code`/`dump_ok`/`dump_fault` in lower/interp/mir_serial). The DRIFTED
+  `fault_code` (6-arm, `panic!` fallback in lower/interp) is reconciled to the canonical
+  10-arm total map (Overflow=0 … NoForeignRuntime=9, matching the `FaultKind` enum + interp
+  kind codes); the subset gates never hit the extra arms, so byte-exactness holds. Per-gate
+  CORPUS lists stay gate-specific (not shared). Every gate compiled warning-clean and stayed
+  byte-exact green.
+
+- **F-FAULT-TRACE — FIXED (implemented, not scoped).** Assessed as a clean, contained addition:
+  every fault propagates to a single run boundary in each engine with no internal catch, and
+  only `Fault::new` constructs the struct literal. `Fault` gains `pub trace: Vec<i64>`
+  (`src/interp/mod.rs`); the tree-walker (`eval.rs` `run_main` via a new `attach_trace`) and the
+  MIR interp (`mir/interp.rs` `run` boundary) thread the accumulated pre-fault trace into the
+  escaping fault. The shared `dump_fault` now renders those `TRACE` lines before `FAULT`, so the
+  differential harness compares the pre-fault trace, not just kind+span. Fixture
+  `tests/fixtures/selfhost_interp/trace_then_fault.cnr` (traces 7, 11, THEN overflows) added to
+  `mir_serial` CORPUS: both engines emit `TRACE 7\nTRACE 11\nFAULT 0 …` byte-exact, proving the
+  pre-fault trace is now compared (empty for every prior fault fixture, so all stay green). The
+  `Fault`-shape harness assertions relaxed from `starts_with("FAULT ")` to `contains("FAULT ")`.
+
+The remaining deferred findings (F-LAYOUT-EXTRACT [done above], F-FOUR-ENGINE-CLAIM) are
+unaddressed by this batch.
+
 ## T1 — trait-generics front-end: `interface`/`impl` parsing in the self-host parser (2026-07-11)
 
 The FIRST slice of the trait-generics arc, closing the FRONT-END gap flagged by OBL-G1 /

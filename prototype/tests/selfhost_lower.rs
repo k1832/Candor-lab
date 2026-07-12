@@ -12,13 +12,12 @@
 use std::collections::HashMap;
 
 use candor_proto::ast;
-use candor_proto::interp::{Fault, FaultKind, Run};
 use candor_proto::mir::{self, serial};
 use candor_proto::resolve::Items;
 use candor_proto::{check, generics, resolve, run_source_real, RunResult};
 
 mod selfhost_modtree;
-use selfhost_modtree::{run_module_tree, trace_text};
+use selfhost_modtree::{dump_fault, dump_ok, on_big_stack, run_module_tree, trace_text};
 
 const LEXER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/lexer/lexer.cnr"));
@@ -30,30 +29,6 @@ const MONO_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/mono/mono.cnr"));
 const LOWER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/lower/lower.cnr"));
-
-/// Integer kind-code map shared with `selfhost_interp` / the wire renderer.
-fn fault_code(k: FaultKind) -> i64 {
-    match k {
-        FaultKind::Overflow => 0,
-        FaultKind::DivByZero => 1,
-        FaultKind::Assert => 2,
-        FaultKind::Panic => 3,
-        FaultKind::Bounds => 4,
-        FaultKind::ConvLoss => 5,
-        other => panic!("out-of-subset fault kind reached the gate: {other:?}"),
-    }
-}
-
-fn dump_ok(run: &Run) -> String {
-    let mut s = format!("RET {}\n", run.ret);
-    for v in &run.trace {
-        s.push_str(&format!("TRACE {v}\n"));
-    }
-    s
-}
-fn dump_fault(f: &Fault) -> String {
-    format!("FAULT {} {} {}\n", fault_code(f.kind), f.span.start, f.span.end)
-}
 
 /// The tree-walking oracle's dump for `src`.
 fn oracle_dump(src: &str) -> String {
@@ -273,15 +248,6 @@ fn read_fixture(rel: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 
-fn on_big_stack<F: FnOnce() + Send + 'static>(f: F) {
-    std::thread::Builder::new()
-        .stack_size(256 * 1024 * 1024)
-        .spawn(f)
-        .expect("spawn big-stack thread")
-        .join()
-        .expect("gate thread panicked");
-}
-
 #[test]
 fn candor_lowering_execution_equal_to_oracle_over_scalar_subset() {
     on_big_stack(|| {
@@ -313,5 +279,4 @@ fn candor_lowering_execution_equal_to_oracle_over_scalar_subset() {
         );
     });
 }
-
 

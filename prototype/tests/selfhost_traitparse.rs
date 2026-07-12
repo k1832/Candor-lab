@@ -14,7 +14,7 @@
 use candor_proto::RunResult;
 
 mod selfhost_modtree;
-use selfhost_modtree::run_module_tree;
+use selfhost_modtree::{on_big_stack, run_module_tree};
 
 const LEXER_SRC: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/selfhost/lexer/lexer.cnr"));
@@ -72,15 +72,6 @@ fn parse_node_count(src: &str) -> i64 {
             panic!("self-host parser parse error on trait fixture: {}", d.to_json())
         }
     }
-}
-
-fn on_big_stack<F: FnOnce() + Send + 'static>(f: F) {
-    std::thread::Builder::new()
-        .stack_size(256 * 1024 * 1024)
-        .spawn(f)
-        .expect("spawn big-stack thread")
-        .join()
-        .expect("gate thread panicked");
 }
 
 #[test]

@@ -1,0 +1,11 @@
+// Traces two values, THEN overflows: the pre-fault trace [7, 11] must appear in
+// the fault dump before `FAULT` (F-FAULT-TRACE). Both engines thread the
+// accumulated trace into the Fault at the run boundary, so the differential
+// harness now compares the pre-fault trace, not just the fault's kind+span.
+fn main() -> i64 {
+    trace(7i64);
+    trace(11i64);
+    let a: i32 = 2147483647i32;
+    let b: i32 = a + 1i32;
+    return 0i64;
+}

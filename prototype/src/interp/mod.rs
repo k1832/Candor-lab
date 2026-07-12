@@ -79,6 +79,11 @@ pub struct Fault {
     pub kind: FaultKind,
     pub span: Span,
     pub message: String,
+    /// Values emitted by `trace(x)` BEFORE the fault, threaded in at the run
+    /// boundary so a differential harness can compare the pre-fault trace, not
+    /// just the fault's kind+span (F-FAULT-TRACE). Empty until the run's
+    /// top-level attaches the accumulated trace.
+    pub trace: Vec<i64>,
 }
 
 impl Fault {
@@ -87,6 +92,7 @@ impl Fault {
             kind,
             span,
             message: message.into(),
+            trace: Vec::new(),
         }
     }
     pub fn to_json(&self) -> String {
