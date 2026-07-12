@@ -3412,3 +3412,70 @@ run byte-for-byte on the tree-walker AND the MIR engine.
   `print_str`/`println_i64` and `print_show` into a single `Display`-style print
   surface; carry the `T: Show` module-tree resolution (STD-FMT finding F2 / E1002)
   so the convention leaves the single-file image.
+
+## SHOW-DISPLAY — `println_show` unifies the print surface; collection `Show` blocked by the impl/coherence surface (2026-07-12)
+
+The `Show`-broadening slice (STD-IO-PRINT "NEXT SLICE"): add the unified
+`println_show[T: Show]` and extend the `Show` rendering convention to the `String`/
+`Vec`/`Map` collection builtins. `println_show` LANDED; every collection-`Show`
+goal is BLOCKED by an existing compiler restriction (no compiler surface was added
+— design 0007 §2.3 / the CollectionOp builtins are the ground truth), so those are
+reported here with evidence for a follow-up compiler slice to authorize.
+
+- LANDED — `println_show[T: Show]`. The `Show` analog of `println_i64`:
+  `x.to_string(a)` into a fresh owned local `s`, `push(write s, 10)` (the trailing
+  newline onto `s`'s OWN owned local — the STD-FMT owned-String rule), then
+  `write_all(stdout(), as_bytes(as_str(read s)))`. Source: the new generic print
+  layer `tests/fixtures/std_print_show.cnr` (holding `print_show` + `println_show`,
+  the `T: Show` sibling of the non-generic `std_print.cnr`); `tests/print.rs`
+  `show_image` now composes that fixture (the inline `PRINT_SHOW` const is gone,
+  test 7 unchanged). It runs the SAME generic-through-boundary path proven by
+  STD-IO-PRINT (the `Show` interface makes the image generic; the extern survives
+  mono; `as_bytes` lowers on MIR), so both engines produce identical bytes.
+- GATE (isolation). `tests/print.rs` green — 8 tests: the 7 prior plus
+  `println_show_renders_line_per_value_both_engines`, asserting the EXACT bytes
+  `"42\nSome(9)\nNone\n"` (a `Show` leaf `ShowInt`, a `T: Show` composition
+  `Opt::Some`, and `Opt::None`, each on its own line) byte-for-byte on the
+  tree-walker AND the MIR engine. `tests/fmt.rs` (12), `tests/std_io.rs` (13),
+  `tests/generics.rs` (42), and the AOT/LLVM/Stage-D native gates untouched/green.
+- BLOCKED — `impl Show for String` (design point 1). `String` IS a compiler-known
+  nominal, so the impl target resolves, but coherence rejects it: `heads_overlap`
+  (`src/generics.rs`) compares only the interface args and the target's TYPE
+  ARGUMENTS, never the target CONSTRUCTOR NAME, so any two bare-nominal impls of
+  one interface (both with zero target args) "overlap". `impl Show for String`
+  collides with the existing `impl Show for ShowInt` -> `E1009 overlapping impl of
+  Show for String`. Minimal repro: `interface I{..} struct A{..} struct B{..}
+  impl I for A{..} impl I for B{..}` -> `E1009 overlapping impl of I for B`. This
+  blocks EVERY second concrete `Show` (or any interface) impl in one image, so
+  neither `String` nor any further leaf can join the convention as an impl. (A free
+  `string_show` copy fn compiles but is not a `Show` and does not compose, so it
+  was not shipped.)
+- BLOCKED — `impl[T: Show] Show for Vec[T]` (design point 2), on THREE independent
+  restrictions: (1) `Vec`/`Map` are compiler-known CollectionOps, not registered
+  nominals, so an impl target `Vec[T]` is `E0102 unknown type Vec`
+  (`resolve_tables`, `src/generics.rs`; only `String` is a registered struct).
+  (2) The sanctioned free-fn fallback `vec_show[T: Show](v: read Vec[T], a: Alloc)`
+  ALSO fails — in a generic signature `Vec[T]` is `E1004 \`Vec\` is not a generic
+  type` (`resolve_gty`: `Vec` is not in `generic_types`), so a `Vec` cannot be
+  abstracted over its element type at all; only a CONCRETE `Vec[ShowInt]` param
+  resolves. (3) Even a concrete `vec_show_int(Vec[ShowInt])` cannot render via the
+  convention: the tree-walker's method dispatch resolves the receiver nominal
+  through `expr_static_ty`, which handles only place expressions (ident/field/
+  deref), NOT a call — so `get(read v, i).*.to_string(a)` fails to find the impl,
+  falls through to the indirect fn-ptr path, and reads a garbage callee
+  (`fn_names[..]` out of bounds / `unknown name align`). (A loop-carried owning
+  `String` local also trips `E0309` unless pre-initialized before the loop.) So
+  `Vec` cannot render through `Show` without compiler work; not forced/faked.
+- BLOCKED (as predicted) — `Show for Map` (design point 3). The `Map[V]` CollectionOp
+  surface is `map_new`/`insert`/`contains`/`get`/`len` only (`CollOp` in
+  `src/mir/mod.rs`; `src/check/expr.rs`) — there is NO key iteration / `keys()`
+  primitive, so entries cannot be enumerated to render. Skipped with that reason;
+  no `keys()` primitive was invented.
+- NEXT SLICE (compiler, needs authorization). To broaden `Show` to the collections,
+  a compiler slice must: (a) fix `heads_overlap` to compare the target constructor
+  name (unblocks a second concrete impl / `Show for String`); (b) make `Vec`/`Map`/
+  `String` impl-able and element-abstractable (register them for impl targets and
+  in `generic_types`, or add a blessed generic-collection impl path); (c) let the
+  tree-walker dispatch a method on a call-shaped receiver (`get(..).*`). Then carry
+  the `T: Show` module-tree resolution (STD-FMT finding F2 / E1002) so the whole
+  convention leaves the single-file image.

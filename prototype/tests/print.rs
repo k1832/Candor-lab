@@ -218,20 +218,17 @@ fn fmt_full() -> String {
     read_fixture("std_fmt.cnr")
 }
 
-/// A generic `print_show[T: Show]` that renders `x` into an owning `String` and
-/// writes its byte view to stdout (no newline). `s` is this fn\'s own owned local,
-/// so the `as_str`/`as_bytes` bridge applies (the owned-String constraint).
-const PRINT_SHOW: &str = "fn print_show[T: Show](x: read T, a: Alloc) alloc -> IoResult {
-  let s: String = x.to_string(a);
-  let view: str = as_str(read s);
-  let bytes: [u8] = as_bytes(view);
-  return write_all(stdout(), bytes);
-}";
+/// The generic `Show` print layer (`print_show`/`println_show`) — the `T: Show`
+/// sibling of the non-generic `std_print.cnr`, now that the monomorphizer carries
+/// the io `extern`s through (so a generic image keeps `sys_write`).
+fn show_layer() -> String {
+    read_fixture("std_print_show.cnr")
+}
 
-/// Compose the generic print_show image: io wrappers + full formatting (with
-/// Show) + the print_show layer + the test\'s `main`.
+/// Compose the generic print image: io wrappers + full formatting (with Show) +
+/// the generic `Show` print layer + the test\'s `main`.
 fn show_image(main_body: &str) -> String {
-    format!("{}\n{}\n{}\n{}", io_prefix(), fmt_full(), PRINT_SHOW, main_body)
+    format!("{}\n{}\n{}\n{}", io_prefix(), fmt_full(), show_layer(), main_body)
 }
 
 #[test]
@@ -272,4 +269,50 @@ fn print_show_through_boundary_renders_bytes() {
         MirRunResult::Unsupported(msg) => panic!("mir unsupported: {msg}"),
         other => panic!("mir not ok: {}", matches!(other, MirRunResult::Ok(_))),
     }
+}
+
+// ---- 8. `println_show[T: Show]` — the unified `Show` print surface ----------
+// `println_show` is `print_show` plus a trailing newline (byte 10), the `Show`
+// analog of `println_i64`. It renders each value through the SAME generic-through-
+// boundary path (Show interface makes the image generic; the extern survives mono;
+// `as_bytes` lowers on MIR), so both engines must produce identical bytes. Exercised
+// over a `Show` leaf (`ShowInt`) and a `T: Show` composition (`Opt[ShowInt]`), each
+// on its own line.
+#[test]
+fn println_show_renders_line_per_value_both_engines() {
+    let _g = lock();
+    let body = print_main(
+        "  let x: ShowInt = ShowInt { val: 42 };
+           let _a: IoResult = println_show(read x, al);
+           let y: Opt[ShowInt] = Opt::Some(ShowInt { val: 9 });
+           let _b: IoResult = println_show(read y, al);
+           let z: Opt[ShowInt] = Opt::None;
+           let _c: IoResult = println_show(read z, al);",
+    );
+    let src = show_image(&body);
+    const EXPECT: &[u8] = b"42\nSome(9)\nNone\n";
+
+    foreign_io::reset();
+    foreign_io::register_std_io();
+    let tret = run_tree_ok(&src);
+    let tout = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+    assert_eq!(tret, 0);
+    assert_eq!(tout, EXPECT, "tree-walker println_show bytes");
+
+    foreign_io::reset();
+    foreign_io::register_std_io();
+    let mres = run_source_real_mir(&src);
+    let mout = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+    match mres {
+        MirRunResult::Ok(run) => {
+            assert_eq!(run.ret, 0);
+            assert_eq!(mout, EXPECT, "MIR println_show bytes");
+        }
+        MirRunResult::Fault(f) => panic!("mir fault: {}", f.to_json()),
+        MirRunResult::Unsupported(msg) => panic!("mir unsupported: {msg}"),
+        other => panic!("mir not ok: {}", matches!(other, MirRunResult::Ok(_))),
+    }
+    assert_eq!(tout, mout, "both engines byte-for-byte");
 }

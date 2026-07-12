@@ -1,0 +1,40 @@
+// std::io PRINT layer, GENERIC half (design 0011/0013): the `Show` value-rendering
+// convention wired through the std/io libc-write boundary. It renders a `T: Show`
+// value into an OWNING `String`, then hands that String's byte view to the
+// module's real `write_all`/`stdout` wrappers — the same thin, capture-free bridge
+// as `std_print.cnr`, but generic over `Show`.
+//
+// This layer is generic (a `T: Show` bound), which used to erase the io externs:
+// `is_generic_program` classifies any `interface`/`impl` as generic, and the
+// monomorphizer once DROPPED `extern`/`export` items, so `sys_write` became an
+// `unknown name` the moment `Show` joined the image. The monomorphizer now carries
+// `Item::Extern`/`Item::Export` through, so the extern survives and this generic
+// path reaches the boundary on BOTH engines (tree-walker + MIR).
+//
+// Like `std_print.cnr`, this names the std/io wrappers (`write_all`/`stdout`/
+// `IoResult`) and the formatting definitions (`Show`/`Alloc`/`String`), so it is a
+// single-file IMAGE layer composed by the harness, not a standalone module.
+//
+// The owned-String constraint (std_fmt.cnr): the render target `s` is always this
+// function's own directly-owned local — `x.to_string(a)` returns a fresh owning
+// String, and `println_show` pushes the trailing newline (byte 10) onto that own
+// `s` before handing its `as_str`/`as_bytes` view to `write_all`.
+
+// Render `x` through `Show` and write its byte view to stdout verbatim (no newline).
+pub fn print_show[T: Show](x: read T, a: Alloc) alloc -> IoResult {
+    let s: String = x.to_string(a);
+    let view: str = as_str(read s);
+    let bytes: [u8] = as_bytes(view);
+    return write_all(stdout(), bytes);
+}
+
+// Render `x` through `Show` and write it to stdout followed by a newline (byte 10),
+// the unified `Show` analog of `println_i64`. The newline is pushed onto this fn's
+// own owned `s` (the fresh `to_string` result), then the whole line is written once.
+pub fn println_show[T: Show](x: read T, a: Alloc) alloc -> IoResult {
+    let mut s: String = x.to_string(a);
+    push(write s, 10);
+    let view: str = as_str(read s);
+    let bytes: [u8] = as_bytes(view);
+    return write_all(stdout(), bytes);
+}
