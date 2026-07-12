@@ -461,3 +461,25 @@ One lesson per entry, one-line summary first.
   instead. The value-drop corpus fixtures (`generics/gdrop*.cnr`) are in-subset; the
   Box corpus (`11_1_allocator`/`11_5_arena`/`11_4_parser`) rejects BEFORE any drop, on
   the allocator-handle `CopyVal`. (LLVM-S3, 2026-07-12).
+
+- **Adding a new native backend behind the MIR seam = walk MIR + mirror `lower.rs`
+  op-for-op, because `mir::build` carries almost all the structure.** The whole LLVM
+  backend (S0-S6, `src/backend/llvm.rs`, ~2100 lines) confirmed this at every slice:
+  match is already lowered to a tag `Load` + `icmp`/`Branch` chain; drop schedules are
+  pre-placed with static move masks (no runtime flags); struct/enum/array field offsets
+  are baked into `Proj::Field`; box/unbox/rawptr are `BoxOp`/`UnboxOp`/observable
+  `Load`/`Store`; a fn-as-value is `Const(id)` indexing `prog.fn_ptrs`; extern is a
+  `Call` keying `items.externs`; spawn/scope are explicit statements. So each slice
+  reduced to emitting the LLVM twin of what Cranelift's `lower.rs` emits — the emitter
+  never re-derives semantics. **The one genuinely new decision** was the two-tier value
+  model (`classify_tiers`): address-never-taken scalars -> `alloca i64` (mem2reg -> SSA
+  registers, the real perf win under clang -O2); aggregates + address-taken -> flat
+  `rt_stack_alloc`+`inttoptr(MEM_BASE+off)` (correct but optimizer-opaque — the
+  permanent flat-arena aliasing ceiling). **Correctness traps that bite every backend:**
+  NEVER emit `nsw`/`nuw` (LLVM deletes overflow checks as UB — use `llvm.*.with.overflow`
+  + guarded div); keep `rt_*` as bare external declares (they're the optimization
+  barriers that preserve trace/fault observability under -O2). CollectionOp (Vec/Map/
+  String) is out-of-subset in Cranelift TOO — a shared corpus boundary, not a per-backend
+  gap. Equivalence is transitive-through-one-oracle (each engine == tree-walker), not an
+  all-pairs diff — state it that way, don't overclaim. Next backend (ARM/etc.) should
+  start from this same walk-MIR-mirror-lower.rs playbook. (LLVM S0-S6 arc, 2026-07-12).
