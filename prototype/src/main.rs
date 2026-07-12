@@ -350,6 +350,7 @@ fn run_compile(rest: &[String]) -> ExitCode {
     let mut out: Option<&str> = None;
     let mut input: Option<&str> = None;
     let mut freestanding = false;
+    let mut llvm = false;
     let mut i = 0;
     while i < rest.len() {
         match rest[i].as_str() {
@@ -367,6 +368,10 @@ fn run_compile(rest: &[String]) -> ExitCode {
                 freestanding = true;
                 i += 1;
             }
+            "--backend=llvm" => {
+                llvm = true;
+                i += 1;
+            }
             other => {
                 input = Some(other);
                 i += 1;
@@ -376,12 +381,14 @@ fn run_compile(rest: &[String]) -> ExitCode {
     let (input, out) = match (input, out) {
         (Some(a), Some(b)) => (a, b),
         _ => {
-            eprintln!("usage: candor compile [--freestanding] <file_or_dir> -o <prog>");
+            eprintln!("usage: candor compile [--freestanding] [--backend=llvm] <file_or_dir> -o <prog>");
             return ExitCode::from(2);
         }
     };
     let (inp, outp) = (std::path::Path::new(input), std::path::Path::new(out));
-    let r = if freestanding {
+    let r = if llvm {
+        candor_proto::compile_path_llvm(inp, outp)
+    } else if freestanding {
         candor_proto::compile_path_freestanding(inp, outp)
     } else {
         candor_proto::compile_path(inp, outp)

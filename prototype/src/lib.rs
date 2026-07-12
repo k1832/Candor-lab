@@ -506,6 +506,22 @@ pub fn compile_path(path: &std::path::Path, out: &std::path::Path) -> Result<(),
     backend::object::emit_executable(&mp, &items, &consts, out)
 }
 
+/// Emit textual LLVM-IR for `path` (the LLVM-S0 scalar+control-flow backend).
+/// Returns `Err` on parse/check errors or an out-of-subset construct.
+pub fn emit_llvm_ir(path: &std::path::Path) -> Result<String, String> {
+    let (mp, _items, _consts) = lower_path_for_object(path)?;
+    backend::llvm::emit_ll(&mp)
+}
+
+/// LLVM-S0 AOT: emit textual LLVM-IR from `path`'s MIR and build it with
+/// `clang -O2`, linked against the same static C runtime as the Cranelift object,
+/// into a standalone native executable at `out`. The first OPTIMIZED native code
+/// Candor produces.
+pub fn compile_path_llvm(path: &std::path::Path, out: &std::path::Path) -> Result<(), String> {
+    let ll = emit_llvm_ir(path)?;
+    backend::llvm::link_ll(&ll, out)
+}
+
 /// AOT-compile `path` into a FREESTANDING (no-libc) native executable at `out` —
 /// the NN#6 proof artifact (design 0010 §5; P7/P9). Same MIR/object as
 /// `compile_path`; the emitted ELF is `-nostdlib -static -no-pie` and depends on

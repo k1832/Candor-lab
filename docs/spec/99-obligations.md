@@ -2908,3 +2908,60 @@ tests, all 89 fixtures byte-exact across N1-N6 + generics, plus a new
 "dead code"). clippy clean. Contained to `codegen.cnr` + its gate; NO edits to
 `interp.cnr`/`lower.cnr`/`mono.cnr`/`layout.cnr`/`src/backend/*`. The self-hosted
 native codegen now does real register allocation for scalar operand pairs.
+
+
+## LLVM-S0 — the first OPTIMIZED native backend: MIR -> textual LLVM-IR built by `clang -O2`, byte-exact vs the oracle (2026-07-12)
+
+A new Rust-side production backend `src/backend/llvm.rs` emits TEXTUAL LLVM-IR from
+the same checked MIR the Cranelift backend consumes, for the scalar + control-flow
+subset, built by `clang -O2` and linked against the SAME static C runtime
+(`aot_runtime.c`, reused UNCHANGED) as the Cranelift AOT object. It mirrors
+`backend::lower`'s SEMANTICS in `.ll` text; it reuses no Cranelift code. This is the
+first optimized native code Candor produces via LLVM — the earlier native tiers run
+at `opt_level=none` (Cranelift) or emit naive asm (self-host codegen).
+
+- VALUE MODEL (Tier-R, the perf win): each scalar local is an `alloca i64` in the
+  entry block; a use is a `load`, a definition a `store`. No local's address is
+  taken and there are no aggregates, so `clang -O2`'s mem2reg promotes every slot to
+  an SSA register. Scalars NEVER route through the flat MEM_BASE buffer /
+  rt_stack_alloc (that would defeat mem2reg). Values are canonicalized (trunc/sext/
+  zext per the local's width) exactly as `lower::canon` does; the slot always holds
+  the canonical i64.
+- CHECKED ARITH (INV-CHECK): checked add/sub/mul use `llvm.{s,u}{add,sub,mul}.
+  with.overflow.iN` -> `extractvalue` result + overflow bit -> `br i1` to a fault
+  block. NEVER `add nsw`/`mul nsw` (LLVM would delete the overflow check as
+  UB-unreachable). Conv/neg range checks are explicit `icmp` in i128 against the
+  target min/max. Div/Rem guard divisor==0, then guard signed MIN/-1 via a
+  `select`ed safe divisor so `sdiv` never sees UB — op-for-op with
+  `lower::range_or_fit` / the div path. Wrapping = plain iN wrapping ops; Saturating
+  = i128 compare + select-clamp.
+- FAULT BLOCKS + rt_* (INV-FAULT-ID / INV-OBS-ORDER): each fault edge is `call void
+  @rt_fault(i32 kind_code, i32 s, i32 e)` then `unreachable`; `rt_fault` is declared
+  `noreturn`. `rt_trace`/`rt_fault` are BARE external declares (no `readnone`/
+  `memory(none)`), so `-O2` preserves trace order and fault points (external
+  side-effecting calls are optimization barriers). The kind-code is the stable
+  `lower::kind_code` map, reused directly.
+- ENTRY: `define i64 @candor_entry()` calls `@cnf_main` and returns its i64 (or 0
+  for a non-i64 main), mirroring `lower::lower_entry` for the scalar subset (no
+  statics/strings). Candor fn symbols are prefixed `cnf_` (as `object.rs` does) and
+  emitted `internal` so `-O2` can inline; `candor_entry` is external. The full
+  requires/ensures predicate-region + shared-final-return block structure of
+  `lower::lower_fn` is replicated so contract faults land byte-exact.
+- WIRING: `compile_path_llvm(path, out)` and `emit_llvm_ir(path)` in `lib.rs` beside
+  `compile_path`; `candor compile --backend=llvm x.cnr -o prog` in `main.rs`. The
+  clang invocation reuses `aot_runtime.c` verbatim: `clang -O2 <file>.ll
+  <aot_runtime.c> -o out -no-pie -pthread`.
+
+GATE / VERIFICATION (isolation): `tests/llvm.rs` green — 3 tests. `gate_llvm_fault_
+axes` (8 axes: overflow, div-by-zero, conv-loss, assert, requires, ensures, panic,
+shift-overflow) and `gate_llvm_ok_slice` (arithmetic, fib recursion, while-loop sum,
+bitwise) compile via `clang -O2`, run as standalone processes, and compare (exit
+byte, stdout trace, stderr fault-JSON) byte-exact to the tree-walking oracle
+(`run_source`/`run_source_real`). `perf_mem2reg_promotes_locals` proves the
+optimization is REAL: the emitted `.ll` uses `alloca i64` per local, and `clang -O2
+-S -emit-llvm` output contains NO `alloca` (mem2reg promoted every slot to a
+register). clippy clean. Additive: `aot`/self-host gates untouched; `aot_runtime.c`
+reused UNCHANGED; no new crate dependency (format! + shelling clang). GAP: the
+array-bounds and enum/`?` axes of `tests/aot.rs`'s FAULTS array are OUT of the S0
+scalar subset (aggregates/enums) and are correctly rejected by the emitter with a
+precise "out of LLVM-S0 subset" error, not faked — deferred to a later slice.

@@ -10,6 +10,7 @@
 //! compiles, then runs the static initializers and `main` inside the fault-exit
 //! landing pad (`runtime::run_guarded`).
 
+pub mod llvm;
 pub mod lower;
 pub mod object;
 pub mod runtime;
