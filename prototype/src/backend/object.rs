@@ -4,7 +4,7 @@
 //! `ObjectModule` instead of the JIT, emitting a relocatable ELF `.o` for x86-64
 //! Linux; the system linker (`cc`) links it with the static C runtime
 //! (`aot_runtime.c`) into a standalone native executable that needs neither the
-//! JIT nor `candor-proto` at runtime.
+//! JIT nor `candor` at runtime.
 //!
 //! ## The module-plumbing delta (vs the JIT)
 //! * **Flat-memory base.** The JIT bakes the host buffer address as a constant.

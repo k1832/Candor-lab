@@ -37,10 +37,9 @@ Build the toolchain and install the `candor` command (full detail in
 
 ```sh
 # from the prototype crate:
-cargo build --release            # produces target/release/candor-proto
+cargo build --release            # produces target/release/candor
 # then put the `candor` command on your PATH (see INSTALL.md):
-export CANDOR_PROTO=/path/to/target/release/candor-proto
-export PATH="$PWD/bin:$PATH"     # bin/candor forwards to it
+cp target/release/candor ~/.local/bin/   # (a dir already on PATH)
 ```
 
 Write `hello.cnr`:
@@ -118,7 +117,5 @@ Tags: **[working]** runs today · **[preview]** works but rough/partial ·
 - **[seed]** Standard library: a small `core`/`std` seed (`Opt`, `Res`, `Arena`,
   `List`, iteration, a bump allocator). Text handling and an I/O layer are
   designed-but-not-yet-shipped.
-- **[preview]** The command is a shim today (`candor` forwards to `candor-proto`);
-  the binary rename is a packaging step. See [INSTALL.md](INSTALL.md).
 
 Nothing here is stable. See the lab's obligations ledger for what 1.0 still owes.

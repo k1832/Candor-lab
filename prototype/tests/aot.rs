@@ -1,6 +1,6 @@
-//! AOT gate (design 0010 §5, Stage B's cranelift-object note): `candor-proto
+//! AOT gate (design 0010 §5, Stage B's cranelift-object note): `candor
 //! compile` emits a LINKED NATIVE EXECUTABLE, and that standalone process — run
-//! with no JIT and no `candor-proto` present — must reproduce the tree-walking
+//! with no JIT and no `candor` present — must reproduce the tree-walking
 //! oracle's observable result: `θ` as the trace hook prints it to stdout, the
 //! process exit code (main's `i64` mapped to the Unix low-byte protocol, or 2 on
 //! fault), and the `(kind, span)` fault JSON on stderr. This is the fourth

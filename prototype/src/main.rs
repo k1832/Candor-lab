@@ -1,15 +1,15 @@
-//! `candor-proto` CLI.
+//! `candor` CLI.
 //!
 //! Usage:
-//!   candor-proto parse <file>   -- print the parsed AST (Debug), exit 0/1
-//!   candor-proto check <file>   -- parse + resolve + Stage 2 check;
+//!   candor parse <file>   -- print the parsed AST (Debug), exit 0/1
+//!   candor check <file>   -- parse + resolve + Stage 2 check;
 //!                                  print JSON diagnostics (one per line),
 //!                                  exit 0 if clean, 1 if any error.
-//!   candor-proto run <file>     -- parse + check + execute `main`.
-//!   candor-proto count <file>   -- parse + check, then emit the frozen Bet 5
+//!   candor run <file>     -- parse + check + execute `main`.
+//!   candor count <file>   -- parse + check, then emit the frozen Bet 5
 //!                                  unit-table counts as JSON (exit 0), or a
 //!                                  parse-error JSON (exit 1).
-//!   candor-proto migrate <file.cn> [-o <out.cnr>]
+//!   candor migrate <file.cn> [-o <out.cnr>]
 //!                               -- P15 migrator (design 0006 §5): parse the
 //!                                  throwaway `.cn` file and emit real (`.cnr`)
 //!                                  syntax to stdout (or `-o` file).
@@ -36,7 +36,7 @@ fn main() -> ExitCode {
         (Some("migrate"), Some(path)) => run_migrate(path, &args[3..]),
         (Some("fmt"), Some(path)) => run_fmt(path, &args[3..]),
         _ => {
-            eprintln!("usage: candor-proto (parse|check|run|count) <file>  |  run [--engine=mir] <file>  |  compile <file_or_dir> -o <prog>  |  migrate <file.cn> [-o <out.cnr>]  |  fmt <file_or_dir.cnr> [--check|--stdout]  (.cnr = real syntax, .cn = throwaway)");
+            eprintln!("usage: candor (parse|check|run|count) <file>  |  run [--engine=mir] <file>  |  compile <file_or_dir> -o <prog>  |  migrate <file.cn> [-o <out.cnr>]  |  fmt <file_or_dir.cnr> [--check|--stdout]  (.cnr = real syntax, .cn = throwaway)");
             ExitCode::from(2)
         }
     }
@@ -149,7 +149,7 @@ fn run_run(rest: &[String]) -> ExitCode {
     let path = match path {
         Some(p) => p,
         None => {
-            eprintln!("usage: candor-proto run [--engine=mir|native] <file>");
+            eprintln!("usage: candor run [--engine=mir|native] <file>");
             return ExitCode::from(2);
         }
     };
@@ -364,7 +364,7 @@ fn run_compile(rest: &[String]) -> ExitCode {
     let (input, out) = match (input, out) {
         (Some(a), Some(b)) => (a, b),
         _ => {
-            eprintln!("usage: candor-proto compile [--freestanding] <file_or_dir> -o <prog>");
+            eprintln!("usage: candor compile [--freestanding] <file_or_dir> -o <prog>");
             return ExitCode::from(2);
         }
     };

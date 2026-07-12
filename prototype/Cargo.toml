@@ -9,7 +9,7 @@ name = "candor_proto"
 path = "src/lib.rs"
 
 [[bin]]
-name = "candor-proto"
+name = "candor"
 path = "src/main.rs"
 
 [dependencies]

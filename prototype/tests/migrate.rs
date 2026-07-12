@@ -116,7 +116,7 @@ fn committed_cnr_fixtures_match_migrator_output() {
             let committed = read(&format!("{dir}/{name}.cnr"));
             assert_eq!(
                 migrated, committed,
-                "{dir}/{name}.cnr is stale; re-run `candor-proto migrate {dir}/{name}.cn -o {dir}/{name}.cnr`"
+                "{dir}/{name}.cnr is stale; re-run `candor migrate {dir}/{name}.cn -o {dir}/{name}.cnr`"
             );
         }
     }

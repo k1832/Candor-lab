@@ -1,7 +1,7 @@
 //! Freestanding gate (design 0010 §5; LANG_PHYLOSOPHY P7/P9/NN#6): the NN#6 proof
 //! that Candor has "no mandatory runtime; freestanding targets are first-class".
 //!
-//! `candor-proto compile --freestanding` emits an ELF linked `-nostdlib -static
+//! `candor compile --freestanding` emits an ELF linked `-nostdlib -static
 //! -no-pie` — NO libc, no OS-facing runtime, a root-declared HALT fault policy
 //! (P7's second point), the flat region a static NOBITS section (no mmap), and the
 //! checker-proven allocation-free CORE layer as its payload. This gate:

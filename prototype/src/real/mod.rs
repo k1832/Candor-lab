@@ -12,7 +12,7 @@
 //! `.*`) for programs parsed here (see [`crate::check::check_program_real`]).
 //!
 //! [`emit`] is the reverse direction: the P15 migrator's AST -> real-syntax
-//! pretty-printer (design 0006 §5), used by `candor-proto migrate`.
+//! pretty-printer (design 0006 §5), used by `candor migrate`.
 
 pub mod emit;
 pub mod fmt;
@@ -39,7 +39,7 @@ pub fn parse_module(src: &str) -> Result<(Program, Vec<crate::ast::UseDecl>, Vec
 }
 
 /// Parse a real-syntax source string, returning the AST and the file's
-/// `boundary`-preamble status (design 0011 audit). Used by `candor-proto audit`.
+/// `boundary`-preamble status (design 0011 audit). Used by `candor audit`.
 pub fn parse_with_boundary(src: &str) -> Result<(Program, bool), Diag> {
     let tokens = lexer::lex(src)?;
     parser::parse_with_boundary(tokens)

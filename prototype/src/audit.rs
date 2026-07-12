@@ -1,4 +1,4 @@
-//! `candor-proto audit <dir_or_file>` — the boundary-module audit surface
+//! `candor audit <dir_or_file>` — the boundary-module audit surface
 //! (design 0011 §6; 0008 §4's `candor audit --boundaries`). A structural query
 //! over the boundary modules: their externs (full signature + `foreign` effect +
 //! every trust predicate, justification, and span), their exports, and the

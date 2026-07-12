@@ -1,6 +1,6 @@
 //! Stage C — the incremental, two-hash build (design 0008 §2; design 0010 §3).
 //!
-//! `candor-proto build <dir>` realizes 0008's load-bearing P20 mechanism: a
+//! `candor build <dir>` realizes 0008's load-bearing P20 mechanism: a
 //! per-module **interface artifact** carrying two content hashes, and a build
 //! over the import DAG that reuses a module's analysis whenever its source and
 //! every import's **signature hash** are unchanged. A body edit that leaves
@@ -55,7 +55,7 @@ pub const SCHEMA_VERSION: &str = "candor-mir-schema-c2";
 /// the NN#16 reproducibility contract; a toolchain bump must not silently reuse
 /// machine code the old compiler emitted.
 pub fn toolchain_version() -> String {
-    format!("candor-proto {} / cranelift 0.132.3", env!("CARGO_PKG_VERSION"))
+    format!("candor {} / cranelift 0.132.3", env!("CARGO_PKG_VERSION"))
 }
 
 /// The full schema/toolchain salt recorded in every artifact.

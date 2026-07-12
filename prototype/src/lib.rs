@@ -1,7 +1,7 @@
 //! Candor Bet 5 validation prototype — Stage 1 (lexer, AST, parser).
 //!
 //! Structured as a library crate so later stages (checker, interpreter) add
-//! modules alongside these without reshaping the front end. The `candor-proto`
+//! modules alongside these without reshaping the front end. The `candor`
 //! binary is a thin CLI over `parse_source`.
 
 pub mod ast;
@@ -428,7 +428,7 @@ fn run_dir_native_impl(dir: &std::path::Path, optimize: bool) -> MirRunResult {
 // AOT compilation (design 0010 §5, Stage B's cranelift-object note): the same
 // parse+check+monomorphize+lower-to-MIR front as the native engine, but the
 // terminal step emits a linked native EXECUTABLE (`backend::object`) instead of
-// JIT-running. `candor-proto compile <file_or_dir> -o prog` drives this.
+// JIT-running. `candor compile <file_or_dir> -o prog` drives this.
 // ---------------------------------------------------------------------------
 
 /// Format the first error diagnostics as a single message.

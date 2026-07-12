@@ -14,12 +14,12 @@ Paths are given relative to the lab root.
 
 | What | Lab source | Notes |
 |---|---|---|
-| **Toolchain source** | `prototype/` (the Rust crate) | The compiler/interpreter/AOT backend. The crate's `[[bin]]` is renamed `candor-proto` → `candor` (delete `bin/candor`). Ship `src/`, `Cargo.toml`, `Cargo.lock`, `benches/`. |
+| **Toolchain source** | `prototype/` (the Rust crate) | The compiler/interpreter/AOT backend. The crate's `[[bin]]` is `candor`. Ship `src/`, `Cargo.toml`, `Cargo.lock`, `benches/`. |
 | **Normative spec** | `docs/spec/` | Chapters 00–12 + `99-obligations.md`. The reference. |
 | **Spec-pack** | `docs/specpack/` | The model-facing distillation (grammar, semantics, idioms, diagnostics). |
 | **Standard-library seed** | `prototype/tests/fixtures/corelib/` (`core/*`, `std/*`) | Relocate to a first-class `stdlib/` (or `lib/`) path, not a test fixture. `Opt`/`Res`/`Arena`/`iter` + `alloc`/`bump`/`list`. |
 | **Editor tools** | `tools/vscode-candor/`, `tools/candor-lsp/` | TextMate grammar + diagnostics LSP. |
-| **Getting-started + examples** | `dist/README.md`, `dist/INSTALL.md`, `dist/LANGUAGE-TOUR.md`, `dist/bin/candor`, `dist/examples/` | This staging tree becomes the distribution root. |
+| **Getting-started + examples** | `dist/README.md`, `dist/INSTALL.md`, `dist/LANGUAGE-TOUR.md`, `dist/examples/` | This staging tree becomes the distribution root. |
 
 ## STAYS LAB-ONLY — never copied; linked as the design record
 
@@ -38,11 +38,9 @@ Paths are given relative to the lab root.
 1. Create the standalone `candor` repo (this is the operator's git action, not
    done here).
 2. Copy in only the **SHIPS** rows above; take `dist/`'s contents as the repo root
-   (`README.md`, `INSTALL.md`, `LANGUAGE-TOUR.md`, `bin/`, `examples/`).
+   (`README.md`, `INSTALL.md`, `LANGUAGE-TOUR.md`, `examples/`).
 3. Relocate the stdlib seed out of `prototype/tests/fixtures/corelib/` into a
    first-class library path.
-4. Rename the crate binary: `Cargo.toml` `[[bin]] name = "candor-proto"` →
-   `"candor"`, then delete `bin/candor` (the shim) and update INSTALL.md.
-5. Add the back-links to the lab repository (design record, philosophy, Bet 5
+4. Add the back-links to the lab repository (design record, philosophy, Bet 5
    criterion) wherever the docs reference "the lab."
-6. Do NOT copy any **STAYS LAB-ONLY** path.
+5. Do NOT copy any **STAYS LAB-ONLY** path.
