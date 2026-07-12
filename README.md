@@ -102,7 +102,17 @@ the reference oracle process-for-process across the entire corpus. A
 `--freestanding` profile links that same object with **no libc** (`-nostdlib
 -static -no-pie`, the flat region a static section, a root HALT fault policy, raw
 syscalls for trace/exit) and runs the allocation-free core payload to its sentinel
-— `ldd` reports "not a dynamic executable", the NN#6 no-mandatory-runtime proof. The language's
+— `ldd` reports "not a dynamic executable", the NN#6 no-mandatory-runtime proof. A
+second, optimizing backend is coming online alongside Cranelift: `candor compile
+--backend=llvm` emits textual LLVM-IR through `clang -O2` on a two-tier value model —
+address-never-taken scalars live in `alloca` slots that `mem2reg` promotes to real SSA
+registers (so the compute hot path gets genuine LLVM optimization), while aggregates
+and address-taken values use the flat memory arena. It already compiles the **entire
+systems corpus** (allocator, scheduler, MMIO, parser, `Box [4096]Node` arena)
+byte-exact — exit code, trace, and fault identity — against the reference oracle, with
+heap allocation, the move/drop schedule with trace-on-drop, enums, and statics all
+in-subset; FFI and structured concurrency are the remaining slices before it joins the
+proven-equivalence set as a fifth engine. The language's
 central bet (value-first memory model, Bet 5) was tested against a frozen,
 pre-registered kill criterion: killed as first registered, re-examined under a
 corrected successor registration (both on the public record), and **provisionally
