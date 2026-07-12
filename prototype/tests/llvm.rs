@@ -604,3 +604,128 @@ fn gate_llvm_native_io_open_error() {
 
     assert_eq!(output.status.code(), Some(exp_ret as u8 as i32), "error exit byte vs shim run");
 }
+
+// ---------------------------------------------------------------------------
+// 10. THE FIFTH ENGINE (P5): LLVM as a co-equal member of the Stage-D
+//     equivalence set. tests/stage_d.rs proves interpreter · MIR · native-noopt
+//     · native-opt agree (k,s,θ)-byte-exact over the runnable corpus, each engine
+//     compared against the SAME tree-walking oracle (transitive equivalence via a
+//     shared oracle — NOT a pairwise N-way diff). tests/aot.rs adds the Cranelift
+//     linked-ELF engine against that same oracle over that same corpus. This gate
+//     completes the set: the IDENTICAL corpus — every run/parity/real/generics
+//     fixture + the flat corelib + the corelib/corelib_question module trees —
+//     compiled through the LLVM backend (clang -O2 ELF) and asserted byte-exact
+//     (exit byte / trace / fault-JSON) against that same oracle, making LLVM the
+//     fifth transitively-equivalent engine.
+//
+//     The four-engine corpus contains NO CollectionOp program: Vec/Map/String are
+//     MIR-interp-only in BOTH the Cranelift MIR-lowering and the LLVM backend, and
+//     they live in the separate collection suites (tests/vec, map, text), never in
+//     these directories. So the LLVM engine's coverage == the Cranelift engine's
+//     coverage == the full four-engine corpus — a fair, honest equivalence over
+//     the whole shared subset, nothing silently narrowed.
+// ---------------------------------------------------------------------------
+
+/// The tree-walking oracle's outcome for a file or module-tree directory — the
+/// SAME oracle tests/stage_d.rs and tests/aot.rs compare against.
+fn oracle_path(path: &Path) -> Option<Outcome> {
+    if path.is_dir() {
+        return match candor_proto::run_dir(path) {
+            RunResult::Ok(run) => Some(Outcome::Ok { exit: run.ret as u8, trace: run.trace }),
+            RunResult::Fault(f) => Some(oracle_fault(&f)),
+            _ => None,
+        };
+    }
+    let src = std::fs::read_to_string(path).ok()?;
+    let real = path.extension().map(|e| e == "cnr").unwrap_or(false);
+    oracle_src(&src, real)
+}
+
+/// The LLVM (clang -O2) process's outcome for a source file or module-tree dir.
+fn llvm_outcome_path(path: &Path, tag: &str) -> Result<Outcome, String> {
+    let out = std::env::temp_dir().join(format!("candor-llvm-corpus-{}-{}", std::process::id(), tag));
+    candor_proto::compile_path_llvm(path, &out)?;
+    let output = Command::new(&out)
+        .output()
+        .map_err(|e| format!("could not run compiled `{}`: {e}", out.display()))?;
+    let _ = std::fs::remove_file(&out);
+
+    let code = output.status.code();
+    if code == Some(2) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let kind = field(&stderr, "kind").ok_or("no kind in fault JSON")?.to_string();
+        let start: usize = field(&stderr, "start").ok_or("no start")?.parse().map_err(|_| "bad start")?;
+        let end: usize = field(&stderr, "end").ok_or("no end")?.parse().map_err(|_| "bad end")?;
+        return Ok(Outcome::Fault { kind, start, end });
+    }
+    let exit = code.ok_or("compiled process killed by signal")? as u8;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trace: Vec<i64> = stdout
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.trim().parse::<i64>().expect("trace line is an integer"))
+        .collect();
+    Ok(Outcome::Ok { exit, trace })
+}
+
+/// The full four-engine corpus (identical to tests/aot.rs `single_file_fixtures`
+/// + the two module-tree dirs, and to tests/stage_d.rs's `gate_full_corpus_four_engine`).
+fn corpus_paths() -> Vec<std::path::PathBuf> {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let mut out = Vec::new();
+    for sub in ["run", "parity", "real", "generics"] {
+        let d = base.join(sub);
+        if let Ok(rd) = std::fs::read_dir(&d) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().map(|x| x == "cn" || x == "cnr").unwrap_or(false) {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    out.push(base.join("corelib_flat.cnr"));
+    out.sort();
+    for name in ["corelib", "corelib_question"] {
+        let d = base.join(name);
+        if d.is_dir() {
+            out.push(d);
+        }
+    }
+    out
+}
+
+#[test]
+fn gate_llvm_full_corpus_fifth_engine() {
+    assert!(clang_available(), "clang unavailable: cannot build the LLVM fifth-engine corpus gate");
+    let mut equal = 0usize;
+    let mut diffs: Vec<String> = Vec::new();
+    let mut not_run = 0usize;
+
+    for path in corpus_paths() {
+        let o = match oracle_path(&path) {
+            Some(o) => o,
+            None => {
+                not_run += 1;
+                continue;
+            }
+        };
+        let tag: String = path.to_string_lossy().chars().filter(|c| c.is_alphanumeric()).collect();
+        match llvm_outcome_path(&path, &tag) {
+            Ok(a) => {
+                if a == o {
+                    equal += 1;
+                } else {
+                    diffs.push(format!("{}: llvm={a:?} oracle={o:?}", path.display()));
+                }
+            }
+            Err(e) => diffs.push(format!("{}: compile/link error: {e}", path.display())),
+        }
+    }
+
+    eprintln!("LLVM FIFTH-ENGINE GATE: {equal} runnable fixtures clang-O2 == oracle; not-runnable={not_run}");
+    assert!(diffs.is_empty(), "LLVM fifth-engine divergences / failures:\n{}", diffs.join("\n"));
+    // The four-engine corpus (tests/stage_d, tests/aot) closes on 31 fixtures; the
+    // LLVM engine must cover the identical set — no silent narrowing.
+    assert!(equal >= 31, "expected the full four-engine corpus (>=31 fixtures), got {equal}");
+}
