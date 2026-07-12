@@ -3432,24 +3432,35 @@ reported here with evidence for a follow-up compiler slice to authorize.
   test 7 unchanged). It runs the SAME generic-through-boundary path proven by
   STD-IO-PRINT (the `Show` interface makes the image generic; the extern survives
   mono; `as_bytes` lowers on MIR), so both engines produce identical bytes.
-- GATE (isolation). `tests/print.rs` green — 8 tests: the 7 prior plus
-  `println_show_renders_line_per_value_both_engines`, asserting the EXACT bytes
-  `"42\nSome(9)\nNone\n"` (a `Show` leaf `ShowInt`, a `T: Show` composition
-  `Opt::Some`, and `Opt::None`, each on its own line) byte-for-byte on the
-  tree-walker AND the MIR engine. `tests/fmt.rs` (12), `tests/std_io.rs` (13),
-  `tests/generics.rs` (42), and the AOT/LLVM/Stage-D native gates untouched/green.
-- BLOCKED — `impl Show for String` (design point 1). `String` IS a compiler-known
-  nominal, so the impl target resolves, but coherence rejects it: `heads_overlap`
-  (`src/generics.rs`) compares only the interface args and the target's TYPE
-  ARGUMENTS, never the target CONSTRUCTOR NAME, so any two bare-nominal impls of
-  one interface (both with zero target args) "overlap". `impl Show for String`
-  collides with the existing `impl Show for ShowInt` -> `E1009 overlapping impl of
-  Show for String`. Minimal repro: `interface I{..} struct A{..} struct B{..}
-  impl I for A{..} impl I for B{..}` -> `E1009 overlapping impl of I for B`. This
-  blocks EVERY second concrete `Show` (or any interface) impl in one image, so
-  neither `String` nor any further leaf can join the convention as an impl. (A free
-  `string_show` copy fn compiles but is not a `Show` and does not compose, so it
-  was not shipped.)
+- GATE (isolation). `tests/print.rs` green — 9 tests: the 8 prior plus
+  `println_show_string_both_engines`, asserting `impl Show for String` renders
+  `"hello\n"` byte-for-byte on the tree-walker AND the MIR engine (the coherence-fix
+  payoff). `tests/fmt.rs` (12), `tests/std_io.rs` (13), `tests/generics.rs` (44 —
+  +2 coherence tests below), and the AOT/LLVM/Stage-D native gates green
+  (byte-exact corpus unchanged — the fix only NARROWS overlap detection).
+- LANDED (2026-07-12 coherence fix) — `impl Show for String` (design point 1).
+  Two independent blockers, both resolved:
+  (1) COHERENCE. `heads_overlap` (`src/generics.rs`) compared only the interface args
+  and the target's TYPE ARGUMENTS, never the target CONSTRUCTOR NAME, so any two
+  bare-nominal impls of one interface (both zero target args) falsely "overlapped" —
+  `impl Show for String` collided with `impl Show for ShowInt` -> spurious `E1009`.
+  FIX: `heads_overlap` now also requires the target constructor NAME to match
+  (`atgt != btgt` short-circuits to no-overlap); the `Head` tuple carries the target
+  name, and the E1009 caller passes `e.target`/`target`. Distinct nominals no longer
+  overlap; SAME-head cases are UNCHANGED (a generic-vs-concrete `W[T]` vs `W[i64]`
+  and a duplicate `A` twice still unify -> still `E1009`), so the narrowing opens no
+  soundness hole (regression tests: `tests/generics.rs`
+  `distinct_target_impls_of_one_interface_coexist_and_dispatch`,
+  `generic_and_concrete_impls_on_same_head_overlap_are_rejected`,
+  `duplicate_impl_is_rejected`).
+  (2) OWNED-STRING-THROUGH-BORROW. `to_string(read self)` gets `self` as a `read`
+  borrow, whose static type is `Borrow(String)`; the String intrinsic dispatch
+  (`arg0_is_string`, checker + tree-walker) only recognizes a `Named("String")`, so
+  `as_str(read self)` is `E0103 unknown name as_str` on BOTH engines. RESOLVED IN
+  THE FIXTURE (no compiler change): `as_str(read self.*)` — the explicit deref names
+  the underlying `String` place directly (static type `String`), which both engines'
+  dispatch and `string_base` (deref of the borrow value) accept. The rendered target
+  `s` remains this fn's own owned local (the STD-FMT owned-String build rule).
 - BLOCKED — `impl[T: Show] Show for Vec[T]` (design point 2), on THREE independent
   restrictions: (1) `Vec`/`Map` are compiler-known CollectionOps, not registered
   nominals, so an impl target `Vec[T]` is `E0102 unknown type Vec`
@@ -3471,10 +3482,10 @@ reported here with evidence for a follow-up compiler slice to authorize.
   `src/mir/mod.rs`; `src/check/expr.rs`) — there is NO key iteration / `keys()`
   primitive, so entries cannot be enumerated to render. Skipped with that reason;
   no `keys()` primitive was invented.
-- NEXT SLICE (compiler, needs authorization). To broaden `Show` to the collections,
-  a compiler slice must: (a) fix `heads_overlap` to compare the target constructor
-  name (unblocks a second concrete impl / `Show for String`); (b) make `Vec`/`Map`/
-  `String` impl-able and element-abstractable (register them for impl targets and
+- NEXT SLICE (compiler, needs authorization). Coherence step (a) — fix
+  `heads_overlap` to compare the target constructor name — is DONE (above; unblocked
+  `Show for String`). Remaining, to broaden `Show` to the collections: (b) make
+  `Vec`/`Map` impl-able and element-abstractable (register them for impl targets and
   in `generic_types`, or add a blessed generic-collection impl path); (c) let the
   tree-walker dispatch a method on a call-shaped receiver (`get(..).*`). Then carry
   the `T: Show` module-tree resolution (STD-FMT finding F2 / E1002) so the whole

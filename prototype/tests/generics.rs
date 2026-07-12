@@ -124,6 +124,22 @@ fn duplicate_impl_is_rejected() {
 }
 
 #[test]
+fn distinct_target_impls_of_one_interface_coexist_and_dispatch() {
+    // Two impls of ONE interface for DIFFERENT nominal targets must coexist (this
+    // is `impl Show for ShowInt` + `impl Show for String`): distinct target
+    // constructors never overlap, so no E1009. Both dispatch to their own method.
+    let src = "interface I { fn m(read self) -> i64; }\nstruct A { v: i64 }\nstruct B { v: i64 }\n\
+         impl I for A { fn m(read self) -> i64 { return 1; } }\n\
+         impl I for B { fn m(read self) -> i64 { return 2; } }\n\
+         fn main() -> i64 { let a: A = A { v: 0 }; let b: B = B { v: 0 }; return a.m() * 10 + b.m(); }\n";
+    assert!(codes(src).is_empty(), "distinct targets should check clean, got {:?}", codes(src));
+    match run_source_real(src) {
+        RunResult::Ok(r) => assert_eq!(r.ret, 12, "each target dispatches to its own impl"),
+        other => panic!("did not run: ok={}", matches!(other, RunResult::Ok(_))),
+    }
+}
+
+#[test]
 fn borrow_type_argument_is_rejected() {
     assert_code(
         "fn id[T](x: T) -> T { return x; }\n\
@@ -247,6 +263,20 @@ fn overlapping_generic_impls_are_rejected() {
         "interface I { fn m(read self) -> i64; }\nstruct List[T] { x: T }\n\
          impl[T] I for List[T] { fn m(read self) -> i64 { return 1; } }\n\
          impl[U] I for List[U] { fn m(read self) -> i64 { return 2; } }\n\
+         fn main() -> i64 { return 0; }\n",
+        "E1009",
+    );
+}
+
+#[test]
+fn generic_and_concrete_impls_on_same_head_overlap_are_rejected() {
+    // A generic head and a concrete head for the SAME target constructor still
+    // overlap on their common instance (`W[T]` unifies with `W[i64]`), so adding
+    // the target-name comparison must NOT weaken this: E1009 (§2.3).
+    assert_code(
+        "interface I { fn m(read self) -> i64; }\nstruct W[T] { x: T }\n\
+         impl[T] I for W[T] { fn m(read self) -> i64 { return 1; } }\n\
+         impl I for W[i64] { fn m(read self) -> i64 { return 2; } }\n\
          fn main() -> i64 { return 0; }\n",
         "E1009",
     );

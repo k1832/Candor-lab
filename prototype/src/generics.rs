@@ -454,8 +454,8 @@ fn resolve_impl(
     if let Some(prev) = items.impls.iter().find(|e| {
         e.iface == im.iface
             && heads_overlap(
-                (&e.iface_args, &e.target_args, &e.type_params),
-                (&iface_args, &target_args, &type_params),
+                (e.target.as_str(), &e.iface_args, &e.target_args, &e.type_params),
+                (target.as_str(), &iface_args, &target_args, &type_params),
             )
     }) {
         let _ = prev;
@@ -584,16 +584,18 @@ fn collect_params(t: &Type, out: &mut HashSet<String>) {
     }
 }
 
-type Head<'a> = (&'a Vec<Type>, &'a Vec<Type>, &'a Vec<(String, Vec<String>)>);
+type Head<'a> = (&'a str, &'a Vec<Type>, &'a Vec<Type>, &'a Vec<(String, Vec<String>)>);
 
-/// Do two impl heads (iface_args + target_args) unify under their respective
-/// type-parameter sets? Each side's parameters are unification variables local to
-/// that side; the two are kept in separate binding maps so a shared spelling `T`
-/// on both sides does not falsely couple them (design 0007 §2.3 overlap check).
+/// Do two impl heads unify: SAME target constructor, and (iface_args + target_args)
+/// unify under their respective type-parameter sets? Distinct target nominals never
+/// overlap, so `impl I for A` and `impl I for B` (distinct nominals) coexist. Each
+/// side's parameters are unification variables local to that side; the two are kept
+/// in separate binding maps so a shared spelling `T` on both sides does not falsely
+/// couple them (design 0007 §2.3 overlap check).
 fn heads_overlap(a: Head, b: Head) -> bool {
-    let (aif, atg, ap) = a;
-    let (bif, btg, bp) = b;
-    if aif.len() != bif.len() || atg.len() != btg.len() {
+    let (atgt, aif, atg, ap) = a;
+    let (btgt, bif, btg, bp) = b;
+    if atgt != btgt || aif.len() != bif.len() || atg.len() != btg.len() {
         return false;
     }
     let aset: HashSet<&str> = ap.iter().map(|(n, _)| n.as_str()).collect();

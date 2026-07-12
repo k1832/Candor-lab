@@ -107,6 +107,20 @@ impl Show for ShowInt {
     }
 }
 
+// `Show` over `String` itself: render the string's own text into a fresh owning
+// String. The built target `s` is this function's own directly-owned local (the
+// owned-String build constraint). `self` arrives as a `read` borrow, so the string
+// intrinsic needs the underlying String named directly: `self.*` derefs the borrow
+// to the `String` place (static type `String`, which `as_str` dispatch recognizes),
+// then `read self.*` takes the read view whose bytes are appended.
+impl Show for String {
+    fn to_string(read self, a: Alloc) alloc -> String {
+        let mut s: String = string_new(read a);
+        append(write s, as_str(read self.*));
+        return s;
+    }
+}
+
 // `Show` composing THROUGH a generic bound: `Opt[T]` is renderable exactly when
 // its payload is (`T: Show`), rendering "Some(<inner>)" / "None". The `Some` arm
 // calls `T`'s own `to_string`, proving the convention threads through the bound.

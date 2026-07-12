@@ -316,3 +316,46 @@ fn println_show_renders_line_per_value_both_engines() {
     }
     assert_eq!(tout, mout, "both engines byte-for-byte");
 }
+
+
+// ---- 9. `Show for String` renders a String through the SAME boundary ---------
+// The payoff of the coherence fix: `impl Show for String` now coexists with
+// `impl Show for ShowInt` (distinct target nominals no longer falsely overlap),
+// so a `String` renders through the very same generic `Show`-through-boundary path
+// as the other `Show` witnesses. Build a String, render it through `println_show`,
+// and assert its text + trailing newline byte-for-byte on BOTH engines.
+#[test]
+fn println_show_string_both_engines() {
+    let _g = lock();
+    let body = print_main(
+        "  let mut msg: String = string_new(read al);
+           append(write msg, \"hello\");
+           let _a: IoResult = println_show(read msg, al);",
+    );
+    let src = show_image(&body);
+    const EXPECT: &[u8] = b"hello\n";
+
+    foreign_io::reset();
+    foreign_io::register_std_io();
+    let tret = run_tree_ok(&src);
+    let tout = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+    assert_eq!(tret, 0);
+    assert_eq!(tout, EXPECT, "tree-walker Show-for-String bytes");
+
+    foreign_io::reset();
+    foreign_io::register_std_io();
+    let mres = run_source_real_mir(&src);
+    let mout = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+    match mres {
+        MirRunResult::Ok(run) => {
+            assert_eq!(run.ret, 0);
+            assert_eq!(mout, EXPECT, "MIR Show-for-String bytes");
+        }
+        MirRunResult::Fault(f) => panic!("mir fault: {}", f.to_json()),
+        MirRunResult::Unsupported(msg) => panic!("mir unsupported: {msg}"),
+        other => panic!("mir not ok: {}", matches!(other, MirRunResult::Ok(_))),
+    }
+    assert_eq!(tout, mout, "both engines byte-for-byte");
+}
