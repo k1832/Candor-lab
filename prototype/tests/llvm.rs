@@ -446,3 +446,161 @@ fn gate_llvm_drop_through_box() {
     .expect("read box-drop fixture");
     assert_llvm_eq_oracle(&src, true, "boxdropfree");
 }
+
+// ---------------------------------------------------------------------------
+// 8. STRUCTURED CONCURRENCY (design 0012 Stage 2, S5): `spawn`/`scope` over REAL
+//    OS threads via the C runtime's raw-pthread rt_scope_begin/rt_spawn/
+//    rt_scope_end (reused UNCHANGED). Task args are marshalled on the parent
+//    thread (a scalar value or an aggregate's flat address); the cross-thread
+//    trace is merged in SPAWN ORDER at the join, so θ is deterministic regardless
+//    of the OS-thread interleaving, and a spawned task's fault is re-delivered
+//    spawn-order-first at the brace. The compiled binary's (exit / trace /
+//    fault-JSON) must match the sequential oracle byte-exact — the same fixtures
+//    tests/aot.rs's concurrency gate carries.
+// ---------------------------------------------------------------------------
+
+const CONC: &[(&str, bool)] = &[
+    // The parallel-fill flagship: split_mut halves fed to two disjoint spawns
+    // writing through their `slice_mut`s; the merged buffer -> exit byte (2211).
+    (
+        "fn fill(s: write [u8], v: u8, n: usize) -> unit { \
+            let mut i: usize = 0; loop { if i >= n { break; } s[i] = v; i = i + 1; } } \
+         fn main() -> i64 { let mut buf: [4]u8 = [0u8, 0u8, 0u8, 0u8]; \
+            let lo: write [u8]; let hi: write [u8]; \
+            split_mut(buf, 2, out lo, out hi); \
+            scope { spawn fill(write lo, 1u8, 2); spawn fill(write hi, 2u8, 2); } \
+            return conv i64 buf[0] + conv i64 buf[1] * 10 \
+                 + conv i64 buf[2] * 100 + conv i64 buf[3] * 1000; }",
+        true,
+    ),
+    // Per-task trace projection merged in spawn order: θ == [100, 3, 4, 200]
+    // regardless of the OS-thread interleaving.
+    (
+        "fn work(o: write i64, v: i64) -> unit { trace(v); o.* = v * v; } \
+         fn main() -> i64 { let mut a: i64 = 0; let mut b: i64 = 0; trace(100); \
+            scope { spawn work(write a, 3); spawn work(write b, 4); } \
+            trace(200); return a + b; }",
+        true,
+    ),
+    // A spawned task faults (div-by-zero): the join delivers the fault on the
+    // parent thread via the fault-exit path -> exit 2 + (kind, span) on stderr.
+    (
+        "fn work(o: write i64, v: i64, d: i64) -> unit { o.* = v / d; } \
+         fn main() -> i64 { let mut a: i64 = 0; \
+            scope { spawn work(write a, 10, 0); } return a; }",
+        true,
+    ),
+];
+
+#[test]
+fn gate_llvm_concurrency() {
+    assert!(clang_available(), "clang unavailable: cannot build the LLVM-S5 concurrency gate");
+    for (i, (src, real)) in CONC.iter().enumerate() {
+        assert_llvm_eq_oracle(src, *real, &format!("s5conc{i}"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 9. Native FFI (design 0011 §5, S5): the std_io demonstrator built by `clang
+//    -O2` into a REAL native binary that calls REAL libc (open/read/write/close)
+//    with NO shim registry — the flat-memory `rawptr` args translated to real
+//    host pointers at the trust boundary, sub-word `i32` fd/flags narrowed to
+//    their C ABI width. Its observable result (exit byte + stdout bytes) must
+//    equal the shim-backed interpreter run — the same milestone tests/aot.rs
+//    proves for the Cranelift object backend.
+// ---------------------------------------------------------------------------
+
+fn io_guard() -> std::sync::MutexGuard<'static, ()> {
+    static G: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    G.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[test]
+fn gate_llvm_native_io_real_libc() {
+    assert!(clang_available(), "clang unavailable: cannot build the LLVM-S5 FFI gate");
+    let _g = io_guard();
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/std_io");
+    let main_cnr = dir.join("main.cnr");
+    let src = std::fs::read_to_string(&main_cnr).expect("read io fixture");
+
+    // Expected observable: the shim-backed interpreter (real std::fs + captured
+    // stdout via foreign_io), rooted at the fixture dir.
+    candor_proto::foreign_io::reset();
+    candor_proto::foreign_io::set_root(&dir);
+    candor_proto::foreign_io::register_std_io();
+    let (exp_ret, exp_out) = match run_source_real(&src) {
+        RunResult::Ok(r) => (r.ret, candor_proto::foreign_io::take_stdout()),
+        _ => {
+            candor_proto::foreign_io::unregister_std_io();
+            panic!("shim-backed interpreter should run the io demonstrator");
+        }
+    };
+    candor_proto::foreign_io::unregister_std_io();
+
+    // The milestone: a clang -O2 native binary calling real libc directly, run
+    // with the fixture dir as cwd (so `open("input.txt")` resolves).
+    let out = std::env::temp_dir().join(format!("candor-llvm-io-ok-{}", std::process::id()));
+    candor_proto::compile_path_llvm(&main_cnr, &out).expect("compile io demonstrator via clang -O2");
+    let output = Command::new(&out)
+        .current_dir(&dir)
+        .output()
+        .expect("run compiled io binary");
+    let _ = std::fs::remove_file(&out);
+
+    assert_eq!(output.status.code(), Some(exp_ret as u8 as i32), "exit byte vs shim run");
+    assert_eq!(output.stdout, exp_out, "stdout bytes vs shim run");
+    // The known observable: the uppercased fixture, 17 bytes read/written.
+    assert_eq!(exp_ret, 17);
+    assert_eq!(output.stdout, b"HELLO, CANDOR IO\n");
+}
+
+#[test]
+fn gate_llvm_native_io_open_error() {
+    assert!(clang_available(), "clang unavailable");
+    let _g = io_guard();
+    // The io module minus its demonstrator `main`, plus a `main` opening a file
+    // that does not exist -> the `Fail` arm -> a negative exit byte.
+    let fixture =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/std_io/main.cnr"))
+            .unwrap();
+    let prefix = &fixture[..fixture.find("fn main").expect("fixture has a main")];
+    let main = "fn main() -> i64 {\n\
+        let name: [9]u8 = [110u8, 111u8, 112u8, 101u8, 46u8, 116u8, 120u8, 116u8, 0u8];\n\
+        match open_read(slice_of(name)) {\n\
+            IoResult::Count(c) => { return 1i64; },\n\
+            IoResult::Fail(e) => { return conv i64 e; },\n\
+        }\n\
+    }\n";
+    let src = format!("{prefix}{main}");
+
+    let empty = std::env::temp_dir().join(format!("candor-llvm-io-empty-{}", std::process::id()));
+    std::fs::create_dir_all(&empty).unwrap();
+
+    // Expected: the shim-backed interpreter, rooted at the (empty) dir -> -1.
+    candor_proto::foreign_io::reset();
+    candor_proto::foreign_io::set_root(&empty);
+    candor_proto::foreign_io::register_std_io();
+    let exp_ret = match run_source_real(&src) {
+        RunResult::Ok(r) => r.ret,
+        _ => {
+            candor_proto::foreign_io::unregister_std_io();
+            panic!("shim-backed interpreter should run the open-error program");
+        }
+    };
+    candor_proto::foreign_io::unregister_std_io();
+    assert!(exp_ret < 0, "open of a missing file should be the Fail arm (got {exp_ret})");
+
+    // The native binary: real libc open of a missing file -> the same error value.
+    let srcpath = empty.join("prog.cnr");
+    std::fs::write(&srcpath, &src).unwrap();
+    let out = std::env::temp_dir().join(format!("candor-llvm-io-err-{}", std::process::id()));
+    candor_proto::compile_path_llvm(&srcpath, &out).expect("compile open-error program via clang -O2");
+    let output = Command::new(&out)
+        .current_dir(&empty)
+        .output()
+        .expect("run compiled open-error binary");
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_dir_all(&empty);
+
+    assert_eq!(output.status.code(), Some(exp_ret as u8 as i32), "error exit byte vs shim run");
+}

@@ -20,8 +20,13 @@
 //! adds HEAP ALLOCATION: `Box[T]`/`unbox` through a Candor allocator handle's vtable
 //! (the fn-pointer dispatch table), raw-pointer load/store (observable rt_mmio
 //! barriers), and drop-through-Box (free-on-drop via per-pointee drop glue).
-//! FFI/extern and concurrency/spawn remain out of subset, rejected with a precise
-//! "out of LLVM-S4 subset" error.
+//! S5 adds EXTERN/FFI (boundary `extern` declares + the C/SysV ABI call marshalling
+//! — pointer args translated to real host addresses at the trust boundary, the libc
+//! I/O path standalone binaries use) and STRUCTURED CONCURRENCY (design 0012 Stage 2:
+//! `spawn` a real OS thread via `rt_spawn`, the `scope` join barrier via
+//! `rt_scope_begin`/`rt_scope_end`, cross-thread trace merged in spawn order). Only
+//! the `Vec`/`Map`/`String` collection intrinsics (MIR-interp only, as in `lower`)
+//! remain out of subset, rejected with a precise "out of LLVM-S5 subset" error.
 //!
 //! ## The two-tier value model
 //! Each local is classified by a per-fn MIR scan (LLVM's own "is the address
@@ -117,6 +122,24 @@ fn scalar_of(ty: &Type) -> ScalarTy {
     }
 }
 
+/// The LLVM C-ABI integer type for a boundary parameter/return: a pointer word or a
+/// full 64-bit scalar is `i64`; a narrower (<=32-bit) scalar is `i32` (its natural
+/// SysV register width). A private mirror of `lower::c_abi_ty`, in LLVM type spelling.
+fn c_abi_llty(ty: &Type) -> &'static str {
+    match ty {
+        Type::RawPtr(_) | Type::FnPtr(_) | Type::Borrow(_) | Type::BorrowMut(_) => "i64",
+        Type::Scalar(s) => {
+            let (_, _, bits, _) = ty_range(*s);
+            if bits <= 32 {
+                "i32"
+            } else {
+                "i64"
+            }
+        }
+        _ => "i64",
+    }
+}
+
 /// The LLVM global symbol for a Candor function's compiled body. Always quoted:
 /// MIR names for compiler-synthesized bodies (e.g. a `static`'s `"<init G>"`
 /// initializer) contain characters that are not valid in a bare LLVM identifier.
@@ -183,7 +206,40 @@ pub fn emit_ll(
     out.push_str("declare i64 @rt_stack_alloc(i64, i64)\n");
     out.push_str("declare void @rt_copy(i64, i64, i64)\n");
     out.push_str("declare i64 @rt_mmio_load(i64, i64)\n");
-    out.push_str("declare void @rt_mmio_store(i64, i64, i64)\n\n");
+    out.push_str("declare void @rt_mmio_store(i64, i64, i64)\n");
+    // Structured-concurrency Stage 2 (design 0012): the raw-pthread scope/spawn
+    // markers `-O2` must never reorder or elide (bare side-effecting declares).
+    // `rt_spawn(faddr, argc, a0..a5)` — reused UNCHANGED from aot_runtime.c.
+    out.push_str("declare void @rt_scope_begin()\n");
+    out.push_str("declare void @rt_scope_end()\n");
+    out.push_str(&format!(
+        "declare void @rt_spawn({})\n",
+        ["i64"; 2 + super::lower::MAX_SPAWN_ARGS].join(", ")
+    ));
+    // Boundary `extern`s (design 0011 §5): each imported C symbol declared at its
+    // SysV C-ABI signature (pointer/word -> i64, sub-word scalar -> i32, unit ->
+    // void), keyed by `c_symbol_name`. A foreign call resolves to the REAL libc
+    // symbol in the linked binary — the standalone-binary trust boundary.
+    let mut externs: Vec<_> = items.externs.iter().collect();
+    externs.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, es) in externs {
+        let params = es
+            .params
+            .iter()
+            .map(|p| c_abi_llty(&p.lowered))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ret = if matches!(es.ret, Type::Scalar(ScalarTy::Unit)) {
+            "void"
+        } else {
+            c_abi_llty(&es.ret)
+        };
+        out.push_str(&format!(
+            "declare {ret} @\"{}\"({params})\n",
+            super::lower::c_symbol_name(name)
+        ));
+    }
+    out.push('\n');
     for bits in [8u32, 16, 32, 64] {
         for op in [BinOp::Add, BinOp::Sub, BinOp::Mul] {
             for signed in [true, false] {
@@ -662,6 +718,54 @@ impl<'a> FnEmit<'a> {
         }
     }
 
+    /// Lower a foreign `extern "C"` call (design 0011 §5, the standalone-binary
+    /// trust boundary; mirrors `lower::lower_extern_call`). Marshal each arg per the
+    /// SysV C ABI — a `rawptr`/borrow is a flat-buffer OFFSET translated to the REAL
+    /// host pointer (`MEM_BASE + offset`) libc needs; a <=32-bit scalar is narrowed to
+    /// its `i32` register width — call the imported C symbol, and canonicalize a
+    /// sub-word return back to the i64 word.
+    fn extern_call(&mut self, name: &str, args: &[Operand]) -> Result<String, String> {
+        let es = self.lay.items.externs[name].clone();
+        let mut argv: Vec<String> = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let v = self.operand(a);
+            let marshalled = match es.params.get(i).map(|p| &p.lowered) {
+                Some(Type::RawPtr(_)) | Some(Type::FnPtr(_)) | Some(Type::Borrow(_))
+                | Some(Type::BorrowMut(_)) => {
+                    let h = self.t();
+                    self.line(&format!("{h} = add i64 {MEM_BASE}, {v}"));
+                    format!("i64 {h}")
+                }
+                Some(t) if c_abi_llty(t) == "i32" => {
+                    let r = self.t();
+                    self.line(&format!("{r} = trunc i64 {v} to i32"));
+                    format!("i32 {r}")
+                }
+                _ => format!("i64 {v}"),
+            };
+            argv.push(marshalled);
+        }
+        let csym = super::lower::c_symbol_name(name);
+        let argstr = argv.join(", ");
+        if matches!(es.ret, Type::Scalar(ScalarTy::Unit)) {
+            self.line(&format!("call void @\"{csym}\"({argstr})"));
+            return Ok("0".to_string());
+        }
+        let rllty = c_abi_llty(&es.ret);
+        let raw = self.t();
+        self.line(&format!("{raw} = call {rllty} @\"{csym}\"({argstr})"));
+        if rllty == "i32" {
+            if let Type::Scalar(sc) = &es.ret {
+                let (_, _, _, signed) = ty_range(*sc);
+                let ex = self.t();
+                let opn = if signed { "sext" } else { "zext" };
+                self.line(&format!("{ex} = {opn} i32 {raw} to i64"));
+                return Ok(ex);
+            }
+        }
+        Ok(raw)
+    }
+
     fn eval_rvalue(&mut self, rv: &Rvalue) -> Result<String, String> {
         match rv {
             Rvalue::Use(op) => Ok(self.operand(op)),
@@ -729,6 +833,11 @@ impl<'a> FnEmit<'a> {
                 self.range_or_fit(&x128, *to, *regime, fault.as_ref())
             }
             Rvalue::Call { func, args } => {
+                // A boundary `extern` call (design 0011 §5) targets an imported C
+                // symbol with C-ABI marshalling, not a `cnf_` body.
+                if self.lay.items.externs.contains_key(func) {
+                    return self.extern_call(func, args);
+                }
                 let vals: Vec<String> = args.iter().map(|a| self.operand(a)).collect();
                 let argstr = vals
                     .iter()
@@ -1384,7 +1493,29 @@ impl<'a> FnEmit<'a> {
             StatementKind::Subslice { dst, src, lo, hi, stride, span } => {
                 self.subslice_op(dst, src, lo, hi, *stride, *span)?;
             }
-            other => return Err(format!("out of LLVM-S4 subset: {other:?}")),
+            // Structured concurrency Stage 2 (design 0012 §6; mirrors `lower`): `spawn`
+            // creates a real OS thread running the task fn at its (address-taken) body
+            // with the args MARSHALLED on the PARENT thread (each a single i64 — a
+            // scalar value or an aggregate's flat address; shared-nothing is enforced
+            // at compile time), padded to MAX_SPAWN_ARGS. The `scope` braces push/join
+            // the barrier frame; the join merges per-task traces in spawn order and
+            // re-delivers the spawn-order-first fault (all inside `aot_runtime.c`).
+            StatementKind::Spawn { func, args } => {
+                let argc = args.len();
+                let mut vals: Vec<String> = args.iter().map(|a| self.operand(a)).collect();
+                while vals.len() < super::lower::MAX_SPAWN_ARGS {
+                    vals.push("0".to_string());
+                }
+                let argstr =
+                    vals.iter().map(|v| format!("i64 {v}")).collect::<Vec<_>>().join(", ");
+                self.line(&format!(
+                    "call void @rt_spawn(i64 ptrtoint (ptr {} to i64), i64 {argc}, {argstr})",
+                    cnf_sym(func)
+                ));
+            }
+            StatementKind::ScopeBegin => self.line("call void @rt_scope_begin()"),
+            StatementKind::ScopeEnd => self.line("call void @rt_scope_end()"),
+            other => return Err(format!("out of LLVM-S5 subset: {other:?}")),
         }
         Ok(())
     }

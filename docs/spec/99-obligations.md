@@ -3181,3 +3181,65 @@ that completes the arena drop story — purely additive, same static C runtime
   untouched and green; `aot_runtime.c` reused UNCHANGED; clippy clean. Out-of-S4 ops
   (FFI/extern, concurrency/spawn) still REJECTED precisely ("out of LLVM-S4 subset"),
   never faked. NEXT: S5 (FFI + concurrency).
+
+## LLVM-S5 — EXTERN/FFI + STRUCTURED CONCURRENCY on the LLVM backend (2026-07-12)
+
+Extends `src/backend/llvm.rs` from S0..S4 to the WHOLE native language surface:
+boundary `extern` (real libc I/O across the audited trust boundary) and design 0012
+Stage-2 structured concurrency (`spawn`/`scope` on real OS threads). Purely additive,
+same static C runtime (`aot_runtime.c`, still UNCHANGED — no runtime symbol added or
+modified), no Cranelift code reused, no `nsw`/`nuw`. After S5 the only construct still
+out of subset is the `Vec`/`Map`/`String` collection intrinsics — MIR-interp only in
+`lower` too (native codegen of their alloc/hash bodies is a shared forward dependency),
+so the LLVM backend now covers exactly what the Cranelift backend covers.
+
+- ALREADY-IN-MIR vs NEW EMITTER WORK (the S1..S4 lesson holds). `mir::build` bakes the
+  shape; the emitter mirrors `lower` op-for-op. A boundary `extern` call is an ordinary
+  `Rvalue::Call { func, args }` whose `func` is a key in `items.externs` (NOT a `cnf_`
+  body) — the emitter branches on that. `spawn`/`scope` are dedicated statements
+  `Spawn { func, args }` / `ScopeBegin` / `ScopeEnd` (previously the S4 reject). NEW
+  emitter work: the imported-C-symbol declares, the C-ABI call marshalling, the
+  scope/spawn runtime declares, and the `rt_spawn` marshalling (function-address +
+  padded i64 args).
+- FFI MODEL (`FnEmit::extern_call`, mirror of `lower::lower_extern_call`). Each
+  `extern` is declared as an IMPORTED C symbol at its SysV C-ABI signature via
+  `c_abi_llty` (a pointer word or a full 64-bit scalar -> `i64`; a narrower scalar ->
+  `i32`; a unit return -> `void`), keyed by `c_symbol_name` (`sys_read`->`read`, …).
+  The call marshals per the C ABI: a `rawptr`/borrow argument is a flat-buffer OFFSET
+  translated to the REAL host pointer `MEM_BASE + offset` that libc needs; a <=32-bit
+  scalar is `trunc`ed to its `i32` register width; a sub-word return is `sext`/`zext`ed
+  back to the canonical i64 word. The imported symbol resolves to REAL libc in the
+  linked binary — the standalone-binary trust boundary (the extern carries the
+  assumed-proven TRUST; the safe `pub` wrappers carry the enforced value contracts).
+  The declares are bare (no `readnone`), so `-O2` preserves I/O ordering.
+- CONCURRENCY MODEL (mirror of `lower`'s `Spawn`/`ScopeBegin`/`ScopeEnd`). `spawn
+  CALLEE(args)` emits `call void @rt_spawn(i64 ptrtoint (ptr @cnf_CALLEE to i64), i64
+  argc, a0..a5)`: the task fn's ADDRESS (address-taken, so `-O2` keeps its C calling
+  convention and never elides it), `argc`, and the args MARSHALLED ON THE PARENT
+  THREAD — each a single i64 (a scalar value, or an aggregate/slice's flat address —
+  the same operand ABI as an ordinary call), padded to `MAX_SPAWN_ARGS` (6). The
+  runtime creates a real pthread that casts the address back to a fn-ptr of the right
+  arity and calls it (shared-nothing/message-passing: only the marshalled words cross;
+  race freedom is a COMPILE-TIME guarantee already checked). `scope { … }` brackets
+  emit `rt_scope_begin` / `rt_scope_end`; the closing brace JOINS every task in SPAWN
+  ORDER, MERGES each task's per-thread trace fragment into the parent's trace (so `θ`
+  is DETERMINISTIC regardless of the OS-thread interleaving — this is the mechanism
+  that makes the cross-thread trace byte-exact), and re-delivers the spawn-order-first
+  fault on the parent thread. `rt_spawn`/`rt_scope_begin`/`rt_scope_end` already exist
+  in `aot_runtime.c` (reused UNCHANGED). The LLVM gate mirrors `tests/aot.rs`'s
+  concurrency mechanism exactly (compare the compiled binary against the sequential
+  oracle, whose inline spawn-order run yields the same deterministic θ + fault).
+- GATE / VERIFICATION (isolation): `tests/llvm.rs` green — 14 tests (11 from S0..S4 +
+  3 new). `gate_llvm_concurrency` runs the three design-0012 fixtures the AOT gate
+  carries (the parallel-fill flagship via `split_mut` + two disjoint `spawn`s -> exit
+  byte 2211; per-task trace projection merged in spawn order -> θ == [100, 3, 4, 200];
+  a spawned div-by-zero task whose fault the join re-delivers -> exit 2 + (kind, span)).
+  `gate_llvm_native_io_real_libc` builds the std_io demonstrator with `clang -O2` into
+  a standalone binary that calls REAL libc open/read/write/close (no shim registry),
+  run with the fixture dir as cwd: exit byte + stdout bytes byte-exact vs the
+  shim-backed interpreter (uppercased 17-byte fixture, `HELLO, CANDOR IO\n`).
+  `gate_llvm_native_io_open_error` opens a missing file -> the `Fail` arm's negative
+  exit byte, matched. All S0..S4 fixtures + `perf_mem2reg_promotes_locals` stay green;
+  `tests/aot.rs` (6 tests) untouched and green; `aot_runtime.c` reused UNCHANGED;
+  clippy clean. The LLVM backend is now a fully-covering native engine, ready for S6
+  (wiring it in as the 5th Stage-D proven-equivalent engine over the whole corpus).
