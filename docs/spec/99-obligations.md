@@ -3067,3 +3067,57 @@ code reused; no `nsw`/`nuw`.
   tests) untouched and green; `aot_runtime.c` reused UNCHANGED; clippy clean. Out-of-S2
   ops (box/alloc/rawptr, needs-drop, collections, concurrency) still REJECTED precisely
   ("out of LLVM-S2 subset"), never faked. NEXT: S3 (drop — the tallest pole).
+
+## LLVM-S3 — the MOVE/DROP SCHEDULE with trace-on-drop on the LLVM backend (2026-07-12)
+
+Extends `src/backend/llvm.rs` from S0+S1+S2 to the deterministic-destruction
+contract: every needs-drop value runs its drop glue at the scheduled point, with
+trace-on-drop firing in `backend::lower`'s exact order — purely additive, same
+static C runtime (`aot_runtime.c`, still UNCHANGED), no Cranelift code reused, no
+`nsw`/`nuw`.
+
+- ALREADY-IN-MIR vs NEW EMITTER WORK (the S1/S2 lesson holds, strongly). The
+  ENTIRE drop SCHEDULE is baked into the MIR by the front end (`mir::build`): each
+  `Drop` statement is already placed at scope exit / early `return` / `break` in
+  REVERSE declaration order, and carries a STATIC move mask (`moved: Vec<Vec<String>>`)
+  — the field-name sub-paths already moved out at that point. There is NO runtime
+  drop flag anywhere (design 0010 §2 INV-DROP): conditional-move correctness is a
+  compile-time mask, and the checker forbids inconsistent move state at CFG joins
+  (E0302), so every drop site has one deterministic mask. The NEW emitter work is
+  only the drop-GLUE expansion at each `Drop`: recurse the static type + mask into
+  the matching LLVM, op-for-op with `lower::emit_drop`.
+- DROP-GLUE MODEL (`FnEmit::emit_drop`/`drop_enum`, mirror of `lower::emit_drop`/
+  `drop_enum`). A needs-drop local is non-wordy -> Tier-F, so its flat candor offset
+  `%off{id}` is the drop address. STRUCT: if not partially-moved, fire the `drop`
+  hook (`call cnf_<drop Name>(i64 addr)` — the user hook body, already emitted as an
+  ordinary MIR fn, is where the observable `trace` lives) THEN drop each field in
+  reverse declaration order. ARRAY: drop each element in reverse index order (stride
+  = round_up(size,align)). ENUM: load the u64 tag at offset 0, then per variant with
+  a droppable payload emit `icmp eq tag, idx` -> branch to a per-variant block that
+  drops the payload fields in reverse, all joining a `merge` block (variants with no
+  droppable payload emit no test). Recurses; `needs_drop` mirrors `lower::needs_drop`.
+- DROP-FLAG / CONDITIONAL-DROP MECHANISM (no runtime flag; static mask). `emit_drop`
+  is pruned by the same `is_moved`/`partially`/`prefix` predicates `lower` uses: a
+  path fully covered by the mask is skipped (a moved value never double-drops), a
+  strictly-deeper mask entry marks a struct partially-moved (skip its whole-value
+  hook, drop only the still-owned fields). A value consumed by a call is moved out
+  and pruned from the caller's schedule, dropped exactly once inside the callee's
+  param scope; early-return drops fire on every control path.
+- OUT OF S3 (rejected precisely, never faked). A drop that recurses through
+  `Box`/`BoxResult` needs the allocator's `free` through the vtable — that is S4;
+  `emit_drop` rejects it with "out of LLVM-S3 subset: drop through Box/alloc". The
+  corpus fixtures still out-of-subset for this (and the surrounding Alloc/rawptr
+  machinery) are `11_1_allocator`, `11_5_arena`, `11_4_parser` (all reject on the
+  allocator-handle `CopyVal`, before any drop). The pure-VALUE drop/trace corpus
+  fixtures ARE in subset: `generics/gdrop.cnr` (generic struct hook fires BEFORE the
+  field drop) and `generics/gdrop_groundfloor.cnr` (move-into-callee param drop).
+- GATE / VERIFICATION (isolation): `tests/llvm.rs` green — 9 tests. New:
+  `gate_llvm_drop_trace` (9 fixtures: single-struct hook, two-value reverse order,
+  conditional-move no-double-drop + param drop, nested struct inner-to-outer, array
+  reverse, enum active-variant payload, enum non-droppable variant, early-return on
+  both paths, partial-move hook-skip) and `gate_llvm_drop_trace_corpus` (the two
+  generics value-drop fixtures) compile via `clang -O2`, run standalone, and compare
+  (exit / TRACE / fault-JSON) byte-exact to the oracle — the TRACE order is the
+  correctness axis. All S0+S1+S2 fixtures + `perf_mem2reg_promotes_locals` stay
+  green; `tests/aot.rs` (6 tests) untouched and green; `aot_runtime.c` reused
+  UNCHANGED; clippy clean. NEXT: S4 (Box/alloc/rawptr — drop through the allocator).

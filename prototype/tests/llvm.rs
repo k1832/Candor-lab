@@ -328,3 +328,79 @@ fn gate_llvm_enum_fault_axis() {
         assert_llvm_eq_oracle(src, *real, &format!("s2fault{i}"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// 6. The MOVE/DROP SCHEDULE with trace-on-drop (S3): every needs-drop value runs
+//    its drop glue at the scheduled point — a struct fires its `drop` hook (the
+//    observable `trace`) then drops its fields inner-to-outer (reverse declaration
+//    order), an array drops its elements in reverse, an enum switches on its tag
+//    and drops the active variant's payload. A moved value (consumed by a call,
+//    or a moved-out field) is pruned from the schedule by the static move mask —
+//    never double-dropped — while the still-owned remainder drops exactly once.
+//    The TRACE sequence is the correctness axis: byte-exact vs the oracle.
+// ---------------------------------------------------------------------------
+
+const DROP_OK: &[(&str, bool)] = &[
+    // Single struct with a trace-on-drop hook: fires at scope exit (after trace(1)).
+    ("struct Res { id: i64 } drop(write self) { trace(self.id); } \
+      fn main() -> i64 { let r: Res = Res { id: 42 }; trace(1); return 0; }", true),
+    // Two owned values drop in REVERSE declaration order (2 then 1).
+    ("struct Res { id: i64 } drop(write self) { trace(self.id); } \
+      fn main() -> i64 { let a: Res = Res { id: 1 }; let b: Res = Res { id: 2 }; trace(99); return 0; }", true),
+    // Conditional move: `a` is consumed by `eat` (dropped once, inside the callee's
+    // param scope) and pruned from main's schedule — no double-drop (trace 5 twice,
+    // not thrice: the callee's param drop + trace(n)).
+    ("struct Res { id: i64 } drop(write self) { trace(self.id); } \
+      fn eat(r: Res) -> i64 { return r.id; } \
+      fn main() -> i64 { let a: Res = Res { id: 5 }; let n: i64 = eat(a); trace(n); return 0; }", true),
+    // Nested struct: fields drop inner-to-outer (b=2 then a=1).
+    ("struct Inner { id: i64 } drop(write self) { trace(self.id); } \
+      struct Outer { a: Inner, b: Inner } \
+      fn main() -> i64 { let o: Outer = Outer { a: Inner { id: 1 }, b: Inner { id: 2 } }; trace(9); return 0; }", true),
+    // Array of droppable elements: dropped in reverse index order (30,20,10).
+    ("struct Res { id: i64 } drop(write self) { trace(self.id); } \
+      fn main() -> i64 { let a: [3]Res = [Res { id: 10 }, Res { id: 20 }, Res { id: 30 }]; trace(0); return 0; }", true),
+    // Enum drop: switch on the tag, drop the ACTIVE variant's payload (trace 77).
+    ("struct Res { id: i64 } drop(write self) { trace(self.id); } \
+      enum E { Has(Res), None } \
+      fn main() -> i64 { let e: E = E::Has(Res { id: 77 }); trace(1); return 0; }", true),
+    // Enum drop: a non-droppable variant runs no payload drop (only trace(1)).
+    ("struct Res { id: i64 } drop(write self) { trace(self.id); } \
+      enum E { Has(Res), None } \
+      fn main() -> i64 { let e: E = E::None; trace(1); return 0; }", true),
+    // Early return: the drop fires on BOTH control paths (trace 8 each).
+    ("struct Res { id: i64 } drop(write self) { trace(self.id); } \
+      fn f(early: bool) -> i64 { let r: Res = Res { id: 8 }; if early { trace(100); return 1; } trace(200); return 2; } \
+      fn main() -> i64 { let x: i64 = f(true); let y: i64 = f(false); return 0; }", true),
+    // Partial move: `p.a` is moved into `eat`; the struct-level schedule skips the
+    // moved field and drops only the still-owned `p.b` (trace 1 from the callee,
+    // trace 50, then trace 2 for p.b) — no double-drop of the moved `a`.
+    ("struct Res { id: i64 } drop(write self) { trace(self.id); } \
+      struct Pair { a: Res, b: Res } \
+      fn eat(r: Res) -> i64 { return r.id; } \
+      fn main() -> i64 { let p: Pair = Pair { a: Res { id: 1 }, b: Res { id: 2 } }; let n: i64 = eat(p.a); trace(50); return 0; }", true),
+];
+
+#[test]
+fn gate_llvm_drop_trace() {
+    assert!(clang_available(), "clang unavailable: cannot build the LLVM-S3 drop/trace gate");
+    for (i, (src, real)) in DROP_OK.iter().enumerate() {
+        assert_llvm_eq_oracle(src, *real, &format!("s3drop{i}"));
+    }
+}
+
+// The generics corpus's value-drop fixtures: a generic struct `drop` hook that
+// monomorphizes to a concrete value type — the hook fires BEFORE the field drop
+// (`gdrop`: Wrap's tag hook, then the Noisy field), and a move into a callee drops
+// the value in the callee's param scope (`gdrop_groundfloor`). Both are within the
+// S3 value subset (no Box); their trace order must match the oracle byte-exact.
+#[test]
+fn gate_llvm_drop_trace_corpus() {
+    assert!(clang_available(), "clang unavailable");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/generics");
+    for name in ["gdrop.cnr", "gdrop_groundfloor.cnr"] {
+        let src = std::fs::read_to_string(dir.join(name)).expect("read generics drop fixture");
+        let tag: String = name.chars().filter(|c| c.is_alphanumeric()).collect();
+        assert_llvm_eq_oracle(&src, true, &tag);
+    }
+}

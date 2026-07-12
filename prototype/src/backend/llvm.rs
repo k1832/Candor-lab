@@ -60,7 +60,7 @@ use crate::mir::{
 use crate::resolve::Items;
 use crate::span::Span;
 use crate::token::ScalarTy;
-use crate::types::Type;
+use crate::types::{ItemEnv, Type};
 
 use std::collections::HashMap;
 
@@ -190,7 +190,7 @@ pub fn emit_ll(
     out.push('\n');
 
     for f in &prog.fns {
-        emit_fn(&mut out, f, &lay, &statics, &strings)?;
+        emit_fn(&mut out, f, &lay, &statics, &strings, &prog.drop_hooks)?;
     }
     emit_entry(&mut out, prog, &lay, &statics, &strings);
 
@@ -332,6 +332,7 @@ struct FnEmit<'a> {
     lay: &'a Layout<'a>,
     statics: &'a HashMap<String, u64>,
     strings: &'a HashMap<String, u64>,
+    drop_hooks: &'a HashMap<String, String>,
     tier_f: Vec<bool>,
 }
 
@@ -341,9 +342,20 @@ impl<'a> FnEmit<'a> {
         lay: &'a Layout<'a>,
         statics: &'a HashMap<String, u64>,
         strings: &'a HashMap<String, u64>,
+        drop_hooks: &'a HashMap<String, String>,
     ) -> Self {
         let tier_f = classify_tiers(mf);
-        FnEmit { out: String::new(), tmp: 0, lbl: 0, mf, lay, statics, strings, tier_f }
+        FnEmit {
+            out: String::new(),
+            tmp: 0,
+            lbl: 0,
+            mf,
+            lay,
+            statics,
+            strings,
+            drop_hooks,
+            tier_f,
+        }
     }
     fn t(&mut self) -> String {
         let n = self.tmp;
@@ -473,7 +485,7 @@ impl<'a> FnEmit<'a> {
                     let v = self.load_local(root);
                     (v, inner.clone(), &place.proj[1..])
                 }
-                _ => return Err("out of LLVM-S2 subset: address of a register local".to_string()),
+                _ => return Err("out of LLVM-S3 subset: address of a register local".to_string()),
             }
         };
         for p in rest {
@@ -703,7 +715,7 @@ impl<'a> FnEmit<'a> {
                     .ok_or_else(|| format!("unknown string literal `{sv}`"))?;
                 Ok(format!("{}", a as i64))
             }
-            other => Err(format!("out of LLVM-S2 subset: {other:?}")),
+            other => Err(format!("out of LLVM-S3 subset: {other:?}")),
         }
     }
 
@@ -883,9 +895,138 @@ impl<'a> FnEmit<'a> {
         }
     }
 
+    // ---- static drop schedule (INV-DROP; mirrors `lower::emit_drop`) ----
+
+    /// Whether a type carries a drop obligation — mirror of `lower::needs_drop`
+    /// (array of droppable / Box / BoxResult / a struct with a drop hook or a
+    /// droppable field / an enum with a droppable variant payload).
+    fn needs_drop(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Array(e, _) => self.needs_drop(e),
+            Type::Box(_) | Type::BoxResult(_) => true,
+            Type::Named(n) if self.lay.items.lookup_struct(n).is_some() => {
+                if self.drop_hooks.contains_key(n) {
+                    return true;
+                }
+                let (fields, _, _) = self.lay.struct_layout(n);
+                fields.iter().any(|(_, t, _)| self.needs_drop(t))
+            }
+            Type::Named(n) if self.lay.items.lookup_enum(n).is_some() => match self.lay.enum_info(ty) {
+                Some(vs) => vs.iter().any(|(_, ps)| ps.iter().any(|p| self.needs_drop(p))),
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// `add i64 candor, off` — a byte offset into a flat candor address.
+    fn add_off_candor(&mut self, addr: &str, off: u64) -> String {
+        if off == 0 {
+            return addr.to_string();
+        }
+        let a = self.t();
+        self.line(&format!("{a} = add i64 {addr}, {off}"));
+        a
+    }
+
+    /// Recursively drop the value of `ty` at flat candor address `addr`, in
+    /// `lower::emit_drop`'s exact order: array/struct fields inner-to-outer (reverse
+    /// declaration order), the active enum variant's payload, and the struct drop
+    /// hook fired at trace time. `moved` is the static move mask (field-name paths
+    /// already moved out); `path` is the current sub-path. Box/BoxResult drop needs
+    /// the allocator (S4) and is rejected precisely.
+    fn emit_drop(
+        &mut self,
+        addr: &str,
+        ty: &Type,
+        moved: &[Vec<String>],
+        path: &mut Vec<String>,
+    ) -> Result<(), String> {
+        if is_moved(moved, path) || !self.needs_drop(ty) {
+            return Ok(());
+        }
+        match ty {
+            Type::Array(elem, len) => {
+                let n = self.lay.array_len(len);
+                let stride = round_up(self.lay.size_of(elem), self.lay.align_of(elem));
+                for i in (0..n).rev() {
+                    let ea = self.add_off_candor(addr, i * stride);
+                    self.emit_drop(&ea, elem, moved, path)?;
+                }
+            }
+            Type::Box(_) | Type::BoxResult(_) => {
+                return Err(
+                    "out of LLVM-S3 subset: drop through Box/alloc (needs the allocator; S4)"
+                        .to_string(),
+                );
+            }
+            Type::Named(n) if self.lay.items.lookup_struct(n).is_some() => {
+                // A partially-moved struct skips its whole-value hook (the moved
+                // field carried the ownership the hook would observe).
+                if !partially(moved, path) {
+                    if let Some(hook) = self.drop_hooks.get(n).cloned() {
+                        let r = self.t();
+                        self.line(&format!("{r} = call i64 {}(i64 {addr})", cnf_sym(&hook)));
+                    }
+                }
+                let (fields, _, _) = self.lay.struct_layout(n);
+                for (fname, fty, off) in fields.into_iter().rev() {
+                    path.push(fname);
+                    let fa = self.add_off_candor(addr, off);
+                    self.emit_drop(&fa, &fty, moved, path)?;
+                    path.pop();
+                }
+            }
+            Type::Named(_) => self.drop_enum(addr, ty, moved, path)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Drop an enum by switching on its runtime tag (offset 0) to the active
+    /// variant, then dropping that variant's payload fields in reverse — mirror of
+    /// `lower::drop_enum` (variants with no droppable payload emit no test).
+    fn drop_enum(
+        &mut self,
+        addr: &str,
+        ty: &Type,
+        moved: &[Vec<String>],
+        path: &mut Vec<String>,
+    ) -> Result<(), String> {
+        let einfo = match self.lay.enum_info(ty) {
+            Some(e) => e,
+            None => return Ok(()),
+        };
+        let tag = self.load_scalar(addr, ScalarTy::U64);
+        let merge = self.l();
+        for (idx, (_, payloads)) in einfo.iter().enumerate() {
+            if !payloads.iter().any(|p| self.needs_drop(p)) {
+                continue;
+            }
+            let isv = self.t();
+            self.line(&format!("{isv} = icmp eq i64 {tag}, {idx}"));
+            let vblock = self.l();
+            let next = self.l();
+            self.line(&format!("br i1 {isv}, label %{vblock}, label %{next}"));
+            self.label(&vblock);
+            for i in (0..payloads.len()).rev() {
+                let (pty, off) = self.lay.payload_offset(payloads, i);
+                path.push(format!("_{i}"));
+                let pa = self.add_off_candor(addr, off);
+                self.emit_drop(&pa, &pty, moved, path)?;
+                path.pop();
+            }
+            self.line(&format!("br label %{merge}"));
+            self.label(&next);
+        }
+        self.line(&format!("br label %{merge}"));
+        self.label(&merge);
+        Ok(())
+    }
+
     fn lower_stmt(&mut self, st: &Statement) -> Result<(), String> {
         if st.observable && !matches!(st.kind, StatementKind::Trace(_)) {
-            return Err(format!("out of LLVM-S2 subset (observable): {:?}", st.kind));
+            return Err(format!("out of LLVM-S3 subset (observable): {:?}", st.kind));
         }
         match &st.kind {
             StatementKind::Assign(local, rv) => {
@@ -910,18 +1051,34 @@ impl<'a> FnEmit<'a> {
                 let (d, _) = self.place_addr(dst)?;
                 self.rt_copy(&d, &s, self.lay.size_of(ty));
             }
-            // A drop-inert local (a scalar, or a struct/array of drop-inert fields)
-            // carries no drop obligation, so its Drop is a no-op; a needs-drop value
-            // (its glue is enum/box territory) is out of subset.
-            StatementKind::Drop { local, .. } => {
+            // Emit the value's drop glue at its scheduled point (INV-DROP). A
+            // drop-inert local carries no obligation, so its Drop stays a no-op; a
+            // needs-drop value recurses through `emit_drop` (struct fields / array
+            // elements / active enum variant, reverse order, trace-on-drop via the
+            // struct's drop hook), pruned by the static move mask.
+            StatementKind::Drop { local, moved } => {
                 if self.mf.locals[*local].drop_obligation {
-                    return Err("out of LLVM-S2 subset: drop of a needs-drop value".to_string());
+                    let ty = self.mf.locals[*local].ty.clone();
+                    let addr = format!("%off{local}");
+                    self.emit_drop(&addr, &ty, moved, &mut Vec::new())?;
                 }
             }
-            other => return Err(format!("out of LLVM-S2 subset: {other:?}")),
+            other => return Err(format!("out of LLVM-S3 subset: {other:?}")),
         }
         Ok(())
     }
+}
+
+/// The static move-mask predicates (mirror `lower::is_moved`/`partially`/`prefix`):
+/// a path is dropped only if not covered by, and not a strict prefix cut by, the mask.
+fn is_moved(mask: &[Vec<String>], path: &[String]) -> bool {
+    mask.iter().any(|m| prefix(m, path))
+}
+fn partially(mask: &[Vec<String>], path: &[String]) -> bool {
+    mask.iter().any(|m| m.len() > path.len() && m[..path.len()] == path[..])
+}
+fn prefix(a: &[String], b: &[String]) -> bool {
+    a.len() <= b.len() && a[..] == b[..a.len()]
 }
 
 /// Emit one `cnf_<name>` function, replicating `lower::lower_fn`'s block/region
@@ -933,8 +1090,9 @@ fn emit_fn(
     lay: &Layout,
     statics: &HashMap<String, u64>,
     strings: &HashMap<String, u64>,
+    drop_hooks: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let mut e = FnEmit::new(mf, lay, statics, strings);
+    let mut e = FnEmit::new(mf, lay, statics, strings, drop_hooks);
 
     let params = (0..mf.num_params)
         .map(|i| format!("i64 %a{i}"))
