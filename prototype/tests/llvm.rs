@@ -567,8 +567,8 @@ fn gate_llvm_native_io_open_error() {
     let main = "fn main() -> i64 {\n\
         let name: [9]u8 = [110u8, 111u8, 112u8, 101u8, 46u8, 116u8, 120u8, 116u8, 0u8];\n\
         match open_read(slice_of(name)) {\n\
-            IoResult::Count(c) => { return 1i64; },\n\
-            IoResult::Fail(e) => { return conv i64 e; },\n\
+            IoResult::Ok(c) => { return 1i64; },\n\
+            IoResult::Err(e) => { match e { IoError::Errno(n) => { return conv i64 n; }, } },\n\
         }\n\
     }\n";
     let src = format!("{prefix}{main}");

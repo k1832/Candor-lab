@@ -7,13 +7,18 @@
 // is placed legally in `AppErr`'s own module — here (the orphan rule; the
 // misplaced-impl case is `corelib_neg_orphan`, which faults E1013).
 //
-// STAGE-3 FINDING (see the run report): the `?` operator is NOT wired into the
-// module-tree checker — E0712 fires for BOTH same-type and cross-type `?` in any
-// multi-file program, so the ergonomic `let n = read_at(ok)?;` (which desugars
-// to a call to `AppErr::from`, design 0007 §7.1) cannot appear in-tree. In-tree
-// we widen the error explicitly (the exact value `from` would produce); the
-// `From` impl still checks at its definition site (coherence). The `?` sugar is
-// verified single-file in the corelib test (`cross_type_question_single_file`).
+// The `?` operator now resolves in-tree, both same-type and cross-type. In
+// `src/check/expr.rs` (`check_try`, ~:1003-1033) same-type propagation is the
+// `Named==Named` / `App==App` arm and cross-type propagation is
+// `try_from_conversion` (the `From` impl, matched by base name across the tree's
+// qualified names, design 0007 §7.1). E0712 now fires ONLY when neither holds —
+// the enclosing return type differs AND no `impl From[E1] for E2` is in scope.
+// Multi-file `?` is exercised by the `corelib_question` tree
+// (`question_operator_across_tree`); single-file cross-type by
+// `cross_type_question_works_single_file`; the narrowed E0712 by
+// `question_without_return_or_from_is_e0712`.
+use core::opt::{Opt};
+
 pub enum Res[T, E] {
     ok Ok(T),
     Err(E),
@@ -64,6 +69,78 @@ pub fn is_ok[T, E](r: read Res[T, E]) -> bool {
         },
         Res::Err(e) => {
             return false;
+        },
+    }
+}
+
+// `map` transforms the `Ok` payload with a capture-free fn pointer, leaving `Err`
+// unchanged. Both arms FORWARD their payload into the new `Res` (never drop), so
+// §3.4 does not tax it — non-`alloc`, ground floor.
+pub fn map[T, E, U](r: Res[T, E], f: fn(T) -> U) -> Res[U, E] {
+    match r {
+        Res::Ok(v) => {
+            return Res::Ok(f(v));
+        },
+        Res::Err(e) => {
+            return Res::Err(e);
+        },
+    }
+}
+
+// `map_err` transforms the `Err` payload, leaving `Ok` unchanged. Both arms
+// forward their payload; non-`alloc`.
+pub fn map_err[T, E, F](r: Res[T, E], f: fn(E) -> F) -> Res[T, F] {
+    match r {
+        Res::Ok(v) => {
+            return Res::Ok(v);
+        },
+        Res::Err(e) => {
+            return Res::Err(f(e));
+        },
+    }
+}
+
+// `unwrap_or` returns the `Ok` payload or a default. `T: copy` keeps the payload
+// and default drop-inert; the `Err` arm DISCARDS `e: E`, and a bare generic `E`
+// may bear a `Box`, so dropping it is the §3.4 opaque-drop `alloc` tax — this
+// combinator carries `alloc`, off the ground floor (design 0007 §3.4).
+pub fn unwrap_or[T: copy, E](r: Res[T, E], d: T) alloc -> T {
+    match r {
+        Res::Ok(v) => {
+            return v;
+        },
+        Res::Err(e) => {
+            return d;
+        },
+    }
+}
+
+// `ok` discards the `Err` and turns a `Res` into an `Opt`. The `Err` arm drops a
+// possibly-`Box`-bearing `E`, so like `unwrap_or` it carries the §3.4 `alloc` tax.
+pub fn ok[T, E](r: Res[T, E]) alloc -> Opt[T] {
+    match r {
+        Res::Ok(v) => {
+            return Opt::Some(v);
+        },
+        Res::Err(e) => {
+            return Opt::None;
+        },
+    }
+}
+
+// `ok_or` bridges the other way: an `Opt` becomes a `Res`, supplying `e` for the
+// `None` case. The eager `e: E` is DISCARDED on the `Some` path (a possibly-
+// `Box`-bearing generic drop), so it carries the §3.4 `alloc` tax. It lives here
+// (not in `core::opt`) because `core::opt` is the ground floor and must not import
+// `core::res` — the acyclic-DAG rule (design 0008 §3) permits only the `res -> opt`
+// edge, so both `Opt <-> Res` bridges (`ok`, `ok_or`) sit in `res`.
+pub fn ok_or[T, E](o: Opt[T], e: E) alloc -> Res[T, E] {
+    match o {
+        Opt::Some(v) => {
+            return Res::Ok(v);
+        },
+        Opt::None => {
+            return Res::Err(e);
         },
     }
 }

@@ -24,7 +24,7 @@ fn dir() -> String {
 fn fixture() -> String {
     std::fs::read_to_string(format!("{}/main.cnr", dir())).expect("read io fixture")
 }
-/// The io module minus its demonstrator `main` — externs, `IoResult`, and the
+/// The io module minus its demonstrator `main` — externs, `Res`/`IoError`, and the
 /// pub wrappers — so a focused test can append its own `main` and drive the
 /// *actual* module wrappers (no re-implementation).
 fn module_prefix() -> String {
@@ -34,6 +34,15 @@ fn module_prefix() -> String {
 }
 fn probe(main_body: &str) -> String {
     format!("{}{}", module_prefix(), main_body)
+}
+
+fn run_ok_mir(src: &str) -> i64 {
+    match run_source_real_mir(src) {
+        MirRunResult::Ok(r) => r.ret,
+        MirRunResult::Fault(f) => panic!("mir fault: {}", f.to_json()),
+        MirRunResult::Unsupported(s) => panic!("mir unsupported: {s}"),
+        other => panic!("mir not ok: {}", matches!(other, MirRunResult::Ok(_))),
+    }
 }
 
 fn run_ok(src: &str) -> i64 {
@@ -97,8 +106,8 @@ fn demonstrator_mir_engine_equal() {
 const WRITE_PROBE: &str = r#"fn main() -> i64 {
     let data: [3]u8 = [88u8, 89u8, 90u8];
     match write_all(stdout(), slice_of(data)) {
-        IoResult::Count(c) => { return conv i64 c; },
-        IoResult::Fail(e) => { return 0i64 - 100i64 + conv i64 e; },
+        IoResult::Ok(c) => { return conv i64 c; },
+        IoResult::Err(e) => { match e { IoError::Errno(n) => { return 0i64 - 100i64 + conv i64 n; }, } },
     }
 }
 "#;
@@ -143,8 +152,8 @@ fn write_all_error_is_fail() {
 const READ_PROBE: &str = r#"fn main() -> i64 {
     let mut buf: [8]u8 = [0u8; 8];
     let n: usize = match read_into(stdin(), slice_of_mut(buf)) {
-        IoResult::Count(c) => c,
-        IoResult::Fail(e) => { return 0i64 - 9i64; },
+        IoResult::Ok(c) => c,
+        IoResult::Err(e) => { return 0i64 - 9i64; },
     };
     let mut i: usize = 0usize;
     let mut acc: i64 = 0i64;
@@ -209,8 +218,8 @@ fn std_stream_constants() {
 const STDERR_PROBE: &str = r#"fn main() -> i64 {
     let d: [2]u8 = [69u8, 82u8];
     match write_all(stderr(), slice_of(d)) {
-        IoResult::Count(c) => { return conv i64 c; },
-        IoResult::Fail(e) => { return 0i64 - 1i64; },
+        IoResult::Ok(c) => { return conv i64 c; },
+        IoResult::Err(e) => { return 0i64 - 1i64; },
     }
 }
 "#;
@@ -258,4 +267,109 @@ fn audit_enumerates_io_externs_trust_and_discharge() {
     assert!(json.contains("\"undischarged_foreign_wrappers\": 0"), "every wrapper discharges");
     assert!(json.contains("discharges foreign"), "wrappers shown as discharging");
     assert!(!json.contains("propagates foreign"), "no wrapper leaks foreign — pub API is safe");
+}
+
+// ---- 14/15. `?` widens IoError -> AppErr across write_all (both engines) ----
+// The audited `std_io` module stays non-generic (so `candor audit` keeps its
+// foreign-effect discharge report — see the run report's fork); the `From`
+// widening and its `?` chain are defined HERE, in the probe, and driven over the
+// real `write_all`/`open_read` wrappers. `?` unwraps `IoResult::Ok` and, on
+// `IoResult::Err`, widens `IoError` into `AppErr` via the `From` impl, returning
+// the enclosing `AppResult::Err` (cross-type `?`, design 0007 §7.1).
+const WRITE_APP_PROBE: &str = r#"
+enum AppErr { Io(IoError), Denied }
+enum AppResult { ok Ok(usize), Err(AppErr) }
+interface From[E] { fn from(e: E) -> Self; }
+impl From[IoError] for AppErr { fn from(e: IoError) -> Self { return AppErr::Io(e); } }
+fn write_app(fd: i32, s: read [u8]) -> AppResult {
+    let n: usize = write_all(fd, s)?;
+    return AppResult::Ok(n);
+}
+fn main() -> i64 {
+    let data: [3]u8 = [88u8, 89u8, 90u8];
+    match write_app(stdout(), slice_of(data)) {
+        AppResult::Ok(c) => { return conv i64 c; },
+        AppResult::Err(e) => { match e { AppErr::Io(io) => { return 0i64 - 1i64; }, AppErr::Denied => { return 0i64 - 2i64; }, } },
+    }
+}
+"#;
+#[test]
+fn write_app_question_widens_ioerror_both_engines() {
+    let _g = lock();
+    let src = probe(WRITE_APP_PROBE);
+    // tree-walker: happy path — `?` passes Ok through; stdout captures "XYZ".
+    foreign_io::reset();
+    foreign_io::register_std_io();
+    let tw = run_ok(&src);
+    let tw_out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+    // MIR: identical.
+    foreign_io::reset();
+    foreign_io::register_std_io();
+    let mir = run_ok_mir(&src);
+    let mir_out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+    assert_eq!(tw, 3);
+    assert_eq!(mir, 3);
+    assert_eq!(tw_out, b"XYZ");
+    assert_eq!(mir_out, b"XYZ");
+}
+
+#[test]
+fn write_app_question_propagates_widened_error_both_engines() {
+    let _g = lock();
+    let src = probe(WRITE_APP_PROBE);
+    // A shim that reports a write error (-1) -> write_all Err -> `?` widens
+    // IoError -> AppErr and early-returns -> main hits the AppResult::Err arm.
+    foreign_io::reset();
+    foreign_io::register_std_io();
+    foreign_io::register_shim_override_write_short(-1);
+    let tw = run_ok(&src);
+    foreign_io::unregister_std_io();
+    foreign_io::reset();
+    foreign_io::register_std_io();
+    foreign_io::register_shim_override_write_short(-1);
+    let mir = run_ok_mir(&src);
+    foreign_io::unregister_std_io();
+    assert_eq!(tw, -1, "widened IoError::Errno(-1) -> AppErr::Io, early-returned");
+    assert_eq!(mir, -1);
+}
+
+// ---- 16. `?` widens an open error across open_read (both engines) -----------
+const OPEN_APP_PROBE: &str = r#"
+enum AppErr { Io(IoError), Denied }
+enum AppResult { ok Ok(i32), Err(AppErr) }
+interface From[E] { fn from(e: E) -> Self; }
+impl From[IoError] for AppErr { fn from(e: IoError) -> Self { return AppErr::Io(e); } }
+fn open_app(path: read [u8]) -> AppResult {
+    let fd: usize = open_read(path)?;
+    return AppResult::Ok(conv i32 fd);
+}
+fn main() -> i64 {
+    let name: [10]u8 = [105u8, 110u8, 112u8, 117u8, 116u8, 46u8, 116u8, 120u8, 116u8, 0u8];
+    match open_app(slice_of(name)) {
+        AppResult::Ok(fd) => { return conv i64 fd; },
+        AppResult::Err(e) => { match e { AppErr::Io(io) => { return 0i64 - 5i64; }, AppErr::Denied => { return 0i64 - 6i64; }, } },
+    }
+}
+"#;
+#[test]
+fn open_app_question_widens_open_error_both_engines() {
+    let _g = lock();
+    let src = probe(OPEN_APP_PROBE);
+    let empty = std::env::temp_dir().join("candor_io_app_empty_root");
+    std::fs::create_dir_all(&empty).unwrap();
+    foreign_io::reset();
+    foreign_io::set_root(&empty);
+    foreign_io::register_std_io();
+    let tw = run_ok(&src);
+    foreign_io::unregister_std_io();
+    foreign_io::reset();
+    foreign_io::set_root(&empty);
+    foreign_io::register_std_io();
+    let mir = run_ok_mir(&src);
+    foreign_io::unregister_std_io();
+    // open of a missing file -> open_read Err -> `?` widens to AppErr::Io -> -5.
+    assert_eq!(tw, -5, "missing file -> widened IoError -> AppErr::Io arm");
+    assert_eq!(mir, -5);
 }

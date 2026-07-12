@@ -1,0 +1,135 @@
+// Flattened combinator image (the `corelib_flat` pattern): `Opt`/`Res` plus the
+// six seed combinators added to `core::opt` / `core::res`, exercised end-to-end to
+// an exact sentinel on every engine (tree-walker, MIR, native, native-opt). In the
+// module tree the two `unwrap_or`s are the distinct `core::opt::unwrap_or` /
+// `core::res::unwrap_or`; flattened into one module only the `Res` one is needed
+// (the `Opt` one already ships and is unchanged), so there is no name clash.
+//
+// `ok`/`unwrap_or`/`ok_or` carry `alloc`: each discards a bare generic `E`
+// (possibly `Box`-bearing), the design 0007 §3.4 opaque-drop tax. `map`/`map_err`
+// forward every payload, so they stay non-`alloc` (ground floor). `and_then` is
+// exercised in its own tree-walker test: its `f: fn(T) -> Opt[U]` is an indirect
+// call returning an AGGREGATE, which the MIR/native lowering does not support
+// (mir/build.rs, "indirect/unknown aggregate call"), so it is not in this
+// four-engine image.
+enum Opt[T] {
+    ok Some(T),
+    None,
+}
+enum Res[T, E] {
+    ok Ok(T),
+    Err(E),
+}
+
+fn is_some[T](o: read Opt[T]) -> bool {
+    match o {
+        Opt::Some(v) => {
+            return true;
+        },
+        Opt::None => {
+            return false;
+        },
+    }
+}
+
+fn map[T, E, U](r: Res[T, E], f: fn(T) -> U) -> Res[U, E] {
+    match r {
+        Res::Ok(v) => {
+            return Res::Ok(f(v));
+        },
+        Res::Err(e) => {
+            return Res::Err(e);
+        },
+    }
+}
+
+fn map_err[T, E, F](r: Res[T, E], f: fn(E) -> F) -> Res[T, F] {
+    match r {
+        Res::Ok(v) => {
+            return Res::Ok(v);
+        },
+        Res::Err(e) => {
+            return Res::Err(f(e));
+        },
+    }
+}
+
+fn unwrap_or[T: copy, E](r: Res[T, E], d: T) alloc -> T {
+    match r {
+        Res::Ok(v) => {
+            return v;
+        },
+        Res::Err(e) => {
+            return d;
+        },
+    }
+}
+
+fn ok[T, E](r: Res[T, E]) alloc -> Opt[T] {
+    match r {
+        Res::Ok(v) => {
+            return Opt::Some(v);
+        },
+        Res::Err(e) => {
+            return Opt::None;
+        },
+    }
+}
+
+fn ok_or[T, E](o: Opt[T], e: E) alloc -> Res[T, E] {
+    match o {
+        Opt::Some(v) => {
+            return Res::Ok(v);
+        },
+        Opt::None => {
+            return Res::Err(e);
+        },
+    }
+}
+
+fn inc(x: i64) -> i64 { return x + 1; }
+fn code(b: bool) -> i64 { if b { return 100; } return 200; }
+
+fn main() alloc -> i64 {
+    let mut acc: i64 = 0;
+
+    // map over Ok transforms the payload; over Err it passes through.
+    let a: Res[i64, bool] = Res::Ok(10);
+    let am: Res[i64, bool] = map(a, inc);
+    acc = acc + unwrap_or(am, 0); // Ok(11) -> 11
+
+    let b: Res[i64, bool] = Res::Err(false);
+    let bm: Res[i64, bool] = map(b, inc);
+    acc = acc + unwrap_or(bm, 5); // Err -> default 5
+
+    // map_err transforms the error payload.
+    let c: Res[i64, bool] = Res::Err(true);
+    let cm: Res[i64, i64] = map_err(c, code);
+    match cm {
+        Res::Ok(v) => { acc = acc + 0; },
+        Res::Err(e) => { acc = acc + e; }, // code(true) = 100
+    }
+
+    // ok turns Ok into Some, Err into None.
+    let d: Res[i64, bool] = Res::Ok(9);
+    match ok(d) {
+        Opt::Some(v) => { acc = acc + v; }, // 9
+        Opt::None => { acc = acc + 0; },
+    }
+    let re: Res[i64, bool] = Res::Err(true);
+    match ok(re) {
+        Opt::Some(v) => { acc = acc + 1000; },
+        Opt::None => { acc = acc + 20; }, // +20
+    }
+
+    // ok_or turns Some into Ok, None into Err(e).
+    let f: Res[i64, bool] = ok_or(Opt::Some(7), false);
+    acc = acc + unwrap_or(f, 0); // 7
+    let g: Res[i64, i64] = ok_or(Opt::None, 300);
+    match g {
+        Res::Ok(v) => { acc = acc + 0; },
+        Res::Err(e) => { acc = acc + e; }, // 300
+    }
+
+    return acc; // 11+5+100+9+20+7+300 = 452
+}

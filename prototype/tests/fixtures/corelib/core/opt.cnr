@@ -72,3 +72,18 @@ pub fn map[T, U](o: Opt[T], f: fn(T) -> U) -> Opt[U] {
         },
     }
 }
+
+// `and_then` chains a fallible step: forward `T` into `f` (which yields the next
+// `Opt`), short-circuiting on `None`. Capture-free (the transform is an explicit
+// fn pointer, not a hidden environment; §5.1/§5.2). Like `map` it FORWARDS its `T`
+// into `f(v)` and consumes the drop-inert `None` shell, so §3.4 does not tax it.
+pub fn and_then[T, U](o: Opt[T], f: fn(T) -> Opt[U]) -> Opt[U] {
+    match o {
+        Opt::Some(v) => {
+            return f(v);
+        },
+        Opt::None => {
+            return Opt::None;
+        },
+    }
+}

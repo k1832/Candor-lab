@@ -31,10 +31,26 @@ extern "C" {
         };
 }
 
-// result-shaped: `Count` is the `ok`-marked variant (design 0006).
+// The I/O error is a structured ENUM over the raw negative syscall return — no
+// longer a bare `i32`. A single `Errno(i32)` variant keeps it native-safe (an
+// LLVM S2 scalar enum; no `String`, no allocator). Named errno variants
+// (`NotFound`/`PermissionDenied`/...) would require reading C `errno`, which the
+// trust-clause externs deliberately do NOT surface (they return only the syscall
+// result), so `Errno(i32)` is the smaller useful design without changing them.
+pub enum IoError {
+    Errno(i32),
+}
+
+// result-shaped (design 0006): `Ok` is the `ok`-marked variant, so `?` propagates
+// the `IoError` through an `IoResult`-returning caller. The error is now the
+// structured `IoError`, not a raw errno. Native-safe (LLVM S2 scalar enums; no
+// `String`/allocator). Cross-type `?` widening `IoError -> AppErr` via a `From`
+// impl is proven across this boundary in `tests/std_io.rs` (the audited module
+// itself stays NON-generic — see the run report's deciding-authority fork on the
+// generic-boundary audit gap).
 pub enum IoResult {
-    ok Count(usize),
-    Fail(i32),
+    ok Ok(usize),
+    Err(IoError),
 }
 
 pub fn stdin() -> i32 { return 0i32; }
@@ -45,9 +61,9 @@ pub fn open_read(path: read [u8]) -> IoResult {
     unsafe "sys_open trust discharged: path is a live NUL-terminated [u8] view; open retains nothing (POSIX)" {
         let fd: i32 = sys_open(addr_of(path[0]), 0i32, 0i32);
         if fd < 0i32 {
-            return IoResult::Fail(fd);
+            return IoResult::Err(IoError::Errno(fd));
         }
-        return IoResult::Count(conv usize fd);
+        return IoResult::Ok(conv usize fd);
     }
 }
 
@@ -55,9 +71,9 @@ pub fn close(fd: i32) -> IoResult {
     unsafe "sys_close trust discharged: fd is a descriptor; close touches no Candor memory" {
         let r: i32 = sys_close(fd);
         if r < 0i32 {
-            return IoResult::Fail(r);
+            return IoResult::Err(IoError::Errno(r));
         }
-        return IoResult::Count(0usize);
+        return IoResult::Ok(0usize);
     }
 }
 
@@ -65,39 +81,39 @@ pub fn read_into(fd: i32, buf: write [u8]) -> IoResult {
     unsafe "sys_read trust discharged: buf is a live [u8] view valid for len(buf) bytes; read retains nothing (POSIX), thread-confined" {
         let n: isize = sys_read(fd, addr_of_mut(buf[0]), len(buf));
         if n < 0isize {
-            return IoResult::Fail(conv i32 n);
+            return IoResult::Err(IoError::Errno(conv i32 n));
         }
-        return IoResult::Count(conv usize n);
+        return IoResult::Ok(conv usize n);
     }
 }
 
 pub fn write_all(fd: i32, s: read [u8]) -> IoResult {
     let total: usize = len(s);
     if total == 0usize {
-        return IoResult::Count(0usize);
+        return IoResult::Ok(0usize);
     }
     unsafe "sys_write trust discharged: s is a live [u8] view valid for len(s) bytes; write retains nothing (POSIX), thread-confined" {
         let n: isize = sys_write(fd, addr_of(s[0]), total);
         if n < 0isize {
-            return IoResult::Fail(conv i32 n);
+            return IoResult::Err(IoError::Errno(conv i32 n));
         }
         if conv usize n < total {
-            return IoResult::Fail(0i32 - 1i32);
+            return IoResult::Err(IoError::Errno(0i32 - 1i32));
         }
-        return IoResult::Count(total);
+        return IoResult::Ok(total);
     }
 }
 
 fn main() -> i64 {
     let name: [10]u8 = [105u8, 110u8, 112u8, 117u8, 116u8, 46u8, 116u8, 120u8, 116u8, 0u8];
     let fd: i32 = match open_read(slice_of(name)) {
-        IoResult::Count(c) => conv i32 c,
-        IoResult::Fail(e) => { return 0i64 - 1i64; },
+        IoResult::Ok(c) => conv i32 c,
+        IoResult::Err(e) => { return 0i64 - 1i64; },
     };
     let mut buf: [64]u8 = [0u8; 64];
     let n: usize = match read_into(fd, slice_of_mut(buf)) {
-        IoResult::Count(c) => c,
-        IoResult::Fail(e) => { return 0i64 - 2i64; },
+        IoResult::Ok(c) => c,
+        IoResult::Err(e) => { return 0i64 - 2i64; },
     };
     let mut i: usize = 0usize;
     loop {

@@ -18,7 +18,10 @@
 //!       single-file (`cross_type_question_works_single_file`).
 
 use candor_proto::diag::Severity;
-use candor_proto::{check_dir, check_source_real, run_dir, run_source_real, RunResult};
+use candor_proto::{
+    check_dir, check_source_real, run_dir, run_source_real, run_source_real_mir,
+    run_source_real_native, run_source_real_native_opt, MirRunResult, RunResult,
+};
 use std::path::PathBuf;
 
 const SENTINEL: i64 = 380;
@@ -284,6 +287,100 @@ fn main() alloc -> i64 { let mut x: List[i64] = List::Nil; x = nil(); return 0; 
         RunResult::Ok(r) => assert_eq!(r.ret, 0),
         other => panic!("F4 assignment repro did not run: {}", describe(other)),
     }
+}
+
+// ---- Res/Opt combinators: the six seed additions, exact values, all engines --
+
+#[test]
+fn res_opt_combinators_run_to_sentinel() {
+    // `and_then`/`ok_or` (Opt side, hosted in `core::res`) + `map`/`map_err`/
+    // `unwrap_or`/`ok` (Res side), flattened into one image and driven to an exact
+    // sentinel on the tree-walker, MIR, native, and native-opt engines. Proves the
+    // capture-free fn-pointer combinators (OBL-GENERICS-CLOSURE) monomorphize and
+    // lower natively, and that the `alloc`-taxed discarders drop a concrete
+    // (non-Box) error cleanly on every backend.
+    let src = fixture("corelib_combinators.cnr");
+    assert!(
+        check_source_real(&src).unwrap().is_empty(),
+        "combinators image should check clean, got {:?}",
+        check_source_real(&src).unwrap()
+    );
+    match run_source_real(&src) {
+        RunResult::Ok(r) => assert_eq!(r.ret, 452, "tree-walker"),
+        other => panic!("combinators did not run: {}", describe(other)),
+    }
+    for (label, r) in [
+        ("mir", run_source_real_mir(&src)),
+        ("native", run_source_real_native(&src)),
+        ("native-opt", run_source_real_native_opt(&src)),
+    ] {
+        match r {
+            MirRunResult::Ok(run) => assert_eq!(run.ret, 452, "{label}"),
+            other => panic!("{label} did not run: ok={}", matches!(other, MirRunResult::Ok(_))),
+        }
+    }
+}
+
+// ---- and_then: tree-walker only (aggregate-returning indirect call) ----------
+
+#[test]
+fn and_then_runs_on_tree_walker_mir_native_gap() {
+    // `and_then`'s `f: fn(T) -> Opt[U]` is an INDIRECT (fn-pointer) call returning
+    // an AGGREGATE (`Opt[U]`). The MIR lowering rejects that shape
+    // (`mir/build.rs`, "indirect/unknown aggregate call"), so `and_then` runs only
+    // on the tree-walker; scalar-returning indirect combinators (`map`/`map_err`)
+    // lower on every engine. This pins the backend gap: if it is ever closed, the
+    // Unsupported assertion below flips and this test surfaces the fix.
+    let src = r#"
+enum Opt[T] { ok Some(T), None }
+fn and_then[T, U](o: Opt[T], f: fn(T) -> Opt[U]) -> Opt[U] {
+    match o { Opt::Some(v) => { return f(v); }, Opt::None => { return Opt::None; }, }
+}
+fn step(x: i64) -> Opt[i64] { return Opt::Some(x * 2); }
+fn main() -> i64 {
+    let mut acc: i64 = 0;
+    match and_then(Opt::Some(4), step) { Opt::Some(v) => { acc = acc + v; }, Opt::None => { acc = acc + 0; }, }
+    match and_then(Opt::None, step) { Opt::Some(v) => { acc = acc + 1000; }, Opt::None => { acc = acc + 40; }, }
+    return acc;
+}
+"#;
+    assert!(
+        check_source_real(src).unwrap().is_empty(),
+        "and_then image should check clean, got {:?}",
+        check_source_real(src).unwrap()
+    );
+    match run_source_real(src) {
+        RunResult::Ok(r) => assert_eq!(r.ret, 48, "Some(4)->8 plus None->40"),
+        other => panic!("and_then did not run on the tree-walker: {}", describe(other)),
+    }
+    assert!(
+        matches!(candor_proto::run_source_real_mir(src), MirRunResult::Unsupported(_)),
+        "aggregate-returning indirect call is a known MIR/native lowering gap"
+    );
+}
+
+// ---- negative: E0712 is NARROWED, not gone ----------------------------------
+
+#[test]
+fn question_without_return_or_from_is_e0712() {
+    // The stale `res.cnr` comment claimed E0712 fired for ALL in-tree `?`. Reality
+    // (src/check/expr.rs check_try): `?` resolves same-type (Named==Named/App==App)
+    // and cross-type (`try_from_conversion` via `From`); E0712 now fires ONLY when
+    // neither holds. Here the enclosing return error type is `Other` and there is
+    // no `impl From[IoErr] for Other`, so the `?` is genuinely unconvertible.
+    let src = r#"
+enum Res[T, E] { ok Ok(T), Err(E) }
+enum IoErr { Eof }
+enum Other { Nope }
+fn read_at(ok: bool) -> Res[i64, IoErr] { if ok { return Res::Ok(42); } return Res::Err(IoErr::Eof); }
+fn decode(ok: bool) -> Res[i64, Other] { let n: i64 = read_at(ok)?; return Res::Ok(n); }
+fn main() -> i64 { return 0; }
+"#;
+    assert!(
+        src_error_codes(src).contains(&"E0712".to_string()),
+        "want E0712 (no return-match, no From), got {:?}",
+        src_error_codes(src)
+    );
 }
 
 fn describe(r: RunResult) -> String {

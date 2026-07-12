@@ -3550,3 +3550,77 @@ memory-safety, not a mere wrong answer.
   the E1002 attribution there was the surface symptom, this was the cause). STILL OPEN and
   independent: the `impl Show for Vec[T]` / element-abstractable-`Vec` impl-target surface
   (SHOW-DISPLAY BLOCKED (1)/(2) — `Vec`/`Map` are CollectionOps, not impl-able nominals).
+
+## STD-IO-ERROR — the I/O error story: Res/Opt combinators + a Res-typed IoError, `?` in-tree confirmed (2026-07-13)
+
+The "real std + I/O" slice for error handling. Purely additive: the six seed
+Res/Opt combinators (capture-free fn-pointer args, OBL-GENERICS-CLOSURE), a
+structured `IoError` enum for `std_io`, and the in-tree `?` confirmation with the
+stale-comment fix. No compiler, MIR, checker, backend, or `aot_runtime.c` change.
+
+- RES/OPT COMBINATORS (`corelib/core/opt.cnr`, `core/res.cnr`). Added `and_then`
+  to `Opt`; `map`/`map_err`/`unwrap_or`/`ok`/`ok_or` to `Res`. `ok_or` (an
+  `Opt -> Res` bridge) lives in `core::res`, NOT `core::opt`, because `core::opt`
+  is the ground floor and must not import `core::res`; the acyclic-DAG rule
+  (design 0008 §3, enforced E0904) permits only the `res -> opt` edge, so both
+  `Opt <-> Res` bridges (`ok`, `ok_or`) sit in `res`. `map`/`map_err`/`and_then`
+  FORWARD every payload and stay non-`alloc` (ground floor); `ok`/`unwrap_or`/
+  `ok_or` DISCARD a bare generic `E` (`ok_or` drops the eager `e: E` on the `Some`
+  path), which is the design 0007 §3.4 opaque-drop `alloc` tax — so those three
+  carry `alloc` (verified: without it, E0401). NO faulting `unwrap` was added: it
+  is not in the required set and there is no clean surface fault primitive; the
+  safe `unwrap_or` is the shipped form.
+- COMBINATOR TEST (`corelib.rs::res_opt_combinators_run_to_sentinel`). A flattened
+  image `corelib_combinators.cnr` drives `map`/`map_err`/`unwrap_or`/`ok`/`ok_or`
+  to an exact sentinel (452) on ALL FOUR engines (tree-walker, MIR, native,
+  native-opt). `tree_checks_clean` proves the same combinators check clean in the
+  real seed tree. NEW BACKEND GAP (reported, not patched): `and_then`'s
+  `f: fn(T) -> Opt[U]` is an INDIRECT (fn-pointer) call returning an AGGREGATE,
+  which `mir/build.rs` rejects ("indirect/unknown aggregate call"), so `and_then`
+  runs on the tree-walker only — `map`/`map_err`'s scalar-returning `f` lower on
+  every engine. Pinned by `and_then_runs_on_tree_walker_mir_native_gap` (asserts
+  MIR `Unsupported`); if the gap is closed the pin flips.
+- RES-TYPED IOERROR (`std_io/main.cnr`). `IoError` is a structured ENUM,
+  `Errno(i32)`, replacing the bare-`i32` failure payload. Chosen over named errno
+  variants because the trust-clause externs expose only the syscall RESULT, never
+  C `errno`; a NotFound/PermissionDenied mapping would need to read `errno`, which
+  would change the externs (forbidden). `Errno(i32)` is native-safe (LLVM S2
+  scalar enum, no `String`/allocator). Wrappers now return `IoResult {ok Ok(usize),
+  Err(IoError)}`. Cross-type `?` widening `IoError -> AppErr` via `From` (design
+  0007 §7.1) is proven ACROSS the I/O boundary on BOTH engines with captured I/O
+  (`std_io.rs::write_app_question_*` / `open_app_question_*`): `?` unwraps
+  `IoResult::Ok` and, on `Err`, widens into `AppResult::Err(AppErr::Io(..))` and
+  early-returns. Cross-ENUM `?` (two distinct result enums, not one generic `Res`)
+  composes on tree-walker/MIR/native — `try_from_conversion` keys on the non-`ok`
+  PAYLOAD types, so it does not require a shared result enum.
+- FORK (deciding authority) — the AUDITED std_io module stays NON-GENERIC.
+  Part 2 literally asks the wrappers to return the GENERIC `Res[T, IoError]`. Doing
+  so turns the boundary module generic, and `check::check_program_real_foreign`
+  (`src/check/mod.rs:230`) routes any generic program through
+  `generics::check_generic_program` and DISCARDS the (already-computed)
+  `ForeignFnInfo` report — so `candor audit` loses its per-function foreign
+  discharge/propagation report (`audit_enumerates_io_externs_trust_and_discharge`
+  goes red: no "discharges foreign"). The `foreign_report` IS populated in the
+  generic path (`check_fn` on the concrete wrappers) and only dropped by the
+  return tuple, so exposing it is a small plumbing change — but that is a COMPILER
+  change, deferred to the deciding authority per "do not touch the compiler unless
+  a genuine primitive is missing (then STOP + report — do NOT build it)". Until
+  then the audited wrappers use the non-generic `IoResult` (audit-green, full
+  teeth) and the generic `Res`-typed `?`-widening is proven in the (non-audited)
+  test probes. To ship generic `Res[T, IoError]` wrappers, authorize plumbing
+  `foreign_report` through `check_generic_program`.
+- `?` IN-TREE — E0712 NARROWED, stale comment fixed. The `res.cnr:10-16` comment
+  claimed E0712 fired for ALL in-tree `?`; that is STALE. `src/check/expr.rs`
+  `check_try` (~:1003-1033) resolves same-type `?` (Named==Named / App==App) and
+  cross-type `?` (`try_from_conversion` via a `From` impl matched by base name
+  across the tree's qualified names); E0712 now fires ONLY when neither holds — the
+  enclosing return error type differs AND no `impl From[E1] for E2` is in scope.
+  The comment is rewritten to cite this. Confirmed by: multi-file same+cross `?`
+  (`corelib_question` / `question_operator_across_tree`, already green post
+  MONO-SPAN-KEY), single-file cross-type (`cross_type_question_works_single_file`),
+  and the NEW narrowed-negative `question_without_return_or_from_is_e0712`.
+- GATE. `tests/corelib.rs` (16), `tests/std_io.rs` (16) green; the std_io AOT +
+  LLVM native gates (`gate_{aot,llvm}_native_io_{real_libc,open_error}`) rebuild
+  the new `IoResult`/`IoError` demonstrator byte-exact (exit + stdout). Full
+  `cargo nextest` green; clippy clean. The allocator direction remains the
+  separate deciding-authority fork.
