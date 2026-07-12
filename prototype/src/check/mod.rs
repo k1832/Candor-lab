@@ -217,7 +217,7 @@ pub fn check_module_stub(own: &[Item], stubs: &[Item]) -> (Vec<Diag>, Vec<(Strin
     items.extend(stubs.iter().cloned());
     let prog = Program { items };
     if crate::generics::is_generic_program(&prog) {
-        let (diags, insts, _shapes) = generics::check_generic_program_own(&prog, true, own_len);
+        let (diags, insts, _shapes, _foreign) = generics::check_generic_program_own(&prog, true, own_len);
         (diags, insts)
     } else {
         (check_program_collect_own(&prog, true, own_len).0, Vec::new())
@@ -228,7 +228,7 @@ pub fn check_module_stub(own: &[Item], stubs: &[Item]) -> (Vec<Diag>, Vec<(Strin
 /// report (design 0011 §2), for the `audit` command's effect-reach section.
 pub fn check_program_real_foreign(prog: &Program) -> (Vec<Diag>, Vec<ForeignFnInfo>) {
     if crate::generics::is_generic_program(prog) {
-        return (generics::check_generic_program(prog, true).0, Vec::new());
+        return generics::check_generic_program_foreign(prog, true);
     }
     check_program_collect(prog, true)
 }

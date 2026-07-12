@@ -3624,3 +3624,44 @@ stale-comment fix. No compiler, MIR, checker, backend, or `aot_runtime.c` change
   the new `IoResult`/`IoError` demonstrator byte-exact (exit + stdout). Full
   `cargo nextest` green; clippy clean. The allocator direction remains the
   separate deciding-authority fork.
+
+## P17-AUDIT-GENERIC — `candor audit` keeps full teeth on generic boundary modules (2026-07-13)
+
+RESOLVES the STD-IO-ERROR "FORK (deciding authority)" note above: the plumbing
+it deferred is now done. `check::check_program_real_foreign` (`src/check/mod.rs`)
+previously routed any generic program through `generics::check_generic_program`
+and returned `Vec::new()` for the `ForeignFnInfo` effect-reach — so a boundary
+module that was ALSO generic (any `interface`/`impl`/generic `fn`) reported an
+EMPTY foreign discharge/propagation to `candor audit`, losing its teeth exactly
+where a generic `Res[T, IoError]` I/O wrapper would live.
+- WHAT `foreign_report` IS: one `ForeignFnInfo { name, boundary, discharges,
+  propagates }` per checked function — the design 0011 §2 discharge decision,
+  which depends only on source-level facts (the fn's `boundary`-module status,
+  its `foreign` mark, and the ground-source `extern` calls in its body). It is a
+  SOURCE-level property, independent of monomorphization.
+- FIX (same fidelity, not weaker): the generic checker already runs
+  `check_fn_with_sig` on every function — concrete fns, generic def-site fns,
+  impl methods, and drop hooks — each pushing its `ForeignFnInfo`. Those inner
+  def-site `Checker`s dropped their `foreign_report`; they now propagate it back
+  to the outer checker exactly as they already propagate `diags`/`insts`/`shapes`.
+  `check_generic_program_own` returns the report (`GenericForeignCheck`), and
+  `check_program_real_foreign` threads it through the new
+  `check_generic_program_foreign` instead of substituting empty. The discharge
+  decision is computed by the IDENTICAL `ForeignEffect::resolve` on the IDENTICAL
+  per-fn accumulator, so a generic wrapper's entry is bit-for-bit the entry the
+  non-generic path would produce — no info is lost pre-monomorphization.
+- REGRESSION: `tests/foreign.rs::audit_generic_boundary_keeps_effect_reach` over
+  `tests/fixtures/ffi_audit_generic/` — a boundary module with a GENERIC
+  discharging wrapper (`safe_len[T]`) and a GENERIC propagating one
+  (`thin_raw[T] foreign`); asserts the audit names both externs, their trust
+  predicates (`valid_nul_terminated`/`no_retain`), classifies `main::safe_len`
+  as "discharges foreign" and `main::thin_raw` as "propagates foreign
+  (undischarged)", and counts one undischarged wrapper. Pre-fix this reported an
+  empty effect-reach.
+- PAYOFF DEFERRED: making a real `std_io` wrapper generic is left untouched — the
+  audited `std_io` module changes codegen/monomorphization and feeds the AOT/LLVM
+  native byte-exact gates, so flipping it generic balloons scope beyond this fix.
+  The regression fixture already proves a generic boundary module keeps full
+  teeth. The allocator direction remains the separate deciding-authority fork.
+- GATE. Full `cargo nextest` green (652 tests, incl. `tests/foreign.rs`,
+  `tests/std_io.rs`, generics, and the native gates); clippy clean.

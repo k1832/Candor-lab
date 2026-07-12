@@ -1,0 +1,38 @@
+boundary
+extern "C" {
+    fn c_len(s: rawptr u8) -> usize
+        trust "POSIX 7: reads bytes to a NUL, retains nothing, no thread state" {
+            valid_nul_terminated(s),
+            no_retain(s),
+        };
+    fn c_raw(p: rawptr u8) -> usize;
+}
+
+// A GENERIC boundary wrapper that DISCHARGES `foreign` (design 0011 §2 rule 4):
+// it calls only the trusted `c_len` and extinguishes the effect here. Being
+// generic must not cost the audit its teeth — this is the case the I/O-error
+// slice had to avoid by keeping its audited module non-generic.
+pub fn safe_len[T](p: rawptr u8, ok: T) -> T {
+    unsafe "c_len trust discharged: p is a live NUL-terminated view" {
+        let _n: usize = c_len(p);
+        return ok;
+    }
+}
+
+// A GENERIC wrapper that PROPAGATES: `c_raw` carries no trust, so the effect
+// cannot be discharged and the wrapper must be marked `foreign` (rule 3/5).
+pub fn thin_raw[T](p: rawptr u8, ok: T) foreign -> T {
+    unsafe "re-exported raw: caller must not outlive p" {
+        let _n: usize = c_raw(p);
+        return ok;
+    }
+}
+
+pub fn checksum(x: usize) -> u32 {
+    return conv u32 x;
+}
+export "C" fn candor_checksum(x: usize) -> u32 = checksum;
+
+fn main() -> i64 {
+    return 0;
+}

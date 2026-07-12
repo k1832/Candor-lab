@@ -300,6 +300,42 @@ fn audit_golden_over_boundary_tree() {
     assert_eq!(got.trim(), golden.trim(), "audit output drifted from golden");
 }
 
+// ---- 11. audit keeps full teeth on a GENERIC boundary module --------------
+// Regression (P17): a boundary module that is ALSO generic used to route
+// through the generic checker, which DROPPED the already-computed foreign
+// effect-reach — so `candor audit` reported an EMPTY discharge/reach exactly
+// where a generic Res-typed I/O wrapper would live. The audit must now name the
+// externs, their trust predicates, and classify each generic wrapper's reach
+// with the same fidelity as the non-generic path (design 0011 §2, §6).
+#[test]
+fn audit_generic_boundary_keeps_effect_reach() {
+    let dir = format!("{}/tests/fixtures/ffi_audit_generic", env!("CARGO_MANIFEST_DIR"));
+    let got = candor_proto::audit::audit_path(std::path::Path::new(&dir))
+        .expect("audit succeeds");
+
+    // Externs and every trust predicate survive the generic path.
+    assert!(got.contains("\"name\": \"c_len\""), "missing extern c_len:\n{got}");
+    assert!(got.contains("\"name\": \"c_raw\""), "missing extern c_raw:\n{got}");
+    assert!(got.contains("valid_nul_terminated"), "missing trust predicate:\n{got}");
+    assert!(got.contains("no_retain"), "missing trust predicate:\n{got}");
+
+    // Effect reach classifies both GENERIC wrappers, not an empty report.
+    assert!(
+        got.contains("\"function\": \"main::safe_len\"")
+            && got.contains("\"status\": \"discharges foreign\""),
+        "generic wrapper `safe_len` lost its `discharges` teeth:\n{got}"
+    );
+    assert!(
+        got.contains("\"function\": \"main::thin_raw\"")
+            && got.contains("\"status\": \"propagates foreign (undischarged)\""),
+        "generic wrapper `thin_raw` lost its `propagates` teeth:\n{got}"
+    );
+    assert!(
+        got.contains("\"undischarged_foreign_wrappers\": 1"),
+        "summary undercounts the propagating generic wrapper:\n{got}"
+    );
+}
+
 fn debug_run(r: &RunResult) -> String {
     match r {
         RunResult::Ok(run) => format!("Ok(ret={})", run.ret),

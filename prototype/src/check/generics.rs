@@ -286,13 +286,30 @@ use super::FnState;
 /// Diagnostics, reached instantiations, and per-node monomorphization shapes.
 pub type GenericCheck = (Vec<Diag>, Vec<(String, Vec<Type>)>, std::collections::HashMap<crate::generics::ShapeKey, crate::generics::Shape>);
 
+/// As [`GenericCheck`] plus the per-function foreign-effect report (design 0011
+/// §2). The trust boundary is a source-level property — externs and their
+/// discharge don't depend on monomorphization — so a generic boundary module
+/// yields the same effect reach as a concrete one; this carries it for `audit`.
+pub type GenericForeignCheck = (Vec<Diag>, Vec<(String, Vec<Type>)>, std::collections::HashMap<crate::generics::ShapeKey, crate::generics::Shape>, Vec<super::foreign::ForeignFnInfo>);
+
 /// Check a program that contains generics (design 0007): resolve the generic
 /// tables, definition-site-check each generic body once against its bounds with
 /// opaque type parameters, then check the concrete code (whose generic call sites
 /// are typed by value-argument inference and bound conformance). Returns the
 /// diagnostics and the reached concrete instantiations (for monomorphization).
 pub fn check_generic_program(prog: &Program, real: bool) -> GenericCheck {
-    check_generic_program_own(prog, real, prog.items.len())
+    let (diags, insts, shapes, _foreign) = check_generic_program_own(prog, real, prog.items.len());
+    (diags, insts, shapes)
+}
+
+/// As [`check_generic_program`] but also returns the per-function foreign-effect
+/// report (design 0011 §2) for the `audit` command's effect-reach section — the
+/// generic counterpart of [`super::check_program_collect`]. Same fidelity: every
+/// function (concrete, generic def-site, impl method, drop hook) contributes its
+/// resolved discharge/propagate status, exactly as the concrete path does.
+pub fn check_generic_program_foreign(prog: &Program, real: bool) -> (Vec<Diag>, Vec<super::foreign::ForeignFnInfo>) {
+    let (diags, _insts, _shapes, foreign) = check_generic_program_own(prog, real, prog.items.len());
+    (diags, foreign)
 }
 
 /// As [`check_generic_program`], but only the first `own_len` items are checked
@@ -300,7 +317,7 @@ pub fn check_generic_program(prog: &Program, real: bool) -> GenericCheck {
 /// signature-only stubs (design 0008 §2) whose tables/impls resolve and whose
 /// generic + `drop`-hook bodies feed instantiation, but whose bodies are never
 /// re-analyzed. The generic half of the signature-only re-check tier.
-pub fn check_generic_program_own(prog: &Program, real: bool, own_len: usize) -> GenericCheck {
+pub fn check_generic_program_own(prog: &Program, real: bool, own_len: usize) -> GenericForeignCheck {
     let mut diags = Vec::new();
     let mut items = resolve_program(prog, &mut diags);
     crate::generics::resolve_tables(prog, &mut items, &mut diags);
@@ -392,7 +409,7 @@ pub fn check_generic_program_own(prog: &Program, real: bool, own_len: usize) -> 
         check_one_hook(&mut c, &items, h, real, *idx);
     }
 
-    (c.diags, c.insts, c.shapes)
+    (c.diags, c.insts, c.shapes, c.foreign_report)
 }
 
 /// A struct `drop` hook to check (concrete or generic).
@@ -524,6 +541,7 @@ fn check_one_hook(outer: &mut Checker, items: &crate::resolve::Items, h: &HookIn
     outer.diags = c.diags;
     outer.shapes.extend(c.shapes);
     outer.insts.extend(c.insts);
+    outer.foreign_report.extend(c.foreign_report);
 }
 
 impl<'a> Checker<'a> {
@@ -575,6 +593,7 @@ impl<'a> Checker<'a> {
         self.diags = c.diags;
         self.shapes.extend(c.shapes);
         self.insts.extend(c.insts);
+        self.foreign_report.extend(c.foreign_report);
     }
 
     /// Definition-site check of an impl's method bodies (design 0007 §2.1, §3).
@@ -613,6 +632,7 @@ impl<'a> Checker<'a> {
                 self.diags = c.diags;
                 self.shapes.extend(c.shapes);
                 self.insts.extend(c.insts);
+                self.foreign_report.extend(c.foreign_report);
             }
             return;
         }
@@ -655,6 +675,7 @@ impl<'a> Checker<'a> {
             self.diags = c.diags;
             self.shapes.extend(c.shapes);
             self.insts.extend(c.insts);
+            self.foreign_report.extend(c.foreign_report);
         }
     }
 
