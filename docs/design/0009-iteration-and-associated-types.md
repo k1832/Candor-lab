@@ -512,9 +512,15 @@ add, remove" by adding nothing.
 
 ### 5.3 The one thing to complete (not design)
 
-`map` is uncallable today only via E1002 (§1.2): the prototype does not infer `U`
-from `f`'s return. That is *within* 0007 §2.2's body-local inference — an
-**implementation obligation**, not a design choice, with no surface attached.
+**RESOLVED (2026-07-12).** `map` was uncallable only via E1002 (§1.2): the
+prototype did not infer `U` from `f`'s return. This was *within* 0007 §2.2's
+body-local inference — an **implementation obligation**, not a design choice, with
+no surface attached. Closed by extending the call-site unifier (`unify` in
+`src/check/generics.rs`) to descend `fn(..)->..` formal parameters structurally,
+binding a type parameter from the actual fn-pointer argument's parameter and
+return types — the natural completion of the existing pass, no new engine. `map`
+now checks clean and runs to `42` on the tree-walker, MIR, and native engines
+(`opt_map_end_to_end`).
 
 ### 5.4 Staged plan and gate
 
@@ -652,9 +658,11 @@ the loop, exactly the P2 / 0007 §3.4 partition.
   model found.
 - **OBL-GENERICS-CLOSURE (new).** Full capturing closures deferred with §5.4's
   two-part gate.
-- **Prototype inference note (new).** E1002 (infer a type parameter from a
-  fn-pointer argument's *return* type) is a completeness gap within 0007 §2.2, to
-  close in stage 3 (§5.3) — no surface change.
+- **Prototype inference note — RESOLVED (2026-07-12).** E1002 (infer a type
+  parameter from a fn-pointer argument's *return* type) was a completeness gap
+  within 0007 §2.2; closed by extending `unify` to descend `fn(..)->..` formal
+  parameters (§5.3) — no surface change. A genuinely uninferable parameter still
+  correctly raises E1002.
 - **Forced on 0007 (refusal ledger, when 0007 is next revised):** §1.1's
   associated-type refusal → *reopened and minimally admitted* (one member,
   §2.3 sub-refusals retained); §7.2's `for`/iteration deferral → *discharged*

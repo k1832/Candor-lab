@@ -5,7 +5,7 @@
 //! `.cnr` front-end), so each program is self-contained.
 
 use candor_proto::diag::Severity;
-use candor_proto::{check_source_real, run_source_real, RunResult};
+use candor_proto::{check_source_real, run_source_real, run_source_real_mir, MirRunResult, RunResult};
 
 fn errors(src: &str) -> Vec<String> {
     match check_source_real(src) {
@@ -27,6 +27,18 @@ fn run_ret(src: &str) -> i64 {
     match run_source_real(src) {
         RunResult::Ok(r) => r.ret,
         other => panic!("did not run: {}", describe(other)),
+    }
+}
+
+fn run_ret_mir(src: &str) -> i64 {
+    match run_source_real_mir(src) {
+        MirRunResult::Ok(r) => r.ret,
+        MirRunResult::Fault(f) => panic!("MIR fault: {}", f.to_json()),
+        MirRunResult::CheckErrors(d) => {
+            panic!("MIR check-errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>())
+        }
+        MirRunResult::ParseError(d) => panic!("MIR parse-error: {}", d.to_json()),
+        MirRunResult::Unsupported(w) => panic!("MIR unsupported: {w}"),
     }
 }
 
@@ -341,5 +353,8 @@ fn main() -> i64 {
 }
 "#;
     assert_clean(src);
+    // Both engines: the tree-walker and the monomorphizing MIR pipeline must
+    // agree that `U` is inferred through `f`'s return type and `map` runs.
     assert_eq!(run_ret(src), 42);
+    assert_eq!(run_ret_mir(src), 42);
 }

@@ -226,6 +226,14 @@ tax compounds it); (b) no swap/replace plus E0303 plus struct-only drop hooks ma
 container with a user drop hook" mutually exclusive - containers free structurally or hooks live
 on wrapper cells. Both feed the iteration/associated-types design round.
 
+**E1002 RESOLVED (2026-07-12).** Friction (a)'s inference half is closed: the call-site
+unifier (`unify`, `src/check/generics.rs`) now descends `fn(..)->..` formal parameters, so `U`
+in `map[T,U](Opt[T], fn(T)->U) -> Opt[U]` is inferred from the fn-pointer argument's return
+type. `Opt::map` checks clean and runs on the tree-walker, MIR, and native engines
+(`opt_map_end_to_end`); a genuinely uninferable parameter still raises E1002. The remaining
+higher-order friction is OBL-GENERICS-CLOSURE (capturing closures), not inference. This
+discharges the STD-FMT F2 / design 0009 §5.3 inference obligation.
+
 
 ---
 
