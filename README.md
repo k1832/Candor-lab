@@ -95,7 +95,7 @@ interpreter, MIR, native, native-optimized - produce identical observable
 traces and identical fault identity across the entire corpus. Incremental
 builds prove zero-downstream re-analysis on body edits (P20's mechanism,
 measured); the P17 boundary and audit command run; the P20 measurement
-instrument reports baselines; and candor-proto compile emits standalone
+instrument reports baselines; and `candor compile` emits standalone
 native ELF executables (via cranelift-object + a small C runtime) that match
 the reference oracle process-for-process across the entire corpus. A
 `--freestanding` profile links that same object with **no libc** (`-nostdlib
