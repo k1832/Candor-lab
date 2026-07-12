@@ -9,7 +9,7 @@ the end.
 The compiler is a Rust crate. Building it produces the `candor` binary.
 
 ```sh
-# in the prototype crate directory:
+# in the toolchain/ directory (the Candor crate at the repo root):
 cargo build --release
 # -> target/release/candor
 ```
@@ -29,7 +29,7 @@ Requirements:
 PATH:
 
 ```sh
-cp /path/to/target/release/candor ~/.local/bin/     # (a dir already on PATH)
+cp toolchain/target/release/candor ~/.local/bin/     # (a dir already on PATH)
 ```
 
 Verify:
@@ -40,17 +40,17 @@ candor run examples/01_hello.cnr     # -> 42
 
 ## 3. Install the VS Code extension
 
-The editor support lives in the `vscode-candor` tool (TextMate grammar +
-`language-configuration.json`) plus the `candor-lsp` diagnostics server.
+The editor support lives in `editor/vscode/` (TextMate grammar +
+`language-configuration.json`) plus the `editor/lsp/` diagnostics server.
 
 ```sh
 # syntax highlighting: copy/symlink the extension into your VS Code extensions dir
-ln -s /path/to/tools/vscode-candor ~/.vscode/extensions/candor
+ln -s "$PWD/editor/vscode" ~/.vscode/extensions/candor
 # reload VS Code; open any .cnr file to see highlighting.
 ```
 
-For live diagnostics, build the LSP (`cargo build --release` in the `candor-lsp`
-crate) and point the extension at it per that tool's own README. Diagnostics are
+For live diagnostics, build the LSP (`cargo build --release` in `editor/lsp/`)
+and point the extension at it per that tool's own README. Diagnostics are
 the P4 machine-readable JSON the compiler already emits, surfaced in the editor.
 
 ## Maturity

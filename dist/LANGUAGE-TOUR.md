@@ -175,8 +175,10 @@ fn main() -> i64 {
 ## Where to go next
 
 - `examples/` — every snippet above, whole and runnable.
-- The shipped `spec/` and `specpack/` — the normative rules and the
-  model-facing distillation.
+- `spec/` and `specpack/` — the normative rules and the model-facing
+  distillation, both present at the repo root of this standalone distribution.
+- `stdlib/` — the `core`/`std` seed (a module tree); `candor run stdlib`
+  builds and runs it end-to-end.
 - The lab repository — the philosophy, the twelve designs (each recording what was
   rejected and why), and the Bet 5 experiment. That is the authority; this preview
   follows it.

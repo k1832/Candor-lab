@@ -36,7 +36,7 @@ Build the toolchain and install the `candor` command (full detail in
 [INSTALL.md](INSTALL.md)):
 
 ```sh
-# from the prototype crate:
+# from the toolchain/ directory:
 cargo build --release            # produces target/release/candor
 # then put the `candor` command on your PATH (see INSTALL.md):
 cp target/release/candor ~/.local/bin/   # (a dir already on PATH)
@@ -113,9 +113,11 @@ Tags: **[working]** runs today · **[preview]** works but rough/partial ·
 - **[working]** AOT native compilation (x86-64 via Cranelift) and a
   `--freestanding` no-libc profile.
 - **[working]** One canonical `fmt`; machine-readable JSON diagnostics.
-- **[preview]** VS Code support: syntax highlighting + a diagnostics LSP.
-- **[seed]** Standard library: a small `core`/`std` seed (`Opt`, `Res`, `Arena`,
-  `List`, iteration, a bump allocator). Text handling and an I/O layer are
+- **[preview]** VS Code support: syntax highlighting + a diagnostics LSP, in
+  `editor/` (`editor/vscode/` grammar, `editor/lsp/` server).
+- **[seed]** Standard library: a small `core`/`std` seed in `stdlib/` (`Opt`,
+  `Res`, `Arena`, `List`, iteration, a bump allocator; `candor run stdlib`
+  drives the whole surface). Text handling and an I/O layer are
   designed-but-not-yet-shipped.
 
 Nothing here is stable. See the lab's obligations ledger for what 1.0 still owes.
