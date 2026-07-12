@@ -1,0 +1,48 @@
+// std::io PRINT layer (design 0011/0013 I/O + formatting) — the thin, capture-
+// free bridge from the `fmt_i64` formatting primitive to the std/io libc-write
+// boundary. It renders a value into an owning `String`, then hands that String's
+// byte view to the module's real `write_all`/`stdout` wrappers, which own the
+// `unsafe`/`foreign` discharge. This layer discharges nothing.
+//
+// This is NOT a self-contained module: it names the std/io wrappers
+// (`write_all`/`stdout`/`IoResult`) and the formatting definitions (`fmt_i64`/
+// `Alloc`/`String`). Like `std_fmt.cnr`, it is a single-file IMAGE layer: the
+// harness PREPENDS the std/io module (minus its `main`) and the formatting
+// source, then APPENDS a `main`. `String` is a MIR-interp-only CollectionOp, so
+// this cannot live in the backend-swept module tree (see `std_fmt.cnr`'s header).
+//
+// Engine coverage: this path runs on the TREE-WALKER (real captured stdout). It is
+// NOT yet runnable on the MIR engine — `write_all` takes `[u8]`, and the only
+// String-text -> `[u8]` bridge is `as_bytes`, which the MIR lowering does not
+// implement (it knows `as_str` but not `as_bytes`; see obligations STD-IO-PRINT).
+//
+// The owned-String constraint (std_fmt.cnr): the String intrinsics (`push`/
+// `as_str`) only recognize a String that is this function's own directly-owned
+// local, never one reached through a borrow parameter. So the render target `s`
+// is always a fresh local here — `println_i64` pushes the trailing newline onto
+// its own `s`, then hands `s`'s byte view to `write_all`.
+//
+// Only the NON-GENERIC print path lives here. A `print_show[T: Show]` that renders
+// through the `Show` convention cannot be wired through this boundary: the
+// monomorphizer drops `extern` items (generics.rs `monomorphize` catch-all), and
+// `is_generic_program` classifies ANY `interface`/`impl` as generic, so the moment
+// the `Show` interface joins the image the externs vanish and `sys_write` becomes
+// `unknown name` at runtime. See the slice report / obligations STD-IO-PRINT.
+
+// Write a UTF-8 string view to stdout verbatim (no newline). `str` is already a
+// borrow-shaped view, so its `as_bytes` retype needs no owned-local String.
+pub fn print_str(s: str) -> IoResult {
+    let bytes: [u8] = as_bytes(s);
+    return write_all(stdout(), bytes);
+}
+
+// Render a signed 64-bit integer to decimal and write it to stdout followed by a
+// newline (byte 10). The newline is pushed onto this function's own owned `s`
+// (the fresh `fmt_i64` result), then the whole line is written in one call.
+pub fn println_i64(a: Alloc, n: i64) alloc -> IoResult {
+    let mut s: String = fmt_i64(read a, n);
+    push(write s, 10);
+    let view: str = as_str(read s);
+    let bytes: [u8] = as_bytes(view);
+    return write_all(stdout(), bytes);
+}

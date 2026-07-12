@@ -3354,3 +3354,58 @@ CollectionOp — so `String` std stays single-file, exactly like `text.rs`/`vec.
   clippy clean. No backend, self-host, `aot_runtime.c`, MIR, or checker change.
 - NEXT SLICE. Wire `fmt`/`Show` through `std_io` (the libc `write` path,
   `fixtures/std_io/main.cnr` + `src/audit.rs`) for a `println` path.
+
+## STD-IO-PRINT — the println path: `print_str`/`println_i64` wiring `fmt_i64` through `std_io` to real captured stdout (2026-07-12)
+
+The second slice of "real std + I/O": the `fmt_i64` formatting primitive (STD-FMT)
+wired through the `std_io` libc-`write` boundary (`fixtures/std_io/main.cnr`,
+`write_all(fd: i32, s: read [u8]) -> IoResult` over the `sys_write` extern) to
+produce REAL, host-captured stdout on the `foreign_io` shims. Purely additive: NO
+compiler/MIR/checker/backend change. Source: `tests/fixtures/std_print.cnr` (the
+print layer) composed with the `std_io` module prefix (minus its `main`) and the
+non-generic `fmt_i64` core sliced verbatim from `std_fmt.cnr`; observed by
+`tests/print.rs` on the host-backed shims.
+
+- THE LAYER (capture-free, discharges nothing). `print_str(s: str) -> IoResult`
+  retypes the view to bytes (`as_bytes`) and calls `write_all(stdout(), .)`.
+  `println_i64(a: Alloc, n: i64) alloc -> IoResult` = `fmt_i64` into a fresh owned
+  local `s`, then `push(write s, 10)` (the trailing newline pushed onto `s`'s OWN
+  owned local — the STD-FMT owned-String rule), then `write_all` of `s`'s byte
+  view. `Alloc` threads BY VALUE (the `copy` handle; a `read Alloc` param would
+  double-borrow at `fmt_i64(read a, .)` -> `borrow borrow Alloc`, E0703). String
+  text reaches `write_all` as `[u8]` via `as_bytes(as_str(read s))`, each step
+  bound to a local (a call-expression used directly as a place does not lower).
+- GATE (isolation). `tests/print.rs` green — 6 tests on the TREE-WALKER via the
+  captured-stdout shims: an `image_checks_clean` guard; `println_i64` over
+  0/positive/negative/`i64::MIN` asserting the EXACT bytes
+  `"0\n42\n-42\n-9223372036854775808\n"`; `print_str` verbatim (no newline);
+  `print_str`+`println_i64` composing (`"n=7\n"`); and the pinned MIR boundary
+  below. `tests/fmt.rs` (12) and `tests/std_io.rs` (13) untouched and green.
+- BLOCKER 1 — `as_bytes` HAS NO MIR LOWERING (why this slice is tree-walker-only).
+  `write_all` requires `[u8]`, and the only bridge from a built `String`'s text to
+  `[u8]` is `as_bytes` (str -> [u8]). MIR lowering knows `as_str` (a String
+  CollectionOp view) but NOT `as_bytes`: it is absent from `is_builtin`
+  (`src/mir/build.rs`) and has no special case, so `let b: [u8] = as_bytes(v)`
+  falls to the generic-call arm and yields `Unsupported("indirect/unknown
+  aggregate call")` (build.rs ~1517); nested inside another call it yields
+  `Unsupported("unsupported place")` (build.rs ~994). `as_bytes` had never run on
+  MIR (`text.rs`/`fmt.rs` are tree-walker-only). So the both-engines parity the
+  slice targets is BLOCKED pending an `as_bytes` MIR lowering. Per the slice's
+  standing order (no unprompted compiler surface), that primitive was NOT added;
+  `println_mir_boundary_is_unsupported_as_bytes` PINS the current boundary so it
+  cannot regress silently and flips red the moment MIR gains `as_bytes`.
+- BLOCKER 2 — the `Show` convention CANNOT be wired through an `extern` boundary
+  (why there is no `print_show`). `generics::monomorphize` (`src/generics.rs`) DROPS
+  `Item::Extern`/`Item::Export` (its item loop's `_ => {}` catch-all handles only
+  Fn/Struct/Enum/Static/Impl), and `is_generic_program` classifies ANY
+  `interface`/`impl` as generic. So the instant the `Show` interface (or a
+  `print_show[T: Show]`) joins the image, the program is "generic", monomorphizes,
+  the `sys_*` externs vanish, and `write_all` faults `Panic("unknown name
+  \`sys_write\`")` at runtime. The composed image therefore excludes `Show`/`Opt[T]`
+  and uses only the non-generic `fmt_i64` core. Reported, not worked around.
+- NEXT SLICE. Either (a) give the MIR lowering an `as_bytes` (str/String -> [u8])
+  rule + fix the monomorphizer to carry `Item::Extern`/`Item::Export` through — the
+  two primitives that would let the println path (and `print_show`) run on BOTH
+  engines with byte-for-byte parity; or (b) extend the layer with `print_show[T:
+  Show]`/`println_show` once (b) lands. Both are compiler-surface changes, out of
+  this additive slice's scope.
