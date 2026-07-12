@@ -3015,3 +3015,55 @@ static C runtime (`aot_runtime.c`, still UNCHANGED); no Cranelift code reused.
   `aot_runtime.c` reused UNCHANGED; clippy clean. Out-of-S1 ops (enum/box/collections/
   concurrency, needs-drop) still REJECTED precisely ("out of LLVM-S1 subset"), never
   faked. NEXT: S2 (enums + statics).
+
+## LLVM-S2 — tagged-union ENUMS + STATIC/CONST data on the LLVM backend (2026-07-12)
+
+Extends `src/backend/llvm.rs` from the S0+S1 subset to TAGGED-UNION ENUMS and the
+STATIC/CONST data region — purely additive, mirroring `backend::lower`'s SEMANTICS in
+`.ll` text. Same static C runtime (`aot_runtime.c`, still UNCHANGED); no Cranelift
+code reused; no `nsw`/`nuw`.
+
+- ENUM LAYOUT (from the shared `interp::layout`, the same source `lower` uses): a
+  tagged union = a `u64` tag at offset 0 (`ENUM_TAG=8`) followed by the payload union
+  sized to the largest variant (`enum_size`); payload field `i` of a variant sits at
+  `ENUM_TAG + lay_fields(payload)[i].offset`. An enum is `!is_wordy`, so `classify_
+  tiers` makes every enum local Tier-F — it lives in the flat MEM_BASE buffer via
+  `rt_stack_alloc`, exactly like a struct/array. NO new emitter code was needed for the
+  enum value model: the MIR front end already bakes the tag/payload byte offsets into
+  `Proj::Field`, so the S1 flat-aggregate path (`place_addr`, `Store`, `CopyVal`,
+  sub-word trunc/sext/zext canonicalization) covers enums verbatim.
+- CONSTRUCTION: `EnumCtor` lowers (in MIR) to a `Store` of the tag constant at offset 0
+  plus a `Store`/`CopyVal` of each payload field at its offset — ordinary S1 stores.
+- MATCH: MIR lowers `match` to a tag read (`Load` of the `u64` at offset 0) followed by
+  an `icmp eq`/`Branch` chain, one test per `Variant` arm, with the wildcard/`Binding`
+  arm as the unconditional default and a `Panic` fault on a non-exhaustive fall-through
+  — so the LLVM emitter's existing `Cmp`+`Branch` lowering reproduces the switch and the
+  exhaustiveness/default behavior byte-for-byte; each arm binds its pattern fields as
+  payload-offset field reads/borrows (copy-bind `Load`, move-bind/borrow-bind via the S1
+  paths). Enum-payload sub-word scalars are canonicalized like any S1 leaf.
+- STATIC/CONST DATA (the new emitter work): `layout_statics_strings` reproduces the
+  Cranelift driver's bump arithmetic (`STATIC_BASE`, statics in program order each
+  aligned, then interned string bytes) so the `StaticAddr`/`StrAddr` constants baked
+  into function bodies agree with what the entry prologue writes. `Rvalue::StaticAddr`/
+  `Rvalue::StrAddr` now emit the baked Candor address as an immediate `u64` (a `static`
+  place is modeled by the front end as `*(&STATIC)` — a Tier-R pointer temp holding the
+  address, then a `Deref` — so `place_addr`'s existing leading-`Deref` path reads through
+  it). Integer `const`s stay immediate (`Operand::Const`); the `consts` map only feeds
+  `Layout` array lengths. `candor_entry`'s PROLOGUE now mirrors `lower::lower_entry`:
+  copy each string literal's bytes into the flat buffer at `MEM_BASE + addr + i`
+  (`inttoptr`+`store i8`), then run each static initializer `cnf_<init_fn>()` and deliver
+  its result to the static's slot (wordy: store the low `size` bytes; aggregate:
+  `rt_copy` from the returned candor offset), then call `main`. Compiler-synthesized body
+  names (e.g. a static's `"<init G>"` initializer) are not valid bare LLVM identifiers,
+  so every `cnf_*` symbol is now emitted QUOTED (`@"cnf_..."`).
+- GATE / VERIFICATION (isolation): `tests/llvm.rs` green — 7 tests. New:
+  `gate_llvm_enums_and_statics` (enum construct + `match` payload bind; multi-variant +
+  wildcard/default arm; the real-syntax `propagate` golden — struct-in-enum `?` chain;
+  enum-in-struct; static scalar/struct/array reads; string-literal `b"..."` byte data)
+  and `gate_llvm_enum_fault_axis` (a div-by-zero raised through an enum-returning `?`
+  chain — `div_by_zero` kind + span byte-exact) compile via `clang -O2`, run as
+  standalone processes, and compare (exit / trace / fault-JSON) byte-exact to the oracle.
+  All S0+S1 fixtures + `perf_mem2reg_promotes_locals` stay green; `tests/aot.rs` (6
+  tests) untouched and green; `aot_runtime.c` reused UNCHANGED; clippy clean. Out-of-S2
+  ops (box/alloc/rawptr, needs-drop, collections, concurrency) still REJECTED precisely
+  ("out of LLVM-S2 subset"), never faked. NEXT: S3 (drop — the tallest pole).

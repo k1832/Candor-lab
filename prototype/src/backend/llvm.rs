@@ -11,7 +11,11 @@
 //! neg/not; `trace(x)`; assert/panic; requires/ensures; direct fn calls + recursion.
 //! S1 adds STRUCTS and ARRAYS (the flat aggregate model): struct/array literals,
 //! field/index read+assign, the Index bounds fault, nested aggregates, by-value
-//! struct params + struct returns, and `Ref` (address-of). Enum/box/collections/
+//! struct params + struct returns, and `Ref` (address-of). S2 adds TAGGED-UNION
+//! ENUMS (tag + payload-union in the flat model; construction = tag+payload stores,
+//! `match` = tag read -> icmp/branch chain -> per-variant payload projection) and
+//! STATIC/CONST data (the static region: string-literal bytes + `static` initializers
+//! run before `main`, addressed via `StaticAddr`/`StrAddr`). Box/collections/
 //! concurrency remain out of subset and are rejected with a precise error.
 //!
 //! ## The two-tier value model
@@ -47,6 +51,7 @@ use std::process::Command;
 
 use crate::ast::{BinOp, UnOp};
 use crate::interp::layout::Layout;
+use crate::interp::mem::{round_up, STATIC_BASE};
 use crate::interp::FaultKind;
 use crate::mir::{
     FaultEdge, MirFn, MirProgram, Operand, Place, Proj, Regime, Rvalue, Statement, StatementKind,
@@ -107,6 +112,13 @@ fn scalar_of(ty: &Type) -> ScalarTy {
     }
 }
 
+/// The LLVM global symbol for a Candor function's compiled body. Always quoted:
+/// MIR names for compiler-synthesized bodies (e.g. a `static`'s `"<init G>"`
+/// initializer) contain characters that are not valid in a bare LLVM identifier.
+fn cnf_sym(name: &str) -> String {
+    format!("@\"cnf_{name}\"")
+}
+
 fn overflow_intrinsic(op: BinOp, signed: bool, bits: u32) -> String {
     let base = match op {
         BinOp::Add => if signed { "sadd" } else { "uadd" },
@@ -115,6 +127,34 @@ fn overflow_intrinsic(op: BinOp, signed: bool, bits: u32) -> String {
         _ => unreachable!("overflow intrinsic for non add/sub/mul"),
     };
     format!("llvm.{base}.with.overflow.i{bits}")
+}
+
+/// Lay out `static` + string-literal Candor addresses with the same bump
+/// arithmetic the Cranelift driver uses (`backend::object::layout_statics_strings`
+/// / `backend::run`), so the `StaticAddr`/`StrAddr` constants baked into function
+/// bodies agree with the addresses `candor_entry`'s prologue writes to. Statics
+/// first (in program order, each aligned), then interned string bytes.
+fn layout_statics_strings(
+    prog: &MirProgram,
+    lay: &Layout,
+) -> (HashMap<String, u64>, HashMap<String, u64>) {
+    let mut bump = STATIC_BASE;
+    let mut statics = HashMap::new();
+    for st in &prog.statics {
+        let size = lay.size_of(&st.ty).max(1);
+        let align = lay.align_of(&st.ty).max(1);
+        let a = round_up(bump, align);
+        bump = a + size;
+        statics.insert(st.name.clone(), a);
+    }
+    let mut strings = HashMap::new();
+    for sv in super::collect_strings(prog) {
+        let len = (sv.len().max(1)) as u64;
+        let a = round_up(bump, 1);
+        bump = a + len;
+        strings.insert(sv, a);
+    }
+    (statics, strings)
 }
 
 /// Emit the whole program as one textual LLVM-IR module: the `rt_*` + intrinsic
@@ -130,6 +170,7 @@ pub fn emit_ll(
         return Err("no `main` function to compile".to_string());
     }
     let lay = Layout { items, consts };
+    let (statics, strings) = layout_statics_strings(prog, &lay);
     let mut out = String::new();
     out.push_str("; Candor LLVM-S1 module\n");
     out.push_str("declare void @rt_trace(i64)\n");
@@ -149,23 +190,75 @@ pub fn emit_ll(
     out.push('\n');
 
     for f in &prog.fns {
-        emit_fn(&mut out, f, &lay)?;
+        emit_fn(&mut out, f, &lay, &statics, &strings)?;
     }
-    emit_entry(&mut out, prog);
+    emit_entry(&mut out, prog, &lay, &statics, &strings);
 
     out.push_str("\nattributes #0 = { noreturn }\n");
     Ok(out)
 }
 
-/// The `candor_entry() -> i64` glue the runtime calls (mirrors `lower::lower_entry`
-/// for the scalar+aggregate subset: no statics/strings, just call `main`).
-fn emit_entry(out: &mut String, prog: &MirProgram) {
+/// The `candor_entry() -> i64` glue the runtime calls (mirrors `lower::lower_entry`).
+/// The prologue runs the startup work the JIT driver does host-side: copy each
+/// string literal's bytes into the flat buffer at its baked Candor address, then
+/// run each `static` initializer and write its result to the static's address
+/// (wordy: the low `size` bytes; aggregate: `rt_copy` from the returned candor
+/// offset). Then call `main` and return its `i64` (or `0` for a non-`i64` main).
+fn emit_entry(
+    out: &mut String,
+    prog: &MirProgram,
+    lay: &Layout,
+    statics: &HashMap<String, u64>,
+    strings: &HashMap<String, u64>,
+) {
     let main_is_i64 = matches!(
         prog.get("main").map(|f| &f.locals[0].ty),
         Some(Type::Scalar(ScalarTy::I64))
     );
     out.push_str("define i64 @candor_entry() {\nentry:\n");
-    out.push_str("  %r = call i64 @cnf_main()\n");
+    let mut n = 0usize;
+
+    // String-literal bytes -> flat buffer at `MEM_BASE + addr + i`.
+    for sv in super::collect_strings(prog) {
+        let addr = strings[&sv];
+        for (i, byte) in sv.as_bytes().iter().enumerate() {
+            let host = MEM_BASE + (addr + i as u64) as i64;
+            out.push_str(&format!("  %e{n} = inttoptr i64 {host} to ptr\n"));
+            out.push_str(&format!("  store i8 {byte}, ptr %e{n}\n"));
+            n += 1;
+        }
+    }
+
+    // Static initializers: run `cnf_<init_fn>()`, deliver into the static's slot
+    // (wordy: store the low `size` bytes; aggregate: `rt_copy` from the returned
+    // candor offset).
+    for st in &prog.statics {
+        let addr = statics[&st.name];
+        let size = lay.size_of(&st.ty);
+        out.push_str(&format!("  %e{n} = call i64 {}()\n", cnf_sym(&st.init_fn)));
+        let r = format!("%e{n}");
+        n += 1;
+        if is_wordy(&st.ty) {
+            if size > 0 {
+                let host = MEM_BASE + addr as i64;
+                out.push_str(&format!("  %e{n} = inttoptr i64 {host} to ptr\n"));
+                let p = format!("%e{n}");
+                n += 1;
+                let bits = size * 8;
+                if bits >= 64 {
+                    out.push_str(&format!("  store i64 {r}, ptr {p}\n"));
+                } else {
+                    out.push_str(&format!("  %e{n} = trunc i64 {r} to i{bits}\n"));
+                    out.push_str(&format!("  store i{bits} %e{n}, ptr {p}\n"));
+                    n += 1;
+                }
+            }
+        } else if size > 0 {
+            out.push_str(&format!("  call void @rt_copy(i64 {addr}, i64 {r}, i64 {size})\n"));
+        }
+    }
+
+    out.push_str(&format!("  %r = call i64 {}()\n", cnf_sym("main")));
     if main_is_i64 {
         out.push_str("  ret i64 %r\n");
     } else {
@@ -237,13 +330,20 @@ struct FnEmit<'a> {
     lbl: usize,
     mf: &'a MirFn,
     lay: &'a Layout<'a>,
+    statics: &'a HashMap<String, u64>,
+    strings: &'a HashMap<String, u64>,
     tier_f: Vec<bool>,
 }
 
 impl<'a> FnEmit<'a> {
-    fn new(mf: &'a MirFn, lay: &'a Layout<'a>) -> Self {
+    fn new(
+        mf: &'a MirFn,
+        lay: &'a Layout<'a>,
+        statics: &'a HashMap<String, u64>,
+        strings: &'a HashMap<String, u64>,
+    ) -> Self {
         let tier_f = classify_tiers(mf);
-        FnEmit { out: String::new(), tmp: 0, lbl: 0, mf, lay, tier_f }
+        FnEmit { out: String::new(), tmp: 0, lbl: 0, mf, lay, statics, strings, tier_f }
     }
     fn t(&mut self) -> String {
         let n = self.tmp;
@@ -373,7 +473,7 @@ impl<'a> FnEmit<'a> {
                     let v = self.load_local(root);
                     (v, inner.clone(), &place.proj[1..])
                 }
-                _ => return Err("out of LLVM-S1 subset: address of a register local".to_string()),
+                _ => return Err("out of LLVM-S2 subset: address of a register local".to_string()),
             }
         };
         for p in rest {
@@ -583,10 +683,27 @@ impl<'a> FnEmit<'a> {
                     .collect::<Vec<_>>()
                     .join(", ");
                 let r = self.t();
-                self.line(&format!("{r} = call i64 @cnf_{func}({argstr})"));
+                self.line(&format!("{r} = call i64 {}({argstr})", cnf_sym(func)));
                 Ok(r)
             }
-            other => Err(format!("out of LLVM-S1 subset: {other:?}")),
+            // The static's / interned string's baked Candor address (an
+            // immediate `u64` into the static region, whose bytes/initializers
+            // `candor_entry`'s prologue lays down before `main`).
+            Rvalue::StaticAddr(name) => {
+                let a = *self
+                    .statics
+                    .get(name)
+                    .ok_or_else(|| format!("unknown static `{name}`"))?;
+                Ok(format!("{}", a as i64))
+            }
+            Rvalue::StrAddr(sv) => {
+                let a = *self
+                    .strings
+                    .get(sv)
+                    .ok_or_else(|| format!("unknown string literal `{sv}`"))?;
+                Ok(format!("{}", a as i64))
+            }
+            other => Err(format!("out of LLVM-S2 subset: {other:?}")),
         }
     }
 
@@ -768,7 +885,7 @@ impl<'a> FnEmit<'a> {
 
     fn lower_stmt(&mut self, st: &Statement) -> Result<(), String> {
         if st.observable && !matches!(st.kind, StatementKind::Trace(_)) {
-            return Err(format!("out of LLVM-S1 subset (observable): {:?}", st.kind));
+            return Err(format!("out of LLVM-S2 subset (observable): {:?}", st.kind));
         }
         match &st.kind {
             StatementKind::Assign(local, rv) => {
@@ -798,10 +915,10 @@ impl<'a> FnEmit<'a> {
             // (its glue is enum/box territory) is out of subset.
             StatementKind::Drop { local, .. } => {
                 if self.mf.locals[*local].drop_obligation {
-                    return Err("out of LLVM-S1 subset: drop of a needs-drop value".to_string());
+                    return Err("out of LLVM-S2 subset: drop of a needs-drop value".to_string());
                 }
             }
-            other => return Err(format!("out of LLVM-S1 subset: {other:?}")),
+            other => return Err(format!("out of LLVM-S2 subset: {other:?}")),
         }
         Ok(())
     }
@@ -810,14 +927,20 @@ impl<'a> FnEmit<'a> {
 /// Emit one `cnf_<name>` function, replicating `lower::lower_fn`'s block/region
 /// structure (requires/ensures predicate regions, the shared final-return block)
 /// and its two-tier storage + aggregate ABI.
-fn emit_fn(out: &mut String, mf: &MirFn, lay: &Layout) -> Result<(), String> {
-    let mut e = FnEmit::new(mf, lay);
+fn emit_fn(
+    out: &mut String,
+    mf: &MirFn,
+    lay: &Layout,
+    statics: &HashMap<String, u64>,
+    strings: &HashMap<String, u64>,
+) -> Result<(), String> {
+    let mut e = FnEmit::new(mf, lay, statics, strings);
 
     let params = (0..mf.num_params)
         .map(|i| format!("i64 %a{i}"))
         .collect::<Vec<_>>()
         .join(", ");
-    e.raw(&format!("define internal i64 @cnf_{}({params}) {{\n", mf.name));
+    e.raw(&format!("define internal i64 {}({params}) {{\n", cnf_sym(&mf.name)));
     e.label("entry");
     // Tier-R locals -> alloca (mem2reg-promotable); Tier-F locals -> flat slot.
     for i in 0..mf.locals.len() {

@@ -259,3 +259,72 @@ fn gate_llvm_aggregate_bounds_fault() {
         assert_llvm_eq_oracle(src, *real, &format!("aggfault{i}"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// 5. Tagged-union ENUMS + STATIC/CONST data (S2): the flat-model enum (tag +
+//    payload union), `match` (tag read -> icmp/branch chain -> per-variant
+//    payload projection, incl. the wildcard/default arm), enum-in-struct and
+//    struct-in-enum nesting, and the static region (scalar/aggregate/array
+//    `static` initializers run before `main`, plus string-literal bytes). Every
+//    fixture: clang -O2 build, run, byte-exact (exit / trace / fault-JSON)
+//    against the oracle — the same fixtures the AOT corpus carries.
+// ---------------------------------------------------------------------------
+
+const ENUM_STATIC_OK: &[(&str, bool)] = &[
+    // Enum construct + `match` with a payload binding.
+    ("enum R { ok Val(i64), Err } fn dv(n: i64, d: i64) -> R { let q: i64 = n / d; return R::Val(q); } \
+      fn main() -> i64 { return match dv(84, 2) { R::Val(v) => v, R::Err => 0 - 1 }; }", true),
+    // Multi-variant enum + a wildcard/default arm (borrowed scrutinee).
+    ("enum Shape { Circle(i64), Square(i64), Unknown } \
+      fn area(s: read Shape) -> i64 { return match s { Shape::Circle(r) => r * r * 3, Shape::Square(w) => w * w, _ => 0 }; } \
+      fn main() -> i64 { let a: Shape = Shape::Circle(2); let b: Shape = Shape::Square(5); let c: Shape = Shape::Unknown; \
+      return area(read a) + area(read b) + area(read c); }", true),
+    // Struct-in-enum: `?` propagation on an `ok`-marked result enum whose payload
+    // reads a struct field (the real-syntax `propagate` golden fixture).
+    ("struct Acc { total: i64, count: i64 } enum Step { ok Cont(i64), Stop } \
+      fn advance(a: write Acc, delta: i64) -> Step { a.*.total = a.total + delta; a.*.count = a.count + 1; \
+      if a.count >= 3 { return Step::Stop; } return Step::Cont(a.total); } \
+      fn drive(a: write Acc) -> Step { let x: i64 = advance(a, 10)?; let y: i64 = advance(a, 20)?; let z: i64 = advance(a, 30)?; return Step::Cont(z); } \
+      fn main() -> i64 { let mut acc: Acc = Acc { total: 0, count: 0 }; let r: Step = drive(write acc); \
+      return match r { Step::Cont(v) => v, Step::Stop => acc.total }; }", true),
+    // Enum-in-struct: a struct field is an enum; match projects its payload.
+    ("enum E { A(i64), B } struct Wrap { tag: i64, e: E } \
+      fn main() -> i64 { let w: Wrap = Wrap { tag: 7, e: E::A(35) }; \
+      return match w.e { E::A(v) => v + w.tag, E::B => w.tag }; }", true),
+    // Static scalar read (the initializer runs before `main`).
+    ("static BASE: i64 = 100; static STEP: i64 = 7; fn main() -> i64 { return BASE + STEP + STEP; }", true),
+    // Static aggregate (struct) read: field projection through the static's address.
+    ("struct P { x: i64, y: i64 } static ORIGIN: P = P { x: 3, y: 4 }; \
+      fn main() -> i64 { return ORIGIN.x + ORIGIN.y; }", true),
+    // Static array read (dynamic index).
+    ("static TABLE: [3]i64 = [10, 20, 30]; fn main() -> i64 { let i: usize = 2; return TABLE[0] + TABLE[i]; }", true),
+    // String-literal (byte-array) data: the bytes are laid into the static region.
+    ("fn main() -> i64 { let s: [u8] = b\"AZ\"; let i: usize = 1; return conv i64 s[0] + conv i64 s[i]; }", true),
+];
+
+#[test]
+fn gate_llvm_enums_and_statics() {
+    assert!(clang_available(), "clang unavailable: cannot build the LLVM-S2 enum/static gate");
+    for (i, (src, real)) in ENUM_STATIC_OK.iter().enumerate() {
+        assert_llvm_eq_oracle(src, *real, &format!("s2ok{i}"));
+    }
+}
+
+// A fault raised through an enum-returning `?` chain (the div-by-zero happens
+// inside a `?`-called function that builds a result enum): kind + span must match
+// the oracle byte-exact — the same fixture the AOT gate carries.
+const ENUM_FAULTS: &[(&str, bool)] = &[
+    ("enum R { ok Val(i64), Err } fn dv(n: i64, d: i64) -> R { let q: i64 = n / d; return R::Val(q); } \
+      fn run() -> R { let a: i64 = dv(10, 0)?; return R::Val(a); } \
+      fn main() -> i64 { return match run() { R::Val(v) => v, R::Err => 0 - 1 }; }", true),
+];
+
+#[test]
+fn gate_llvm_enum_fault_axis() {
+    assert!(clang_available(), "clang unavailable");
+    for (i, (src, real)) in ENUM_FAULTS.iter().enumerate() {
+        let o = oracle_src(src, *real).expect("faulting program should run");
+        assert!(matches!(o, Outcome::Fault { .. }), "expected a fault:\n{src}");
+        assert_llvm_eq_oracle(src, *real, &format!("s2fault{i}"));
+    }
+}
