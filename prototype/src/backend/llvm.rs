@@ -1301,6 +1301,93 @@ impl<'a> FnEmit<'a> {
                 self.line(&format!("{newlen} = add i64 {len}, {slen}"));
                 self.store_u64(&b8, &newlen);
             }
+            CollOp::StringPush { base, ch, span } => {
+                let base = self.operand(base);
+                let c = self.operand(ch);
+                // Reject non-scalar-values (surrogates, > 0x10FFFF) exactly as
+                // `utf8_encode_scalar`; the interp faults `Requires` at the call span.
+                let oor = self.t();
+                self.line(&format!("{oor} = icmp ugt i64 {c}, 1114111"));
+                let ge_lo = self.t();
+                self.line(&format!("{ge_lo} = icmp uge i64 {c}, 55296"));
+                let le_hi = self.t();
+                self.line(&format!("{le_hi} = icmp ule i64 {c}, 57343"));
+                let surr = self.t();
+                self.line(&format!("{surr} = and i1 {ge_lo}, {le_hi}"));
+                let bad = self.t();
+                self.line(&format!("{bad} = or i1 {oor}, {surr}"));
+                self.fault_if(&bad, FaultKind::Requires, *span);
+                // UTF-8 length: <0x80 -> 1, <0x800 -> 2, <0x10000 -> 3, else 4.
+                let lt80 = self.t();
+                self.line(&format!("{lt80} = icmp ult i64 {c}, 128"));
+                let lt800 = self.t();
+                self.line(&format!("{lt800} = icmp ult i64 {c}, 2048"));
+                let lt10000 = self.t();
+                self.line(&format!("{lt10000} = icmp ult i64 {c}, 65536"));
+                let l34 = self.t();
+                self.line(&format!("{l34} = select i1 {lt10000}, i64 3, i64 4"));
+                let l234 = self.t();
+                self.line(&format!("{l234} = select i1 {lt800}, i64 2, i64 {l34}"));
+                let enc_len = self.t();
+                self.line(&format!("{enc_len} = select i1 {lt80}, i64 1, i64 {l234}"));
+                self.string_reserve(&base, &enc_len, *span);
+                let buf = self.load_u64(&base);
+                let b8 = self.add_off_candor(&base, 8);
+                let len = self.load_u64(&b8);
+                let dstp = self.t();
+                self.line(&format!("{dstp} = add i64 {buf}, {len}"));
+                // Write the 1-4 encoded bytes (branch per width, mirroring the
+                // 1/2/3/4-byte arms of `utf8_encode_scalar` bit for bit).
+                let w1 = self.l();
+                let t2 = self.l();
+                let w2 = self.l();
+                let t3 = self.l();
+                let w3 = self.l();
+                let w4 = self.l();
+                let cont = self.l();
+                self.line(&format!("br i1 {lt80}, label %{w1}, label %{t2}"));
+                self.label(&w1);
+                self.store_byte(&dstp, &c);
+                self.line(&format!("br label %{cont}"));
+                self.label(&t2);
+                self.line(&format!("br i1 {lt800}, label %{w2}, label %{t3}"));
+                self.label(&w2);
+                let b0 = self.utf8_lead(&c, 6, 0xC0);
+                self.store_byte(&dstp, &b0);
+                let d1 = self.add_off_candor(&dstp, 1);
+                let b1 = self.utf8_cont(&c, 0);
+                self.store_byte(&d1, &b1);
+                self.line(&format!("br label %{cont}"));
+                self.label(&t3);
+                self.line(&format!("br i1 {lt10000}, label %{w3}, label %{w4}"));
+                self.label(&w3);
+                let e0 = self.utf8_lead(&c, 12, 0xE0);
+                self.store_byte(&dstp, &e0);
+                let e1a = self.add_off_candor(&dstp, 1);
+                let e1 = self.utf8_cont(&c, 6);
+                self.store_byte(&e1a, &e1);
+                let e2a = self.add_off_candor(&dstp, 2);
+                let e2 = self.utf8_cont(&c, 0);
+                self.store_byte(&e2a, &e2);
+                self.line(&format!("br label %{cont}"));
+                self.label(&w4);
+                let f0 = self.utf8_lead(&c, 18, 0xF0);
+                self.store_byte(&dstp, &f0);
+                let f1a = self.add_off_candor(&dstp, 1);
+                let f1 = self.utf8_cont(&c, 12);
+                self.store_byte(&f1a, &f1);
+                let f2a = self.add_off_candor(&dstp, 2);
+                let f2 = self.utf8_cont(&c, 6);
+                self.store_byte(&f2a, &f2);
+                let f3a = self.add_off_candor(&dstp, 3);
+                let f3 = self.utf8_cont(&c, 0);
+                self.store_byte(&f3a, &f3);
+                self.line(&format!("br label %{cont}"));
+                self.label(&cont);
+                let newlen = self.t();
+                self.line(&format!("{newlen} = add i64 {len}, {enc_len}"));
+                self.store_u64(&b8, &newlen);
+            }
             _ => return Err(format!("out of LLVM subset: {op:?}")),
         }
         Ok(())
@@ -1382,6 +1469,32 @@ impl<'a> FnEmit<'a> {
     /// collection-buffer sizes).
     fn rt_copy_val(&mut self, dst: &str, src: &str, len: &str) {
         self.line(&format!("call void @rt_copy(i64 {dst}, i64 {src}, i64 {len})"));
+    }
+
+    /// Store the low byte of i64 `val` at candor address `addr` (UTF-8 byte writer).
+    fn store_byte(&mut self, addr: &str, val: &str) {
+        self.store_scalar(addr, val, ScalarTy::U8);
+    }
+
+    /// UTF-8 lead byte `prefix | (c >> shift)` (no mask: the scalar's high bits are
+    /// already zero for the chosen width).
+    fn utf8_lead(&mut self, c: &str, shift: u32, prefix: u32) -> String {
+        let sh = self.t();
+        self.line(&format!("{sh} = lshr i64 {c}, {shift}"));
+        let r = self.t();
+        self.line(&format!("{r} = or i64 {sh}, {prefix}"));
+        r
+    }
+
+    /// UTF-8 continuation byte `0x80 | ((c >> shift) & 0x3F)`.
+    fn utf8_cont(&mut self, c: &str, shift: u32) -> String {
+        let sh = self.t();
+        self.line(&format!("{sh} = lshr i64 {c}, {shift}"));
+        let m = self.t();
+        self.line(&format!("{m} = and i64 {sh}, 63"));
+        let r = self.t();
+        self.line(&format!("{r} = or i64 {m}, 128"));
+        r
     }
 
     fn call_free(&mut self, ctx: &str, vt: &str, ptr: &str, size: u64, align: u64) {

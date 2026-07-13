@@ -3794,3 +3794,52 @@ checker, or the MIR. `aot_runtime.c` reused UNCHANGED — NO new runtime symbol.
 - Full `cargo nextest` green (658 tests, was 657 + this gate); `--profile fast`
   green (538); `tests/text.rs` (36) / fmt / print / std_io interp gates unchanged;
   clippy clean.
+
+
+## NATIVE-COLLECTIONS-S2 — `String::push` (UTF-8 encode + scalar-value backstop) landed native on BOTH backends → `String` is now FULLY native (2026-07-13)
+
+The second native collection slice (design 0013, Path A). The one remaining `String`
+`CollectionOp` arm — `StringPush`, the sole UTF-8 op — is lowered INLINE in both
+native backends, mirroring `mir::interp::collection_op`'s `StringPush` (and its
+`utf8_encode_scalar`) byte-for-byte. Purely additive: no change to the `String`
+representation, the checker, or the MIR. `aot_runtime.c` reused UNCHANGED — NO new
+runtime symbol (the encode is inline branches, not an `rt_utf8_encode` call).
+
+- WHAT LANDED (`src/backend/lower.rs` Cranelift + `src/backend/llvm.rs` LLVM, in
+  lockstep). `collection_op`'s `StringPush` arm: (1) validate the `u32` scalar —
+  reject a surrogate (`0xD800..=0xDFFF`) or out-of-range (`> 0x10FFFF`) code point,
+  exactly as `utf8_encode_scalar`, FAULTING `Requires` at the push call span
+  (kind-code 5 + `span.start`/`span.end` through the shared `emit_fault`); (2)
+  compute the UTF-8 length via a `select` chain (`<0x80 → 1`, `<0x800 → 2`,
+  `<0x10000 → 3`, else 4); (3) `string_reserve(enc_len)` — REUSING the S1 growth
+  helper unchanged; (4) branch per width to write the 1–4 encoded bytes at `buf+len`
+  (lead byte `prefix | (c >> shift)`, continuation bytes `0x80 | ((c >> shift) &
+  0x3F)`, bit-for-bit with `char::encode_utf8`); (5) bump `len` by `enc_len`. No
+  `nsw`/`nuw` (wrapping `add`/`lshr`/`and`/`or`; `.max` via `icmp`+`select`). The
+  encode is emitted INLINE in both backends (new `store_byte`/`utf8_lead`/`utf8_cont`
+  IR-emitter helpers) — `aot_runtime.c` untouched.
+- `String` IS NOW FULLY NATIVE: `New` / `StringAppend` / `StringAsStr` (S1) +
+  `StringPush` (S2) all lower inline in both backends; no `String` op is MIR-interp-
+  only anymore.
+- GATE (`tests/string_native.rs` + `tests/fixtures/run/string_native.cnr`): the
+  fixture pushes scalars encoding to 1/2/3/4 bytes — `'A'` (65 → `65`), `'é'` (233 →
+  `195 169`), `'€'` (0x20AC → `226 130 172`), `'😀'` (0x1F600 → `240 159 152 128`) —
+  the last push crossing a `string_reserve` growth (cap 8 → 16), read back through
+  `as_str` + `as_bytes` byte index. Asserted BYTE-IDENTICAL under the oracle, MIR,
+  and Cranelift native no-opt + opt (extended trace tail `10, 65, 195, 169, 226,
+  130, 172, 240, 159, 152, 128`); the LLVM `-O2` fifth engine covers it transitively
+  through `tests/llvm.rs`'s full-corpus gate (the fixture lives in `run/`). A FAULT
+  gate (`string_push_non_scalar_faults_requires_all_engines`) pushes a surrogate
+  (`0xD800`) and an out-of-range scalar (`0x110000`) and asserts the `Requires` fault
+  kind AND span byte-exact across the oracle, MIR, and Cranelift no-opt + opt.
+- GAP (unchanged from S1, still pending): a native `String`'s buffer is NOT yet freed
+  on scope-end drop (native `emit_drop` treats `String` as a plain struct = no-op) —
+  a leak, not a divergence (observable-independent; the gate does not depend on
+  allocator liveness). The drop-free (`alloc_on_drop` for `String`/`Vec`/`Map` in
+  `emit_drop`) should land with the collection-drop slice.
+- DEFERRED (next slices, in order): `Vec` (same 5-word header + `string_reserve`-shape
+  growth, adding `stride` + drop-on-overwrite: `push`/`pop`/`get`/`set`), then `Map`
+  (FNV-1a + linear-probe `insert`/`contains`/`get`), then collection-drop-free.
+- Full `cargo nextest` green (659 tests, was 658 + this fault gate); `--profile fast`
+  green (539); `tests/text.rs` (36) / fmt / print / std_io interp gates unchanged;
+  the aot / llvm / stage_d native corpus gates green; clippy clean.

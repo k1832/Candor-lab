@@ -1663,6 +1663,90 @@ impl<M: Module> Cg<'_, '_, M> {
                 let newlen = self.b.ins().iadd(len, slen);
                 self.store_u64(b8, newlen);
             }
+            CollOp::StringPush { base, ch, span } => {
+                let base = self.eval_operand(base, mf);
+                let c = self.eval_operand(ch, mf);
+                // Reject non-scalar-values (surrogates, > 0x10FFFF) exactly as
+                // `utf8_encode_scalar`; the interp faults `Requires` at the call span.
+                let max = self.iconst(0x10FFFF);
+                let oor = self.b.ins().icmp(IntCC::UnsignedGreaterThan, c, max);
+                let lo = self.iconst(0xD800);
+                let hi = self.iconst(0xDFFF);
+                let ge_lo = self.b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, c, lo);
+                let le_hi = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, c, hi);
+                let surr = self.b.ins().band(ge_lo, le_hi);
+                let bad = self.b.ins().bor(oor, surr);
+                self.fault_if(bad, FaultKind::Requires, *span);
+                // UTF-8 length: <0x80 -> 1, <0x800 -> 2, <0x10000 -> 3, else 4.
+                let c80 = self.iconst(0x80);
+                let c800 = self.iconst(0x800);
+                let c10000 = self.iconst(0x10000);
+                let lt80 = self.b.ins().icmp(IntCC::UnsignedLessThan, c, c80);
+                let lt800 = self.b.ins().icmp(IntCC::UnsignedLessThan, c, c800);
+                let lt10000 = self.b.ins().icmp(IntCC::UnsignedLessThan, c, c10000);
+                let one = self.iconst(1);
+                let two = self.iconst(2);
+                let three = self.iconst(3);
+                let four = self.iconst(4);
+                let l34 = self.b.ins().select(lt10000, three, four);
+                let l234 = self.b.ins().select(lt800, two, l34);
+                let enc_len = self.b.ins().select(lt80, one, l234);
+                self.string_reserve(base, enc_len, *span);
+                let buf = self.load_u64(base);
+                let b8 = self.add_off(base, 8);
+                let len = self.load_u64(b8);
+                let dstp = self.b.ins().iadd(buf, len);
+                // Write the 1-4 encoded bytes (branch per width, mirroring the
+                // 1/2/3/4-byte arms of `utf8_encode_scalar` bit for bit).
+                let w1 = self.b.create_block();
+                let t2 = self.b.create_block();
+                let w2 = self.b.create_block();
+                let t3 = self.b.create_block();
+                let w3 = self.b.create_block();
+                let w4 = self.b.create_block();
+                let cont = self.b.create_block();
+                self.b.ins().brif(lt80, w1, &[], t2, &[]);
+                self.b.switch_to_block(w1);
+                self.store_byte(dstp, c);
+                self.b.ins().jump(cont, &[]);
+                self.b.switch_to_block(t2);
+                self.b.ins().brif(lt800, w2, &[], t3, &[]);
+                self.b.switch_to_block(w2);
+                let b0 = self.utf8_lead(c, 6, 0xC0);
+                self.store_byte(dstp, b0);
+                let d1 = self.add_off(dstp, 1);
+                let b1 = self.utf8_cont(c, 0);
+                self.store_byte(d1, b1);
+                self.b.ins().jump(cont, &[]);
+                self.b.switch_to_block(t3);
+                self.b.ins().brif(lt10000, w3, &[], w4, &[]);
+                self.b.switch_to_block(w3);
+                let e0 = self.utf8_lead(c, 12, 0xE0);
+                self.store_byte(dstp, e0);
+                let e1a = self.add_off(dstp, 1);
+                let e1 = self.utf8_cont(c, 6);
+                self.store_byte(e1a, e1);
+                let e2a = self.add_off(dstp, 2);
+                let e2 = self.utf8_cont(c, 0);
+                self.store_byte(e2a, e2);
+                self.b.ins().jump(cont, &[]);
+                self.b.switch_to_block(w4);
+                let f0 = self.utf8_lead(c, 18, 0xF0);
+                self.store_byte(dstp, f0);
+                let f1a = self.add_off(dstp, 1);
+                let f1 = self.utf8_cont(c, 12);
+                self.store_byte(f1a, f1);
+                let f2a = self.add_off(dstp, 2);
+                let f2 = self.utf8_cont(c, 6);
+                self.store_byte(f2a, f2);
+                let f3a = self.add_off(dstp, 3);
+                let f3 = self.utf8_cont(c, 0);
+                self.store_byte(f3a, f3);
+                self.b.ins().jump(cont, &[]);
+                self.b.switch_to_block(cont);
+                let newlen = self.b.ins().iadd(len, enc_len);
+                self.store_u64(b8, newlen);
+            }
             _ => unimplemented!(
                 "native backend: Vec/Map + String::push collection intrinsics are MIR-interp only"
             ),
@@ -1743,6 +1827,30 @@ impl<M: Module> Cg<'_, '_, M> {
     fn call_copy_val(&mut self, dst: Value, src: Value, len: Value) {
         let r = self.shimref("copy", self.shims.copy);
         self.b.ins().call(r, &[dst, src, len]);
+    }
+
+    /// Store the low byte of `val` at candor address `addr` (the UTF-8 byte writer).
+    fn store_byte(&mut self, addr: Value, val: Value) {
+        self.store_scalar(addr, val, ScalarTy::U8);
+    }
+
+    /// UTF-8 lead byte `prefix | (c >> shift)` (no mask: the scalar's high bits are
+    /// already zero for the chosen width).
+    fn utf8_lead(&mut self, c: Value, shift: i64, prefix: i64) -> Value {
+        let s = self.iconst(shift);
+        let sh = self.b.ins().ushr(c, s);
+        let p = self.iconst(prefix);
+        self.b.ins().bor(p, sh)
+    }
+
+    /// UTF-8 continuation byte `0x80 | ((c >> shift) & 0x3F)`.
+    fn utf8_cont(&mut self, c: Value, shift: i64) -> Value {
+        let s = self.iconst(shift);
+        let sh = self.b.ins().ushr(c, s);
+        let m = self.iconst(0x3F);
+        let masked = self.b.ins().band(sh, m);
+        let p = self.iconst(0x80);
+        self.b.ins().bor(p, masked)
     }
 
     fn subslice_op(&mut self, dst: &Place, src: &Place, lo: &Operand, hi: &Operand, stride: u64, span: Span, mf: &MirFn) {

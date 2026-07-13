@@ -146,5 +146,27 @@ fn main() alloc -> i64 {
     trace(conv i64 vb[0]);
     trace(conv i64 vb[10]);
     trace(conv i64 vb[19]);
+    // String::push: encode Unicode scalars to UTF-8 (1/2/3/4 bytes). The final
+    // 4-byte push crosses a `string_reserve` growth (cap 8 -> 16), and every
+    // encoded byte must equal `utf8_encode_scalar`'s under all engines.
+    let mut p: String = string_new(read a);
+    push(write p, 65);      // 'A'  -> 65
+    push(write p, 233);     // 'e' + acute -> 195 169
+    push(write p, 8364);    // euro sign   -> 226 130 172
+    push(write p, 128512);  // grinning face -> 240 159 152 128
+    let pv: str = as_str(read p);
+    let pb: [u8] = as_bytes(pv);
+    trace(conv i64 len(pv));
+    trace(conv i64 pb[0]);
+    trace(conv i64 pb[1]);
+    trace(conv i64 pb[2]);
+    trace(conv i64 pb[3]);
+    trace(conv i64 pb[4]);
+    trace(conv i64 pb[5]);
+    trace(conv i64 pb[6]);
+    trace(conv i64 pb[7]);
+    trace(conv i64 pb[8]);
+    trace(conv i64 pb[9]);
+
     return conv i64 len(v);
 }
