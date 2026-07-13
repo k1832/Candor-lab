@@ -433,10 +433,15 @@ MIR and mirroring the Cranelift backend op-for-op. Emitter landed ~2100 lines.
    old interpreter-only ceiling. Along the way, feature work flushed out and fixed real compiler
    bugs: a coherence-checker overlap bug, method dispatch on call-shaped receivers, a
    cross-module monomorphization span-collision (a memory-safety bug), call-site associated-type
-   projection normalization, and audit-teeth on generic boundary modules. REMAINING: native
-   String-based file I/O (line/buffered readers/writers -- now unblocked by native String),
-   realloc (the one allocator ABI decision), best-fit; richer std (dir/network I/O, more
-   combinators).*
+   projection normalization, audit-teeth on generic boundary modules, native str-view lowering
+   (as_bytes/str_from_unchecked/str_from/substr), and two collection-op + two len/str[i]
+   ergonomics papercuts. Then native FILE I/O on top of native String: whole-file
+   read_to_string/read_file/write_str and read_lines/split_lines, plus a streaming BufReader
+   (read_line assembling lines across buffer refills) and a BufWriter -- all byte-exact
+   interp==native on both backends over the P17 std_io boundary. REMAINING: a streaming
+   Lines: Iter (needs the 0009 RefIndexed borrowed-yield DESIGN); realloc / in-place
+   string_clear (the one allocator ABI DECISION); best-fit; richer std (dir/network I/O, more
+   combinators). The two remaining items are deciding-authority forks, not additive work.*
 3. **Stability + packaging.** The 1.0 gate (editions/migrator exist via P15), a package manager,
    dependency handling. What lets OTHERS build on it.
 4. **Reach.** More platforms (ARM/macOS/Windows/bare-metal; today x86-64 Linux), richer
