@@ -369,6 +369,78 @@ fn str_view_dead_before_mutation_is_clean() {
     );
 }
 
+// ---- function-return view provenance (design 0015 review F1 residual) ------
+// A USER function returning a borrow keeps the loan on its argument alive at the
+// call site (return-extension, §3.3). A view return (`[T]`/`str`/`[u8]`) is a
+// borrow-kind return too — the returned view aliases the source's backing exactly
+// as a borrow does — yet the call-site machinery only extended `borrow`/`borrow_mut`
+// returns, so a view laundered out of a user call SHED its source loan: the caller
+// could then grow/free/move the backing while the returned view was still live (a
+// confirmed check-clean stale/freed read on the native engine). Treating a
+// borrow-kind return uniformly closes it; each rejection below checked CLEAN before.
+
+#[test]
+fn view_return_realloc_while_view_live() {
+    // A user fn returns a `[u8]` view of its `read String` param; the caller grows
+    // the String (alloc-new + FREE-old) while the returned view is live. The
+    // returned view carries the argument loan on `s`, so the grow's `write s`
+    // conflicts with the view's shared loan — E0801.
+    assert_str_has(
+        "fn view_of(s: read String) -> [u8] { return as_bytes(as_str(read s)); }          fn f(a: read Alloc) alloc -> unit { let mut s: String = string_new(a);          append(write s, \"abcde\"); let vb: [u8] = view_of(read s);          append(write s, \"fghij\"); use_i(conv i64 vb[0]); }",
+        "E0801",
+    );
+}
+
+#[test]
+fn view_return_dead_before_mutation_is_clean() {
+    // NLL positive: the returned view dies at its last use before the grow, so the
+    // return-extension introduces no false positive.
+    assert_str_clean(
+        "fn view_of(s: read String) -> [u8] { return as_bytes(as_str(read s)); }          fn f(a: read Alloc) alloc -> unit { let mut s: String = string_new(a);          append(write s, \"abcde\"); let vb: [u8] = view_of(read s);          use_i(conv i64 vb[0]); append(write s, \"fghij\"); }",
+    );
+}
+
+#[test]
+fn view_return_of_local_rejected() {
+    // A view return must derive from an input, not a local: returning a view of the
+    // callee's OWN local String (dropped/freed at fn exit) is E0806 — the same
+    // provenance rule a borrow return obeys, now applied to view returns.
+    assert_str_has(
+        "fn leak_view(a: read Alloc) alloc -> [u8] { let mut s: String = string_new(a);          append(write s, \"abcde\"); return as_bytes(as_str(read s)); }",
+        "E0806",
+    );
+}
+
+#[test]
+fn two_param_view_return_needs_region() {
+    // A view return from two borrow params is ambiguous with no region to
+    // disambiguate the source (exactly as a two-borrow-param borrow return is):
+    // E0807. Without it the loan was extended to neither param and shed silently.
+    assert_str_has(
+        "fn pick(x: read String, y: read String) -> [u8] { return as_bytes(as_str(read x)); }",
+        "E0807",
+    );
+}
+
+#[test]
+fn slice_return_extends_arg_loan() {
+    // The same flow for `slice T`: a user fn returns a sub-slice of its slice
+    // param; the caller writes the backing array while the returned slice is live.
+    // The returned slice carries the argument's shared loan on the array — E0803.
+    assert_clean("fn head(s: slice i64) -> slice i64 { return subslice(s, 0, 2); }");
+    assert_has(
+        "fn head(s: slice i64) -> slice i64 { return subslice(s, 0, 2); } \
+         fn f() -> unit { let mut arr: [4]i64 = [0, 0, 0, 0]; let sub = head(slice_of(arr)); \
+         arr[0] = 1; use_i(sub[0]); }",
+        "E0803",
+    );
+    // NLL positive: the returned slice dies before the write, so no false positive.
+    assert_clean(
+        "fn head(s: slice i64) -> slice i64 { return subslice(s, 0, 2); } \
+         fn f() -> unit { let mut arr: [4]i64 = [0, 0, 0, 0]; let sub = head(slice_of(arr)); \
+         use_i(sub[0]); arr[0] = 1; }",
+    );
+}
 // ---- §3.3: signature regions & provenance ---------------------------------
 
 #[test]

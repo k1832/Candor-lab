@@ -172,8 +172,8 @@ impl<'a> Checker<'a> {
     /// be anchored at its landing binding (design §2.1/§3.1). Recognized: an
     /// explicit `read`/`write` borrow, a slice op, a `str`/`[u8]` view retype of a
     /// String (`as_str`/`as_bytes`/`substr`/`str_from_unchecked` — the view aliases
-    /// the source String's heap buffer), a call whose signature returns a borrow
-    /// (its return-extended loan is carried), and a bare place already holding a
+    /// the source String's heap buffer), a call whose signature returns a borrow OR
+    /// a view (`[T]`/`str`) (its return-extended loan is carried), and a bare place already holding a
     /// `read`/`write` borrow, a `slice`/`slice_mut`, or a `str` view — a copy that
     /// aliases the source, so the source loan must extend to the new binding
     /// (`let c = b;` / `let s2 = s;`). Without the last case a copied borrow or
@@ -206,10 +206,11 @@ impl<'a> Checker<'a> {
                         return true;
                     }
                     if let Some(sig) = self.items.fns.get(name) {
-                        return matches!(
-                            sig.ret,
-                            crate::types::Type::Borrow(_) | crate::types::Type::BorrowMut(_)
-                        );
+                        // A user fn returning a borrow OR a view (`[T]`/`str`) carries
+                        // its return-extended argument loan, exactly as a borrow return
+                        // does; without this a view laundered out of a call sheds the
+                        // source loan (the function-return view UAF).
+                        return sig.ret.is_borrow_kind();
                     }
                 }
                 false

@@ -760,7 +760,7 @@ impl<'a> Checker<'a> {
     fn check_fn_with_sig(&mut self, f: &FnDecl, sig: &FnSig) {
         self.f = FnState::empty();
         self.f.ret_ty = sig.ret.clone();
-        self.f.ret_is_borrow = matches!(sig.ret, Type::Borrow(_) | Type::BorrowMut(_));
+        self.f.ret_is_borrow = sig.ret.is_borrow_kind();
         self.f.ret_region = sig.ret_region.clone();
         self.f.sig_params = sig
             .params
@@ -1052,11 +1052,11 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Region well-formedness for a borrow-returning signature (design §3.3):
-    /// two-plus borrow params returning a borrow require a region variable;
+    /// Region well-formedness for a borrow-kind-returning signature (design §3.3):
+    /// two-plus borrow params returning a borrow OR view require a region variable;
     /// an explicit return region must be declared and tag some borrow param.
     fn check_signature_regions(&mut self, sig: &crate::resolve::FnSig) {
-        if !matches!(sig.ret, Type::Borrow(_) | Type::BorrowMut(_)) {
+        if !sig.ret.is_borrow_kind() {
             return;
         }
         let borrow_params: Vec<&crate::resolve::ParamInfo> =

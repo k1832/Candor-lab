@@ -917,7 +917,7 @@ impl<'a> Checker<'a> {
                         "subslice" | "substr" | "as_bytes" | "as_str" => args.first().and_then(|a| self.borrow_provenance(a)),
                         _ => {
                             if let Some(sig) = self.items.fns.get(name) {
-                                if matches!(sig.ret, Type::Borrow(_) | Type::BorrowMut(_)) {
+                                if sig.ret.is_borrow_kind() {
                                     let src = region_source_indices(sig);
                                     return src
                                         .first()
@@ -1397,9 +1397,11 @@ impl<'a> Checker<'a> {
         if sig.foreign && !self.items.externs.contains_key(&sig.name) {
             self.record_foreign_candor(&sig.name, span);
         }
-        // Return-borrow extension: the returned borrow keeps the loan(s) on the
-        // argument(s) tagged with the return's region alive (§3.1/§3.3).
-        if matches!(sig.ret, Type::Borrow(_) | Type::BorrowMut(_)) {
+        // Return-borrow extension: a returned borrow OR view (`[T]`/`str`) keeps
+        // the loan(s) on the argument(s) tagged with the return's region alive
+        // (§3.1/§3.3) — a view aliases its source's backing exactly as a borrow
+        // does, so a view laundered out of a call must carry the source loan.
+        if sig.ret.is_borrow_kind() {
             let src = region_source_indices(sig);
             let mut ids = Vec::new();
             let mut prov = None;

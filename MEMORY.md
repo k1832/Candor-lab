@@ -622,3 +622,22 @@ One lesson per entry, one-line summary first.
   still NOT native — MIR `Index` lowering handles Array/Slice only, not `Type::Str`
   ("index of non-array"); a `str_from`-then-use test must read the recovered view via
   `as_bytes(s)[i]` (native slice index), not `s[i]`. (str-view native, 2026-07-13).
+- **Loan provenance closes over ALL borrow-kind returns, not just `borrow`/`borrow_mut`.**
+  A user fn returning a VIEW (`slice T`/`slice_mut T`/`str`/`[u8]`) is a borrow-kind
+  return exactly like a `read`/`write` borrow return: the view aliases the source's
+  backing. But four checker gates spelled `matches!(sig.ret, Type::Borrow(_)
+  | Type::BorrowMut(_))` while `region_source_indices`/`is_borrow_param` already used
+  `is_borrow_kind()` for PARAMS — so view returns silently shed the argument loan.
+  Repro (check-clean, stale/freed read on native, sound answer differs): `fn view_of(
+  s: read String) -> [u8] { return as_bytes(as_str(read s)); }` then caller `append`s
+  (grow = free-old) while the returned `vb` is live. Fix: generalize all four gates to
+  `sig.ret.is_borrow_kind()` — `ret_is_borrow` (mod.rs:763, → E0806 return-provenance),
+  `check_signature_regions` (mod.rs:1059, → E0807 on 2+ borrow-param view returns),
+  `check_user_call` return-extension (expr.rs:1402), `borrow_provenance` user-call
+  branch (expr.rs:920) — plus `carries_borrow`'s user-Call arm (stmt.rs). Do NOT add a
+  SEPARATE view-provenance analysis: views obey the same "return directly from the
+  param, laundering through a local is E0806" rule borrows do (verified: borrow launder
+  through a local is already E0806). Zero corpus false positives (707 nextest green);
+  the one view-returning fixture (`slices.cnr` `first[region r](s: [i64]) -> [i64]`,
+  single slice param) stays clean because `is_borrow_param` marks slice params `is_bp`.
+  (loan-provenance function-return views, 2026-07-13).
