@@ -7,7 +7,10 @@
 
 use candor_proto::diag::Severity;
 use candor_proto::interp::FaultKind;
-use candor_proto::{check_source_real, run_source_real, RunResult};
+use candor_proto::{
+    check_source_real, run_source_real, run_source_real_mir, run_source_real_native,
+    run_source_real_native_opt, MirRunResult, RunResult,
+};
 
 fn errors(src: &str) -> Vec<String> {
     match check_source_real(src) {
@@ -45,6 +48,73 @@ fn run_fault(src: &str) -> FaultKind {
         }
         RunResult::ParseError(d) => panic!("expected fault, got parse error: {}", d.to_json()),
     }
+}
+
+// ---- all-engine drivers (design 0013 str-view native): a program's result must
+// match byte-for-byte across the tree-walking oracle, the MIR interpreter, and the
+// Cranelift native backend (no-opt + opt). The LLVM `clang -O2` fifth engine is
+// covered by the `tests/fixtures/run/str_view.cnr` corpus fixture (auto-scanned by
+// `tests/llvm.rs`'s full-corpus gate), the same pattern `string_native` uses.
+
+fn run_ret_all(src: &str) -> i64 {
+    let o = match run_source_real(src) {
+        RunResult::Ok(r) => r,
+        RunResult::Fault(f) => panic!("oracle faulted: {}", f.to_json()),
+        RunResult::CheckErrors(d) => {
+            panic!("check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>())
+        }
+        RunResult::ParseError(d) => panic!("parse error: {}", d.to_json()),
+    };
+    for (label, r) in [
+        ("mir", run_source_real_mir(src)),
+        ("native-noopt", run_source_real_native(src)),
+        ("native-opt", run_source_real_native_opt(src)),
+    ] {
+        match r {
+            MirRunResult::Ok(run) => {
+                assert_eq!(run.ret, o.ret, "{label} ret diverged from oracle");
+                assert_eq!(run.trace, o.trace, "{label} trace diverged from oracle");
+            }
+            MirRunResult::Fault(f) => panic!("{label} faulted: {}", f.to_json()),
+            MirRunResult::Unsupported(m) => panic!("{label} unsupported: {m}"),
+            MirRunResult::CheckErrors(d) => {
+                panic!("{label} check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>())
+            }
+            MirRunResult::ParseError(d) => panic!("{label} parse error: {}", d.to_json()),
+        }
+    }
+    o.ret
+}
+
+fn run_fault_all(src: &str) -> FaultKind {
+    let of = match run_source_real(src) {
+        RunResult::Fault(f) => f,
+        RunResult::Ok(r) => panic!("expected fault, got ret {}", r.ret),
+        RunResult::CheckErrors(d) => {
+            panic!("expected fault, got check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>())
+        }
+        RunResult::ParseError(d) => panic!("expected fault, got parse error: {}", d.to_json()),
+    };
+    for (label, r) in [
+        ("mir", run_source_real_mir(src)),
+        ("native-noopt", run_source_real_native(src)),
+        ("native-opt", run_source_real_native_opt(src)),
+    ] {
+        match r {
+            // The fault identity (kind AND span) must match the oracle byte-for-byte.
+            MirRunResult::Fault(f) => {
+                assert_eq!(f.kind, of.kind, "{label} fault kind diverged from oracle");
+                assert_eq!(f.span, of.span, "{label} fault span diverged from oracle");
+            }
+            MirRunResult::Ok(run) => panic!("{label}: expected fault, got ret {}", run.ret),
+            MirRunResult::Unsupported(m) => panic!("{label} unsupported: {m}"),
+            MirRunResult::CheckErrors(d) => {
+                panic!("{label} check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>())
+            }
+            MirRunResult::ParseError(d) => panic!("{label} parse error: {}", d.to_json()),
+        }
+    }
+    of.kind
 }
 
 // ---- str literal typing + no implicit coercion (P2) ------------------------
@@ -116,14 +186,14 @@ fn str_ordering_is_bytelexicographic() {
 #[test]
 fn substr_on_boundary_works() {
     // "héllo" bytes: h | é(2 bytes) | l l o. [0,3) = "hé" (3 bytes).
-    assert_eq!(run_ret("fn main() -> i64 { let s: str = substr(\"héllo\", 0, 3); return conv i64 len(s); }"), 3);
+    assert_eq!(run_ret_all("fn main() -> i64 { let s: str = substr(\"héllo\", 0, 3); return conv i64 len(s); }"), 3);
 }
 
 #[test]
 fn substr_mid_char_faults() {
     // Offset 2 falls inside the 2-byte `é` — a non-boundary slice is a bug (P5).
     assert_eq!(
-        run_fault("fn main() -> i64 { let s: str = substr(\"héllo\", 0, 2); return 0; }"),
+        run_fault_all("fn main() -> i64 { let s: str = substr(\"héllo\", 0, 2); return 0; }"),
         FaultKind::Bounds
     );
 }
@@ -131,7 +201,7 @@ fn substr_mid_char_faults() {
 #[test]
 fn substr_out_of_bounds_faults() {
     assert_eq!(
-        run_fault("fn main() -> i64 { let s: str = substr(\"abc\", 0, 9); return 0; }"),
+        run_fault_all("fn main() -> i64 { let s: str = substr(\"abc\", 0, 9); return 0; }"),
         FaultKind::Bounds
     );
 }
@@ -166,7 +236,7 @@ fn str_from_valid_bytes() {
                    Utf8Res::Invalid(off) => { return -1; }\n\
                  }\n\
                }";
-    assert_eq!(run_ret(src), 2);
+    assert_eq!(run_ret_all(src), 2);
 }
 
 #[test]
@@ -181,20 +251,22 @@ fn str_from_invalid_reports_offset() {
                    Utf8Res::Invalid(off) => { return conv i64 off; }\n\
                  }\n\
                }";
-    assert_eq!(run_ret(src), 1);
+    assert_eq!(run_ret_all(src), 1);
 }
 
 #[test]
 fn str_from_then_use() {
-    // Roundtrip: as_bytes a str, revalidate, index the recovered view.
+    // Roundtrip: as_bytes a str, revalidate, then read the recovered view back
+    // through its `[u8]` bytes ('c' == 99). (`str` byte-indexing itself is not yet
+    // a native op — a separate slice; here the view is read via `as_bytes`.)
     let src = "fn main() -> i64 {\n\
                  let bytes: [u8] = as_bytes(\"abc\");\n\
                  match str_from(bytes) {\n\
-                   Utf8Res::Valid(s) => { return conv i64 s[2]; }\n\
+                   Utf8Res::Valid(s) => { let bs: [u8] = as_bytes(s); return conv i64 bs[2]; }\n\
                    Utf8Res::Invalid(off) => { return -1; }\n\
                  }\n\
                }";
-    assert_eq!(run_ret(src), 99);
+    assert_eq!(run_ret_all(src), 99);
 }
 
 // ---- String (std, compiler-known): push / append / as_str ------------------

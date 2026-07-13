@@ -748,6 +748,18 @@ fn stmtkind_to(k: &StatementKind) -> Sexp {
             n(span.start),
             n(span.end),
         ]),
+        StatementKind::StrFrom { dst, src } => {
+            l(vec![a("strfrom"), place_to(dst), place_to(src)])
+        }
+        StatementKind::Substr { dst, src, lo, hi, span } => l(vec![
+            a("substr"),
+            place_to(dst),
+            place_to(src),
+            operand_to(lo),
+            operand_to(hi),
+            n(span.start),
+            n(span.end),
+        ]),
         StatementKind::CollectionOp { dst, op } => l(vec![a("collop"), place_to(dst), collop_to(op)]),
         StatementKind::Spawn { func, args } => l(vec![a("spawn"), s(func), args_to(args)]),
         StatementKind::ScopeBegin => l(vec![a("scopebegin")]),
@@ -873,6 +885,17 @@ fn stmtkind_from(sx: &Sexp) -> Result<StatementKind, String> {
             hi: operand_from(arg(args, 3)?)?,
             stride: arg(args, 4)?.num()?,
             span: Span { start: arg(args, 5)?.num()?, end: arg(args, 6)?.num()? },
+        },
+        "strfrom" => StatementKind::StrFrom {
+            dst: place_from(arg(args, 0)?)?,
+            src: place_from(arg(args, 1)?)?,
+        },
+        "substr" => StatementKind::Substr {
+            dst: place_from(arg(args, 0)?)?,
+            src: place_from(arg(args, 1)?)?,
+            lo: operand_from(arg(args, 2)?)?,
+            hi: operand_from(arg(args, 3)?)?,
+            span: Span { start: arg(args, 4)?.num()?, end: arg(args, 5)?.num()? },
         },
         "collop" => StatementKind::CollectionOp {
             dst: place_from(arg(args, 0)?)?,

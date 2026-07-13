@@ -353,6 +353,12 @@ impl<'a> Engine<'a> {
                     StatementKind::Subslice { dst, src, lo, hi, stride, span } => {
                         self.subslice_op(dst, src, *lo, *hi, *stride, *span, mf, frame)?;
                     }
+                    StatementKind::StrFrom { dst, src } => {
+                        self.str_from_op(dst, src, mf, frame)?;
+                    }
+                    StatementKind::Substr { dst, src, lo, hi, span } => {
+                        self.substr_op(dst, src, *lo, *hi, *span, mf, frame)?;
+                    }
                     StatementKind::CollectionOp { dst, op } => {
                         self.collection_op(dst, op, mf, frame)?;
                     }
@@ -665,6 +671,72 @@ impl<'a> Engine<'a> {
         }
         let (daddr, _) = self.place_addr(dst, mf, frame)?;
         self.write_u64(daddr, ptr + lo * stride)?;
+        self.write_u64(daddr + 8, hi - lo)?;
+        Ok(())
+    }
+
+    /// `str_from(b) -> Utf8Res` (design 0013 §4): UTF-8-validate the `[u8]` view at
+    /// `src`, building `Utf8Res::Valid(str)` (the same fat pointer) or
+    /// `Utf8Res::Invalid(offset)`. Mirrors the tree-walker `bi_str_from` — the
+    /// offset is `str::from_utf8().valid_up_to()`, the start of the first ill-formed
+    /// sequence.
+    fn str_from_op(&mut self, dst: &Place, src: &Place, mf: &MirFn, frame: &Frame) -> Result<(), Fault> {
+        let (saddr, _) = self.place_addr(src, mf, frame)?;
+        let ptr = self.read_u64(saddr)?;
+        let len = self.read_u64(saddr + 8)?;
+        let bytes = self.read_bytes(ptr, len)?;
+        let ures = Type::Named("Utf8Res".to_string());
+        let einfo = self
+            .lay()
+            .enum_info(&ures)
+            .ok_or_else(|| self.fault(FaultKind::Panic, Span::point(0), "unknown enum `Utf8Res`"))?;
+        let valid_idx = einfo.iter().position(|(n, _)| n == "Valid").unwrap_or(0);
+        let invalid_idx = einfo.iter().position(|(n, _)| n == "Invalid").unwrap_or(1);
+        let (daddr, _) = self.place_addr(dst, mf, frame)?;
+        match std::str::from_utf8(&bytes) {
+            Ok(_) => {
+                self.write_u64(daddr, valid_idx as u64)?;
+                let (_, off) = self.lay().payload_offset(&einfo[valid_idx].1, 0);
+                // `Valid`'s `str` payload IS the validated `{ptr, len}` fat pointer.
+                self.write_u64(daddr + off, ptr)?;
+                self.write_u64(daddr + off + 8, len)?;
+            }
+            Err(e) => {
+                self.write_u64(daddr, invalid_idx as u64)?;
+                let (_, off) = self.lay().payload_offset(&einfo[invalid_idx].1, 0);
+                self.write_u64(daddr + off, e.valid_up_to() as u64)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `substr(s, lo, hi) -> str` (design 0013 §3): the `[lo, hi)` byte sub-view,
+    /// faulting `Bounds` at `span` on an out-of-range OR non-char-boundary offset.
+    /// Mirrors the tree-walker `bi_substr` (`str_is_boundary`).
+    fn substr_op(
+        &mut self,
+        dst: &Place,
+        src: &Place,
+        lo: Operand,
+        hi: Operand,
+        span: Span,
+        mf: &MirFn,
+        frame: &Frame,
+    ) -> Result<(), Fault> {
+        let (saddr, _) = self.place_addr(src, mf, frame)?;
+        let ptr = self.read_u64(saddr)?;
+        let len = self.read_u64(saddr + 8)?;
+        let lo = self.eval_operand(&lo, mf, frame)? as u64;
+        let hi = self.eval_operand(&hi, mf, frame)? as u64;
+        if lo > hi || hi > len {
+            return Err(self.fault(FaultKind::Bounds, span, "substr out of bounds"));
+        }
+        let bytes = self.read_bytes(ptr, len)?;
+        if !str_is_boundary(&bytes, lo as usize) || !str_is_boundary(&bytes, hi as usize) {
+            return Err(self.fault(FaultKind::Bounds, span, "substr not on a char boundary"));
+        }
+        let (daddr, _) = self.place_addr(dst, mf, frame)?;
+        self.write_u64(daddr, ptr + lo)?;
         self.write_u64(daddr + 8, hi - lo)?;
         Ok(())
     }
@@ -1286,6 +1358,13 @@ fn map_hash(bytes: &[u8]) -> u64 {
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h
+}
+
+/// Is byte offset `i` a UTF-8 character boundary of the (well-formed) run `bytes`?
+/// A boundary is the start, the end, or any non-continuation byte (`& 0xC0 != 0x80`)
+/// — the `substr` boundary predicate, matching `interp::eval::str_is_boundary`.
+fn str_is_boundary(bytes: &[u8], i: usize) -> bool {
+    i == 0 || i == bytes.len() || (i < bytes.len() && (bytes[i] & 0xC0) != 0x80)
 }
 
 /// UTF-8-encode one Unicode scalar value, rejecting surrogates / out-of-range

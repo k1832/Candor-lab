@@ -1216,6 +1216,12 @@ impl<M: Module> Cg<'_, '_, M> {
             StatementKind::Subslice { dst, src, lo, hi, stride, span } => {
                 self.subslice_op(dst, src, lo, hi, *stride, *span, mf);
             }
+            StatementKind::StrFrom { dst, src } => {
+                self.str_from_op(dst, src, mf);
+            }
+            StatementKind::Substr { dst, src, lo, hi, span } => {
+                self.substr_op(dst, src, lo, hi, *span, mf);
+            }
             // The compiler-known `String` intrinsics (design 0013) lowered inline,
             // mirroring the MIR interpreter byte-for-byte (`mir::interp::collection_op`).
             // `Vec`/`Map` + String `push` (UTF-8) are the remaining forward slices.
@@ -2366,6 +2372,250 @@ impl<M: Module> Cg<'_, '_, M> {
         let newlen = self.b.ins().isub(hi, lo);
         let d8 = self.add_off(daddr, 8);
         self.store_u64(d8, newlen);
+    }
+
+    /// `str_from(b) -> Utf8Res` (design 0013 §4): scan `src`'s `[u8]` bytes for
+    /// UTF-8 well-formedness (the standard lead-class / continuation / overlong /
+    /// surrogate / range checks of `str::from_utf8`), building `Utf8Res::Valid(str)`
+    /// (the same `{ptr, len}` fat pointer, retyped) or `Utf8Res::Invalid(offset)`.
+    /// The `offset` is the START of the first ill-formed sequence — exactly the
+    /// `valid_up_to()` the interpreter oracle reports (byte-exact). No fault.
+    fn str_from_op(&mut self, dst: &Place, src: &Place, mf: &MirFn) {
+        let (saddr, _) = self.place_addr(src, mf);
+        let ptr = self.load_u64(saddr);
+        let s8 = self.add_off(saddr, 8);
+        let len = self.load_u64(s8);
+        let (daddr, _) = self.place_addr(dst, mf);
+        let ures = Type::Named("Utf8Res".to_string());
+        let einfo = self.lay().enum_info(&ures).expect("unknown enum `Utf8Res`");
+        let valid_idx = einfo.iter().position(|(n, _)| n == "Valid").unwrap_or(0);
+        let invalid_idx = einfo.iter().position(|(n, _)| n == "Invalid").unwrap_or(1);
+        let (_, valid_off) = self.lay().payload_offset(&einfo[valid_idx].1, 0);
+        let (_, invalid_off) = self.lay().payload_offset(&einfo[invalid_idx].1, 0);
+
+        let head = self.b.create_block();
+        let idx = self.b.append_block_param(head, types::I64);
+        let body = self.b.create_block();
+        let adv1 = self.b.create_block();
+        let notascii = self.b.create_block();
+        let m2 = self.b.create_block();
+        let m2b = self.b.create_block();
+        let adv2 = self.b.create_block();
+        let not2 = self.b.create_block();
+        let m3 = self.b.create_block();
+        let m3b = self.b.create_block();
+        let m3c = self.b.create_block();
+        let adv3 = self.b.create_block();
+        let not3 = self.b.create_block();
+        let m4 = self.b.create_block();
+        let m4b = self.b.create_block();
+        let m4c = self.b.create_block();
+        let m4d = self.b.create_block();
+        let adv4 = self.b.create_block();
+        let invalid = self.b.create_block();
+        let valid_exit = self.b.create_block();
+        let done = self.b.create_block();
+
+        let zero = self.iconst(0);
+        // Hoist the small step constants so they dominate every branch's offset math.
+        let one = self.iconst(1);
+        let two = self.iconst(2);
+        let three = self.iconst(3);
+        let four = self.iconst(4);
+        self.b.ins().jump(head, &[BlockArg::from(zero)]);
+        // head(idx): loop while idx < len.
+        self.b.switch_to_block(head);
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, idx, len);
+        self.b.ins().brif(more, body, &[], valid_exit, &[]);
+        // body: decode the sequence starting at idx.
+        self.b.switch_to_block(body);
+        let addr0 = self.b.ins().iadd(ptr, idx);
+        let b0 = self.load_scalar(addr0, ScalarTy::U8);
+        let c80 = self.iconst(0x80);
+        let ascii = self.b.ins().icmp(IntCC::UnsignedLessThan, b0, c80);
+        self.b.ins().brif(ascii, adv1, &[], notascii, &[]);
+        // adv1: one ASCII byte consumed.
+        self.b.switch_to_block(adv1);
+        let n1 = self.b.ins().iadd(idx, one);
+        self.b.ins().jump(head, &[BlockArg::from(n1)]);
+        // notascii: classify a 2-byte lead (0xC2..=0xDF).
+        self.b.switch_to_block(notascii);
+        let is_w2 = self.byte_in_range(b0, 0xC2, 0xDF);
+        self.b.ins().brif(is_w2, m2, &[], not2, &[]);
+        // m2: need one continuation byte present.
+        self.b.switch_to_block(m2);
+        let p1 = self.b.ins().iadd(idx, one);
+        let pres2 = self.b.ins().icmp(IntCC::UnsignedLessThan, p1, len);
+        self.b.ins().brif(pres2, m2b, &[], invalid, &[]);
+        self.b.switch_to_block(m2b);
+        let a1 = self.b.ins().iadd(ptr, p1);
+        let b1 = self.load_scalar(a1, ScalarTy::U8);
+        let cont2 = self.byte_is_cont(b1);
+        self.b.ins().brif(cont2, adv2, &[], invalid, &[]);
+        self.b.switch_to_block(adv2);
+        let n2 = self.b.ins().iadd(idx, two);
+        self.b.ins().jump(head, &[BlockArg::from(n2)]);
+        // not2: classify a 3-byte lead (0xE0..=0xEF).
+        self.b.switch_to_block(not2);
+        let is_w3 = self.byte_in_range(b0, 0xE0, 0xEF);
+        self.b.ins().brif(is_w3, m3, &[], not3, &[]);
+        self.b.switch_to_block(m3);
+        let p2 = self.b.ins().iadd(idx, two);
+        let pres3 = self.b.ins().icmp(IntCC::UnsignedLessThan, p2, len);
+        self.b.ins().brif(pres3, m3b, &[], invalid, &[]);
+        self.b.switch_to_block(m3b);
+        let p1_3 = self.b.ins().iadd(idx, one);
+        let a1_3 = self.b.ins().iadd(ptr, p1_3);
+        let b1_3 = self.load_scalar(a1_3, ScalarTy::U8);
+        // Second-byte range: E0 -> A0..BF, ED -> 80..9F, else 80..BF.
+        let is_e0 = self.icmp_eq_imm(b0, 0xE0);
+        let is_ed = self.icmp_eq_imm(b0, 0xED);
+        let c80v = self.iconst(0x80);
+        let ca0 = self.iconst(0xA0);
+        let cbf = self.iconst(0xBF);
+        let c9f = self.iconst(0x9F);
+        let lo3 = self.b.ins().select(is_e0, ca0, c80v);
+        let hi3 = self.b.ins().select(is_ed, c9f, cbf);
+        let ge_lo3 = self.b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, b1_3, lo3);
+        let le_hi3 = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, b1_3, hi3);
+        let ok2_3 = self.b.ins().band(ge_lo3, le_hi3);
+        self.b.ins().brif(ok2_3, m3c, &[], invalid, &[]);
+        self.b.switch_to_block(m3c);
+        let a2_3 = self.b.ins().iadd(ptr, p2);
+        let b2_3 = self.load_scalar(a2_3, ScalarTy::U8);
+        let cont3 = self.byte_is_cont(b2_3);
+        self.b.ins().brif(cont3, adv3, &[], invalid, &[]);
+        self.b.switch_to_block(adv3);
+        let n3 = self.b.ins().iadd(idx, three);
+        self.b.ins().jump(head, &[BlockArg::from(n3)]);
+        // not3: classify a 4-byte lead (0xF0..=0xF4); anything else is an invalid lead.
+        self.b.switch_to_block(not3);
+        let is_w4 = self.byte_in_range(b0, 0xF0, 0xF4);
+        self.b.ins().brif(is_w4, m4, &[], invalid, &[]);
+        self.b.switch_to_block(m4);
+        let p3 = self.b.ins().iadd(idx, three);
+        let pres4 = self.b.ins().icmp(IntCC::UnsignedLessThan, p3, len);
+        self.b.ins().brif(pres4, m4b, &[], invalid, &[]);
+        self.b.switch_to_block(m4b);
+        let p1_4 = self.b.ins().iadd(idx, one);
+        let a1_4 = self.b.ins().iadd(ptr, p1_4);
+        let b1_4 = self.load_scalar(a1_4, ScalarTy::U8);
+        // Second-byte range: F0 -> 90..BF, F4 -> 80..8F, else 80..BF.
+        let is_f0 = self.icmp_eq_imm(b0, 0xF0);
+        let is_f4 = self.icmp_eq_imm(b0, 0xF4);
+        let c80w = self.iconst(0x80);
+        let c90 = self.iconst(0x90);
+        let cbfw = self.iconst(0xBF);
+        let c8f = self.iconst(0x8F);
+        let lo4 = self.b.ins().select(is_f0, c90, c80w);
+        let hi4 = self.b.ins().select(is_f4, c8f, cbfw);
+        let ge_lo4 = self.b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, b1_4, lo4);
+        let le_hi4 = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, b1_4, hi4);
+        let ok2_4 = self.b.ins().band(ge_lo4, le_hi4);
+        self.b.ins().brif(ok2_4, m4c, &[], invalid, &[]);
+        self.b.switch_to_block(m4c);
+        let p2_4 = self.b.ins().iadd(idx, two);
+        let a2_4 = self.b.ins().iadd(ptr, p2_4);
+        let b2_4 = self.load_scalar(a2_4, ScalarTy::U8);
+        let cont4b = self.byte_is_cont(b2_4);
+        self.b.ins().brif(cont4b, m4d, &[], invalid, &[]);
+        self.b.switch_to_block(m4d);
+        let a3_4 = self.b.ins().iadd(ptr, p3);
+        let b3_4 = self.load_scalar(a3_4, ScalarTy::U8);
+        let cont4c = self.byte_is_cont(b3_4);
+        self.b.ins().brif(cont4c, adv4, &[], invalid, &[]);
+        self.b.switch_to_block(adv4);
+        let n4 = self.b.ins().iadd(idx, four);
+        self.b.ins().jump(head, &[BlockArg::from(n4)]);
+        // invalid(idx): build `Utf8Res::Invalid(idx)` (idx = first bad-sequence start).
+        self.b.switch_to_block(invalid);
+        let inv_tag = self.iconst(invalid_idx as i64);
+        self.store_u64(daddr, inv_tag);
+        let inv_slot = self.add_off(daddr, invalid_off);
+        self.store_u64(inv_slot, idx);
+        self.b.ins().jump(done, &[]);
+        // valid_exit: build `Utf8Res::Valid(str)` — the same `{ptr, len}` view.
+        self.b.switch_to_block(valid_exit);
+        let val_tag = self.iconst(valid_idx as i64);
+        self.store_u64(daddr, val_tag);
+        let val_slot = self.add_off(daddr, valid_off);
+        self.store_u64(val_slot, ptr);
+        let val_slot8 = self.add_off(daddr, valid_off + 8);
+        self.store_u64(val_slot8, len);
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+    }
+
+    /// `b in [lo, hi]` (unsigned) for an already-zero-extended byte value.
+    fn byte_in_range(&mut self, b: Value, lo: i64, hi: i64) -> Value {
+        let lov = self.iconst(lo);
+        let hiv = self.iconst(hi);
+        let ge = self.b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, b, lov);
+        let le = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, b, hiv);
+        self.b.ins().band(ge, le)
+    }
+    /// `b == imm`.
+    fn icmp_eq_imm(&mut self, b: Value, imm: i64) -> Value {
+        let v = self.iconst(imm);
+        self.b.ins().icmp(IntCC::Equal, b, v)
+    }
+    /// Is `b` a UTF-8 continuation byte (`b & 0xC0 == 0x80`)?
+    fn byte_is_cont(&mut self, b: Value) -> Value {
+        let mask = self.iconst(0xC0);
+        let masked = self.b.ins().band(b, mask);
+        let c80 = self.iconst(0x80);
+        self.b.ins().icmp(IntCC::Equal, masked, c80)
+    }
+
+    /// `substr(s, lo, hi) -> str` (design 0013 §3): the `[lo, hi)` byte sub-view,
+    /// faulting `Bounds` at `span` on `lo > hi || hi > len` OR when `lo`/`hi` is not
+    /// a UTF-8 character boundary. Mirrors the interpreter `bi_substr` byte-for-byte.
+    fn substr_op(&mut self, dst: &Place, src: &Place, lo: &Operand, hi: &Operand, span: Span, mf: &MirFn) {
+        let (saddr, _) = self.place_addr(src, mf);
+        let ptr = self.load_u64(saddr);
+        let s8 = self.add_off(saddr, 8);
+        let len = self.load_u64(s8);
+        let lo = self.eval_operand(lo, mf);
+        let hi = self.eval_operand(hi, mf);
+        let lo_gt_hi = self.b.ins().icmp(IntCC::UnsignedGreaterThan, lo, hi);
+        let hi_gt_len = self.b.ins().icmp(IntCC::UnsignedGreaterThan, hi, len);
+        let oob = self.b.ins().bor(lo_gt_hi, hi_gt_len);
+        self.fault_if(oob, FaultKind::Bounds, span);
+        // Char-boundary check for lo and hi (a non-boundary continuation byte faults).
+        let lo_bad = self.boundary_bad(ptr, lo, len);
+        let hi_bad = self.boundary_bad(ptr, hi, len);
+        let bad = self.b.ins().bor(lo_bad, hi_bad);
+        self.fault_if(bad, FaultKind::Bounds, span);
+        let (daddr, _) = self.place_addr(dst, mf);
+        let newptr = self.b.ins().iadd(ptr, lo);
+        self.store_u64(daddr, newptr);
+        let newlen = self.b.ins().isub(hi, lo);
+        let d8 = self.add_off(daddr, 8);
+        self.store_u64(d8, newlen);
+    }
+
+    /// Is byte offset `i` NOT a char boundary of the run at `ptr` (len `len`)?
+    /// `i == 0 || i == len` is always a boundary; otherwise the byte at `i` must
+    /// not be a continuation byte. Returns an i1 (true = fault). Guards the load so
+    /// `i == len` never reads past the run.
+    fn boundary_bad(&mut self, ptr: Value, i: Value, len: Value) -> Value {
+        let zero = self.iconst(0);
+        let is0 = self.b.ins().icmp(IntCC::Equal, i, zero);
+        let islen = self.b.ins().icmp(IntCC::Equal, i, len);
+        let skip = self.b.ins().bor(is0, islen);
+        let load_b = self.b.create_block();
+        let merge = self.b.create_block();
+        let bad = self.b.append_block_param(merge, types::I8);
+        // The `skip` (boundary) path carries `false` (an I8 bool, matching `icmp`).
+        let f = self.b.ins().iconst(types::I8, 0);
+        self.b.ins().brif(skip, merge, &[BlockArg::from(f)], load_b, &[]);
+        self.b.switch_to_block(load_b);
+        let a = self.b.ins().iadd(ptr, i);
+        let byte = self.load_scalar(a, ScalarTy::U8);
+        let cont = self.byte_is_cont(byte);
+        self.b.ins().jump(merge, &[BlockArg::from(cont)]);
+        self.b.switch_to_block(merge);
+        bad
     }
 
     /// Drop a Box pointee at `addr` by calling its synthesized glue function

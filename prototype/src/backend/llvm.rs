@@ -405,6 +405,16 @@ fn classify_tiers(mf: &MirFn) -> Vec<bool> {
                     mark(dst, &mut tf);
                     mark(src, &mut tf);
                 }
+                // str_from / substr copy through place ADDRESSES (`place_addr`),
+                // so their result + source fat-pointer slots must live flat.
+                StatementKind::StrFrom { dst, src } => {
+                    mark(dst, &mut tf);
+                    mark(src, &mut tf);
+                }
+                StatementKind::Substr { dst, src, .. } => {
+                    mark(dst, &mut tf);
+                    mark(src, &mut tf);
+                }
                 // Collection ops write their result and read element/value operands
                 // through place ADDRESSES (`place_addr`), so those slots must be flat.
                 StatementKind::CollectionOp { dst, op } => {
@@ -2216,6 +2226,283 @@ impl<'a> FnEmit<'a> {
         Ok(())
     }
 
+    /// `b & 0xC0 == 0x80` (i1): is `b` a UTF-8 continuation byte?
+    fn byte_is_cont(&mut self, b: &str) -> String {
+        let m = self.t();
+        self.line(&format!("{m} = and i64 {b}, 192"));
+        let r = self.t();
+        self.line(&format!("{r} = icmp eq i64 {m}, 128"));
+        r
+    }
+    /// `b in [lo, hi]` (unsigned, i1).
+    fn byte_in_range(&mut self, b: &str, lo: u32, hi: u32) -> String {
+        let ge = self.t();
+        self.line(&format!("{ge} = icmp uge i64 {b}, {lo}"));
+        let le = self.t();
+        self.line(&format!("{le} = icmp ule i64 {b}, {hi}"));
+        let r = self.t();
+        self.line(&format!("{r} = and i1 {ge}, {le}"));
+        r
+    }
+
+    /// `str_from(b) -> Utf8Res` (design 0013 §4): scan `src`'s `[u8]` bytes for
+    /// UTF-8 well-formedness (lead-class / continuation / overlong / surrogate /
+    /// range — the `str::from_utf8` algorithm), building `Utf8Res::Valid(str)` (the
+    /// same `{ptr, len}` view, retyped) or `Utf8Res::Invalid(offset)`, where
+    /// `offset` is the START of the first ill-formed sequence — exactly the
+    /// `valid_up_to()` the interpreter oracle reports (byte-exact). No fault.
+    fn str_from_op(&mut self, dst: &Place, src: &Place) -> Result<(), String> {
+        let (saddr, _) = self.place_addr(src)?;
+        let ptr = self.load_u64(&saddr);
+        let s8 = self.add_off_candor(&saddr, 8);
+        let len = self.load_u64(&s8);
+        let (daddr, _) = self.place_addr(dst)?;
+        let ures = Type::Named("Utf8Res".to_string());
+        let einfo = self.lay.enum_info(&ures).ok_or("unknown enum `Utf8Res`")?;
+        let valid_idx = einfo.iter().position(|(n, _)| n == "Valid").unwrap_or(0);
+        let invalid_idx = einfo.iter().position(|(n, _)| n == "Invalid").unwrap_or(1);
+        let (_, valid_off) = self.lay.payload_offset(&einfo[valid_idx].1, 0);
+        let (_, invalid_off) = self.lay.payload_offset(&einfo[invalid_idx].1, 0);
+
+        let pre = self.l();
+        let head = self.l();
+        let body = self.l();
+        let adv1 = self.l();
+        let notascii = self.l();
+        let m2 = self.l();
+        let m2b = self.l();
+        let adv2 = self.l();
+        let not2 = self.l();
+        let m3 = self.l();
+        let m3b = self.l();
+        let m3c = self.l();
+        let adv3 = self.l();
+        let not3 = self.l();
+        let m4 = self.l();
+        let m4b = self.l();
+        let m4c = self.l();
+        let m4d = self.l();
+        let adv4 = self.l();
+        let invalid = self.l();
+        let valid_exit = self.l();
+        let done = self.l();
+
+        let idx = self.t();
+        let n1 = self.t();
+        let n2 = self.t();
+        let n3 = self.t();
+        let n4 = self.t();
+
+        self.line(&format!("br label %{pre}"));
+        self.label(&pre);
+        self.line(&format!("br label %{head}"));
+        self.label(&head);
+        self.line(&format!(
+            "{idx} = phi i64 [ 0, %{pre} ], [ {n1}, %{adv1} ], [ {n2}, %{adv2} ], [ {n3}, %{adv3} ], [ {n4}, %{adv4} ]"
+        ));
+        let more = self.t();
+        self.line(&format!("{more} = icmp ult i64 {idx}, {len}"));
+        self.line(&format!("br i1 {more}, label %{body}, label %{valid_exit}"));
+        // body: decode the sequence starting at idx.
+        self.label(&body);
+        let a0 = self.t();
+        self.line(&format!("{a0} = add i64 {ptr}, {idx}"));
+        let b0 = self.load_scalar(&a0, ScalarTy::U8);
+        let ascii = self.t();
+        self.line(&format!("{ascii} = icmp ult i64 {b0}, 128"));
+        self.line(&format!("br i1 {ascii}, label %{adv1}, label %{notascii}"));
+        self.label(&adv1);
+        self.line(&format!("{n1} = add i64 {idx}, 1"));
+        self.line(&format!("br label %{head}"));
+        // 2-byte lead (0xC2..=0xDF).
+        self.label(&notascii);
+        let is_w2 = self.byte_in_range(&b0, 0xC2, 0xDF);
+        self.line(&format!("br i1 {is_w2}, label %{m2}, label %{not2}"));
+        self.label(&m2);
+        let p1 = self.t();
+        self.line(&format!("{p1} = add i64 {idx}, 1"));
+        let pres2 = self.t();
+        self.line(&format!("{pres2} = icmp ult i64 {p1}, {len}"));
+        self.line(&format!("br i1 {pres2}, label %{m2b}, label %{invalid}"));
+        self.label(&m2b);
+        let a1 = self.t();
+        self.line(&format!("{a1} = add i64 {ptr}, {p1}"));
+        let bb1 = self.load_scalar(&a1, ScalarTy::U8);
+        let cont2 = self.byte_is_cont(&bb1);
+        self.line(&format!("br i1 {cont2}, label %{adv2}, label %{invalid}"));
+        self.label(&adv2);
+        self.line(&format!("{n2} = add i64 {idx}, 2"));
+        self.line(&format!("br label %{head}"));
+        // 3-byte lead (0xE0..=0xEF).
+        self.label(&not2);
+        let is_w3 = self.byte_in_range(&b0, 0xE0, 0xEF);
+        self.line(&format!("br i1 {is_w3}, label %{m3}, label %{not3}"));
+        self.label(&m3);
+        let p1b = self.t();
+        self.line(&format!("{p1b} = add i64 {idx}, 1"));
+        let p2 = self.t();
+        self.line(&format!("{p2} = add i64 {idx}, 2"));
+        let pres3 = self.t();
+        self.line(&format!("{pres3} = icmp ult i64 {p2}, {len}"));
+        self.line(&format!("br i1 {pres3}, label %{m3b}, label %{invalid}"));
+        self.label(&m3b);
+        let a1_3 = self.t();
+        self.line(&format!("{a1_3} = add i64 {ptr}, {p1b}"));
+        let b1_3 = self.load_scalar(&a1_3, ScalarTy::U8);
+        // Second-byte range: E0 -> A0..BF, ED -> 80..9F, else 80..BF.
+        let is_e0 = self.t();
+        self.line(&format!("{is_e0} = icmp eq i64 {b0}, 224"));
+        let is_ed = self.t();
+        self.line(&format!("{is_ed} = icmp eq i64 {b0}, 237"));
+        let lo3 = self.t();
+        self.line(&format!("{lo3} = select i1 {is_e0}, i64 160, i64 128"));
+        let hi3 = self.t();
+        self.line(&format!("{hi3} = select i1 {is_ed}, i64 159, i64 191"));
+        let ge3 = self.t();
+        self.line(&format!("{ge3} = icmp uge i64 {b1_3}, {lo3}"));
+        let le3 = self.t();
+        self.line(&format!("{le3} = icmp ule i64 {b1_3}, {hi3}"));
+        let ok2_3 = self.t();
+        self.line(&format!("{ok2_3} = and i1 {ge3}, {le3}"));
+        self.line(&format!("br i1 {ok2_3}, label %{m3c}, label %{invalid}"));
+        self.label(&m3c);
+        let a2_3 = self.t();
+        self.line(&format!("{a2_3} = add i64 {ptr}, {p2}"));
+        let b2_3 = self.load_scalar(&a2_3, ScalarTy::U8);
+        let cont3 = self.byte_is_cont(&b2_3);
+        self.line(&format!("br i1 {cont3}, label %{adv3}, label %{invalid}"));
+        self.label(&adv3);
+        self.line(&format!("{n3} = add i64 {idx}, 3"));
+        self.line(&format!("br label %{head}"));
+        // 4-byte lead (0xF0..=0xF4); anything else is an invalid lead.
+        self.label(&not3);
+        let is_w4 = self.byte_in_range(&b0, 0xF0, 0xF4);
+        self.line(&format!("br i1 {is_w4}, label %{m4}, label %{invalid}"));
+        self.label(&m4);
+        let p1c = self.t();
+        self.line(&format!("{p1c} = add i64 {idx}, 1"));
+        let p2c = self.t();
+        self.line(&format!("{p2c} = add i64 {idx}, 2"));
+        let p3 = self.t();
+        self.line(&format!("{p3} = add i64 {idx}, 3"));
+        let pres4 = self.t();
+        self.line(&format!("{pres4} = icmp ult i64 {p3}, {len}"));
+        self.line(&format!("br i1 {pres4}, label %{m4b}, label %{invalid}"));
+        self.label(&m4b);
+        let a1_4 = self.t();
+        self.line(&format!("{a1_4} = add i64 {ptr}, {p1c}"));
+        let b1_4 = self.load_scalar(&a1_4, ScalarTy::U8);
+        // Second-byte range: F0 -> 90..BF, F4 -> 80..8F, else 80..BF.
+        let is_f0 = self.t();
+        self.line(&format!("{is_f0} = icmp eq i64 {b0}, 240"));
+        let is_f4 = self.t();
+        self.line(&format!("{is_f4} = icmp eq i64 {b0}, 244"));
+        let lo4 = self.t();
+        self.line(&format!("{lo4} = select i1 {is_f0}, i64 144, i64 128"));
+        let hi4 = self.t();
+        self.line(&format!("{hi4} = select i1 {is_f4}, i64 143, i64 191"));
+        let ge4 = self.t();
+        self.line(&format!("{ge4} = icmp uge i64 {b1_4}, {lo4}"));
+        let le4 = self.t();
+        self.line(&format!("{le4} = icmp ule i64 {b1_4}, {hi4}"));
+        let ok2_4 = self.t();
+        self.line(&format!("{ok2_4} = and i1 {ge4}, {le4}"));
+        self.line(&format!("br i1 {ok2_4}, label %{m4c}, label %{invalid}"));
+        self.label(&m4c);
+        let a2_4 = self.t();
+        self.line(&format!("{a2_4} = add i64 {ptr}, {p2c}"));
+        let b2_4 = self.load_scalar(&a2_4, ScalarTy::U8);
+        let cont4b = self.byte_is_cont(&b2_4);
+        self.line(&format!("br i1 {cont4b}, label %{m4d}, label %{invalid}"));
+        self.label(&m4d);
+        let a3_4 = self.t();
+        self.line(&format!("{a3_4} = add i64 {ptr}, {p3}"));
+        let b3_4 = self.load_scalar(&a3_4, ScalarTy::U8);
+        let cont4c = self.byte_is_cont(&b3_4);
+        self.line(&format!("br i1 {cont4c}, label %{adv4}, label %{invalid}"));
+        self.label(&adv4);
+        self.line(&format!("{n4} = add i64 {idx}, 4"));
+        self.line(&format!("br label %{head}"));
+        // invalid: build `Utf8Res::Invalid(idx)`.
+        self.label(&invalid);
+        self.store_u64(&daddr, &format!("{invalid_idx}"));
+        let inv_slot = self.add_off_candor(&daddr, invalid_off);
+        self.store_u64(&inv_slot, &idx);
+        self.line(&format!("br label %{done}"));
+        // valid_exit: build `Utf8Res::Valid(str)` — the same `{ptr, len}` view.
+        self.label(&valid_exit);
+        self.store_u64(&daddr, &format!("{valid_idx}"));
+        let val_slot = self.add_off_candor(&daddr, valid_off);
+        self.store_u64(&val_slot, &ptr);
+        let val_slot8 = self.add_off_candor(&daddr, valid_off + 8);
+        self.store_u64(&val_slot8, &len);
+        self.line(&format!("br label %{done}"));
+        self.label(&done);
+        Ok(())
+    }
+
+    /// Is byte offset `i` NOT a char boundary of the run at `ptr` (len `len`)?
+    /// `i == 0 || i == len` is always a boundary; otherwise the byte at `i` must not
+    /// be a continuation byte. Returns an i1 (true = fault); guards the load so
+    /// `i == len` never reads past the run.
+    fn boundary_bad(&mut self, ptr: &str, i: &str, len: &str) -> String {
+        let is0 = self.t();
+        self.line(&format!("{is0} = icmp eq i64 {i}, 0"));
+        let islen = self.t();
+        self.line(&format!("{islen} = icmp eq i64 {i}, {len}"));
+        let skip = self.t();
+        self.line(&format!("{skip} = or i1 {is0}, {islen}"));
+        let bload = self.l();
+        let bok = self.l();
+        let bmerge = self.l();
+        self.line(&format!("br i1 {skip}, label %{bok}, label %{bload}"));
+        self.label(&bload);
+        let a = self.t();
+        self.line(&format!("{a} = add i64 {ptr}, {i}"));
+        let byte = self.load_scalar(&a, ScalarTy::U8);
+        let cont = self.byte_is_cont(&byte);
+        self.line(&format!("br label %{bmerge}"));
+        self.label(&bok);
+        self.line(&format!("br label %{bmerge}"));
+        self.label(&bmerge);
+        let bad = self.t();
+        self.line(&format!("{bad} = phi i1 [ false, %{bok} ], [ {cont}, %{bload} ]"));
+        bad
+    }
+
+    /// `substr(s, lo, hi) -> str` (design 0013 §3): the `[lo, hi)` byte sub-view,
+    /// faulting `Bounds` at `span` on `lo > hi || hi > len` OR when `lo`/`hi` is not
+    /// a UTF-8 character boundary. Mirrors the interpreter `bi_substr` byte-for-byte.
+    fn substr_op(&mut self, dst: &Place, src: &Place, lo: &Operand, hi: &Operand, span: Span) -> Result<(), String> {
+        let (saddr, _) = self.place_addr(src)?;
+        let ptr = self.load_u64(&saddr);
+        let s8 = self.add_off_candor(&saddr, 8);
+        let len = self.load_u64(&s8);
+        let lo = self.operand(lo);
+        let hi = self.operand(hi);
+        let lo_gt_hi = self.t();
+        self.line(&format!("{lo_gt_hi} = icmp ugt i64 {lo}, {hi}"));
+        let hi_gt_len = self.t();
+        self.line(&format!("{hi_gt_len} = icmp ugt i64 {hi}, {len}"));
+        let oob = self.t();
+        self.line(&format!("{oob} = or i1 {lo_gt_hi}, {hi_gt_len}"));
+        self.fault_if(&oob, FaultKind::Bounds, span);
+        let lo_bad = self.boundary_bad(&ptr, &lo, &len);
+        let hi_bad = self.boundary_bad(&ptr, &hi, &len);
+        let bad = self.t();
+        self.line(&format!("{bad} = or i1 {lo_bad}, {hi_bad}"));
+        self.fault_if(&bad, FaultKind::Bounds, span);
+        let (daddr, _) = self.place_addr(dst)?;
+        let newptr = self.t();
+        self.line(&format!("{newptr} = add i64 {ptr}, {lo}"));
+        self.store_u64(&daddr, &newptr);
+        let newlen = self.t();
+        self.line(&format!("{newlen} = sub i64 {hi}, {lo}"));
+        let d8 = self.add_off_candor(&daddr, 8);
+        self.store_u64(&d8, &newlen);
+        Ok(())
+    }
+
     /// Drop a Box pointee at flat address `addr` (mirrors `lower::drop_box`):
     /// recursively drop the pointee through its glue fn, then free the block —
     /// guarded by `ptr != 0` (a null / OOM Box owns nothing).
@@ -2492,6 +2779,12 @@ impl<'a> FnEmit<'a> {
             // The compiler-known `String` intrinsics (design 0013), lowered inline to
             // mirror `mir::interp::collection_op` byte-for-byte (Cranelift `lower`'s
             // twin). `Vec`/`Map` + String `push` (UTF-8) are the remaining slices.
+            StatementKind::StrFrom { dst, src } => {
+                self.str_from_op(dst, src)?;
+            }
+            StatementKind::Substr { dst, src, lo, hi, span } => {
+                self.substr_op(dst, src, lo, hi, *span)?;
+            }
             StatementKind::CollectionOp { dst, op } => {
                 self.collection_op(dst, op)?;
             }

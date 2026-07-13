@@ -291,6 +291,16 @@ fn stmt_uses(kind: &StatementKind, live: &mut HashSet<LocalId>) {
             op_use(lo, live);
             op_use(hi, live);
         }
+        StatementKind::StrFrom { dst, src } => {
+            place_use(dst, live);
+            place_use(src, live);
+        }
+        StatementKind::Substr { dst, src, lo, hi, .. } => {
+            place_use(dst, live);
+            place_use(src, live);
+            op_use(lo, live);
+            op_use(hi, live);
+        }
         // A collection intrinsic reads its receiver base, index/key/value operands
         // and places, and writes its result place — all live uses.
         StatementKind::CollectionOp { dst, op } => {

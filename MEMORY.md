@@ -577,3 +577,48 @@ One lesson per entry, one-line summary first.
   computed in a dedicated back-edge block so the `phi` predecessor stays a concrete
   label (the map_grow rehash pattern); Cranelift uses `BlockArg` params and is
   immune. This CLOSED the native-collections arc (S5, 2026-07-13).
+
+- **The native str-view family is complete: `str_from` (validated → `Utf8Res`) and
+  `substr` (char-boundary slice → str) both landed native, joining the already-native
+  `str_from_unchecked`/`as_bytes`.** Both are new top-level `StatementKind`s
+  (`StrFrom`/`Substr`, twins of the existing `Subslice`), NOT `CollOp`s — they have no
+  5-word collection header. `str_from` needs a real UTF-8 validation LOOP in each
+  backend; `substr` is `Subslice` + two char-boundary byte-checks (no loop). Plumb a
+  new StatementKind through SIX sites: `mir/mod.rs` (def), `mir/build.rs`
+  (`is_builtin` + `lower_builtin_into` — and `lower_scrutinee` needs a
+  `builtin_static_ret` arm so `match str_from(x)` types its scrutinee, else "match on
+  an indirect call"), `mir/interp.rs` (handler), `mir/opt.rs` (`stmt_uses` liveness;
+  non-Assign/Store kinds are never DCE'd so no removal logic), `mir/serial.rs`
+  (ser+deser round-trip), and BOTH backends (`backend/lower.rs` Cranelift +
+  `backend/llvm.rs` LLVM emit, plus llvm `classify_tiers` must mark dst+src Tier-F
+  since they go through `place_addr`). The MIR interp mirrors the tree-walker by
+  calling `std::str::from_utf8().valid_up_to()` directly (byte-exact, no hand loop);
+  only the two NATIVE backends hand-roll the scan. Key facts that made it byte-exact:
+  (1) Rust's `run_utf8_validation` sets `valid_up_to = old_offset` (the START of the
+  bad sequence) for EVERY failure class, so the native loop's single `invalid` exit
+  just carries the current `index` — no per-byte sub-offset tracking. (2) The 3-byte
+  second-byte range collapses to `lo = (b0==0xE0)?0xA0:0x80, hi = (b0==0xED)?0x9F:0xBF`
+  and 4-byte to `lo = (b0==0xF0)?0x90:0x80, hi = (b0==0xF4)?0x8F:0xBF` — one select
+  pair each, covering overlong+surrogate+range. (3) width via lead class 0xC2..=0xDF
+  / 0xE0..=0xEF / 0xF0..=0xF4 (else invalid lead) then an upfront `index+w<=len`
+  presence check is offset-equivalent to Rust's per-byte `next!()`. GOTCHA (cost me a
+  Cranelift verifier round): in a multi-block loop, a value computed in one branch
+  (e.g. `p1 = idx+1` in the width-2 arm, or the `iconst 1/2/3/4` step constants) must
+  NOT be reused in a sibling branch it doesn't dominate — "uses value from
+  non-dominating inst". Hoist the shared step constants to the entry block (they then
+  dominate all) and recompute each branch's byte offsets LOCALLY. LLVM's textual phi
+  forgives forward-refs so the same structure with a single back-edge (`adv1..adv4 ->
+  head` phi) just works. `substr`'s boundary check needs a guarded load (skip when
+  `i==0||i==len` so `i==len` never reads past the run) — a small diamond (Cranelift
+  `BlockArg` / LLVM `phi i1`); mind Cranelift `icmp` returns `I8`, so the skip-path
+  const must be `iconst.i8 0`, not the I64 `iconst` helper. `substr` faults reuse
+  `FaultKind::Bounds` at the CALL span (`lower_builtin_into`'s `self.cur_span` == the
+  tree-walker's `bi_substr(args, span)` span) for both the out-of-range and
+  non-boundary cases; the gate checks kind+span only, so the two distinct messages are
+  fine. One `tests/fixtures/run/str_view.cnr` (self-contained `fn main() -> i64`, no
+  allocator) auto-enlists in all six corpus engines; flip the interp-only `text.rs`
+  str_from/substr cases to all-engine via `run_ret_all`/`run_fault_all` (oracle·MIR·
+  native-noopt·native-opt; LLVM via the fixture). NOTE `str` byte-INDEXING (`s[i]`) is
+  still NOT native — MIR `Index` lowering handles Array/Slice only, not `Type::Str`
+  ("index of non-array"); a `str_from`-then-use test must read the recovered view via
+  `as_bytes(s)[i]` (native slice index), not `s[i]`. (str-view native, 2026-07-13).

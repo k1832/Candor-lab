@@ -1063,6 +1063,12 @@ impl<'a> Lowerer<'a> {
                             .ok_or_else(|| LowerError("match on unresolved method call".into()))?;
                         self.items.fns[fnname.as_str()].ret.clone()
                     }
+                    // A compiler-known builtin returning an enum (`str_from -> Utf8Res`,
+                    // `pop -> Opt`): its result type comes from the static-ret table.
+                    ExprKind::Ident(n) => match self.builtin_static_ret(n, args) {
+                        Some(ty) => ty,
+                        None => return unsupported("match on an indirect call"),
+                    },
                     _ => return unsupported("match on an indirect call"),
                 };
                 let place = self.materialize_place(e, &ret)?;
@@ -2648,6 +2654,25 @@ impl<'a> Lowerer<'a> {
                 self.emit(StatementKind::CopyVal { dst: dst.clone(), src, ty: ty.clone() }, span, false);
                 Ok(())
             }
+            "str_from" => {
+                // UTF-8-validate the `[u8]` fat pointer (design 0013 §4), building
+                // the `Utf8Res` enum at `dst`. The backends/MIR interp mirror the
+                // tree-walker `bi_str_from` byte-for-byte (`str::from_utf8`).
+                let bytes = Type::Slice(Box::new(Type::Scalar(ScalarTy::U8)));
+                let src = self.materialize_place(&args[0], &bytes)?;
+                self.emit(StatementKind::StrFrom { dst: dst.clone(), src }, span, false);
+                Ok(())
+            }
+            "substr" => {
+                // The `[lo, hi)` char-boundary-checked sub-view (design 0013 §3);
+                // `lo`/`hi` are byte offsets. The `Bounds` fault reuses the call
+                // span, exactly as the tree-walker `bi_substr` (`self.cur_span = span`).
+                let src = self.materialize_place(&args[0], &Type::Str)?;
+                let (lo, _) = self.lower_value(&args[1], Some(&Type::usize()))?;
+                let (hi, _) = self.lower_value(&args[2], Some(&Type::usize()))?;
+                self.emit(StatementKind::Substr { dst: dst.clone(), src, lo, hi, span }, span, false);
+                Ok(())
+            }
             _ => unsupported(format!("aggregate builtin `{name}`")),
         }
     }
@@ -2761,7 +2786,7 @@ fn is_builtin(name: &str) -> bool {
         name,
         "box" | "unbox" | "ptr_read" | "ptr_write" | "ptr_offset" | "addr_of" | "addr_of_mut"
             | "is_null" | "ptr_to_addr" | "slice_of" | "slice_of_mut" | "subslice" | "as_bytes"
-            | "str_from_unchecked" | "len"
+            | "str_from_unchecked" | "str_from" | "substr" | "len"
     )
 }
 

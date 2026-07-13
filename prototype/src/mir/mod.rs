@@ -245,6 +245,19 @@ pub enum StatementKind {
     /// `subslice(s, lo, hi)` (design 0004): a bounds-checked slice re-header into
     /// `dst`; `lo > hi || hi > len` faults `Bounds` at `span`.
     Subslice { dst: Place, src: Place, lo: Operand, hi: Operand, stride: u64, span: Span },
+    /// `str_from(b) -> Utf8Res` (design 0013 §4): UTF-8-validate `src`'s `[u8]`
+    /// byte view, building `Utf8Res::Valid(str)` — the SAME `{ptr, len}` fat
+    /// pointer, retyped — on a well-formed run, or `Utf8Res::Invalid(offset)`
+    /// carrying the byte offset of the first ill-formed sequence (the offset
+    /// `str::from_utf8().valid_up_to()` reports). An ENUM result written to `dst`,
+    /// never a fault.
+    StrFrom { dst: Place, src: Place },
+    /// `substr(s, lo, hi) -> str` (design 0013 §3): the `[lo, hi)` byte sub-view
+    /// written to `dst`. Faults `Bounds` at `span` when `lo > hi || hi > len`, OR
+    /// when `lo`/`hi` does not fall on a UTF-8 character boundary (a continuation
+    /// byte `0x80..=0xBF`) — one `Bounds` family for "this offset is not valid for
+    /// this str", mirroring the tree-walker `bi_substr`.
+    Substr { dst: Place, src: Place, lo: Operand, hi: Operand, span: Span },
     /// `spawn CALLEE(args)` inside a `scope` (design 0012 §1.1). The SEQUENTIAL
     /// ORACLE (tree-walker, MIR interp) runs the task inline at this point in spawn
     /// order — valid by SC-for-DRF (§6). The NATIVE backend (design 0012 Stage 2)
