@@ -225,7 +225,19 @@ fn for_over_str_yields_bytes() {
 
 #[test]
 fn as_bytes_is_free_retype() {
-    assert_eq!(run_ret("fn main() -> i64 { let b: [u8] = as_bytes(\"hello\"); return conv i64 len(b); }"), 5);
+    assert_eq!(run_ret_all("fn main() -> i64 { return conv i64 len(as_bytes(\"hello\")); }"), 5);
+}
+
+#[test]
+fn len_of_inline_slice_call() {
+    // `len` of a NON-place fat pointer (an inline `as_bytes`/`substr` call, not a
+    // bound local): the arg has no address, so MIR materializes it into a temp
+    // before reading the length word — mirroring the tree-walker's `eval_value`.
+    // `substr("hello", 1, 4)` == "ell" -> 3 bytes.
+    assert_eq!(
+        run_ret_all("fn main() -> i64 { return conv i64 len(as_bytes(substr(\"hello\", 1, 4))); }"),
+        3
+    );
 }
 
 #[test]
@@ -256,17 +268,37 @@ fn str_from_invalid_reports_offset() {
 
 #[test]
 fn str_from_then_use() {
-    // Roundtrip: as_bytes a str, revalidate, then read the recovered view back
-    // through its `[u8]` bytes ('c' == 99). (`str` byte-indexing itself is not yet
-    // a native op — a separate slice; here the view is read via `as_bytes`.)
+    // Roundtrip: as_bytes a str, revalidate, then byte-index the recovered `str`
+    // view directly ('c' == 99) — `str[i]` is a native op (design 0013 §3).
     let src = "fn main() -> i64 {\n\
                  let bytes: [u8] = as_bytes(\"abc\");\n\
                  match str_from(bytes) {\n\
-                   Utf8Res::Valid(s) => { let bs: [u8] = as_bytes(s); return conv i64 bs[2]; }\n\
+                   Utf8Res::Valid(s) => { return conv i64 s[2]; }\n\
                    Utf8Res::Invalid(off) => { return -1; }\n\
                  }\n\
                }";
     assert_eq!(run_ret_all(src), 99);
+}
+
+#[test]
+fn str_index_reads_bytes() {
+    // `s[i]` — the byte at `i` (design 0013 §3), byte-exact on every engine.
+    // "abc": s[0] == 'a' (97), s[2] == 'c' (99); 97 + 99 == 196.
+    let src = "fn main() -> i64 {\n\
+                 let s: str = \"abc\";\n\
+                 let a: i64 = conv i64 s[0];\n\
+                 let c: i64 = conv i64 s[2];\n\
+                 return a + c;\n\
+               }";
+    assert_eq!(run_ret_all(src), 196);
+}
+
+#[test]
+fn str_index_out_of_bounds_faults() {
+    // `s[i]` past the end faults `Bounds` at the index span — the SAME fault the
+    // slice-index path emits, byte-exact (kind + span) on every engine.
+    let src = "fn main() -> i64 { let s: str = \"abc\"; return conv i64 s[3]; }";
+    assert_eq!(run_fault_all(src), FaultKind::Bounds);
 }
 
 // ---- String (std, compiler-known): push / append / as_str ------------------

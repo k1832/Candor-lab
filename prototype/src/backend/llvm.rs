@@ -653,6 +653,8 @@ impl<'a> FnEmit<'a> {
                     ty = match &ty {
                         Type::Array(e, _) => (**e).clone(),
                         Type::Slice(e) | Type::SliceMut(e) => (**e).clone(),
+                        // `str[i]` -> the byte `u8` (design 0013 §3).
+                        Type::Str => Type::Scalar(ScalarTy::U8),
                         _ => Type::Error,
                     };
                 }

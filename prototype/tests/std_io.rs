@@ -1019,8 +1019,7 @@ fn bw_flush(w: write BufWriter) alloc -> IoResult {
 }
 fn bw_write_str(w: write BufWriter, s: str) alloc -> IoResult {
     append(write w.*.buf, s);
-    let view: [u8] = as_bytes(as_str(read w.buf));
-    if len(view) >= 4096usize {
+    if len(as_bytes(as_str(read w.buf))) >= 4096usize {
         let n: usize = bw_flush(w)?;
     }
     return IoResult::Ok(0usize);

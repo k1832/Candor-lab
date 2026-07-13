@@ -988,6 +988,15 @@ impl<'a> Lowerer<'a> {
                         pl.proj.push(Proj::Index { index: idx, stride, len: 0, span: self.cur_span, slice: true });
                         Ok((pl, (**elem).clone()))
                     }
+                    // `str[i]` yields the byte `u8` at `i` (design 0013 §3): a `str`
+                    // is a `{ptr@0, len@8}` fat pointer with stride-1 `u8` elements,
+                    // so it reuses the slice-index header read and its `Bounds` fault.
+                    Type::Str => {
+                        let u8t = Type::Scalar(ScalarTy::U8);
+                        let stride = self.stride_of(&u8t);
+                        pl.proj.push(Proj::Index { index: idx, stride, len: 0, span: self.cur_span, slice: true });
+                        Ok((pl, u8t))
+                    }
                     _ => unsupported("index of non-array"),
                 }
             }
@@ -1021,6 +1030,20 @@ impl<'a> Lowerer<'a> {
 
     /// Get a place for an aggregate argument: a real place if `e` names one, else
     /// materialize the value into a fresh temp and return that temp's place.
+    /// Whether `e` names a place (so `lower_place` handles it directly). Mirrors
+    /// `materialize_place`'s place arms; a non-place expr must be materialized
+    /// into a temp before it can be addressed.
+    fn is_place_expr(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Paren(i) => Self::is_place_expr(i),
+            ExprKind::Ident(_)
+            | ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Prefix { op: PrefixOp::Deref, .. } => true,
+            _ => false,
+        }
+    }
+
     fn materialize_place(&mut self, e: &Expr, ty: &Type) -> LR<Place> {
         match &e.kind {
             ExprKind::Ident(_)
@@ -2271,7 +2294,19 @@ impl<'a> Lowerer<'a> {
                     let id = self.emit_temp(Type::usize(), Rvalue::Load { place, ty: Type::usize() }, span);
                     return Ok((Operand::Local(id), Type::usize()));
                 }
-                let (pl, ty) = self.lower_place(&args[0])?;
+                // A place arg reads its length word in place; a non-place arg (an
+                // inline call returning a fat pointer, e.g. `len(as_bytes(x))`) has
+                // no address, so materialize it into a temp local first, then read
+                // its length — mirroring the tree-walker's `eval_value` in `bi_len`.
+                let (pl, ty) = if Self::is_place_expr(&args[0]) {
+                    self.lower_place(&args[0])?
+                } else {
+                    let aty = self
+                        .static_ty(&args[0])
+                        .ok_or_else(|| LowerError("cannot type `len` argument".into()))?;
+                    let pl = self.materialize_place(&args[0], &aty)?;
+                    (pl, aty)
+                };
                 match &ty {
                     // `str`/`[u8]`/`[T]` fat pointers carry the length word at offset 8.
                     Type::Slice(_) | Type::SliceMut(_) | Type::Str => {

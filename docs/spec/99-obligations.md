@@ -4356,3 +4356,56 @@ NEXT: a streaming `Lines: Iter` adapter (blocked on 0009 RefIndexed borrowed-yie
 must yield each line by borrow); the `String` realloc ABI / an in-place
 `string_clear` (would drop BufWriter's per-flush realloc); `str[i]` byte indexing and
 the deferred `str_from`/`substr` native lowering.
+
+## STR-INDEX-NATIVE + NON-PLACE-LEN — `str[i]` byte-indexing lowers, and non-collection `len` accepts a non-place (temporary) fat-pointer argument (2026-07-13)
+
+Two native-lowering completeness gaps closed; MIR-lowering only — no checker,
+collection-op, or fault-identity change. Byte-exact with the tree-walker across
+tree · MIR · Cranelift (no-opt + opt) · LLVM -O2.
+
+- (A) NON-PLACE `len`. The non-collection `len` (slice/array/str fat-pointer
+  length, NOT the Vec/Map/String CollectionOp header read) lowered its argument
+  AS A PLACE — reading the length word at offset 8 of the header in memory — so a
+  temporary (`len(as_bytes(x))`, `len(<inline call returning a slice/str>)`) had
+  no address and hit "unsupported place". FIX (`src/mir/build.rs`, the `"len"`
+  value builtin): when the arg is NOT a place (new `is_place_expr` helper,
+  mirroring `materialize_place`'s place arms), take its static type and
+  `materialize_place` it into a fresh temp local, then read the length word from
+  THAT temp — exactly what the tree-walker's `bi_len` does (`eval_value` first,
+  then read offset 8). A place arg keeps the unchanged `lower_place` path. The
+  collection `len` (offset-8 header word) is untouched. Flipped the in-fixture
+  workarounds proving the direct form lowers + runs byte-exact: `tests/std_io.rs`
+  `bw_write_str` now `if len(as_bytes(as_str(read w.buf))) >= 4096usize` (no
+  `view` binding — proven on tree + MIR via
+  `buf_writer_round_trip_crosses_flush_threshold_both_engines`), and `tests/text.rs`
+  `as_bytes_is_free_retype` is now inline `len(as_bytes("hello"))` on ALL engines
+  (`run_ret_all`), plus a focused `len_of_inline_slice_call`
+  (`len(as_bytes(substr("hello",1,4)))` == 3) on all engines.
+
+- (B) `str[i]` BYTE-INDEXING. The `Index` place lowering handled
+  `Type::Array`/`Type::Slice`/`SliceMut` but not `Type::Str`, so `s[i]` was
+  interp-only. A `str` is a `{ptr@0, len@8}` fat pointer with stride-1 `u8`
+  elements, so the new `Type::Str` arm reuses the slice-index path verbatim
+  (`Proj::Index { stride: 1, slice: true, span }`) — the SAME `Bounds` fault
+  (kind + span) the slice-index path emits — yielding a `u8`. The three MIR
+  engines' post-index element-type match (`src/mir/interp.rs`,
+  `src/backend/lower.rs`, `src/backend/llvm.rs`) gained a `Type::Str =>
+  Scalar(U8)` arm; the tree-walker (`src/interp/eval.rs`) already handled
+  `str[i]` and is the oracle. GATES (`tests/text.rs`): `str_index_reads_bytes`
+  (in-range `s[0]`,`s[2]` -> 97+99 == 196, all engines via `run_ret_all`),
+  `str_index_out_of_bounds_faults` (`s[3]` -> `Bounds`, kind + span, all engines
+  via `run_fault_all`); `str_from_then_use` now byte-indexes the recovered `str`
+  directly (`s[2]`) instead of `as_bytes(s)[2]`. Corpus fixture
+  `tests/fixtures/run/str_index.cnr` (loop-indexed `"candor"` bytes, folded ==
+  631) is auto-scanned by the Cranelift + LLVM full-corpus gates
+  (`gate_aot_full_corpus`, `gate_llvm_full_corpus_fifth_engine`,
+  `gate_full_corpus_four_engine`).
+
+- Full `cargo nextest` green (691 tests, +3); clippy clean; all native gates
+  (aot / llvm / stage_a/b/d corpus, text, std_io, vec/map/string_native) pass.
+
+NEXT (unchanged remaining debt): a streaming `Lines: Iter` adapter (blocked on
+0009 RefIndexed borrowed-yield — must yield each line by borrow); the `String`
+realloc ABI / an in-place `string_clear`/`string_truncate` (would drop
+BufWriter's per-flush realloc); the deferred `str_from`/`substr` are already
+native, `str[i]` and non-place `len` are now landed.

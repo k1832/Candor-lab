@@ -1,0 +1,20 @@
+// `str[i]` byte-indexing (design 0013 §3): a `str` is a `{ptr, len}` fat pointer
+// with stride-1 `u8` elements, so `s[i]` reads the byte at `i` — bounds-faulting
+// exactly like a slice index. Every engine — the tree-walking oracle, the MIR
+// interpreter, and the Cranelift / LLVM native backends — must agree byte-for-byte
+// on the traced bytes and the folded return.
+fn main() -> i64 {
+    let s: str = "candor";
+    let n: usize = len(s);
+    let mut acc: i64 = 0;
+    let mut i: usize = 0usize;
+    loop {
+        if i >= n { break; }
+        let b: i64 = conv i64 s[i];
+        trace(b);
+        acc = acc + b;
+        i = i + 1usize;
+    }
+    // c+a+n+d+o+r = 99+97+110+100+111+114 = 631.
+    return acc;
+}
