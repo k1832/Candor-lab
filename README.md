@@ -39,7 +39,7 @@ The language's central bet (value-first memory model, Bet 5) was tested against 
 
 Since then: the real surface syntax is designed and reviewed (design 0006), a normative specification skeleton exists with every gap tracked (docs/spec/), generics and modules are designed and reviewed (0007/0008), the novel fault-window semantics is formalized to its single-threaded core (reviewed, repaired), and the prototype implements the real syntax with a working P15 migrator, multi-file modules, full stage-2 generics (definition-site-checked, monomorphized without re-analysis, generic impls and drop hooks), a growing core/std library written in Candor (Opt/Res/Arena/List, iteration protocols, Opt::map, From-based error widening) whose P9 layering the checker itself proves, iteration and associated types (design 0009), and VS Code support (TextMate grammar + a diagnostics LSP over the P4 machine-readable diagnostics).
 
-The checker has survived eight adversarial review rounds (twelve soundness holes found and closed, all documented).
+The checker has survived nine adversarial review rounds (seventeen soundness holes found and closed, all documented) — the latest, the design-0015 borrowed-iteration review, surfaced a family of five safe-code use-after-frees in the *shipping* loan checker (a borrow/slice/`str`-view losing its loan when copied, aliased, retyped, or returned from a function or interface method), each reproduced, fixed, and regression-gated across all engines.
 
 Live records: [docs/RESULTS.md](docs/RESULTS.md), [docs/spec/99-obligations.md](docs/spec/99-obligations.md), [docs/reviews/](docs/reviews/). Nothing is stable; NN#14's gate obligations are met but no stability has been declared.
 
