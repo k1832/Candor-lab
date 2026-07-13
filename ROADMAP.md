@@ -422,6 +422,21 @@ MIR and mirroring the Cranelift backend op-for-op. Emitter landed ~2100 lines.
 2. **Real std + I/O.** Iterator adapters (map/filter/fold over the 0009 protocol), a formatting
    story, and a std I/O layer over the P17 boundary (files/network). This is what lets people
    write REAL programs (today's std is Opt/Res/Arena/List/Vec/Map/String).
+   *In progress (2026-07-13). LANDED: the formatting foundation (fmt_i64 + the Show/Display
+   convention) and println through the std_io libc-write boundary, both-engine byte-exact;
+   iterator adapters (fold/map/filter, fully generic over any Iter); the I/O error story
+   (Res-typed IoError + Res/Opt combinators + ? confirmed in-tree/cross-module). Then the
+   FOUNDATION for real programs: a reclaiming free-list allocator (first-fit + splitting +
+   forward/backward coalescing, native on both backends), and on top of it String/Vec/Map now
+   COMPILE TO NATIVE CODE on Cranelift and LLVM (allocate + grow + reclaim through that allocator,
+   drop-free on scope end), byte-exact vs the interpreter across all five engines -- lifting the
+   old interpreter-only ceiling. Along the way, feature work flushed out and fixed real compiler
+   bugs: a coherence-checker overlap bug, method dispatch on call-shaped receivers, a
+   cross-module monomorphization span-collision (a memory-safety bug), call-site associated-type
+   projection normalization, and audit-teeth on generic boundary modules. REMAINING: native
+   String-based file I/O (line/buffered readers/writers -- now unblocked by native String),
+   realloc (the one allocator ABI decision), best-fit; richer std (dir/network I/O, more
+   combinators).*
 3. **Stability + packaging.** The 1.0 gate (editions/migrator exist via P15), a package manager,
    dependency handling. What lets OTHERS build on it.
 4. **Reach.** More platforms (ARM/macOS/Windows/bare-metal; today x86-64 Linux), richer
