@@ -590,17 +590,26 @@ impl<'a> Checker<'a> {
     }
 
     /// A borrow value read out of an existing place *aliases* that place's
-    /// borrow: a copy or move of a `read`/`write` borrow points into the same
-    /// borrowed memory, so the loan(s) the source binding holds must extend to
-    /// wherever the value lands (design §2.3). This is what makes `let c = b;`
-    /// keep `b`'s loan live under `c`; without it the copy sheds the loan and a
-    /// later move/free of the borrowed place is a use-after-free the checker
-    /// misses. Fresh transient loans (same place, kind, span) are recorded and
-    /// marked carried, so the landing binding anchors them to its own live range
-    /// exactly as a fresh borrow would.
+    /// borrow: a copy or move of a `read`/`write` borrow — or of a `slice`/
+    /// `slice_mut`, which is a fat pointer into its backing the same way — points
+    /// into the same borrowed memory, so the loan(s) the source binding holds must
+    /// extend to wherever the value lands (design §2.3). This is what makes
+    /// `let c = b;` (or `let s2 = s;`) keep the source loan live under the copy;
+    /// without it the copy sheds the loan and a later move/free/realloc of the
+    /// borrowed backing is a use-after-free the checker misses. Fresh transient
+    /// loans (same place, kind, span) are recorded and marked carried, so the
+    /// landing binding anchors them to its own live range exactly as a fresh
+    /// borrow would.
     pub(super) fn propagate_place_loans(&mut self, place: &Option<Place>, ty: &Type) {
         let root = match place {
-            Some(p) if matches!(ty, Type::Borrow(_) | Type::BorrowMut(_)) => p.root.clone(),
+            Some(p)
+                if matches!(
+                    ty,
+                    Type::Borrow(_) | Type::BorrowMut(_) | Type::Slice(_) | Type::SliceMut(_)
+                ) =>
+            {
+                p.root.clone()
+            }
             _ => return,
         };
         let sources: Vec<LoanInfo> = self

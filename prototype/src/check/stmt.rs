@@ -172,9 +172,10 @@ impl<'a> Checker<'a> {
     /// be anchored at its landing binding (design §2.1/§3.1). Recognized: an
     /// explicit `read`/`write` borrow, a slice op, a call whose signature returns
     /// a borrow (its return-extended loan is carried), and a bare place already
-    /// holding a `read`/`write` borrow — a copy that aliases the source, so the
-    /// source loan must extend to the new binding (`let c = b;`). Without the last
-    /// case a copied borrow shed its loan, admitting a use-after-free.
+    /// holding a `read`/`write` borrow or a `slice`/`slice_mut` — a copy that
+    /// aliases the source, so the source loan must extend to the new binding
+    /// (`let c = b;` / `let s2 = s;`). Without the last case a copied borrow or
+    /// slice shed its loan, admitting a use-after-free.
     pub(super) fn carries_borrow(&self, e: &crate::ast::Expr) -> bool {
         match &e.kind {
             ExprKind::Paren(i) => self.carries_borrow(i),
@@ -184,7 +185,9 @@ impl<'a> Checker<'a> {
             } => true,
             ExprKind::Ident(name) => matches!(
                 self.lookup_local(name).map(|li| &li.ty),
-                Some(Type::Borrow(_) | Type::BorrowMut(_))
+                Some(
+                    Type::Borrow(_) | Type::BorrowMut(_) | Type::Slice(_) | Type::SliceMut(_)
+                )
             ),
             ExprKind::Call { callee, .. } => {
                 if let ExprKind::Ident(name) = &callee.kind {

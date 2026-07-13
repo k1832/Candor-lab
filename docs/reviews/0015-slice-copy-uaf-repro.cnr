@@ -1,0 +1,49 @@
+// 0015 review F1 residual — the SLICE-copy use-after-free (a `[T]`/`[T] mut` is a
+// fat pointer into its backing, `copy` the same way a borrow is). VERIFIED:
+// pre-fix `candor check` exited 0 and `candor run` (tree oracle) faulted reading
+// the freed box slot; post-fix `candor check` rejects it E0802 ("cannot move out
+// of `bx` while it is borrowed"). Sibling of 0015-loan-copy-uaf-repro.cn.
+//
+// `escape` boxes a [4]i64, takes a shared slice of the boxed array, COPIES the
+// slice (`let s2 = s;` — this shed the loan), then `unbox(bx)` moves/frees the
+// box while `s2` still points into it, and reads `s2[0]` — a use-after-free.
+
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free:  fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize }
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "bump owns [ctx..)" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let mask: usize = align - 1;
+        let aligned: usize = (b.next + mask) / align * align;
+        if aligned + size > b.end { return ptr_null[u8](); }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit { }
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+fn mk_alloc(state: write Bump) -> Alloc {
+    unsafe "handle + backing outlive the Box" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) };
+    }
+}
+fn escape(a: read Alloc) alloc -> i64 {
+    match box(read a, [10, 20, 30, 40]) {
+        BoxResult::oom => return 0 - 1,
+        BoxResult::boxed(bx) => {
+            let s = slice_of(bx.*);
+            let s2 = s;                 // sheds the loan on `bx` (the hole)
+            let owned: [4]i64 = unbox(bx);   // frees the box while `s2` points in
+            return s2[0];               // use-after-free
+        },
+    }
+}
+fn main() alloc -> i64 {
+    let mut st: Bump = Bump { next: 16777216, end: 33554432 };
+    let al: Alloc = mk_alloc(write st);
+    return escape(read al);
+}

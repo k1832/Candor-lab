@@ -245,6 +245,56 @@ fn slice_mut_conflicts_with_array_access() {
     );
 }
 
+// ---- slice-copy use-after-free (design 0015 review F1 residual) -----------
+// A slice (`[T]`/`[T] mut`) is a fat pointer into its backing, `copy` the same
+// way a borrow is. A slice copied into a new binding must keep its source loan
+// live under the copy: without it `let s2 = s;` shed the loan and the checker
+// admitted a use-after-free (a write/realloc/move of the backing while the copy
+// still points in). Each rejection below checked CLEAN before the fix.
+
+#[test]
+fn slice_copy_then_read_source_exclusive() {
+    // An exclusive-slice copy freezes the backing: reading the array directly
+    // while the copy is live is E0804 (the copy did not shed the loan).
+    assert_has(
+        "fn f() -> unit { let mut a: [4]i64 = [0, 0, 0, 0]; let s = slice_of_mut(a); \
+         let s2 = s; use_i(a[0]); use_i(s2[0]); }",
+        "E0804",
+    );
+}
+
+#[test]
+fn slice_copy_then_write_source() {
+    // A shared-slice copy keeps the backing frozen: writing the array while the
+    // copy is live is E0803.
+    assert_has(
+        "fn f() -> unit { let mut a: [4]i64 = [0, 0, 0, 0]; let s = slice_of(a); \
+         let s2 = s; a[0] = 1; use_i(s2[0]); }",
+        "E0803",
+    );
+}
+
+#[test]
+fn slice_copy_chained_then_read_source() {
+    // Propagation is transitive across slice copies: `s3` copies `s2` copies `s`;
+    // the exclusive loan on `a` reaches `s3` and freezes the direct read.
+    assert_has(
+        "fn f() -> unit { let mut a: [4]i64 = [0, 0, 0, 0]; let s = slice_of_mut(a); \
+         let s2 = s; let s3 = s2; use_i(a[0]); use_i(s3[0]); }",
+        "E0804",
+    );
+}
+
+#[test]
+fn slice_copy_dead_before_conflict_is_clean() {
+    // NLL positive: the slice copy dies before the backing is rewritten, so the
+    // copy pattern itself introduces no false positive.
+    assert_clean(
+        "fn f() -> unit { let mut a: [4]i64 = [0, 0, 0, 0]; let s = slice_of(a); \
+         let s2 = s; use_i(s2[0]); a[0] = 1; }",
+    );
+}
+
 // ---- §3.3: signature regions & provenance ---------------------------------
 
 #[test]

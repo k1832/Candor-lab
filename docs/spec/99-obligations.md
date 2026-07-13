@@ -4453,8 +4453,23 @@ local (E0806), copy-of-a-return-extended-borrow-then-write (E0803), plus an NLL 
 native collections/allocator corpus; `--profile fast` green; clippy clean. No existing test
 changed verdict — no valid borrow-copy/reborrow pattern was newly rejected.
 
-RESIDUAL (reported, not closed). Slice values (`Type::Slice`/`SliceMut`) are `copy` and alias
-their backing array the same way; a `let s2 = s;` copy still sheds (a separate, pre-existing
-sub-class, not the F1-verified hole). Extending propagation to slices was left out to avoid
-perturbing the heavy slice corpus without a verified repro; it should be revisited with its own
-repro before closing.
+RESIDUAL — RESOLVED (2026-07-13, verified repro + scoped fix). Slice values (`Type::Slice`/
+`SliceMut`) are `copy` and alias their backing the same way, and a `let s2 = s;` copy shed the
+loan identically. A VERIFIED safe-code repro (`docs/reviews/0015-slice-copy-uaf-repro.cnr`):
+`box` a `[4]i64`, `let s = slice_of(bx.*); let s2 = s; let owned = unbox(bx); return s2[0];`
+— pre-fix `candor check` exited 0 and the tree oracle faulted reading the freed box slot; the
+same program without the `let s2 = s;` copy was correctly rejected E0802, so the copy was the
+shed. FIX: `propagate_place_loans` (`src/check/mod.rs`) and the `carries_borrow` bare-place gate
+(`src/check/stmt.rs`) are extended from `Type::Borrow`/`BorrowMut` to also cover `Type::Slice`/
+`SliceMut` — a copied slice now records transient copies of its source's loans and anchors them
+to the new binding's live range, exactly as the borrow copy does. The repro now fails check
+E0802; four `slice_copy_*` regressions in `tests/loans.rs` (exclusive-copy-then-read-source
+E0804, shared-copy-then-write-source E0803, chained/transitive copy E0804, plus an NLL positive
+that stays clean) each checked CLEAN pre-fix. Full `cargo nextest` green (699 + 4 = 703), no
+existing test changed verdict — the heavy slice corpus (vec / vec_native / std_io / selfhost
+checker/analyses/interp/lower / stage_a-d native gates) stays green, so no valid slice code was
+newly rejected. Scoped deliberately to `Slice`/`SliceMut`; a separate observation (NOT this
+sub-class, not fixed): `as_str`/`as_bytes`/`substr` views of a native `String` record no loan at
+all (they retype through `arg0`/`Use::Value`), so a String realloc while a view is live is
+accepted even without any copy — but that path does not fault in the current engines (no verified
+UAF), so it is left as a distinct open question rather than folded in here.
