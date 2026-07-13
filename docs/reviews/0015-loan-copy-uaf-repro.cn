@@ -1,0 +1,49 @@
+// Runnable §11.5 — arena compiler pass. arena_push/arena_get/fold_consts verbatim
+// from §11.5. ADAPTED: `Node` gains a `copy` marker so the `[Node; 4096]` backing
+// can be constructed; `apply` is a real adder; a bump allocator + `main` added.
+
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free:  fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize }
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "bump owns [ctx..)" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let mask: usize = align - 1;
+        let aligned: usize = (b.next + mask) / align * align;
+        if aligned + size > b.end { return ptr_null[u8](); }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit { }
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+fn mk_alloc(state: write Bump) -> Alloc {
+    unsafe "handle + backing outlive the Arena's Box" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(deref state)), vt: addr_of(BUMP_VT) };
+    }
+}
+
+copy enum Node { leaf(i64), binop(u8, u32, u32) }   // ADAPTED: `copy`
+
+
+struct S { x: i64 }
+fn use_it(b: read S) -> i64 { return (deref b).x; }
+fn escape2(a: read Alloc) alloc -> i64 {
+    match box(read a, S { x: 7 }) {
+        case BoxResult::oom => return 0 - 1,
+        case BoxResult::boxed(bx) => {
+            let b = read (deref bx);
+            let c = b;
+            let owned: S = unbox(bx);
+            return use_it(read (deref c));
+        }
+    }
+}
+fn main() alloc -> i64 {
+    let mut st: Bump = Bump { next: 16777216, end: 33554432 };
+    let al: Alloc = mk_alloc(write st);
+    return escape2(read al);
+}
