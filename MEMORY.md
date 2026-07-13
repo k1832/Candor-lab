@@ -539,3 +539,41 @@ One lesson per entry, one-line summary first.
   used, so it can only ever join physically-adjacent blocks (no overlap, no gap).
   All addressing via `ptr_to_addr`/`addr_to_ptr` — no new primitive, lowers
   natively like the existing MVP. (FREELIST-ALLOC split+coalesce, 2026-07-13).
+
+- **Native collection gates for needs_drop elements must drain the collection empty
+  at scope end (until collection-drop lands).** The MIR/tree interp's `drop_value`
+  has a `Type::App("Vec"/"Map")` arm that drops each live element + frees the buffer
+  at scope end, but native `emit_drop`/`needs_drop`/`walk_glue` have NO `Type::App`
+  arm yet (collection-drop is a separate later slice) — a live collection leaks
+  natively. That leak is observable-invisible ONLY if no element drop fires at scope
+  end. So a byte-exact native drop gate (e.g. Vec `set` drop-on-overwrite with a
+  hook-bearing element) must pop/consume every remaining element so the collection is
+  empty when it goes out of scope; otherwise interp fires the surviving hooks and
+  native doesn't → trace divergence. Drop-on-overwrite itself (VecSet → `emit_drop`
+  of the old element) IS native and byte-exact for hook-bearing/non-Box elements; a
+  `Vec<Box>` overwrite would silently skip the Box free because `walk_glue` lacks a
+  `Vec` arm to collect the element glue — fold both into the collection-drop slice.
+  Also: the LLVM backend tiers wordy locals to registers, so a `CollectionOp` result
+  read through `place_addr` (e.g. VecGet's `read elem` borrow dst, or a VecPush/Set
+  value operand) must be marked Tier-F in `classify_tiers`; Cranelift stack-allocates
+  every local so it needs no such change (native collections slice #3, 2026-07-13).
+
+- **Native collection drop = the interp `drop_value` mirror, gated by the counting
+  allocator's `live` balance.** `emit_drop`/`needs_drop`/`walk_glue` (both
+  `backend/lower.rs` + `backend/llvm.rs`) needed a `Type::App("Vec"|"Map")` +
+  `Type::Named("String")` arm to free the buffer (and drop live elements/values, free
+  Map keys) at scope end — the `String` arm MUST precede the generic-struct arm since
+  `String` is a synthesized nominal struct. The move mask already suppresses a
+  moved-out collection's drop (`mir::build::emit_drop` emits no `Drop` when the whole
+  value is moved, same as Box) — no drop flags needed. Prove free/no-leak cheaply by
+  running the fixture over the COUNTING BUMP allocator (`tests/vec.rs` ALLOC:
+  `live = allocs - frees`) and returning `bs.live` — the aot/stage_d/llvm corpus gates
+  auto-scan `tests/fixtures/run/*.cnr` and compare native to the oracle, so `live != 0`
+  (leak) or `< 0` (double free) diverges and fails. Prove REUSE with the reclaiming
+  free-list + a tight window + a many-iteration build-and-drop loop (a leak OOM-faults
+  `vec_reserve`). GOTCHA: the CLI binary is `target/debug/candor` (NOT `candor-proto`,
+  which is a stale leftover) — `cargo run --bin candor` or nextest, never the stale
+  path. LLVM loop bodies that call `emit_drop` need the loop-carried `phi` next-value
+  computed in a dedicated back-edge block so the `phi` predecessor stays a concrete
+  label (the map_grow rehash pattern); Cranelift uses `BlockArg` params and is
+  immune. This CLOSED the native-collections arc (S5, 2026-07-13).
