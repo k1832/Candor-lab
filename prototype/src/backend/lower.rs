@@ -34,7 +34,8 @@ use std::collections::HashMap;
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{
-    types, AbiParam, Block, FuncRef, InstBuilder, MemFlags, Signature, TrapCode, UserFuncName, Value,
+    types, AbiParam, Block, BlockArg, FuncRef, InstBuilder, MemFlags, Signature, TrapCode,
+    UserFuncName, Value,
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -1835,10 +1836,366 @@ impl<M: Module> Cg<'_, '_, M> {
                 self.b.ins().jump(cont, &[]);
                 self.b.switch_to_block(cont);
             }
-            _ => unimplemented!(
-                "native backend: Map collection intrinsics are MIR-interp only"
-            ),
+            CollOp::MapInsert { base, valty, key, value, span } => {
+                let base = self.eval_operand(base, mf);
+                let (kaddr, _) = self.place_addr(key, mf);
+                let kptr = self.load_u64(kaddr);
+                let ka8 = self.add_off(kaddr, 8);
+                let klen = self.load_u64(ka8);
+                let vsz = self.size_of(valty);
+                let stride = crate::interp::mem::round_up(24 + vsz, 8) as i64;
+                let (vaddr, _) = self.place_addr(value, mf);
+                let buf0 = self.load_u64(base);
+                let b16 = self.add_off(base, 16);
+                let cap0 = self.load_u64(b16);
+                let (found, slot) = self.map_find(buf0, cap0, stride, kptr, klen);
+                let zero = self.iconst(0);
+                let one = self.iconst(1);
+                let is_found = self.b.ins().icmp(IntCC::NotEqual, found, zero);
+                let over_b = self.b.create_block();
+                let ins_b = self.b.create_block();
+                let done = self.b.create_block();
+                self.b.ins().brif(is_found, over_b, &[], ins_b, &[]);
+                // Present key: drop the displaced value (drop-on-overwrite, like
+                // `VecSet`), then move the new value into the slot.
+                self.b.switch_to_block(over_b);
+                let stridev = self.iconst(stride);
+                let so = self.b.ins().imul(slot, stridev);
+                let sb = self.b.ins().iadd(buf0, so);
+                let voff = self.add_off(sb, 24);
+                self.emit_drop(voff, valty, &[], &mut Vec::new());
+                self.call_copy(voff, vaddr, vsz);
+                self.b.ins().jump(done, &[]);
+                // Absent key: grow/rehash if needed, own a key byte-copy, store.
+                self.b.switch_to_block(ins_b);
+                self.map_reserve(base, valty, *span);
+                let buf = self.load_u64(base);
+                let cap = self.load_u64(b16);
+                let eslot = self.map_find_empty(buf, cap, stride, kptr, klen);
+                let b24 = self.add_off(base, 24);
+                let ctx = self.load_u64(b24);
+                let b32 = self.add_off(base, 32);
+                let vt = self.load_u64(b32);
+                let kbuf = self.call_alloc(ctx, vt, klen, 1);
+                let oom = self.b.ins().icmp(IntCC::Equal, kbuf, zero);
+                self.fault_if(oom, FaultKind::Panic, *span);
+                self.call_copy_val(kbuf, kptr, klen);
+                let stridev2 = self.iconst(stride);
+                let eo = self.b.ins().imul(eslot, stridev2);
+                let eb = self.b.ins().iadd(buf, eo);
+                self.store_u64(eb, one);
+                let eb8 = self.add_off(eb, 8);
+                self.store_u64(eb8, kbuf);
+                let eb16 = self.add_off(eb, 16);
+                self.store_u64(eb16, klen);
+                let eb24 = self.add_off(eb, 24);
+                self.call_copy(eb24, vaddr, vsz);
+                let b8 = self.add_off(base, 8);
+                let len = self.load_u64(b8);
+                let nlen = self.b.ins().iadd(len, one);
+                self.store_u64(b8, nlen);
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(done);
+            }
+            CollOp::MapContains { base, valty, key } => {
+                let base = self.eval_operand(base, mf);
+                let (kaddr, _) = self.place_addr(key, mf);
+                let kptr = self.load_u64(kaddr);
+                let ka8 = self.add_off(kaddr, 8);
+                let klen = self.load_u64(ka8);
+                let stride = crate::interp::mem::round_up(24 + self.size_of(valty), 8) as i64;
+                let buf = self.load_u64(base);
+                let b16 = self.add_off(base, 16);
+                let cap = self.load_u64(b16);
+                let (found, _slot) = self.map_find(buf, cap, stride, kptr, klen);
+                let (daddr, _) = self.place_addr(dst, mf);
+                self.store_scalar(daddr, found, ScalarTy::Bool);
+            }
+            CollOp::MapGet { base, valty, key, span } => {
+                let base = self.eval_operand(base, mf);
+                let (kaddr, _) = self.place_addr(key, mf);
+                let kptr = self.load_u64(kaddr);
+                let ka8 = self.add_off(kaddr, 8);
+                let klen = self.load_u64(ka8);
+                let stride = crate::interp::mem::round_up(24 + self.size_of(valty), 8) as i64;
+                let buf = self.load_u64(base);
+                let b16 = self.add_off(base, 16);
+                let cap = self.load_u64(b16);
+                let (found, slot) = self.map_find(buf, cap, stride, kptr, klen);
+                let zero = self.iconst(0);
+                let missing = self.b.ins().icmp(IntCC::Equal, found, zero);
+                self.fault_if(missing, FaultKind::Bounds, *span);
+                let stridev = self.iconst(stride);
+                let so = self.b.ins().imul(slot, stridev);
+                let sb = self.b.ins().iadd(buf, so);
+                let voff = self.add_off(sb, 24);
+                let (daddr, _) = self.place_addr(dst, mf);
+                self.store_u64(daddr, voff);
+            }
         }
+    }
+
+    /// 64-bit FNV-1a over the `klen` key bytes at candor `kptr` (offset basis
+    /// 0xcbf29ce484222325, prime 0x100000001b3) — `mir::interp::map_hash` bit for bit.
+    fn map_hash(&mut self, kptr: Value, klen: Value) -> Value {
+        let basis = self.iconst(0xcbf2_9ce4_8422_2325u64 as i64);
+        let prime = self.iconst(0x0000_0100_0000_01b3);
+        let zero = self.iconst(0);
+        let head = self.b.create_block();
+        let hcur = self.b.append_block_param(head, types::I64);
+        let icur = self.b.append_block_param(head, types::I64);
+        let body = self.b.create_block();
+        let done = self.b.create_block();
+        let hout = self.b.append_block_param(done, types::I64);
+        self.b.ins().jump(head, &[BlockArg::from(basis), BlockArg::from(zero)]);
+        self.b.switch_to_block(head);
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, icur, klen);
+        self.b.ins().brif(more, body, &[], done, &[BlockArg::from(hcur)]);
+        self.b.switch_to_block(body);
+        let bp = self.b.ins().iadd(kptr, icur);
+        let byte = self.load_scalar(bp, ScalarTy::U8);
+        let x = self.b.ins().bxor(hcur, byte);
+        let m = self.b.ins().imul(x, prime);
+        let one = self.iconst(1);
+        let ni = self.b.ins().iadd(icur, one);
+        self.b.ins().jump(head, &[BlockArg::from(m), BlockArg::from(ni)]);
+        self.b.switch_to_block(done);
+        hout
+    }
+
+    /// Whether the `len` bytes at candor `p1` and `p2` are equal (i64 0/1) — the
+    /// byte compare `map_find` runs once the key lengths match.
+    fn mem_eq(&mut self, p1: Value, p2: Value, len: Value) -> Value {
+        let zero = self.iconst(0);
+        let one = self.iconst(1);
+        let head = self.b.create_block();
+        let icur = self.b.append_block_param(head, types::I64);
+        let cmp = self.b.create_block();
+        let done = self.b.create_block();
+        let res = self.b.append_block_param(done, types::I64);
+        self.b.ins().jump(head, &[BlockArg::from(zero)]);
+        self.b.switch_to_block(head);
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, icur, len);
+        self.b.ins().brif(more, cmp, &[], done, &[BlockArg::from(one)]);
+        self.b.switch_to_block(cmp);
+        let a1 = self.b.ins().iadd(p1, icur);
+        let b1 = self.b.ins().iadd(p2, icur);
+        let av = self.load_scalar(a1, ScalarTy::U8);
+        let bv = self.load_scalar(b1, ScalarTy::U8);
+        let ne = self.b.ins().icmp(IntCC::NotEqual, av, bv);
+        let inc = self.b.ins().iadd(icur, one);
+        self.b.ins().brif(ne, done, &[BlockArg::from(zero)], head, &[BlockArg::from(inc)]);
+        self.b.switch_to_block(done);
+        res
+    }
+
+    /// Open-addressed linear probe for `key` in the bucket buffer: returns
+    /// `(found, slot)` (found = i64 0/1), stopping at the first empty bucket — the
+    /// `mir::interp::map_find` probe order (start `hash & (cap-1)`, step +1 & mask).
+    fn map_find(&mut self, buf: Value, cap: Value, stride: i64, kptr: Value, klen: Value) -> (Value, Value) {
+        let zero = self.iconst(0);
+        let one = self.iconst(1);
+        let cap0 = self.b.ins().icmp(IntCC::Equal, cap, zero);
+        let bufz = self.b.ins().icmp(IntCC::Equal, buf, zero);
+        let empty = self.b.ins().bor(cap0, bufz);
+        let mask = self.b.ins().isub(cap, one);
+        let hash = self.map_hash(kptr, klen);
+        let idx0 = self.b.ins().band(hash, mask);
+        let probe = self.b.create_block();
+        let idxp = self.b.append_block_param(probe, types::I64);
+        let done = self.b.create_block();
+        let foundp = self.b.append_block_param(done, types::I64);
+        let slotp = self.b.append_block_param(done, types::I64);
+        self.b.ins().brif(
+            empty,
+            done,
+            &[BlockArg::from(zero), BlockArg::from(zero)],
+            probe,
+            &[BlockArg::from(idx0)],
+        );
+        self.b.switch_to_block(probe);
+        let stridev = self.iconst(stride);
+        let off = self.b.ins().imul(idxp, stridev);
+        let b = self.b.ins().iadd(buf, off);
+        let state = self.load_u64(b);
+        let is0 = self.b.ins().icmp(IntCC::Equal, state, zero);
+        let checkk = self.b.create_block();
+        self.b.ins().brif(
+            is0,
+            done,
+            &[BlockArg::from(zero), BlockArg::from(zero)],
+            checkk,
+            &[],
+        );
+        self.b.switch_to_block(checkk);
+        let b16 = self.add_off(b, 16);
+        let slen = self.load_u64(b16);
+        let leneq = self.b.ins().icmp(IntCC::Equal, slen, klen);
+        let cmpb = self.b.create_block();
+        let nextb = self.b.create_block();
+        self.b.ins().brif(leneq, cmpb, &[], nextb, &[]);
+        self.b.switch_to_block(cmpb);
+        let b8 = self.add_off(b, 8);
+        let sptr = self.load_u64(b8);
+        let eq = self.mem_eq(sptr, kptr, klen);
+        let iseq = self.b.ins().icmp(IntCC::NotEqual, eq, zero);
+        self.b.ins().brif(
+            iseq,
+            done,
+            &[BlockArg::from(one), BlockArg::from(idxp)],
+            nextb,
+            &[],
+        );
+        self.b.switch_to_block(nextb);
+        let inc = self.b.ins().iadd(idxp, one);
+        let nidx = self.b.ins().band(inc, mask);
+        self.b.ins().jump(probe, &[BlockArg::from(nidx)]);
+        self.b.switch_to_block(done);
+        (foundp, slotp)
+    }
+
+    /// The first empty bucket along `key`'s probe chain (caller ensures `key`
+    /// absent) — `mir::interp::map_find_empty`.
+    fn map_find_empty(&mut self, buf: Value, cap: Value, stride: i64, kptr: Value, klen: Value) -> Value {
+        let one = self.iconst(1);
+        let zero = self.iconst(0);
+        let mask = self.b.ins().isub(cap, one);
+        let hash = self.map_hash(kptr, klen);
+        let idx0 = self.b.ins().band(hash, mask);
+        let probe = self.b.create_block();
+        let idxp = self.b.append_block_param(probe, types::I64);
+        let done = self.b.create_block();
+        let slotp = self.b.append_block_param(done, types::I64);
+        self.b.ins().jump(probe, &[BlockArg::from(idx0)]);
+        self.b.switch_to_block(probe);
+        let stridev = self.iconst(stride);
+        let off = self.b.ins().imul(idxp, stridev);
+        let b = self.b.ins().iadd(buf, off);
+        let state = self.load_u64(b);
+        let is0 = self.b.ins().icmp(IntCC::Equal, state, zero);
+        let nextb = self.b.create_block();
+        self.b.ins().brif(is0, done, &[BlockArg::from(idxp)], nextb, &[]);
+        self.b.switch_to_block(nextb);
+        let inc = self.b.ins().iadd(idxp, one);
+        let nidx = self.b.ins().band(inc, mask);
+        self.b.ins().jump(probe, &[BlockArg::from(nidx)]);
+        self.b.switch_to_block(done);
+        slotp
+    }
+
+    /// Zero `byte_len` bytes at candor `ptr` (a multiple of 8: the fresh bucket
+    /// buffer, whose zero `state` words mark every bucket empty).
+    fn zero_words(&mut self, ptr: Value, byte_len: Value) {
+        let zero = self.iconst(0);
+        let eight = self.iconst(8);
+        let head = self.b.create_block();
+        let icur = self.b.append_block_param(head, types::I64);
+        let body = self.b.create_block();
+        let done = self.b.create_block();
+        self.b.ins().jump(head, &[BlockArg::from(zero)]);
+        self.b.switch_to_block(head);
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, icur, byte_len);
+        self.b.ins().brif(more, body, &[], done, &[]);
+        self.b.switch_to_block(body);
+        let p = self.b.ins().iadd(ptr, icur);
+        self.store_u64(p, zero);
+        let ni = self.b.ins().iadd(icur, eight);
+        self.b.ins().jump(head, &[BlockArg::from(ni)]);
+        self.b.switch_to_block(done);
+    }
+
+    /// Grow + rehash the bucket buffer (initial 8, then x2) once the load factor
+    /// crosses 3/4, re-probing every live entry — `mir::interp::map_reserve`
+    /// (alloc-new + zero + re-insert + free-old). OOM faults `Panic`.
+    fn map_reserve(&mut self, base: Value, valty: &Type, span: Span) {
+        let vsz = self.size_of(valty);
+        let stride = crate::interp::mem::round_up(24 + vsz, 8) as i64;
+        let zero = self.iconst(0);
+        let one = self.iconst(1);
+        let b8 = self.add_off(base, 8);
+        let len = self.load_u64(b8);
+        let b16 = self.add_off(base, 16);
+        let cap = self.load_u64(b16);
+        let capnz = self.b.ins().icmp(IntCC::NotEqual, cap, zero);
+        let lp1 = self.b.ins().iadd(len, one);
+        let four = self.iconst(4);
+        let three = self.iconst(3);
+        let lhs = self.b.ins().imul(lp1, four);
+        let rhs = self.b.ins().imul(cap, three);
+        let within = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, lhs, rhs);
+        let nogrow = self.b.ins().band(capnz, within);
+        let grow = self.b.create_block();
+        let cont = self.b.create_block();
+        self.b.ins().brif(nogrow, cont, &[], grow, &[]);
+        self.b.switch_to_block(grow);
+        let capis0 = self.b.ins().icmp(IntCC::Equal, cap, zero);
+        let eight = self.iconst(8);
+        let two = self.iconst(2);
+        let cap2 = self.b.ins().imul(cap, two);
+        let newcap = self.b.ins().select(capis0, eight, cap2);
+        let stridev = self.iconst(stride);
+        let allocsz = self.b.ins().imul(newcap, stridev);
+        let b24 = self.add_off(base, 24);
+        let ctx = self.load_u64(b24);
+        let b32 = self.add_off(base, 32);
+        let vt = self.load_u64(b32);
+        let newbuf = self.call_alloc(ctx, vt, allocsz, 8);
+        let oom = self.b.ins().icmp(IntCC::Equal, newbuf, zero);
+        self.fault_if(oom, FaultKind::Panic, span);
+        self.zero_words(newbuf, allocsz);
+        let oldbuf = self.load_u64(base);
+        let hasold = self.b.ins().icmp(IntCC::NotEqual, oldbuf, zero);
+        let rehash = self.b.create_block();
+        let setnew = self.b.create_block();
+        self.b.ins().brif(hasold, rehash, &[], setnew, &[]);
+        self.b.switch_to_block(rehash);
+        let oh = self.b.create_block();
+        let ohi = self.b.append_block_param(oh, types::I64);
+        let scanbody = self.b.create_block();
+        let donescan = self.b.create_block();
+        self.b.ins().jump(oh, &[BlockArg::from(zero)]);
+        self.b.switch_to_block(oh);
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, ohi, cap);
+        self.b.ins().brif(more, scanbody, &[], donescan, &[]);
+        self.b.switch_to_block(scanbody);
+        let obo = self.b.ins().imul(ohi, stridev);
+        let ob = self.b.ins().iadd(oldbuf, obo);
+        let ostate = self.load_u64(ob);
+        let occ = self.b.ins().icmp(IntCC::Equal, ostate, one);
+        let reins = self.b.create_block();
+        let ohnext = self.b.create_block();
+        self.b.ins().brif(occ, reins, &[], ohnext, &[]);
+        self.b.switch_to_block(reins);
+        let ob8 = self.add_off(ob, 8);
+        let okptr = self.load_u64(ob8);
+        let ob16 = self.add_off(ob, 16);
+        let oklen = self.load_u64(ob16);
+        let slot = self.map_find_empty(newbuf, newcap, stride, okptr, oklen);
+        let nbo = self.b.ins().imul(slot, stridev);
+        let nb = self.b.ins().iadd(newbuf, nbo);
+        self.store_u64(nb, one);
+        let nb8 = self.add_off(nb, 8);
+        self.store_u64(nb8, okptr);
+        let nb16 = self.add_off(nb, 16);
+        self.store_u64(nb16, oklen);
+        if vsz > 0 {
+            let nb24 = self.add_off(nb, 24);
+            let ob24 = self.add_off(ob, 24);
+            self.call_copy(nb24, ob24, vsz);
+        }
+        self.b.ins().jump(ohnext, &[]);
+        self.b.switch_to_block(ohnext);
+        let inc = self.b.ins().iadd(ohi, one);
+        self.b.ins().jump(oh, &[BlockArg::from(inc)]);
+        self.b.switch_to_block(donescan);
+        let capsz = self.b.ins().imul(cap, stridev);
+        self.call_free_val(ctx, vt, oldbuf, capsz, 8);
+        self.b.ins().jump(setnew, &[]);
+        self.b.switch_to_block(setnew);
+        self.store_u64(base, newbuf);
+        self.store_u64(b16, newcap);
+        self.b.ins().jump(cont, &[]);
+        self.b.switch_to_block(cont);
     }
 
     /// Grow a `Vec`'s buffer to fit `need` more elements (alloc-new + copy + free-

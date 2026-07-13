@@ -413,6 +413,13 @@ fn classify_tiers(mf: &MirFn) -> Vec<bool> {
                         CollOp::VecPush { value, .. } | CollOp::VecSet { value, .. } => {
                             mark(value, &mut tf)
                         }
+                        CollOp::MapInsert { key, value, .. } => {
+                            mark(key, &mut tf);
+                            mark(value, &mut tf);
+                        }
+                        CollOp::MapContains { key, .. } | CollOp::MapGet { key, .. } => {
+                            mark(key, &mut tf)
+                        }
                         _ => {}
                     }
                 }
@@ -1491,9 +1498,414 @@ impl<'a> FnEmit<'a> {
                 self.line(&format!("br label %{cont}"));
                 self.label(&cont);
             }
-            _ => return Err(format!("out of LLVM subset: {op:?}")),
+            CollOp::MapInsert { base, valty, key, value, span } => {
+                let base = self.operand(base);
+                let (kaddr, _) = self.place_addr(key)?;
+                let kptr = self.load_u64(&kaddr);
+                let ka8 = self.add_off_candor(&kaddr, 8);
+                let klen = self.load_u64(&ka8);
+                let vsz = self.lay.size_of(valty);
+                let stride = round_up(24 + vsz, 8);
+                let (vaddr, _) = self.place_addr(value)?;
+                let buf0 = self.load_u64(&base);
+                let b16 = self.add_off_candor(&base, 16);
+                let cap0 = self.load_u64(&b16);
+                let (found, slot) = self.map_find(&buf0, &cap0, stride, &kptr, &klen);
+                let is_found = self.t();
+                self.line(&format!("{is_found} = icmp ne i64 {found}, 0"));
+                let over = self.l();
+                let ins = self.l();
+                let done = self.l();
+                self.line(&format!("br i1 {is_found}, label %{over}, label %{ins}"));
+                // Present key: drop the displaced value (drop-on-overwrite, like
+                // `VecSet`), then move the new value into the slot.
+                self.label(&over);
+                let so = self.t();
+                self.line(&format!("{so} = mul i64 {slot}, {stride}"));
+                let sb = self.t();
+                self.line(&format!("{sb} = add i64 {buf0}, {so}"));
+                let voff = self.add_off_candor(&sb, 24);
+                self.emit_drop(&voff, valty, &[], &mut Vec::new())?;
+                self.rt_copy(&voff, &vaddr, vsz);
+                self.line(&format!("br label %{done}"));
+                // Absent key: grow/rehash if needed, own a key byte-copy, store.
+                self.label(&ins);
+                self.map_reserve(&base, valty, *span);
+                let buf = self.load_u64(&base);
+                let cap = self.load_u64(&b16);
+                let eslot = self.map_find_empty(&buf, &cap, stride, &kptr, &klen);
+                let b24 = self.add_off_candor(&base, 24);
+                let ctx = self.load_u64(&b24);
+                let b32 = self.add_off_candor(&base, 32);
+                let vt = self.load_u64(&b32);
+                let kbuf = self.call_alloc(&ctx, &vt, &klen, 1);
+                let oom = self.t();
+                self.line(&format!("{oom} = icmp eq i64 {kbuf}, 0"));
+                self.fault_if(&oom, FaultKind::Panic, *span);
+                self.rt_copy_val(&kbuf, &kptr, &klen);
+                let eo = self.t();
+                self.line(&format!("{eo} = mul i64 {eslot}, {stride}"));
+                let eb = self.t();
+                self.line(&format!("{eb} = add i64 {buf}, {eo}"));
+                self.store_u64(&eb, "1");
+                let eb8 = self.add_off_candor(&eb, 8);
+                self.store_u64(&eb8, &kbuf);
+                let eb16 = self.add_off_candor(&eb, 16);
+                self.store_u64(&eb16, &klen);
+                let eb24 = self.add_off_candor(&eb, 24);
+                self.rt_copy(&eb24, &vaddr, vsz);
+                let b8 = self.add_off_candor(&base, 8);
+                let len = self.load_u64(&b8);
+                let nlen = self.t();
+                self.line(&format!("{nlen} = add i64 {len}, 1"));
+                self.store_u64(&b8, &nlen);
+                self.line(&format!("br label %{done}"));
+                self.label(&done);
+            }
+            CollOp::MapContains { base, valty, key } => {
+                let base = self.operand(base);
+                let (kaddr, _) = self.place_addr(key)?;
+                let kptr = self.load_u64(&kaddr);
+                let ka8 = self.add_off_candor(&kaddr, 8);
+                let klen = self.load_u64(&ka8);
+                let stride = round_up(24 + self.lay.size_of(valty), 8);
+                let buf = self.load_u64(&base);
+                let b16 = self.add_off_candor(&base, 16);
+                let cap = self.load_u64(&b16);
+                let (found, _slot) = self.map_find(&buf, &cap, stride, &kptr, &klen);
+                let (daddr, _) = self.place_addr(dst)?;
+                self.store_scalar(&daddr, &found, ScalarTy::Bool);
+            }
+            CollOp::MapGet { base, valty, key, span } => {
+                let base = self.operand(base);
+                let (kaddr, _) = self.place_addr(key)?;
+                let kptr = self.load_u64(&kaddr);
+                let ka8 = self.add_off_candor(&kaddr, 8);
+                let klen = self.load_u64(&ka8);
+                let stride = round_up(24 + self.lay.size_of(valty), 8);
+                let buf = self.load_u64(&base);
+                let b16 = self.add_off_candor(&base, 16);
+                let cap = self.load_u64(&b16);
+                let (found, slot) = self.map_find(&buf, &cap, stride, &kptr, &klen);
+                let missing = self.t();
+                self.line(&format!("{missing} = icmp eq i64 {found}, 0"));
+                self.fault_if(&missing, FaultKind::Bounds, *span);
+                let so = self.t();
+                self.line(&format!("{so} = mul i64 {slot}, {stride}"));
+                let sb = self.t();
+                self.line(&format!("{sb} = add i64 {buf}, {so}"));
+                let voff = self.add_off_candor(&sb, 24);
+                let (daddr, _) = self.place_addr(dst)?;
+                self.store_u64(&daddr, &voff);
+            }
         }
         Ok(())
+    }
+
+    /// 64-bit FNV-1a over the `klen` key bytes at candor `kptr` (offset basis
+    /// 0xcbf29ce484222325, prime 0x100000001b3) — `mir::interp::map_hash` bit for bit.
+    fn map_hash(&mut self, kptr: &str, klen: &str) -> String {
+        let pre = self.l();
+        let head = self.l();
+        let body = self.l();
+        let done = self.l();
+        let h = self.t();
+        let i = self.t();
+        let hnext = self.t();
+        let inext = self.t();
+        self.line(&format!("br label %{pre}"));
+        self.label(&pre);
+        self.line(&format!("br label %{head}"));
+        self.label(&head);
+        self.line(&format!("{h} = phi i64 [ -3750763034362895579, %{pre} ], [ {hnext}, %{body} ]"));
+        self.line(&format!("{i} = phi i64 [ 0, %{pre} ], [ {inext}, %{body} ]"));
+        let more = self.t();
+        self.line(&format!("{more} = icmp ult i64 {i}, {klen}"));
+        self.line(&format!("br i1 {more}, label %{body}, label %{done}"));
+        self.label(&body);
+        let bp = self.t();
+        self.line(&format!("{bp} = add i64 {kptr}, {i}"));
+        let byte = self.load_scalar(&bp, ScalarTy::U8);
+        let x = self.t();
+        self.line(&format!("{x} = xor i64 {h}, {byte}"));
+        self.line(&format!("{hnext} = mul i64 {x}, 1099511628211"));
+        self.line(&format!("{inext} = add i64 {i}, 1"));
+        self.line(&format!("br label %{head}"));
+        self.label(&done);
+        h
+    }
+
+    /// Whether the `len` bytes at candor `p1` and `p2` are equal (i64 0/1) — the
+    /// byte compare `map_find` runs once the key lengths match.
+    fn mem_eq(&mut self, p1: &str, p2: &str, len: &str) -> String {
+        let pre = self.l();
+        let head = self.l();
+        let cmp = self.l();
+        let done = self.l();
+        let i = self.t();
+        let inext = self.t();
+        self.line(&format!("br label %{pre}"));
+        self.label(&pre);
+        self.line(&format!("br label %{head}"));
+        self.label(&head);
+        self.line(&format!("{i} = phi i64 [ 0, %{pre} ], [ {inext}, %{cmp} ]"));
+        let more = self.t();
+        self.line(&format!("{more} = icmp ult i64 {i}, {len}"));
+        self.line(&format!("br i1 {more}, label %{cmp}, label %{done}"));
+        self.label(&cmp);
+        let a1 = self.t();
+        self.line(&format!("{a1} = add i64 {p1}, {i}"));
+        let av = self.load_scalar(&a1, ScalarTy::U8);
+        let b1 = self.t();
+        self.line(&format!("{b1} = add i64 {p2}, {i}"));
+        let bv = self.load_scalar(&b1, ScalarTy::U8);
+        let ne = self.t();
+        self.line(&format!("{ne} = icmp ne i64 {av}, {bv}"));
+        self.line(&format!("{inext} = add i64 {i}, 1"));
+        self.line(&format!("br i1 {ne}, label %{done}, label %{head}"));
+        self.label(&done);
+        let res = self.t();
+        self.line(&format!("{res} = phi i64 [ 1, %{head} ], [ 0, %{cmp} ]"));
+        res
+    }
+
+    /// Open-addressed linear probe for `key`: returns `(found, slot)` (found =
+    /// i64 0/1), stopping at the first empty bucket — the `mir::interp::map_find`
+    /// probe order (start `hash & (cap-1)`, step +1 & mask).
+    fn map_find(&mut self, buf: &str, cap: &str, stride: u64, kptr: &str, klen: &str) -> (String, String) {
+        let cap0 = self.t();
+        self.line(&format!("{cap0} = icmp eq i64 {cap}, 0"));
+        let bufz = self.t();
+        self.line(&format!("{bufz} = icmp eq i64 {buf}, 0"));
+        let empty = self.t();
+        self.line(&format!("{empty} = or i1 {cap0}, {bufz}"));
+        let mask = self.t();
+        self.line(&format!("{mask} = sub i64 {cap}, 1"));
+        let hash = self.map_hash(kptr, klen);
+        let idx0 = self.t();
+        self.line(&format!("{idx0} = and i64 {hash}, {mask}"));
+        let entry = self.l();
+        let probe = self.l();
+        let checkk = self.l();
+        let cmpb = self.l();
+        let postcmp = self.l();
+        let nextb = self.l();
+        let done = self.l();
+        let idxphi = self.t();
+        let nidx = self.t();
+        let found = self.t();
+        let slot = self.t();
+        self.line(&format!("br label %{entry}"));
+        self.label(&entry);
+        self.line(&format!("br i1 {empty}, label %{done}, label %{probe}"));
+        self.label(&probe);
+        self.line(&format!("{idxphi} = phi i64 [ {idx0}, %{entry} ], [ {nidx}, %{nextb} ]"));
+        let off = self.t();
+        self.line(&format!("{off} = mul i64 {idxphi}, {stride}"));
+        let b = self.t();
+        self.line(&format!("{b} = add i64 {buf}, {off}"));
+        let state = self.load_u64(&b);
+        let is0 = self.t();
+        self.line(&format!("{is0} = icmp eq i64 {state}, 0"));
+        self.line(&format!("br i1 {is0}, label %{done}, label %{checkk}"));
+        self.label(&checkk);
+        let b16 = self.add_off_candor(&b, 16);
+        let slen = self.load_u64(&b16);
+        let leneq = self.t();
+        self.line(&format!("{leneq} = icmp eq i64 {slen}, {klen}"));
+        self.line(&format!("br i1 {leneq}, label %{cmpb}, label %{nextb}"));
+        self.label(&cmpb);
+        let b8 = self.add_off_candor(&b, 8);
+        let sptr = self.load_u64(&b8);
+        let eq = self.mem_eq(&sptr, kptr, klen);
+        self.line(&format!("br label %{postcmp}"));
+        self.label(&postcmp);
+        let iseq = self.t();
+        self.line(&format!("{iseq} = icmp ne i64 {eq}, 0"));
+        self.line(&format!("br i1 {iseq}, label %{done}, label %{nextb}"));
+        self.label(&nextb);
+        let inc = self.t();
+        self.line(&format!("{inc} = add i64 {idxphi}, 1"));
+        self.line(&format!("{nidx} = and i64 {inc}, {mask}"));
+        self.line(&format!("br label %{probe}"));
+        self.label(&done);
+        self.line(&format!(
+            "{found} = phi i64 [ 0, %{entry} ], [ 0, %{probe} ], [ 1, %{postcmp} ]"
+        ));
+        self.line(&format!(
+            "{slot} = phi i64 [ 0, %{entry} ], [ 0, %{probe} ], [ {idxphi}, %{postcmp} ]"
+        ));
+        (found, slot)
+    }
+
+    /// The first empty bucket along `key`'s probe chain (caller ensures `key`
+    /// absent) — `mir::interp::map_find_empty`.
+    fn map_find_empty(&mut self, buf: &str, cap: &str, stride: u64, kptr: &str, klen: &str) -> String {
+        let mask = self.t();
+        self.line(&format!("{mask} = sub i64 {cap}, 1"));
+        let hash = self.map_hash(kptr, klen);
+        let idx0 = self.t();
+        self.line(&format!("{idx0} = and i64 {hash}, {mask}"));
+        let entry = self.l();
+        let probe = self.l();
+        let nextb = self.l();
+        let done = self.l();
+        let idxphi = self.t();
+        let nidx = self.t();
+        self.line(&format!("br label %{entry}"));
+        self.label(&entry);
+        self.line(&format!("br label %{probe}"));
+        self.label(&probe);
+        self.line(&format!("{idxphi} = phi i64 [ {idx0}, %{entry} ], [ {nidx}, %{nextb} ]"));
+        let off = self.t();
+        self.line(&format!("{off} = mul i64 {idxphi}, {stride}"));
+        let b = self.t();
+        self.line(&format!("{b} = add i64 {buf}, {off}"));
+        let state = self.load_u64(&b);
+        let is0 = self.t();
+        self.line(&format!("{is0} = icmp eq i64 {state}, 0"));
+        self.line(&format!("br i1 {is0}, label %{done}, label %{nextb}"));
+        self.label(&nextb);
+        let inc = self.t();
+        self.line(&format!("{inc} = add i64 {idxphi}, 1"));
+        self.line(&format!("{nidx} = and i64 {inc}, {mask}"));
+        self.line(&format!("br label %{probe}"));
+        self.label(&done);
+        idxphi
+    }
+
+    /// Zero `byte_len` bytes at candor `ptr` (a multiple of 8: the fresh bucket
+    /// buffer, whose zero `state` words mark every bucket empty).
+    fn zero_words(&mut self, ptr: &str, byte_len: &str) {
+        let pre = self.l();
+        let head = self.l();
+        let body = self.l();
+        let done = self.l();
+        let i = self.t();
+        let inext = self.t();
+        self.line(&format!("br label %{pre}"));
+        self.label(&pre);
+        self.line(&format!("br label %{head}"));
+        self.label(&head);
+        self.line(&format!("{i} = phi i64 [ 0, %{pre} ], [ {inext}, %{body} ]"));
+        let more = self.t();
+        self.line(&format!("{more} = icmp ult i64 {i}, {byte_len}"));
+        self.line(&format!("br i1 {more}, label %{body}, label %{done}"));
+        self.label(&body);
+        let p = self.t();
+        self.line(&format!("{p} = add i64 {ptr}, {i}"));
+        self.store_u64(&p, "0");
+        self.line(&format!("{inext} = add i64 {i}, 8"));
+        self.line(&format!("br label %{head}"));
+        self.label(&done);
+    }
+
+    /// Grow + rehash the bucket buffer (initial 8, then x2) once the load factor
+    /// crosses 3/4, re-probing every live entry — `mir::interp::map_reserve`
+    /// (alloc-new + zero + re-insert + free-old). OOM faults `Panic`.
+    fn map_reserve(&mut self, base: &str, valty: &Type, span: Span) {
+        let vsz = self.lay.size_of(valty);
+        let stride = round_up(24 + vsz, 8);
+        let b8 = self.add_off_candor(base, 8);
+        let len = self.load_u64(&b8);
+        let b16 = self.add_off_candor(base, 16);
+        let cap = self.load_u64(&b16);
+        let capnz = self.t();
+        self.line(&format!("{capnz} = icmp ne i64 {cap}, 0"));
+        let lp1 = self.t();
+        self.line(&format!("{lp1} = add i64 {len}, 1"));
+        let lhs = self.t();
+        self.line(&format!("{lhs} = mul i64 {lp1}, 4"));
+        let rhs = self.t();
+        self.line(&format!("{rhs} = mul i64 {cap}, 3"));
+        let within = self.t();
+        self.line(&format!("{within} = icmp ule i64 {lhs}, {rhs}"));
+        let nogrow = self.t();
+        self.line(&format!("{nogrow} = and i1 {capnz}, {within}"));
+        let grow = self.l();
+        let cont = self.l();
+        self.line(&format!("br i1 {nogrow}, label %{cont}, label %{grow}"));
+        self.label(&grow);
+        let capis0 = self.t();
+        self.line(&format!("{capis0} = icmp eq i64 {cap}, 0"));
+        let cap2 = self.t();
+        self.line(&format!("{cap2} = mul i64 {cap}, 2"));
+        let newcap = self.t();
+        self.line(&format!("{newcap} = select i1 {capis0}, i64 8, i64 {cap2}"));
+        let allocsz = self.t();
+        self.line(&format!("{allocsz} = mul i64 {newcap}, {stride}"));
+        let b24 = self.add_off_candor(base, 24);
+        let ctx = self.load_u64(&b24);
+        let b32 = self.add_off_candor(base, 32);
+        let vt = self.load_u64(&b32);
+        let newbuf = self.call_alloc(&ctx, &vt, &allocsz, 8);
+        let oom = self.t();
+        self.line(&format!("{oom} = icmp eq i64 {newbuf}, 0"));
+        self.fault_if(&oom, FaultKind::Panic, span);
+        self.zero_words(&newbuf, &allocsz);
+        let oldbuf = self.load_u64(base);
+        let hasold = self.t();
+        self.line(&format!("{hasold} = icmp ne i64 {oldbuf}, 0"));
+        let rehash = self.l();
+        let setnew = self.l();
+        self.line(&format!("br i1 {hasold}, label %{rehash}, label %{setnew}"));
+        self.label(&rehash);
+        let oh = self.l();
+        let scanbody = self.l();
+        let reins = self.l();
+        let ohnext = self.l();
+        let donescan = self.l();
+        let ohi = self.t();
+        let ohinext = self.t();
+        self.line(&format!("br label %{oh}"));
+        self.label(&oh);
+        self.line(&format!("{ohi} = phi i64 [ 0, %{rehash} ], [ {ohinext}, %{ohnext} ]"));
+        let more = self.t();
+        self.line(&format!("{more} = icmp ult i64 {ohi}, {cap}"));
+        self.line(&format!("br i1 {more}, label %{scanbody}, label %{donescan}"));
+        self.label(&scanbody);
+        let obo = self.t();
+        self.line(&format!("{obo} = mul i64 {ohi}, {stride}"));
+        let ob = self.t();
+        self.line(&format!("{ob} = add i64 {oldbuf}, {obo}"));
+        let ostate = self.load_u64(&ob);
+        let occ = self.t();
+        self.line(&format!("{occ} = icmp eq i64 {ostate}, 1"));
+        self.line(&format!("br i1 {occ}, label %{reins}, label %{ohnext}"));
+        self.label(&reins);
+        let ob8 = self.add_off_candor(&ob, 8);
+        let okptr = self.load_u64(&ob8);
+        let ob16 = self.add_off_candor(&ob, 16);
+        let oklen = self.load_u64(&ob16);
+        let slot = self.map_find_empty(&newbuf, &newcap, stride, &okptr, &oklen);
+        let nbo = self.t();
+        self.line(&format!("{nbo} = mul i64 {slot}, {stride}"));
+        let nb = self.t();
+        self.line(&format!("{nb} = add i64 {newbuf}, {nbo}"));
+        self.store_u64(&nb, "1");
+        let nb8 = self.add_off_candor(&nb, 8);
+        self.store_u64(&nb8, &okptr);
+        let nb16 = self.add_off_candor(&nb, 16);
+        self.store_u64(&nb16, &oklen);
+        if vsz > 0 {
+            let nb24 = self.add_off_candor(&nb, 24);
+            let ob24 = self.add_off_candor(&ob, 24);
+            self.rt_copy(&nb24, &ob24, vsz);
+        }
+        self.line(&format!("br label %{ohnext}"));
+        self.label(&ohnext);
+        self.line(&format!("{ohinext} = add i64 {ohi}, 1"));
+        self.line(&format!("br label %{oh}"));
+        self.label(&donescan);
+        let capsz = self.t();
+        self.line(&format!("{capsz} = mul i64 {cap}, {stride}"));
+        self.call_free_val(&ctx, &vt, &oldbuf, &capsz, 8);
+        self.line(&format!("br label %{setnew}"));
+        self.label(&setnew);
+        self.store_u64(base, &newbuf);
+        self.store_u64(&b16, &newcap);
+        self.line(&format!("br label %{cont}"));
+        self.label(&cont);
     }
 
     /// Grow a `Vec`'s buffer to fit `need` more elements (alloc-new + copy + free-

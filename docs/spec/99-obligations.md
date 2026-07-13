@@ -3908,5 +3908,98 @@ vt@32}` the S1/S2 `String` slices established.
   the aot / llvm / stage_d native corpus gates green (they auto-scan the two new
   `run/` fixtures); clippy clean.
 - DEFERRED (next slices, in order): `Map` (FNV-1a hash + linear-probe
-  `insert`/`contains`/`get`), then collection-drop-free (`alloc_on_drop` for
-  `String`/`Vec`/`Map` in `emit_drop`).
+  `insert`/`contains`/`get`) — LANDED, see NATIVE-COLLECTIONS-S4 below; then
+  collection-drop-free (`alloc_on_drop` for `String`/`Vec`/`Map` in `emit_drop`).
+
+
+## NATIVE-COLLECTIONS-S4 — `Map[V]` (Insert / Contains / Get) landed native on BOTH backends (2026-07-13)
+
+The fourth and LAST collection slice. The three hash-`Map` `CollectionOp` arms —
+`MapInsert`, `MapContains`, `MapGet` — are lowered INLINE in both native backends,
+mirroring `mir::interp::collection_op`'s Map arms byte-for-byte (the MIR
+interpreter is the native oracle). Purely additive: no change to the `Map`
+representation (the same 5-word header `{buf@0, len@8, cap@16, ctx@24, vt@32}`,
+bucket buffer, `Alloc` handle), the checker, or the MIR. `aot_runtime.c` reused
+UNCHANGED — NO new runtime symbol (the FNV hash + probe are inline emission, like
+the String UTF-8 and Vec stride arithmetic). This makes ALL THREE collections
+(`String`, `Vec`, `Map`) native on both backends.
+
+- BACKING LAYOUT (mirrored exactly): open-addressed bucket buffer, entry stride
+  `round_up(24 + size_of(V), 8)`, each bucket `{state@0 (0=empty/1=occupied),
+  keyptr@8, keylen@16, value@24}`. `cap` = bucket count (a power of two: initial 8,
+  then x2). `len` at header offset 8 is the live entry count — `len(read m)` is an
+  offset-8 Load, NOT a `CollOp` (unchanged). No tombstones (no `remove` op ships).
+- FNV-1a HASH (mirrored bit-for-bit vs `mir::interp::map_hash`): 64-bit, offset
+  basis `0xcbf29ce484222325`, prime `0x100000001b3`, folding each key byte `h =
+  (h ^ byte) * prime` (wrapping). Emitted as an inline byte loop. The LLVM basis is
+  written as its signed-i64 two's-complement (`-3750763034362895579`) — identical
+  64 bits, xor/mul being width-agnostic. Verified identical under `clang -O2`.
+- LINEAR PROBE (mirrored bit-for-bit vs `map_find`/`map_find_empty`): start index
+  `hash & (cap-1)`, step `(idx+1) & (cap-1)`, stop at the first empty bucket
+  (`state==0`). A bucket matches iff `keylen == klen` AND the `klen` key bytes are
+  equal (an inline `mem_eq` byte loop). Same probe order in insert, lookup, and the
+  rehash re-insert, so it matches the interp's observable placement.
+- OPS: `MapInsert` — hash+probe (`map_find`); if PRESENT, DROP the displaced value
+  via `emit_drop(slot+24, V)` BEFORE the move then `rt_copy` the new value (value
+  drop-on-overwrite, the exact `VecSet` pattern); if ABSENT, `map_reserve` (grow +
+  rehash at load factor 3/4), then own a heap byte-copy of the key via the carried
+  `Alloc` (`alloc(klen,1)` + `rt_copy` of the key bytes; OOM faults `Panic`), write
+  `state=1/keyptr/keylen`, `rt_copy` the value, bump `len`. `MapContains` — hash+
+  probe, store the membership bool (1-byte `Bool`, matching the interp's
+  `write_int(.., Bool)`). `MapGet` — hash+probe; ABSENT faults `Bounds` at the key
+  arg's span; PRESENT writes the `slot+24` value borrow to the `read V` dst.
+- REHASH (mirrored bit-for-bit vs `map_reserve`): grows when `!(cap!=0 &&
+  (len+1)*4 <= cap*3)`; `newcap = cap==0 ? 8 : cap*2`; alloc the new buffer, ZERO it
+  (an inline 8-byte-word loop — the bucket `state` words must read empty; the
+  vtable does not zero), RE-INSERT every live old entry by re-probing into the new
+  buffer (`map_find_empty`), then free the old buffer. Re-probe order matches the
+  interp, so post-rehash placement is byte-identical.
+- LLVM LOWERING NOTE: the probe / hash / mem_eq / rehash loops are emitted as
+  textual-IR blocks with `phi` induction variables (forward-referenced loop-carried
+  temps), each loop entered through a named pre-block so the `phi` has a concrete
+  predecessor label. `classify_tiers` now marks a `Map` op's `key` (and `MapInsert`'s
+  `value`) operand Tier-F — they are read through place ADDRESSES via `place_addr`.
+  Cranelift uses `BlockArg` block parameters for the same induction variables and
+  stack-allocates every local, so it needed no tiering change.
+- GATES: `tests/map_native.rs` + `tests/fixtures/run/map_native.cnr` (auto-scanned
+  by the aot / stage_d four-engine and llvm fifth-engine corpus gates). The fixture,
+  over the reclaiming FREE-LIST allocator, inserts 8 keys chosen to COLLIDE in the
+  cap-8 probe chain (`a/i/y` at bucket 4, `h/x` at bucket 7) so the probe loop is
+  genuinely exercised, crosses the 3/4 load factor on the 7th distinct insert to
+  trigger a GROWTH REHASH to cap 16 (where `i/y` and `h/x` still collide), OVERWRITES
+  an existing key (`i`), then `get`/`contains`/`len` — trace
+  `8,8,1,99,3,4,5,6,7,8,1,0`, ret 8, asserted BYTE-IDENTICAL under the oracle, MIR,
+  and Cranelift no-opt + opt; LLVM `-O2` covers it transitively. A FAULT gate
+  (`map_get_missing_faults_bounds_all_engines`) drives a `get` on an absent key and
+  asserts the `Bounds` kind AND span byte-exact across the oracle, MIR, and Cranelift
+  no-opt + opt.
+- VALUE DROP-ON-OVERWRITE: LANDED in code in both backends (the `emit_drop` before
+  the value move, the byte-exact twin of the interp's `drop_value` in `MapInsert`,
+  structurally identical to the cross-engine-gated `VecSet` path). It is covered by
+  `tests/map.rs`'s oracle test `map_overwrite_drops_old_value_once`. A cross-engine
+  NATIVE gate for it is NOT feasible this slice: a hook-bearing value that survives
+  in the Map is dropped at scope end by the interp (its `drop_value` `Map` arm) but
+  NOT by native `emit_drop` (deferred; see GAP), and a `Map` has no `remove`/`pop` to
+  drain the survivors — so a tracing survivor would diverge at scope end. Folds into
+  the collection-drop slice (S5).
+- GAP (deferred to the collection-drop slice, unchanged from S1/S2/S3): a live
+  `Map`'s bucket buffer + owned key byte-copies + remaining values are NOT
+  freed/dropped on scope-end drop (native `emit_drop`/`needs_drop` have no
+  `Type::App("Map")` arm; the interp's `drop_value` DOES). This is a leak, not an
+  observable divergence, as long as the value type needs no drop (the `map_native`
+  fixture uses `i64` values) — so the scope-end `Map` drop is observationally a
+  no-op in every engine. The `Type::App("Map")` arm in native `emit_drop`/
+  `needs_drop`/`walk_glue` (free each key copy + drop each live value + free the
+  buffer through the carried vtable) folds into S5, together with the `Vec`/`String`
+  buffer frees.
+- Full `cargo nextest` green; `--profile fast` green; `tests/map.rs` (interp,
+  incl. collision/rehash/overwrite-drop) unchanged and now additionally native-
+  runnable; text/fmt/print/std_io/vec/string interp gates unchanged; the aot / llvm /
+  stage_d native corpus gates green (they auto-scan the new `run/` fixture); clippy
+  clean.
+- DEFERRED (next slice): collection-drop-free — the `alloc_on_drop` `Type::App`
+  arms for `String`/`Vec`/`Map` in native `emit_drop`/`needs_drop`/`walk_glue`,
+  freeing each collection's heap buffer (and, for `Map`, its owned key copies) and
+  running per-element/per-value drop glue at scope end, so a live collection no
+  longer leaks and a hook-bearing collection's scope-end drops become cross-engine
+  observable.
