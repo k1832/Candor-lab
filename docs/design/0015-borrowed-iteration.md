@@ -1,6 +1,10 @@
 # 0015 — Borrowed-element iteration (RefIndexed)
 
-**Status:** draft — pending adversarial review + deciding-authority disposition
+**Status:** draft — adversarially reviewed (verdict: survives with repairs; see
+[the review](../reviews/0015-borrowed-iteration-review.md)); the soundness prerequisite
+it surfaced (the loan-provenance UAF family) is **fixed and audited**; §5/§7 revised
+accordingly. Pending the deciding authority's accept/revise disposition on the design
+itself (and, if accepted, the `for read` implementation).
 **Date:** 2026-07-13
 **Philosophy hooks:** **P12/Bet 5** (value-first: this is the *borrow* gear reaching
 into iteration, and the whole difficulty is doing it without regressing the
@@ -391,16 +395,21 @@ final `get_ref`. By 0001 §3.3's compact default, each `x = __c.get_ref(__i)` is
 **shared reborrow of `__c`**, so `x` carries `L` (0001 §2.3 step 3: a reborrow's loan
 extends the parent's obligation).
 
-**(1) No mutation-during-borrow (iterator invalidation).** While `L` is live, XOR
-(0001 §2.2) forbids any exclusive access to `coll` or any overlapping place: a direct
-`write`, a `write coll` argument, a move out, or an exclusive reborrow. Any such
-access in `BODY` overlaps `L` (loans.rs `overlaps` + `judge`) and is rejected —
-E0803 (write), E0802 (move), or E0801 (conflicting borrow). This is the *same*
-guarantee `Indexed` already gives (0009 §4.3's E0303 example), and it holds
-identically here because the loop loan is the same shape; the only difference is that
-`x` is a borrow rather than a copy, which does not weaken the loan. The collection is
-therefore **read-locked (unmutated) for the entire loop**, so no element the yielded
-borrow views can be reallocated, moved, or overwritten while the borrow is live.
+**(1) No mutation-during-borrow (iterator invalidation).** The guarantee comes from
+`L`'s **span across the whole loop** — `L` is anchored to `__c`, and `__c` is live from
+`let __c` (its use in `count`) through the final `get_ref`, so by backward liveness
+(0001 §2.3) `L` covers every iteration. (It is `L`'s span that protects the loop, **not**
+a per-iteration reborrow: each `x = __c.get_ref(__i)` carries a loan rooted at `__c`
+that dies at turn end — that per-turn loan is not what freezes `coll`; `L` is. The
+earlier framing that leaned on "each `get_ref` return reborrow carrying `L`" is
+corrected here per the adversarial review's F3.) While `L` is live, XOR (0001 §2.2)
+forbids any exclusive access to `coll` or any overlapping place: a direct `write`, a
+`write coll` argument, a move out, or an exclusive reborrow. Any such access in `BODY`
+overlaps `L` (loans.rs `overlaps` + `judge`) and is rejected — E0803 (write), E0802
+(move), or E0801 (conflicting borrow). This is the *same* guarantee `Indexed` already
+gives (0009 §4.3's E0303 example). The collection is therefore **read-locked (unmutated)
+for the entire loop**, so no element the yielded borrow views can be reallocated, moved,
+or overwritten while the borrow is live.
 
 **(2) No use-after-free.** `x` is a reborrow whose provenance is `coll` (through
 `__c`). Two cases:
@@ -423,6 +432,20 @@ borrow views can be reallocated, moved, or overwritten while the borrow is live.
     reachable. In every route the borrow either cannot escape, or drags its
     read-lock on `coll` with it — so it can never observe freed or overwritten
     storage.
+
+    **This escape argument was UNSOUND when this doc was first drafted** — the
+    adversarial review (F1) showed the implemented loan model *shed* a borrow's loan
+    when it was copied/aliased/returned, so an escaped `x` did **not** keep `L` live and
+    a real safe-code use-after-free followed. That was a **pre-existing checker defect,
+    not specific to `for read`** (reachable through plain `let`, slice copies, `String`
+    views, and view-returning functions alike). It has since been **fixed** (ledger
+    `LOAN-COPY-UAF` / `STR-VIEW-UAF` and the four `soundness:` commits of 2026-07-13):
+    every borrow-kind value — a `read`/`write` borrow, a `slice`/`slice_mut`, a `str`/
+    `[u8]` view — now uniformly threads its source loan through copies, aliases, pattern
+    bindings, view retypes, and function returns. With that fix landed the escape
+    argument above is **valid as stated**, so `for read` needs **no** special
+    non-escape rule on `x` (0015's open-Q1 fallback is not required); its soundness
+    rests on the now-audited general loan-provenance discipline.
 
 **Reduction to checked ground.** `get_ref`'s *definition* is checked once, at its
 definition site, as a borrow-returning accessor deriving its return from `read self`
@@ -488,19 +511,18 @@ loop case as a gating obligation.
 Flagged explicitly for the adversarial reviewer and the deciding authority — the
 parts least nailed down.
 
-1. **Does the checker actually anchor `get_ref`'s returned borrow to `__c` through
-   the desugared call?** (The §5 hinge.) `arena_get` demonstrates the §3.3 default
-   return provenance for a *direct* call; the escape-soundness of `for read` depends
-   on that provenance surviving into the loop-bound `x` and, if `x` escapes, keeping
-   the loop loan `L` live past the loop. This is asserted from the model, **not yet
-   verified end-to-end for the loop case**. If reborrow-through-a-call-return is *not*
-   tracked as extending the parent loan in the current loans.rs (the code tracks
-   binding-anchored loans and same-call overlaps; whether a returned borrow inherits
-   the receiver's anchor is the exact question), the escape route in §5 case (2) is a
-   hole. **This is the top thing to verify before acceptance.** Mitigation if it does
-   not hold: additionally constrain the by-ref loop variable `x` to be non-escaping
-   (forbid assigning it to a binding outside the loop body) — but that is a *new
-   rule*, so it should be a fallback, not the plan.
+1. **Does the checker anchor `get_ref`'s returned borrow to `__c` through the
+   desugared call?** (The §5 hinge.) — **RESOLVED (2026-07-13).** When drafted this was
+   the top open risk, and the adversarial review confirmed it was *not* holding: the
+   loan model shed a borrow's loan on copy/alias/return, so an escaping `x` did not keep
+   `L` live — a real safe-code UAF (F1). It was a pre-existing checker defect, since
+   fixed across the whole borrow-kind family (the four `soundness:` commits; ledger
+   `LOAN-COPY-UAF`/`STR-VIEW-UAF`): a returned/aliased borrow now provably extends its
+   source loan, and a dedicated completeness sweep found no remaining route (match
+   bindings, aggregate transit, view returns, rawptr, loop-carried all closed or
+   unsafe-gated). The escape route in §5 case (2) is now sound, and the non-escape
+   fallback rule is **not** needed. The remaining `for read`-specific work is
+   implementation (the desugar + protocol-selection arm), not this soundness hinge.
 
 2. **Interaction of a scope-exit drop of `coll` with a still-live escaped borrow.**
    loans.rs classifies `Access::ScopeExit` as `AccessKind::None` — a drop point is
