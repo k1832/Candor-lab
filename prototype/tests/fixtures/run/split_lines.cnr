@@ -1,0 +1,255 @@
+// Native line splitting (design 0013 file-I/O layer): `split_lines` byte-scans a
+// native `String`'s UTF-8 bytes for the ASCII newline (10) and builds one OWNED
+// `String` per line into a `Vec[String]`. '\n' is a single ASCII byte, so the
+// scan needs no char-boundary logic; each `[start, end)` span is a bounded
+// sub-view of valid UTF-8 (cut only at a newline), reinterpreted with
+// `str_from_unchecked` and copied into the line's own String. Convention: a
+// trailing newline does NOT yield a final empty line ("a\nb\n" -> ["a","b"]); an
+// empty line between newlines IS preserved ("a\n\nb" -> ["a","","b"]); the empty
+// string yields an EMPTY Vec. Every engine — the tree-walking oracle, the MIR
+// interpreter, and the Cranelift / LLVM native backends — must agree byte-for-byte
+// on the traced line count, per-line byte lengths and bytes, and the folded sum.
+enum IterStep[T, S] { ok More(T, S), Done }
+interface Iter { type Item; fn next(take self) alloc -> IterStep[Item, Self]; }
+
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+
+struct FreeList { next: usize, end: usize, head: rawptr u8 }
+struct FreeBlock { next: rawptr u8, size: usize }
+
+fn with_window(base: usize, size: usize) -> FreeList {
+    unsafe "the empty free list starts with a null head; no block is threaded yet" {
+        return FreeList { next: base, end: base + size, head: ptr_null[u8]() };
+    }
+}
+
+fn block_span(size: usize, align: usize) -> usize {
+    let mut need: usize = size;
+    if need < 16usize {
+        need = 16usize;
+    }
+    return (need + align - 1usize) / align * align;
+}
+
+fn freelist_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live FreeList whose [next, end) window and address-ordered free chain are reserved to this arena alone; every carved block stays inside [next, end) and is >= header-sized, and a split remainder (kept only when >= MIN_SPLIT) is written into the block's own tail" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let need: usize = block_span(size, align);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) {
+            let blk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if blk.size >= need {
+                if blk.size - need >= 32usize {
+                    let rem: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(cur) + need);
+                    ptr_write(cast_ptr[FreeBlock](rem), FreeBlock { next: blk.next, size: blk.size - need });
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: rem });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: rem, size: pblk.size });
+                    }
+                } else {
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: blk.next });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: blk.next, size: pblk.size });
+                    }
+                }
+                return cur;
+            }
+            prev = cur;
+            cur = blk.next;
+        }
+        let aligned: usize = (st.next + align - 1usize) / align * align;
+        if aligned + need > st.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: aligned + need, end: st.end, head: st.head });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+
+fn freelist_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    unsafe "the free list is kept ADDRESS-ORDERED; the freed block's own storage (>= header-sized, guaranteed by block_span in alloc) holds its FreeBlock header {next, size}, and a merge joins two blocks ONLY when their byte spans are exactly adjacent (addr + size == neighbour addr), so a merge can never overlap live memory nor bridge a gap" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let mut cap: usize = block_span(size, align);
+        let a: usize = ptr_to_addr(ptr);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) && ptr_to_addr(cur) < a {
+            let cblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            prev = cur;
+            cur = cblk.next;
+        }
+        let mut link: rawptr u8 = cur;
+        if !is_null(cur) {
+            let nblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if a + cap == ptr_to_addr(cur) {
+                cap = cap + nblk.size;
+                link = nblk.next;
+            }
+        }
+        if !is_null(prev) {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            if ptr_to_addr(prev) + pblk.size == a {
+                ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: link, size: pblk.size + cap });
+                return;
+            }
+        }
+        ptr_write(cast_ptr[FreeBlock](ptr), FreeBlock { next: link, size: cap });
+        if is_null(prev) {
+            ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: ptr });
+        } else {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: ptr, size: pblk.size });
+        }
+    }
+}
+
+static FREELIST_VT: AllocVtable = AllocVtable { alloc: freelist_alloc, free: freelist_free };
+
+fn mk_alloc(state: write FreeList) -> Alloc {
+    unsafe "ctx (the caller's FreeList local) and vt (the static FREELIST_VT) outlive every String this handle serves; the caller keeps the window and FREELIST_VT alive for the whole run and drops every String before the window dies" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(FREELIST_VT) };
+    }
+}
+
+// The 0009 Iter protocol over a cons List, for the compose check.
+enum List[T] { Nil, Cons(T, Box List[T]) }
+impl[T] Iter for List[T] {
+    type Item = T;
+    fn next(take self) alloc -> IterStep[T, List[T]] {
+        match self { List::Nil => { return IterStep::Done; } List::Cons(x, tail) => { return IterStep::More(x, unbox(tail)); } }
+    }
+}
+fn prepend(a: read Alloc, v: i64, rest: List[i64]) alloc -> List[i64] {
+    match box(a, rest) { BoxResult::oom => { return List::Nil; } BoxResult::boxed(b) => { return List::Cons(v, b); } }
+}
+fn fold[T, A](it: List[T], init: A, f: fn(A, T) -> A) alloc -> A {
+    let mut acc: A = init;
+    let mut cur: List[T] = it;
+    loop { match cur.next() { IterStep::More(x, rest) => { acc = f(acc, x); cur = rest; } IterStep::Done => { break; } } }
+    return acc;
+}
+fn add(a: i64, x: i64) -> i64 { return a + x; }
+
+// Split the String's UTF-8 bytes into owned per-line Strings. Byte-scan for '\n'
+// (10); each line span [start, end) is copied into its own String via
+// `str_from_unchecked` (a bounded [u8] -> str retype, safe because the cut point
+// is an ASCII newline, never inside a multibyte char). A trailing newline does not
+// emit a final empty line; interior empty lines are kept. Each line is built into
+// this function's own owned local before it is moved into the result Vec.
+fn split_lines(a: read Alloc, s: read String) alloc -> Vec[String] {
+    let bytes: [u8] = as_bytes(as_str(read s.*));
+    let total: usize = len(bytes);
+    let mut lines: Vec[String] = vec_new(a);
+    let mut start: usize = 0usize;
+    let mut i: usize = 0usize;
+    loop {
+        if i >= total { break; }
+        if bytes[i] == 10u8 {
+            let mut line: String = string_new(a);
+            unsafe "the line span [start, i) is a bounded sub-view of the source String's valid UTF-8, cut only at an ASCII newline (never inside a multibyte char), so it is itself valid UTF-8" {
+                append(write line, str_from_unchecked(subslice(bytes, start, i)));
+            }
+            push(write lines, line);
+            start = i + 1usize;
+        }
+        i = i + 1usize;
+    }
+    if start < total {
+        let mut last: String = string_new(a);
+        unsafe "the final line span [start, total) carries no trailing newline; a bounded sub-view of valid UTF-8 cut only at ASCII newline boundaries is itself valid UTF-8" {
+            append(write last, str_from_unchecked(subslice(bytes, start, total)));
+        }
+        push(write lines, last);
+    }
+    return lines;
+}
+
+// Trace one line's byte length followed by its bytes. Takes the line by shared
+// borrow so the Vec keeps ownership; `as_str`/`as_bytes` read the built text back.
+fn trace_line(s: read String) alloc -> unit {
+    let sb: [u8] = as_bytes(as_str(read s.*));
+    let m: usize = len(sb);
+    trace(conv i64 m);
+    let mut j: usize = 0usize;
+    loop { if j >= m { break; } trace(conv i64 sb[j]); j = j + 1usize; }
+}
+
+// Trace a whole Vec[String]: the line count, then each line via `trace_line`.
+fn dump_vec(v: read Vec[String]) alloc -> unit {
+    let n: usize = len(v);
+    trace(conv i64 n);
+    let mut i: usize = 0usize;
+    loop { if i >= n { break; } trace_line(read get(v, i).*); i = i + 1usize; }
+}
+
+fn line_len(s: read String) alloc -> i64 {
+    let sb: [u8] = as_bytes(as_str(read s.*));
+    return conv i64 len(sb);
+}
+
+// Compose the split output with the Iter `fold` adapter: materialize each line's
+// byte length into a List[i64], then fold-sum it (order-independent). Proves a
+// Vec[String] of lines flows into the 0009 iterator adapters.
+fn sum_line_lengths(a: read Alloc, v: read Vec[String]) alloc -> i64 {
+    let mut lens: List[i64] = List::Nil;
+    let n: usize = len(v);
+    let mut i: usize = 0usize;
+    loop {
+        if i >= n { break; }
+        lens = prepend(a, line_len(read get(v, i).*), lens);
+        i = i + 1usize;
+    }
+    return fold(lens, 0, add);
+}
+
+fn main() alloc -> i64 {
+    let mut st: FreeList = with_window(16777216usize, 1048576usize);
+    let a: Alloc = mk_alloc(write st);
+
+    // Trailing newline: "a\nb\n" -> ["a","b"] (no final empty line).
+    let mut s1: String = string_new(read a);
+    append(write s1, "a\nb\n");
+    let v1: Vec[String] = split_lines(read a, read s1);
+    dump_vec(read v1);
+
+    // No trailing newline: "a\nb" -> ["a","b"] (same lines).
+    let mut s2: String = string_new(read a);
+    append(write s2, "a\nb");
+    let v2: Vec[String] = split_lines(read a, read s2);
+    dump_vec(read v2);
+
+    // Interior empty line: "a\n\nb" -> ["a","","b"] (empty line preserved).
+    let mut s3: String = string_new(read a);
+    append(write s3, "a\n\nb");
+    let v3: Vec[String] = split_lines(read a, read s3);
+    dump_vec(read v3);
+
+    // Empty string -> [] (empty Vec).
+    let s4: String = string_new(read a);
+    let v4: Vec[String] = split_lines(read a, read s4);
+    dump_vec(read v4);
+
+    // Single line, no newline: "abc" -> ["abc"].
+    let mut s5: String = string_new(read a);
+    append(write s5, "abc");
+    let v5: Vec[String] = split_lines(read a, read s5);
+    dump_vec(read v5);
+
+    // Compose: "hello\nworld\n!" -> ["hello","world","!"], fold-sum lengths = 11.
+    let mut s6: String = string_new(read a);
+    append(write s6, "hello\nworld\n!");
+    let v6: Vec[String] = split_lines(read a, read s6);
+    let total: i64 = sum_line_lengths(read a, read v6);
+    trace(total);
+
+    return total;
+}

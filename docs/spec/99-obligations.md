@@ -4192,3 +4192,55 @@ byte-exact. Backend/MIR lowering only — no checker/semantic/extern change.
 
 NEXT: the deferred `str_from`/`substr` native lowering; then a lines iterator + a
 buffered reader/writer (the next file-I/O slice).
+
+## STD-IO-FILE-LINES — native line-oriented file I/O: `split_lines`/`read_lines` over the native String/Vec (2026-07-13)
+
+Rounds out the file-I/O layer with line splitting, fully native (tree-walker · MIR
+· Cranelift · LLVM). Purely additive — no extern/trust-clause, compiler, MIR,
+checker, backend, or `aot_runtime.c` change; built entirely on the already-native
+`String`/`Vec[T]`/`str_from_unchecked` intrinsics.
+
+- `split_lines(a: read Alloc, s: read String) alloc -> Vec[String]` byte-scans the
+  String's UTF-8 bytes (via `as_bytes(as_str(read s.*))`) for the ASCII newline
+  (10). '\n' is single-byte, so the scan needs no char-boundary logic: each line
+  span `[start, end)` is a bounded `subslice` cut only at a newline (never inside a
+  multibyte char), so it is itself valid UTF-8 — reinterpreted with
+  `str_from_unchecked` and `append`ed into the line's OWN owned `String` local
+  before `push`ing it into the result `Vec[String]` (the owned-String-through-borrow
+  discipline). CONVENTION (tested): a trailing newline does NOT emit a final empty
+  line (`"a\nb\n"` -> `["a","b"]`, `"a\nb"` -> `["a","b"]`); an interior empty line
+  IS preserved (`"a\n\nb"` -> `["a","","b"]`); the empty string yields an EMPTY Vec.
+- `read_lines(a: read Alloc, path: read [u8]) alloc -> LinesIoResult` = `read_file(a,
+  path)?` (aggregate-`?` propagating `IoError`, the STD-IO-FILE-NATIVE path) then
+  `split_lines(a, read s)`. `LinesIoResult { ok Ok(Vec[String]), Err(IoError) }` is a
+  Vec-carrying sibling of the module's non-generic `IoResult` (the audited module
+  stays NON-GENERIC), the `?` widening via the identity `From[IoError] for IoError`.
+- TWO CHECKER/INTERP QUIRKS worked around WITHOUT compiler change (both reported,
+  not patched): (1) re-borrowing an already-`read Vec` param — `len(read v)` /
+  `get(read v, i)` on a `v: read Vec[T]` param mis-dispatches/mis-reads; pass the
+  borrow param DIRECTLY (`len(v)`, `get(v, i)`). (2) `as_str`/`as_bytes` chained on a
+  `get(v,i).*` result fault at runtime ("unknown name as_str") because the interp's
+  `expr_static_ty` can't type a builtin `get` call's return; instead pass the element
+  to a `fn(s: read String)` helper (`read get(v, i).*`) whose OWN `read s.*` types
+  cleanly. Both are pre-existing limitations of Vec-element String access, orthogonal
+  to this slice.
+- GATES. `tests/lines.rs` (`split_lines_all_cases_all_engines`) drives the
+  `tests/fixtures/run/split_lines.cnr` fixture — the five split cases plus a `fold`
+  compose (sum of `["hello","world","!"]` line lengths = 11 over the 0009 Iter
+  protocol) — asserting the exact 23-entry trace + ret byte-identical on the oracle,
+  MIR, and Cranelift no-opt/opt; the fixture is auto-scanned by the AOT ELF corpus
+  (`gate_aot_full_corpus`) and the LLVM `clang -O2` corpus
+  (`gate_llvm_full_corpus_fifth_engine`), so all FIVE engines gate it. `read_lines`
+  runs on the tree-walker AND MIR through the real shims
+  (`read_lines_splits_file_into_line_vec_tree_and_mir`, tests/std_io.rs) and as a
+  linked Cranelift / clang -O2 binary calling real libc
+  (`gate_aot_native_read_lines`, `gate_llvm_native_read_lines`) over the
+  self-contained `tests/fixtures/std_io_readpath/read_lines_native.cnr`: read a real
+  4-line multibyte >64-byte file, split, write each line back newline-terminated ==
+  the file body byte-for-byte, ret == 4.
+- Full `cargo nextest` green (683 tests) incl. the std_io/text/adapters/native gates;
+  clippy clean.
+
+NEXT: the deferred `str_from`/`substr` native lowering; a streaming `Lines: Iter`
+adapter (blocked on 0009 RefIndexed borrowed-yield — a Vec-backed iterator must yield
+each line by borrow); a buffered reader/writer.

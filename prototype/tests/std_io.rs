@@ -854,3 +854,53 @@ fn read_to_string_round_trip_byte_equal_tree_and_mir() {
     assert_eq!(tw_ret, content.len() as i64);
     assert_eq!(mir_ret, tw_ret, "MIR byte count matches the tree oracle");
 }
+
+// ---------------------------------------------------------------------------
+// Line-oriented read path: `read_lines` = `read_file`? -> `split_lines`, byte-
+// scanning the owned `String` into a `Vec[String]`. The read path is native
+// (`str_from_unchecked` lowers), so this runs on the tree-walker AND the MIR
+// engine through the same real shims; the Cranelift + LLVM native gates live in
+// tests/aot.rs (`gate_aot_native_read_lines`) and tests/llvm.rs
+// (`gate_llvm_native_read_lines`). The self-contained fixture reads "rt.txt" into
+// lines and writes each line back newline-terminated, so the reconstruction
+// equals the newline-terminated file body byte-for-byte.
+// ---------------------------------------------------------------------------
+fn read_lines_fixture() -> String {
+    let path = format!("{}/tests/fixtures/std_io_readpath/read_lines_native.cnr", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(&path).expect("read read-lines fixture")
+}
+
+#[test]
+fn read_lines_splits_file_into_line_vec_tree_and_mir() {
+    let _g = lock();
+    let src = read_lines_fixture();
+    // Multi-line, multibyte, > 64 bytes so read_file loops and grows the String;
+    // four newline-terminated lines -> the per-line reconstruction reproduces the
+    // body exactly.
+    let content = "hi\ncand\u{00f6}r\n\u{03c0}\nlong line to exceed sixty four bytes across many reads xyz\n";
+    let tdir = std::env::temp_dir().join(format!("candor-io-lines-{}", std::process::id()));
+    std::fs::create_dir_all(&tdir).unwrap();
+    std::fs::write(tdir.join("rt.txt"), content.as_bytes()).unwrap();
+
+    // tree-walker
+    foreign_io::reset();
+    foreign_io::set_root(&tdir);
+    foreign_io::register_std_io();
+    let tw = run_ok(&src);
+    let tw_out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+
+    // MIR engine (split_lines + read_file both lower: native String/Vec + str_from_unchecked)
+    foreign_io::reset();
+    foreign_io::set_root(&tdir);
+    foreign_io::register_std_io();
+    let mir = run_ok_mir(&src);
+    let mir_out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+    let _ = std::fs::remove_dir_all(&tdir);
+
+    assert_eq!(tw, 4, "read_lines split the file into four lines");
+    assert_eq!(mir, 4, "MIR line count matches the tree oracle");
+    assert_eq!(tw_out, content.as_bytes(), "tree: lines reassembled newline-terminated");
+    assert_eq!(mir_out, content.as_bytes(), "MIR: lines reassembled newline-terminated");
+}

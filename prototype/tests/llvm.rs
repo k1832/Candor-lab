@@ -652,6 +652,54 @@ fn gate_llvm_native_read_file_string() {
     assert_eq!(exp_ret, content.len() as i64, "write_str returns the byte count");
 }
 
+#[test]
+fn gate_llvm_native_read_lines() {
+    assert!(clang_available(), "clang unavailable");
+    let _g = io_guard();
+    // The line-oriented read path (`read_lines` -> `read_file` -> `split_lines`),
+    // built by clang -O2: reads a real file into an owned `String`, byte-scans it
+    // into a `Vec[String]` of owned per-line Strings, then writes each line back
+    // (newline-terminated). The native binary must match the shim oracle, and the
+    // reconstruction must equal the newline-terminated file body byte-for-byte.
+    let cnr = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/std_io_readpath/read_lines_native.cnr");
+    let src = std::fs::read_to_string(&cnr).expect("read read-lines fixture");
+    let work = std::env::temp_dir().join(format!("candor-llvm-readlines-{}", std::process::id()));
+    std::fs::create_dir_all(&work).unwrap();
+    let content = "hi\ncand\u{00f6}r\n\u{03c0}\nlong line to exceed sixty four bytes across many reads xyz\n";
+    std::fs::write(work.join("rt.txt"), content.as_bytes()).unwrap();
+
+    // Oracle: the shim-backed interpreter rooted at the work dir.
+    candor_proto::foreign_io::reset();
+    candor_proto::foreign_io::set_root(&work);
+    candor_proto::foreign_io::register_std_io();
+    let (exp_ret, exp_out) = match run_source_real(&src) {
+        RunResult::Ok(r) => (r.ret, candor_proto::foreign_io::take_stdout()),
+        _ => {
+            candor_proto::foreign_io::unregister_std_io();
+            panic!("shim-backed interpreter should run the read-lines demonstrator");
+        }
+    };
+    candor_proto::foreign_io::unregister_std_io();
+
+    // Native: clang -O2 binary calling real libc, run with the work dir as cwd.
+    let srcpath = work.join("prog.cnr");
+    std::fs::write(&srcpath, &src).unwrap();
+    let out = std::env::temp_dir().join(format!("candor-llvm-readlines-bin-{}", std::process::id()));
+    candor_proto::compile_path_llvm(&srcpath, &out).expect("compile read-lines demonstrator via clang -O2");
+    let output = Command::new(&out)
+        .current_dir(&work)
+        .output()
+        .expect("run compiled read-lines binary");
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_dir_all(&work);
+
+    assert_eq!(output.status.code(), Some(exp_ret as u8 as i32), "exit byte vs shim run");
+    assert_eq!(output.stdout, exp_out, "stdout bytes vs shim run");
+    assert_eq!(output.stdout, content.as_bytes(), "the four lines, reassembled newline-terminated");
+    assert_eq!(exp_ret, 4, "four lines split from the file");
+}
+
+
 
 // ---------------------------------------------------------------------------
 // 10. THE FIFTH ENGINE (P5): LLVM as a co-equal member of the Stage-D
