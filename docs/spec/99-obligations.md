@@ -4143,3 +4143,52 @@ baked into the audited `main.cnr` module, for the lowering reason below.
 
 NEXT: a lines iterator + a buffered reader/writer. A native `[u8] -> str` (or a
 byte-append-to-String) intrinsic would let the read path go native.
+
+## STD-IO-FILE-NATIVE — the read path goes native: `str_from_unchecked` lowered as a pure retype, plus aggregate-`?` and block-arm aggregate init (2026-07-13)
+
+Flips STD-IO-FILE's "REPORTED NATIVE GAP": `read_to_string`/`read_file` now run on
+the tree-walker AND the MIR engine AND both native backends (Cranelift + LLVM),
+byte-exact. Backend/MIR lowering only — no checker/semantic/extern change.
+
+- STR-VIEW RETYPE. `str_from_unchecked` ([u8] -> str) is now in
+  `mir::build::is_builtin` and lowers exactly like `as_bytes` (the str -> [u8]
+  mirror): a `[u8]` and a `str` share the same 16-byte `{ptr@0, len@8}` fat pointer
+  (design 0013 §4), so the unsafe (validation-skipping) variant just `CopyVal`s the
+  16-byte header into the `str` destination. Backend-agnostic: `CopyVal` already
+  lowers on both native backends, so no lower.rs/llvm.rs arm was needed (same as
+  `as_bytes`).
+- TWO ENABLING GAPS the read path also hit (whole-program eager lowering means
+  `read_file` taints the image even when `main` only calls `read_to_string`):
+  (1) `?` with an AGGREGATE ok-payload — `read_to_string(a, fd)?` unwraps a
+  `StrIoResult` carrying an owned `String`. `lower_try` now moves an aggregate
+  ok-payload into the caller's destination via `CopyVal` (the enum temp is never
+  dropped, so it is a move, mirroring the tree-walker's payload-address reuse);
+  word payloads are unchanged. (2) A BLOCK match-arm in aggregate position — the
+  diverging `StrIoResult::Err(e) => { return ...; }` arm is now lowered by
+  `lower_into` via `lower_block` (mirroring the value-position handling); a
+  value-producing arm stays a bare expression, so `dst` is left unwritten only on
+  the diverging path.
+- GATES. `read_to_string_round_trip_byte_equal_tree_and_mir` (tests/std_io.rs)
+  replaces the old `read_to_string_mir_native_gap_is_unsupported` pin: the stdin ->
+  read_to_string -> String -> write_str -> stdout round-trip is byte-exact on the
+  tree-walker AND the MIR engine through the same real shims. `gate_aot_native_read_file_string`
+  (tests/aot.rs) and `gate_llvm_native_read_file_string` (tests/llvm.rs) compile a
+  new self-contained fixture (`tests/fixtures/std_io_readpath/read_file_native.cnr`:
+  the extern module + FILE_API + a `read_file`-of-a-real-file main) to a real ELF /
+  clang -O2 binary calling real libc, run with the file's dir as cwd, and assert the
+  stdout + exit byte equal the shim oracle. The fixture lives OUTSIDE the audited
+  `fixtures/std_io` dir so `candor audit`'s extern count stays 4.
+- DEFERRED (unchanged, tree-walker-only). `str_from` (the CHECKED [u8] -> Utf8Res:
+  a full UTF-8 validation byte scan returning `Valid(str)`/`Invalid(offset)`) and
+  `substr` (a char-boundary str slice with a `Bounds` fault on out-of-bounds OR a
+  non-boundary offset) are NOT lowered: both need substantial new multi-block
+  fault-edge / byte-scan machinery emitted byte-exact across the MIR interp AND
+  both native backends (a dedicated `Substr`-style op or an `rt_` validation
+  symbol), which balloons well past the read-path deliverable. Only
+  `str_from_unchecked` (the read path's actual need) was landed; their text.rs
+  tree-walker tests stay green.
+- Full `cargo nextest` green (679 tests) incl. the std_io/text/native gates;
+  clippy clean.
+
+NEXT: the deferred `str_from`/`substr` native lowering; then a lines iterator + a
+buffered reader/writer (the next file-I/O slice).

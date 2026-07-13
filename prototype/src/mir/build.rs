@@ -838,7 +838,7 @@ impl<'a> Lowerer<'a> {
                     .ok_or_else(|| LowerError("`result` outside ensures".into()))?;
                 Ok((Operand::Local(rl), self.ret_ty.clone()))
             }
-            ExprKind::Try(inner) => self.lower_try(inner, e.span),
+            ExprKind::Try(inner) => self.lower_try(inner, e.span, None),
             ExprKind::Match { scrutinee, arms } => {
                 self.lower_match(scrutinee, arms, None)?;
                 Ok(self.unit())
@@ -1289,11 +1289,12 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
-    /// Lower `inner?` (spec 02 §6.5) for a *same-type* result enum: unwrap the
-    /// `ok` variant's (word-sized) payload, or early-return the whole value with
-    /// the enclosing scopes' drop schedule (INV-DROP). Cross-type `?` (a `From`
-    /// conversion) and aggregate payloads remain out of subset.
-    fn lower_try(&mut self, inner: &Expr, span: Span) -> LR<(Operand, Type)> {
+    /// Lower `inner?` (spec 02 §6.5): on the `ok` variant, unwrap the payload — a
+    /// word payload becomes the `?` value, an aggregate payload (e.g. an owned
+    /// `String`) is moved into `dst`; otherwise early-return the whole value with
+    /// the enclosing scopes' drop schedule (INV-DROP), same-type by a whole-value
+    /// copy or cross-type via the matching `From` conversion (design 0007 §7.1).
+    fn lower_try(&mut self, inner: &Expr, span: Span, dst: Option<&Place>) -> LR<(Operand, Type)> {
         self.cur_span = span;
         let ety = match &inner.kind {
             ExprKind::Call { callee, .. } => match &callee.kind {
@@ -1368,15 +1369,23 @@ impl<'a> Lowerer<'a> {
             return Ok(self.unit());
         }
         let (pty, off) = self.lay().payload_offset(&payloads, 0);
-        if !self.is_wordy(&pty) {
-            return unsupported("`?` with an aggregate payload");
-        }
         let mut ppl = splace.clone();
         ppl.proj.push(Proj::Field { offset: off, ty: pty.clone() });
-        let val = self.emit_temp(pty.clone(), Rvalue::Load { place: ppl, ty: pty.clone() }, span);
+        if self.is_wordy(&pty) {
+            let val = self.emit_temp(pty.clone(), Rvalue::Load { place: ppl, ty: pty.clone() }, span);
+            self.terminate(Terminator::Goto(join));
+            self.switch_to(join);
+            return Ok((Operand::Local(val), pty));
+        }
+        // Aggregate ok-payload (e.g. an owned `String`): move the whole payload
+        // out of the enum temp into the caller's destination — mirrors the
+        // tree-walker, which returns the payload's address unchanged (the enum
+        // temp is never dropped, so this is a move, not a copy).
+        let dst = dst.ok_or_else(|| LowerError("`?` aggregate payload without a destination".into()))?;
+        self.emit(StatementKind::CopyVal { dst: dst.clone(), src: ppl, ty: pty.clone() }, span, false);
         self.terminate(Terminator::Goto(join));
         self.switch_to(join);
-        Ok((Operand::Local(val), pty))
+        Ok((self.unit().0, pty))
     }
 
     /// Evaluate `e` and write it into the destination place `dst` of type `ty`
@@ -1476,13 +1485,19 @@ impl<'a> Lowerer<'a> {
             ExprKind::Match { scrutinee, arms } => self.lower_match(scrutinee, arms, Some((dst, ty))),
             ExprKind::Try(inner) => {
                 // `?` producing an aggregate value into `dst` (cross-type or
-                // aggregate-payload `?`): lower and store.
-                let (op, oty) = self.lower_try(inner, e.span)?;
+                // aggregate-payload `?`): the aggregate ok-payload is copied into
+                // `dst` inside `lower_try`; a word payload is stored here.
+                let (op, oty) = self.lower_try(inner, e.span, Some(dst))?;
                 if self.is_wordy(&oty) {
                     self.emit(StatementKind::Store(dst.clone(), Rvalue::Use(op)), self.cur_span, false);
                 }
                 Ok(())
             }
+            // A block match-arm/expression in aggregate position: lower its
+            // statements. A value-producing arm is a bare expression (handled
+            // above); a block arm diverges (`return`/`break`), so `dst` is left
+            // unwritten on that path — matching the value-position handling.
+            ExprKind::Block(b) => self.lower_block(b),
             // A string literal materializes as a `[u8]` slice header (design 0001 §4.2).
             ExprKind::StrLit(bytes) | ExprKind::BytesLit(bytes) => {
                 self.lower_str_into(bytes, dst);
@@ -2520,6 +2535,16 @@ impl<'a> Lowerer<'a> {
                 self.emit(StatementKind::CopyVal { dst: dst.clone(), src, ty: ty.clone() }, span, false);
                 Ok(())
             }
+            "str_from_unchecked" => {
+                // Mirror of `as_bytes` (the `str` -> `[u8]` retype): a `[u8]`'s
+                // `{ptr@0, len@8}` fat pointer IS a `str` (design 0013 §4). The
+                // unsafe variant skips UTF-8 validation, so copy the 16-byte header
+                // verbatim into the `str` destination.
+                let bytes = Type::Slice(Box::new(Type::Scalar(ScalarTy::U8)));
+                let src = self.materialize_place(&args[0], &bytes)?;
+                self.emit(StatementKind::CopyVal { dst: dst.clone(), src, ty: ty.clone() }, span, false);
+                Ok(())
+            }
             _ => unsupported(format!("aggregate builtin `{name}`")),
         }
     }
@@ -2632,7 +2657,8 @@ fn is_builtin(name: &str) -> bool {
     matches!(
         name,
         "box" | "unbox" | "ptr_read" | "ptr_write" | "ptr_offset" | "addr_of" | "addr_of_mut"
-            | "is_null" | "ptr_to_addr" | "slice_of" | "slice_of_mut" | "subslice" | "as_bytes" | "len"
+            | "is_null" | "ptr_to_addr" | "slice_of" | "slice_of_mut" | "subslice" | "as_bytes"
+            | "str_from_unchecked" | "len"
     )
 }
 

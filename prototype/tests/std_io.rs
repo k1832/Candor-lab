@@ -819,19 +819,38 @@ fn write_str_writes_string_bytes_both_engines() {
     assert_eq!(mir_out, b"Hi, Candor!");
 }
 
-// ---- the reported native gap: read_to_string is tree-walker only --------------
-// Appending buf[0..n] as a bounded str-view needs `str_from_unchecked` (a
-// `[u8] -> str` reinterpret). That intrinsic — like `str_from`/`substr` — is NOT
-// in the MIR/native builtin set (`mir::build::is_builtin`), so the whole program
-// is rejected at lowering ("indirect/unknown aggregate call"). Pinned as
-// `Unsupported`: if a native `[u8] -> str` (or a byte-append to String) ever lands
-// and this flips, promote the read-path tests to MIR/native and delete this pin.
+// ---- the read path now lowers to MIR: `str_from_unchecked` is a native retype ---
+// Appending buf[0..n] as a bounded str-view needs `str_from_unchecked` (the
+// `[u8] -> str` reinterpret). That intrinsic now lowers on the MIR/native builtin
+// set (`mir::build::is_builtin`) as a pure 16-byte fat-pointer retype (the mirror
+// of `as_bytes`), so the whole read path reaches the MIR engine. This proves the
+// round-trip byte-exact on BOTH the tree-walker AND the MIR engine through the
+// same real shims; the native (Cranelift + LLVM) gates live in tests/aot.rs and
+// tests/llvm.rs.
 #[test]
-fn read_to_string_mir_native_gap_is_unsupported() {
+fn read_to_string_round_trip_byte_equal_tree_and_mir() {
     let _g = lock();
+    let content = "hi\ncand\u{00f6}r\n\u{03c0}\n".to_string();
     let src = file_probe(ROUND_TRIP_MAIN);
-    match run_source_real_mir(&src) {
-        MirRunResult::Unsupported(_) => {}
-        other => panic!("expected MIR Unsupported (str-view ctor gap), got ok={}", matches!(other, MirRunResult::Ok(_))),
-    }
+
+    // tree-walker
+    foreign_io::reset();
+    foreign_io::register_std_io();
+    foreign_io::set_stdin(content.as_bytes());
+    let tw_ret = run_ok(&src);
+    let tw_out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+
+    // MIR engine (str_from_unchecked lowers as a CopyVal retype; String is native)
+    foreign_io::reset();
+    foreign_io::register_std_io();
+    foreign_io::set_stdin(content.as_bytes());
+    let mir_ret = run_ok_mir(&src);
+    let mir_out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+
+    assert_eq!(tw_out, content.as_bytes(), "tree round-tripped byte-for-byte");
+    assert_eq!(mir_out, content.as_bytes(), "MIR round-tripped byte-for-byte");
+    assert_eq!(tw_ret, content.len() as i64);
+    assert_eq!(mir_ret, tw_ret, "MIR byte count matches the tree oracle");
 }

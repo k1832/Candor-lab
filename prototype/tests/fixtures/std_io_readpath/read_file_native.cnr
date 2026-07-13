@@ -1,0 +1,270 @@
+boundary
+// std::io — a POSIX I/O boundary module over libc (design 0011 boundary + 0013
+// bytes/str). The externs carry the C-boundary TRUST (assumed-proven); the pub
+// wrappers carry the ENFORCED value contracts and discharge the `foreign`
+// effect, so the module's public surface is ordinary safe Candor — audit-clean.
+//
+// The extern symbols are `sys_*`, not the bare POSIX `read`/`write`, because
+// `read`/`write` are Candor keywords (the borrow modes); binding these to the
+// real libc `read`/`write` symbols needs a symbol-rename the edition lacks.
+
+extern "C" {
+    fn sys_open(path: rawptr u8, flags: i32, mode: i32) foreign -> i32
+        trust "POSIX open(2): reads a NUL-terminated path, retains no pointer, thread-confined to this call" {
+            valid_nul_terminated(path),
+            no_retain(path),
+        };
+    fn sys_close(fd: i32) foreign -> i32
+        trust "POSIX close(2): closes a descriptor; touches no Candor memory" {
+        };
+    fn sys_read(fd: i32, buf: rawptr u8, count: usize) foreign -> isize
+        trust "POSIX read(2): writes at most count bytes into buf, retains no pointer, thread-confined" {
+            valid_for(buf, count),
+            no_retain(buf),
+            thread_confined(buf),
+        };
+    fn sys_write(fd: i32, buf: rawptr u8, count: usize) foreign -> isize
+        trust "POSIX write(2): reads at most count bytes from buf, retains no pointer, thread-confined" {
+            valid_for(buf, count),
+            no_retain(buf),
+            thread_confined(buf),
+        };
+}
+
+// The I/O error is a structured ENUM over the raw negative syscall return — no
+// longer a bare `i32`. A single `Errno(i32)` variant keeps it native-safe (an
+// LLVM S2 scalar enum; no `String`, no allocator). Named errno variants
+// (`NotFound`/`PermissionDenied`/...) would require reading C `errno`, which the
+// trust-clause externs deliberately do NOT surface (they return only the syscall
+// result), so `Errno(i32)` is the smaller useful design without changing them.
+pub enum IoError {
+    Errno(i32),
+}
+
+// result-shaped (design 0006): `Ok` is the `ok`-marked variant, so `?` propagates
+// the `IoError` through an `IoResult`-returning caller. The error is now the
+// structured `IoError`, not a raw errno. Native-safe (LLVM S2 scalar enums; no
+// `String`/allocator). Cross-type `?` widening `IoError -> AppErr` via a `From`
+// impl is proven across this boundary in `tests/std_io.rs` (the audited module
+// itself stays NON-generic — see the run report's deciding-authority fork on the
+// generic-boundary audit gap).
+pub enum IoResult {
+    ok Ok(usize),
+    Err(IoError),
+}
+
+pub fn stdin() -> i32 { return 0i32; }
+pub fn stdout() -> i32 { return 1i32; }
+pub fn stderr() -> i32 { return 2i32; }
+
+pub fn open_read(path: read [u8]) -> IoResult {
+    unsafe "sys_open trust discharged: path is a live NUL-terminated [u8] view; open retains nothing (POSIX)" {
+        let fd: i32 = sys_open(addr_of(path[0]), 0i32, 0i32);
+        if fd < 0i32 {
+            return IoResult::Err(IoError::Errno(fd));
+        }
+        return IoResult::Ok(conv usize fd);
+    }
+}
+
+pub fn close(fd: i32) -> IoResult {
+    unsafe "sys_close trust discharged: fd is a descriptor; close touches no Candor memory" {
+        let r: i32 = sys_close(fd);
+        if r < 0i32 {
+            return IoResult::Err(IoError::Errno(r));
+        }
+        return IoResult::Ok(0usize);
+    }
+}
+
+pub fn read_into(fd: i32, buf: write [u8]) -> IoResult {
+    unsafe "sys_read trust discharged: buf is a live [u8] view valid for len(buf) bytes; read retains nothing (POSIX), thread-confined" {
+        let n: isize = sys_read(fd, addr_of_mut(buf[0]), len(buf));
+        if n < 0isize {
+            return IoResult::Err(IoError::Errno(conv i32 n));
+        }
+        return IoResult::Ok(conv usize n);
+    }
+}
+
+pub fn write_all(fd: i32, s: read [u8]) -> IoResult {
+    let total: usize = len(s);
+    if total == 0usize {
+        return IoResult::Ok(0usize);
+    }
+    unsafe "sys_write trust discharged: s is a live [u8] view valid for len(s) bytes; write retains nothing (POSIX), thread-confined" {
+        let n: isize = sys_write(fd, addr_of(s[0]), total);
+        if n < 0isize {
+            return IoResult::Err(IoError::Errno(conv i32 n));
+        }
+        if conv usize n < total {
+            return IoResult::Err(IoError::Errno(0i32 - 1i32));
+        }
+        return IoResult::Ok(total);
+    }
+}
+
+
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+
+struct FreeList { next: usize, end: usize, head: rawptr u8 }
+struct FreeBlock { next: rawptr u8, size: usize }
+
+fn with_window(base: usize, size: usize) -> FreeList {
+    unsafe "the empty free list starts with a null head; no block is threaded yet" {
+        return FreeList { next: base, end: base + size, head: ptr_null[u8]() };
+    }
+}
+
+fn block_span(size: usize, align: usize) -> usize {
+    let mut need: usize = size;
+    if need < 16usize {
+        need = 16usize;
+    }
+    return (need + align - 1usize) / align * align;
+}
+
+fn freelist_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live FreeList whose [next, end) window and address-ordered free chain are reserved to this arena alone; every carved block stays inside [next, end) and is >= header-sized, and a split remainder (kept only when >= MIN_SPLIT) is written into the block's own tail" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let need: usize = block_span(size, align);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) {
+            let blk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if blk.size >= need {
+                if blk.size - need >= 32usize {
+                    let rem: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(cur) + need);
+                    ptr_write(cast_ptr[FreeBlock](rem), FreeBlock { next: blk.next, size: blk.size - need });
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: rem });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: rem, size: pblk.size });
+                    }
+                } else {
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: blk.next });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: blk.next, size: pblk.size });
+                    }
+                }
+                return cur;
+            }
+            prev = cur;
+            cur = blk.next;
+        }
+        let aligned: usize = (st.next + align - 1usize) / align * align;
+        if aligned + need > st.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: aligned + need, end: st.end, head: st.head });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+
+fn freelist_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    unsafe "the free list is kept ADDRESS-ORDERED; the freed block's own storage (>= header-sized, guaranteed by block_span in alloc) holds its FreeBlock header {next, size}, and a merge joins two blocks ONLY when their byte spans are exactly adjacent (addr + size == neighbour addr), so a merge can never overlap live memory nor bridge a gap" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let mut cap: usize = block_span(size, align);
+        let a: usize = ptr_to_addr(ptr);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) && ptr_to_addr(cur) < a {
+            let cblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            prev = cur;
+            cur = cblk.next;
+        }
+        let mut link: rawptr u8 = cur;
+        if !is_null(cur) {
+            let nblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if a + cap == ptr_to_addr(cur) {
+                cap = cap + nblk.size;
+                link = nblk.next;
+            }
+        }
+        if !is_null(prev) {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            if ptr_to_addr(prev) + pblk.size == a {
+                ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: link, size: pblk.size + cap });
+                return;
+            }
+        }
+        ptr_write(cast_ptr[FreeBlock](ptr), FreeBlock { next: link, size: cap });
+        if is_null(prev) {
+            ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: ptr });
+        } else {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: ptr, size: pblk.size });
+        }
+    }
+}
+
+static FREELIST_VT: AllocVtable = AllocVtable { alloc: freelist_alloc, free: freelist_free };
+
+fn mk_alloc(state: write FreeList) -> Alloc {
+    unsafe "ctx (the caller's FreeList local) and vt (the static FREELIST_VT) outlive every String this handle serves; the caller keeps the window and FREELIST_VT alive for the whole run and drops every String before the window dies" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(FREELIST_VT) };
+    }
+}
+
+interface From[E] { fn from(e: E) -> Self; }
+impl From[IoError] for IoError { fn from(e: IoError) -> Self { return e; } }
+enum StrIoResult { ok Ok(String), Err(IoError) }
+
+// Loop `read_into` a fixed [64]u8 stack buffer into an owned growable String:
+// `Ok(0)` is EOF (return the String); `Ok(n)` appends the first n bytes; `Err` is
+// propagated by `?`. The n bytes are appended as a bounded str-view of buf[0..n];
+// `str_from_unchecked` is required (not `str_from`) because a multibyte char may
+// straddle a read boundary — per-chunk UTF-8 validation would wrongly reject a
+// whole that is valid. The bytes are only ever copied (append never re-validates);
+// the assembled String is valid UTF-8 iff the source is.
+fn read_to_string(a: read Alloc, fd: i32) alloc -> StrIoResult {
+    let mut s: String = string_new(a);
+    let mut buf: [64]u8 = [0u8; 64];
+    loop {
+        let n: usize = read_into(fd, slice_of_mut(buf))?;
+        if n == 0usize { break; }
+        let bytes: [u8] = subslice(slice_of(buf), 0usize, n);
+        unsafe "file bytes appended raw: a multibyte char may straddle a read boundary, so per-chunk validation would wrongly reject a valid whole; the accumulated String is valid UTF-8 iff the source is" {
+            append(write s, str_from_unchecked(bytes));
+        }
+    }
+    return StrIoResult::Ok(s);
+}
+
+// open -> read_to_string -> close. On the read-error path the `?` early-returns
+// BEFORE `close`, leaking the fd (accepted for this slice: closing cleanly on the
+// error arm fights the owned-String-through-`?` flow).
+fn read_file(a: read Alloc, path: read [u8]) alloc -> StrIoResult {
+    let fd: usize = open_read(path)?;
+    let s: String = read_to_string(a, conv i32 fd)?;
+    let cr: IoResult = close(conv i32 fd);
+    return StrIoResult::Ok(s);
+}
+
+// Write the String's bytes: `as_str` borrows the built text, `as_bytes` is the
+// free str -> [u8] retype, `write_all` does the syscall. All-native (no str-view
+// constructor), so this lowers on the MIR/native backends too.
+fn write_str(fd: i32, s: read String) -> IoResult {
+    return write_all(fd, as_bytes(as_str(read s.*)));
+}
+
+fn main() alloc -> i64 {
+    let mut st: FreeList = with_window(16777216usize, 1048576usize);
+    let a: Alloc = mk_alloc(write st);
+    let name: [7]u8 = [114u8, 116u8, 46u8, 116u8, 120u8, 116u8, 0u8];
+    let s: String = match read_file(read a, slice_of(name)) {
+        StrIoResult::Ok(v) => v,
+        StrIoResult::Err(e) => { return 0i64 - 1i64; },
+    };
+    match write_str(stdout(), read s) {
+        IoResult::Ok(c) => { return conv i64 c; },
+        IoResult::Err(e) => { return 0i64 - 2i64; },
+    }
+}
