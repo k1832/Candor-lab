@@ -1,0 +1,218 @@
+// M0 of a WebAssembly interpreter, written in Candor: decode a REAL `.wasm`
+// binary module and run its single function on a stack machine.
+//
+// The module embedded in `main` is the 34-byte binary of
+//   (module (func (result i32) i32.const 40 i32.const 2 i32.add))
+// and running it yields 42.
+//
+// Architecture (built to GROW toward M1/M2/M3):
+//   * a byte cursor (`Reader`) + real LEB128 (unsigned `read_u32`, signed
+//     `read_i64`) over a `[u8]` view — decoupled from where the bytes come
+//     from, so M3 swaps the embedded array for bytes read off disk with no
+//     change to the decoder;
+//   * an id-dispatched section walk (`decode_module`) — M1 grows it by adding
+//     a branch per new section id;
+//   * an opcode-dispatched eval loop (`eval`) over a value stack — M1 grows it
+//     by adding a branch per new opcode.
+//
+// i32-in-i64 representation: an i32 operand-stack value is held in an i64 slot
+// SIGN-EXTENDED from bit 31 (bits 32..63 mirror bit 31). `i32.const` sign-
+// extends the decoded LEB value; every i32 arithmetic result is re-normalized
+// by `(x << 32) >> 32` (arithmetic shift) so the invariant holds after wraps.
+// All operand arithmetic runs inside `wrapping { }`, whose `+`/`-`/`*` reduce
+// mod 2^bits with sign reinterpret — exactly WebAssembly's iN semantics (the
+// default regime FAULTS on overflow, so this block is load-bearing).
+
+struct Reader {
+    pos: usize,
+}
+
+fn read_byte(bytes: [u8], r: write Reader) -> u8 {
+    let b: u8 = bytes[r.pos];
+    r.*.pos = r.pos + 1;
+    return b;
+}
+
+// Unsigned LEB128 (section sizes, counts, indices): 7 payload bits per byte,
+// low-to-high, continuation in bit 7.
+fn read_u32(bytes: [u8], r: write Reader) -> u32 {
+    let mut acc: u32 = 0u32;
+    let mut shift: u32 = 0u32;
+    let mut more: bool = true;
+    while more {
+        let byte: u8 = read_byte(bytes, r);
+        let low: u32 = conv u32 (byte & 0x7fu8);
+        wrapping { acc = acc | (low << shift); }
+        shift = shift + 7u32;
+        if (byte & 0x80u8) == 0u8 {
+            more = false;
+        }
+    }
+    return acc;
+}
+
+// Signed LEB128 (`i32.const`/`i64.const` operands): like the unsigned form, but
+// if the final byte's sign bit (0x40) is set and fewer than 64 bits were read,
+// sign-extend the remaining high bits with ones.
+fn read_i64(bytes: [u8], r: write Reader) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut shift: u32 = 0u32;
+    let mut byte: u8 = 0u8;
+    let mut more: bool = true;
+    while more {
+        byte = read_byte(bytes, r);
+        let low: i64 = conv i64 (byte & 0x7fu8);
+        wrapping { acc = acc | (low << conv i64 shift); }
+        shift = shift + 7u32;
+        if (byte & 0x80u8) == 0u8 {
+            more = false;
+        }
+    }
+    if shift < 64u32 {
+        if (byte & 0x40u8) != 0u8 {
+            wrapping { acc = acc | ((0i64 - 1i64) << conv i64 shift); }
+        }
+    }
+    return acc;
+}
+
+fn expect_byte(bytes: [u8], r: write Reader, want: u8) -> unit {
+    let got: u8 = read_byte(bytes, r);
+    if got != want {
+        panic("malformed module: unexpected header byte");
+    }
+}
+
+// The instruction bytes of one function body: the half-open range
+// [start, end) into the module byte view, positioned just past the body's
+// local declarations (M0 has none), up to and including the trailing `end`.
+struct CodeRange {
+    start: usize,
+    end: usize,
+}
+
+// Walk the module: magic + version, then a sequence of sections (each = 1 id
+// byte + unsigned-LEB payload size + `size` payload bytes). Returns func 0's
+// instruction range from the Code section.
+fn decode_module(bytes: [u8]) -> CodeRange {
+    let mut r: Reader = Reader { pos: 0 };
+    // Magic "\0asm".
+    expect_byte(bytes, write r, 0x00u8);
+    expect_byte(bytes, write r, 0x61u8);
+    expect_byte(bytes, write r, 0x73u8);
+    expect_byte(bytes, write r, 0x6du8);
+    // Version 1.
+    expect_byte(bytes, write r, 0x01u8);
+    expect_byte(bytes, write r, 0x00u8);
+    expect_byte(bytes, write r, 0x00u8);
+    expect_byte(bytes, write r, 0x00u8);
+
+    let total: usize = len(bytes);
+    let mut code: CodeRange = CodeRange { start: 0, end: 0 };
+    let mut found: bool = false;
+
+    while r.pos < total {
+        let id: u8 = read_byte(bytes, write r);
+        let size: u32 = read_u32(bytes, write r);
+        let payload_end: usize = r.pos + conv usize size;
+        // Section dispatch. M0 handles only the Code section (id 10); the Type
+        // (1) and Function (3) sections are shape-skipped. M1 adds a branch per
+        // section by extending this chain.
+        if id == 0x0au8 {
+            let nfns: u32 = read_u32(bytes, write r);
+            if nfns == 0u32 {
+                panic("malformed module: code section has no bodies");
+            }
+            let body_size: u32 = read_u32(bytes, write r);
+            let body_start: usize = r.pos;
+            // Local declarations: `nlocals` groups of (count, valtype). M0
+            // requires zero; M1 reads and allocates them.
+            let nlocals: u32 = read_u32(bytes, write r);
+            if nlocals != 0u32 {
+                panic("unimplemented: function locals");
+            }
+            code = CodeRange { start: r.pos, end: body_start + conv usize body_size };
+            found = true;
+        }
+        // Every section (handled or skipped) advances past its payload.
+        r.pos = payload_end;
+    }
+
+    if !found {
+        panic("malformed module: no code section");
+    }
+    return code;
+}
+
+// Re-normalize an i64 holding an i32 result to the sign-extended-from-bit-31
+// representation. Runs in `wrapping` so the left shift cannot fault.
+fn as_i32(v: i64) -> i64 {
+    let mut norm: i64 = 0i64;
+    wrapping { norm = (v << 32i64) >> 32i64; }
+    return norm;
+}
+
+// Run func 0's body on the operand stack, returning the top of stack as the
+// i32 result (sign-extended in i64). The stack depth is bounded by module
+// validation; M0 uses a fixed 256-slot stack.
+fn eval(bytes: [u8], start: usize, end: usize) -> i64 {
+    let mut stack: [256]i64 = [0i64; 256];
+    let mut sp: usize = 0;
+    let mut r: Reader = Reader { pos: start };
+    let mut running: bool = true;
+
+    while running {
+        if r.pos >= end {
+            panic("malformed body: ran off the end without `end`");
+        }
+        let op: u8 = read_byte(bytes, write r);
+        // Opcode dispatch. The value stack holds i32s sign-extended in i64.
+        // M1 grows this chain: full i32/i64 arith + comparisons, locals,
+        // block/loop/if/br, call. (Candor `match` has no integer-literal
+        // patterns, so opcode dispatch is an if/else-if chain, not `match`.)
+        if op == 0x41u8 {
+            // i32.const <signed LEB>
+            let v: i64 = read_i64(bytes, write r);
+            stack[sp] = as_i32(v);
+            sp = sp + 1;
+        } else if op == 0x6au8 {
+            // i32.add
+            sp = sp - 1;
+            let b: i64 = stack[sp];
+            sp = sp - 1;
+            let a: i64 = stack[sp];
+            let mut sum: i64 = 0i64;
+            wrapping { sum = a + b; }
+            stack[sp] = as_i32(sum);
+            sp = sp + 1;
+        } else if op == 0x0bu8 {
+            // end
+            running = false;
+        } else {
+            panic("unimplemented opcode");
+        }
+    }
+
+    sp = sp - 1;
+    return stack[sp];
+}
+
+fn run_module(bytes: [u8]) -> i64 {
+    let cr: CodeRange = decode_module(bytes);
+    return eval(bytes, cr.start, cr.end);
+}
+
+// === HARNESS SPLIT: everything above is the reusable interpreter ===
+// The Rust harness (tests/wasm.rs) reuses the text above this line and appends
+// its own generated `main` to feed the decoder other real modules. The `main`
+// below keeps this file a standalone, corpus-runnable program.
+
+fn main() -> i64 {
+    let data: [30]u8 = [
+        0x00u8, 0x61u8, 0x73u8, 0x6du8, 0x01u8, 0x00u8, 0x00u8, 0x00u8,
+        0x01u8, 0x05u8, 0x01u8, 0x60u8, 0x00u8, 0x01u8, 0x7fu8,
+        0x03u8, 0x02u8, 0x01u8, 0x00u8,
+        0x0au8, 0x09u8, 0x01u8, 0x07u8, 0x00u8, 0x41u8, 0x28u8, 0x41u8, 0x02u8, 0x6au8, 0x0bu8,
+    ];
+    return run_module(slice_of(data));
+}

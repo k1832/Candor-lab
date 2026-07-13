@@ -664,3 +664,33 @@ One lesson per entry, one-line summary first.
   `get_ref` returning `get(read self.v, i)` fails E0806 (`get`'s return not recognized
   by `borrow_provenance`); use the `arena_get` place-reborrow `read self.slot` instead.
   (method-return loan-provenance + for-read borrowed iteration, 2026-07-14).
+
+- **WASM interpreter M0 (decode-and-run spine, in Candor) — five Candor-authoring
+  facts, one spec correction.** Built `tests/fixtures/wasm/interp.cnr` +
+  `tests/wasm.rs`: byte cursor (`Reader { pos }`) + real LEB128 (unsigned
+  `read_u32`, signed `read_i64` with the continuation-bit loop + 0x40 sign-
+  extend), an id-dispatched section walk, and an opcode-dispatched eval loop over
+  a fixed `[256]i64` value stack. i32-in-i64 rep: an i32 is held SIGN-EXTENDED
+  from bit 31; every arith result re-normalized by `(x << 32) >> 32` in
+  `wrapping{}`. Authoring facts that bit: (1) `wrapping { }` is a STATEMENT block,
+  not an expression — `let s = wrapping { a+b };` is a parse error; assign an
+  outer `let mut` inside the block (`wrapping { s = a+b; }`). (2) Candor `match`
+  has NO integer-literal patterns (PatKind = Wildcard|Binding|Variant only), so
+  opcode/section dispatch is an if/else-if chain, not `match`. (3) `result` and
+  `out` are reserved keywords — never binding names (rename to `acc`/`norm`). (4)
+  Forwarding a `write S` PARAM to another fn reborrows when passed BARE (`f(r)`),
+  NOT `f(write r)` (that double-borrows: E0703 `borrow_mut borrow_mut`); but a
+  `let mut` OWNER passes `write r`, and a param's field write needs the deref
+  `r.*.pos = ..` while an owner's is bare `r.pos = ..`. (5) `panic("..")` →
+  FaultKind::Panic and `assert(c)` → Assert both lower on all engines (kind+span
+  match; message may differ) — use them for decode/eval error paths. SPEC
+  CORRECTION: the M0 brief says "34-byte module" but its own byte listing is 30
+  bytes of valid wasm (8 header + 7 type + 4 func + 11 code); used 30. The Rust
+  harness re-encodes the same module independently (`wasm_add_module`, its own
+  signed-LEB) and asserts byte-equality to the spec bytes — two independent LEB
+  impls agreeing (Rust encode vs Candor decode) is the real correctness signal,
+  not a hardcoded 42. Runs on all 6 engines: dropping the file into
+  `tests/fixtures/run/` auto-enlists it in aot/stage_d/llvm; `tests/wasm.rs`
+  asserts the VALUE 42 (+ 10+20, 1000+(-500), i32 wrap, malformed-magic Panic) on
+  oracle·MIR·native-noopt·native-opt. Keep the run/ copy byte-identical to the
+  canonical (a drift-guard test). (WASM M0, 2026-07-14).
