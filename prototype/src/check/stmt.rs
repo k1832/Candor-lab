@@ -178,7 +178,7 @@ impl<'a> Checker<'a> {
     /// aliases the source, so the source loan must extend to the new binding
     /// (`let c = b;` / `let s2 = s;`). Without the last case a copied borrow or
     /// view shed its loan, admitting a use-after-free.
-    pub(super) fn carries_borrow(&self, e: &crate::ast::Expr) -> bool {
+    pub(super) fn carries_borrow(&mut self, e: &crate::ast::Expr) -> bool {
         match &e.kind {
             ExprKind::Paren(i) => self.carries_borrow(i),
             ExprKind::Prefix {
@@ -212,11 +212,59 @@ impl<'a> Checker<'a> {
                         // source loan (the function-return view UAF).
                         return sig.ret.is_borrow_kind();
                     }
+                    return false;
+                }
+                // A method call `recv.m(args)` whose resolved method returns a borrow
+                // reborrows the receiver, so it carries the receiver's loan out of the
+                // call — the same return-extension a free-fn borrow return gets (design
+                // 0015 §4.3/§5; the `get_ref` yield). Without this the `for read` yield,
+                // and any borrow-returning interface method, sheds its source loan and
+                // the escape UAF §5 case (2) forbids slips through.
+                if let ExprKind::Field { base, field } = &callee.kind {
+                    return self.method_returns_borrow(base, field);
                 }
                 false
             }
             _ => false,
         }
+    }
+
+    /// Does `base.field(..)`, resolved against the receiver's interface impl (or the
+    /// `Vec`-wired `get_ref`), return a borrow? Used by `carries_borrow` to decide
+    /// whether a method call's returned reborrow keeps its source loan. Pure w.r.t.
+    /// the carried-loan state (it probes the receiver type via `synth_arg_type`,
+    /// which it saves/restores around).
+    fn method_returns_borrow(&mut self, base: &crate::ast::Expr, field: &str) -> bool {
+        let saved = std::mem::take(&mut self.f.carried);
+        let saved_prov = self.f.carried_prov.take();
+        let recv_ty = self.synth_arg_type(base);
+        self.f.carried = saved;
+        self.f.carried_prov = saved_prov;
+        if field == "get_ref" {
+            if let Type::App(n, _) = &recv_ty {
+                if n == "Vec" {
+                    return true;
+                }
+            }
+        }
+        let ret = match &recv_ty {
+            Type::Param(p) => self
+                .param_bound_ifaces(p)
+                .iter()
+                .find_map(|i| self.iface_method(i, field))
+                .map(|m| m.ret),
+            Type::Named(_) | Type::App(_, _) => (0..self.items.impls.len())
+                .find(|&i| {
+                    self.items.impls[i].methods.contains_key(field) && self.impl_covers(i, &recv_ty)
+                })
+                .and_then(|idx| {
+                    let iface = self.items.impls[idx].iface.clone();
+                    self.iface_method(&iface, field)
+                })
+                .map(|m| m.ret),
+            _ => None,
+        };
+        matches!(ret, Some(t) if t.is_borrow_kind())
     }
 }
 

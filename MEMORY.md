@@ -641,3 +641,26 @@ One lesson per entry, one-line summary first.
   the one view-returning fixture (`slices.cnr` `first[region r](s: [i64]) -> [i64]`,
   single slice param) stays clean because `is_borrow_param` marks slice params `is_bp`.
   (loan-provenance function-return views, 2026-07-13).
+
+- The loan-provenance return-extension (LOAN-COPY / STR-VIEW fix) covered only
+  FREE-fn (`Ident`-callee) borrow returns; INTERFACE-METHOD (`Field`-callee) borrow
+  returns shed the receiver's loan — a stale-borrow hole the completeness sweep
+  missed because `arena_get` is called as a free fn, never a method. It bit design
+  0015's `for read` end-to-end: the desugar emits `__c.get_ref(__i)` (a method call),
+  so `let esc = c.get_ref(0); write c` (the escape §5 forbids) checked CLEAN. Two
+  places both needed the SAME return-extension the free-fn path already had, applied
+  to the method-call shape: `check_iface_method_call` (generics.rs) must carry the
+  receiver's loan when a `read`/`write self` method returns a borrow deriving (compact
+  default, single borrow-in) from the receiver, AND `carries_borrow` (stmt.rs, made
+  `&mut self` + `method_returns_borrow`) must admit that method call so the landing
+  binding anchors it. Lesson: when adding "a borrow return keeps its source loan,"
+  cover BOTH callee shapes (`Ident` and `Field`) — they go through different check
+  paths (`check_user_call` vs `check_iface_method_call`). Also: `for read`'s escape
+  soundness for the LOOP-LOCAL cursor is conservative — assigning the yield to an
+  outer local is rejected outright (design 0015 §7 open-Q1 non-escape fallback), sound
+  but rejects escape-without-later-mutation; transitively threading `__c`'s binding
+  loan through the method return caused a spurious loop self-conflict, so the simpler
+  direct-receiver-loan carry (reject any escape) is what shipped. And: a `Vec` user
+  `get_ref` returning `get(read self.v, i)` fails E0806 (`get`'s return not recognized
+  by `borrow_provenance`); use the `arena_get` place-reborrow `read self.slot` instead.
+  (method-return loan-provenance + for-read borrowed iteration, 2026-07-14).

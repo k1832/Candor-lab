@@ -1,10 +1,18 @@
 # 0015 — Borrowed-element iteration (RefIndexed)
 
-**Status:** draft — adversarially reviewed (verdict: survives with repairs; see
-[the review](../reviews/0015-borrowed-iteration-review.md)); the soundness prerequisite
-it surfaced (the loan-provenance UAF family) is **fixed and audited**; §5/§7 revised
-accordingly. Pending the deciding authority's accept/revise disposition on the design
-itself (and, if accepted, the `for read` implementation).
+**Status:** ACCEPTED and IMPLEMENTED (2026-07-14). Adversarially reviewed (verdict:
+survives with repairs; see [the review](../reviews/0015-borrowed-iteration-review.md));
+the soundness prerequisite it surfaced (the loan-provenance UAF family) is **fixed and
+audited**; §5/§7 revised accordingly. `for read x in read coll` (the §4 recommendation)
+is implemented end-to-end over a user `impl RefIndexed`, byte-exact on all five engines
+(tree-walker, MIR, Cranelift, LLVM, AOT). Implementing §4 required COMPLETING one piece of
+the inherited machinery the §5 escape argument rests on: the reborrow-through-call-return
+loan-provenance discipline, fixed for FREE-fn returns by the four `soundness:` commits, did
+NOT cover METHOD-call returns — the exact shape the desugar emits (`__c.get_ref(__i)`); the
+§5 hinge / §7 open-Q1 was therefore live for the loop's method call. It is now closed (the
+method-call return carries the receiver's loan; ledger `OBL-ITER-BORROW (shared branch)`,
+2026-07-14). Escapes of the yield are rejected; the loop-local-cursor escape is caught
+conservatively (§7 open-Q1's documented non-escape fallback). See §8.
 **Date:** 2026-07-13
 **Philosophy hooks:** **P12/Bet 5** (value-first: this is the *borrow* gear reaching
 into iteration, and the whole difficulty is doing it without regressing the
@@ -571,12 +579,16 @@ parts least nailed down.
 
 ## 8. Obligations
 
-- **OBL-ITER-BORROW (0009 §9) — partially discharged (shared branch, region-free).**
+- **OBL-ITER-BORROW (0009 §9) — shared branch DISCHARGED (region-free), 2026-07-14.**
   This design takes the region-free branch of the gate for **shared** borrowed
-  iteration over index-backed collections. It does **not** discharge: mutating
-  iteration (open question 3), by-borrow `List`/pointer-chain iteration (no `usize`
-  index — still refused, 0009 §3.4), or borrowed *streaming* yield (open question 4).
-  The obligation narrows; it does not close.
+  iteration over index-backed collections, now implemented end-to-end (`for read x in
+  read coll` over a user `impl RefIndexed`, byte-exact on all five engines; the
+  method-return loan-provenance completion that makes §5's escape argument hold in the
+  implementation is landed — ledger `OBL-ITER-BORROW (shared branch)`, 2026-07-14). It
+  does **not** discharge: mutating iteration (open question 3), by-borrow `List`/
+  pointer-chain iteration (no `usize` index — still refused, 0009 §3.4), or borrowed
+  *streaming* yield (open question 4). The obligation narrows to those; the shared
+  branch is closed.
 - **OBL-GRAM.** The `for read PATTERN in OPERAND` grammar arm joins the surface.
 - **Refused, kept refused:** first-class lifetimes, region-parameterized types, GATs,
   closures — none are added (0007 §1.1/§3.5, 0009 §2.3/§5).

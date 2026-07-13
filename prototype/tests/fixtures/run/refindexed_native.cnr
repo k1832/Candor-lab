@@ -1,0 +1,45 @@
+// Borrowed-element iteration (design 0015): `for read x in read coll` binds `x` to
+// a `read Item` REBORROW of each element rather than a copy, backed by the
+// `RefIndexed` protocol. This walks a collection of a NON-`copy` element — the case
+// `Indexed` (copy-out `at`, 0009 §3.2) and `Iter` (consuming) cannot express — on
+// every engine, with each element read through the borrow (no copy, no move) and
+// dropped exactly once.
+
+// The region-free borrowed-yield protocol (0009 seed / 0015 §4.1): `count` gives
+// the loop bound and `get_ref(read self, i) -> read Item` yields a reborrow of
+// element `i`, region-free by the 0001 §3.3 compact default (sole borrow-in
+// `read self`, sole borrow-out `read Item`).
+interface RefIndexed {
+    type Item;
+    fn count(read self) -> usize;
+    fn get_ref(read self, i: usize) -> read Item;
+}
+
+// A NON-`copy` element: the `drop` hook makes `W` move-only, so `Indexed`'s
+// `Item: copy` copy-out cannot touch it. Its `id` is read through a `read W`.
+struct W { id: i64 }
+drop(write self) { trace(self.id); }
+
+// A small index-backed collection (the `Arena[T]` role, 0001 §11.5): `get_ref`
+// returns `read self.slot` — a borrow-returning accessor deriving its return from
+// `read self`, structurally identical to `arena_get` (0001 §11.5).
+struct Bag { a: W, b: W, c: W, n: usize }
+impl RefIndexed for Bag {
+    type Item = W;
+    fn count(read self) -> usize { return self.n; }
+    fn get_ref(read self, i: usize) -> read W {
+        if i == 0usize { return read self.a; }
+        if i == 1usize { return read self.b; }
+        return read self.c;
+    }
+}
+
+fn main() -> i64 {
+    let bag: Bag = Bag { a: W { id: 10 }, b: W { id: 20 }, c: W { id: 30 }, n: 3 };
+    let mut sum: i64 = 0;
+    for read x in read bag { trace(x.id); sum = sum + x.id; }
+    trace(sum);
+    // `bag` drops here: each element's hook fires once (10, 20, 30) — the borrow-walk
+    // neither moved nor copied any element.
+    return sum;
+}

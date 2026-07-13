@@ -627,8 +627,9 @@ into the loop and splitting count() out so get_ref returns a bare read Item. P3:
 selected by two visible syntactic axes (operand mode + binding mode), forced not sprawl. Loan
 lifetime: the loop's read loan spans the body, so mutation-during-iteration is E0801 by existing
 machinery. for write x (mutating yield) extends the same compact-default argument and is future
-work, still region-free. Prototype: RefIndexed wired for Vec; a user impl should typecheck via
-the compact default (not yet exercised end-to-end).
+work, still region-free. Prototype: RefIndexed wired for Vec (tree-walker only); a user impl now typechecks AND
+runs end-to-end on all five engines via the compact default — see the 2026-07-14 shared-branch entry
+(which also fixes the method-return loan-provenance gap design 0015 §5's escape argument rested on).
 
 ## OBL-TEXT-CHARS — DISCHARGED via the value-gear path, 2026-07-10
 
@@ -4513,3 +4514,55 @@ including the heavy `as_bytes`/`as_str` corpus (text, string_native, std_io, lin
 print) and the selfhost + native (stage_a-d, *_native) gates; `--profile fast` green; clippy
 clean. No existing test changed verdict — no valid make-view-use-done pattern was newly rejected.
 This closes the last known loan-tracking gap before 0015 resumes.
+
+## OBL-ITER-BORROW (shared branch) — `for read x in read coll` implemented end-to-end + the method-return loan-provenance gap it exposed (2026-07-14)
+
+Discharges OBL-ITER-BORROW's SHARED, region-free branch as an implementation, not just a design:
+`for read x in read coll` — the `RefIndexed` protocol (`count(read self) -> usize` +
+`get_ref(read self, i) -> read Item`, `Item` unconstrained) behind design 0015 §4 — now runs
+END-TO-END over a USER `impl RefIndexed`, byte-exact on all five engines (tree-walker, MIR,
+Cranelift no-opt/opt, `clang -O2` LLVM, AOT). The desugar (already present, `src/real/parser.rs`
+`desugar_ref_indexed`) is one arm on the existing `for`, mode-directed by the PATTERN's `read`
+(NN#13-clean), lowering to the §4.2 loop; protocol selection reuses the general interface-method
+resolution, so a user `impl RefIndexed for Bag` resolves `count`/`get_ref` to free fns that lower
+on every backend with NO new runtime value kind (a borrowed yield is an address — §4.4). The
+demonstration walks a Vec-of-`Box`-free, DROP-hooked (hence non-`copy`) element and reads a field
+of each through the `read Item` reborrow — the capability `Indexed` (copy-out `at`, needs
+`Item: copy`) and `Iter` (consuming) cannot express — each element dropped exactly once
+(`tests/fixtures/run/refindexed_native.cnr`, driven by `tests/refindexed.rs`).
+
+FINDING + FIX (a real loan-provenance completion, not a repro special-case). Design 0015 §5's escape
+argument rests on ONE load-bearing checker fact: `get_ref(__i)`'s return is tracked as a reborrow of
+the receiver, so an escaped yield keeps the collection loan live (§5 case 2 / open-Q1, marked
+RESOLVED by the four `soundness:` commits). That was TRUE for FREE-fn borrow returns
+(`get0(read c)`) but NOT for METHOD-call returns (`c.get_ref(i)`) — and the desugar emits a method
+call. `carries_borrow`/`check_user_call`'s return-borrow loan extension (the LOAN-COPY / STR-VIEW
+fix) only handled `Ident`-callee (free-fn) calls; the `Field`-callee (interface-method) path in
+`check_iface_method_call` cleared the receiver's loan. So `let esc = c.get_ref(0); write c` — the
+exact escape §5 forbids — checked CLEAN (a stale-borrow hole the completeness sweep missed, because
+`arena_get` is called as a free fn, never as a method). Fix: `check_iface_method_call`
+(`src/check/generics.rs`) now carries the receiver's loan when a `read`/`write self` method returns
+a borrow deriving (compact default, single borrow-in) from the receiver, and `carries_borrow`
+(`src/check/stmt.rs`, now `&mut self` + `method_returns_borrow`) admits such a method call — the
+SAME return-extension a free-fn borrow return already got, applied to the method-call shape (no new
+aliasing rule; 0001 §2.3 step 3). With it, mutation-during-iteration is rejected (E0801, via the
+loop's own `read` loan — unchanged) AND any escape of the yield is rejected (E0801/E0803): a
+directly-escaped `read W` keeps its source-loan on the collection live; the loop-local-cursor
+escape is caught conservatively (assigning the yield to an outer local is rejected — design 0015 §7
+open-Q1's documented non-escape fallback, sound). The normal (non-escaping) `for read` body — which
+only READS through the yield — is unaffected.
+
+GATES. `cargo nextest` full green (712 -> 715: +3 `refindexed.rs` — the all-engine functional walk,
+mutation-during-iteration rejected, escaped-yield rejected); `--profile fast` green; clippy clean.
+The new fixture auto-joins the four/five-engine corpus (llvm/aot/stage_d) — all green. The selfhost
+loan-diagnostics oracle stayed byte-exact: the method-return loan extension rejected NO valid
+existing borrow-returning-method call across the whole corpus. `for write x` (mutating yield) and
+borrowed streaming remain future work; the obligation narrows to the shared branch, discharged.
+
+DOC-vs-IMPL NOTE. A `Vec[T]` user `get_ref` returning `get(read self.v, i)` (the collection-op
+surface's borrowing accessor) does NOT check: `get`'s returned borrow is not recognized by
+`borrow_provenance` (`src/check/expr.rs`) as deriving from its receiver (E0806), so the demonstration
+uses the `arena_get`-shaped place reborrow `return read self.slot;` instead — the compact-default
+accessor design 0015 §4.1 names. The Vec-wired `count`/`get_ref` from the original discharge
+(commit 3176fb7) remains tree-walker-only (method-call collection ops don't lower to MIR); the user
+impl is the cross-engine path.

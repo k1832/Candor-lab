@@ -195,7 +195,7 @@ impl<'a> Checker<'a> {
     /// The interface-method signature substitution for a resolved impl: the
     /// interface's type parameters mapped to the impl's (concrete-ized) interface
     /// arguments, plus `Self` mapped to the receiver type.
-    fn iface_method_subst(
+    pub(super) fn iface_method_subst(
         &self,
         impl_idx: usize,
         self_ty: &Type,
@@ -970,7 +970,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Does the impl at `idx` cover receiver type `ty` (target head + unify)?
-    fn impl_covers(&self, idx: usize, ty: &Type) -> bool {
+    pub(super) fn impl_covers(&self, idx: usize, ty: &Type) -> bool {
         let im = &self.items.impls[idx];
         match ty {
             Type::Named(n) => im.target == *n && im.target_args.is_empty(),
@@ -984,7 +984,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn param_bound_ifaces(&self, pname: &str) -> Vec<String> {
+    pub(super) fn param_bound_ifaces(&self, pname: &str) -> Vec<String> {
         // The current def-site's fn signature bounds are encoded in items via the
         // interfaces the parameter is bound to; we recover them from the type
         // parameter's registered bounds carried on the generic sig being checked.
@@ -996,7 +996,7 @@ impl<'a> Checker<'a> {
             .unwrap_or_default()
     }
 
-    fn iface_method(&self, iface: &str, method: &str) -> Option<crate::resolve::IfaceMethod> {
+    pub(super) fn iface_method(&self, iface: &str, method: &str) -> Option<crate::resolve::IfaceMethod> {
         self.items
             .interfaces
             .get(iface)
@@ -1021,6 +1021,14 @@ impl<'a> Checker<'a> {
         };
         self.clear_carried();
         self.check_expr(base, recv_use);
+        // The loan the receiver contributes: a borrow returned from a `read`/`write
+        // self` method reborrows the receiver, so it carries the receiver's loan out of
+        // the call (design 0015 §4.3/§5; 0001 §2.3 step 3: a reborrow extends the
+        // parent's obligation). The landing binding then anchors it, so an escaped
+        // yield keeps the collection frozen — the `get_ref` hinge §5 rests on.
+        let recv_carried = self.take_carried();
+        let recv_prov = self.f.carried_prov.clone();
+        let self_is_borrow_in = matches!(m.self_mode, ParamMode::Read | ParamMode::Write);
         if args.len() != m.params.len() {
             self.diags.push(Diag::error(
                 "E0706",
@@ -1028,16 +1036,45 @@ impl<'a> Checker<'a> {
                 span,
             ));
         }
+        let mut per_arg: Vec<Vec<usize>> = Vec::new();
+        let mut per_prov: Vec<Option<String>> = Vec::new();
+        let mut param_is_borrow_in: Vec<bool> = Vec::new();
         for ((mode, pty), a) in m.params.iter().zip(args) {
             self.clear_carried();
             let pty = subst(pty, smap);
             self.check_arg_mode(*mode, &pty, a);
+            per_prov.push(self.f.carried_prov.clone());
+            per_arg.push(self.take_carried());
+            param_is_borrow_in
+                .push(matches!(mode, ParamMode::Read | ParamMode::Write) || pty.is_borrow_kind());
         }
         if m.alloc {
             self.note_alloc(span, format!("call to `alloc` interface method `{}` (§4.1)", m.name));
         }
-        self.clear_carried();
-        subst(&m.ret, smap)
+        let ret = subst(&m.ret, smap);
+        // Reborrow-through-call-return: a returned borrow derives, by the compact
+        // default (0001 §3.3), from the method's sole borrow-in. When that is the
+        // receiver (`get_ref`'s `read self`), the return carries the receiver's
+        // loan(s); the landing binding then anchors them (`carries_borrow` admits the
+        // method call). With more than one borrow-in and no region tag the source is
+        // ambiguous — carry nothing, matching the free-fn `region_source_indices` rule.
+        if ret.is_borrow_kind() {
+            let borrow_in_count =
+                usize::from(self_is_borrow_in) + param_is_borrow_in.iter().filter(|b| **b).count();
+            if borrow_in_count == 1 {
+                if self_is_borrow_in {
+                    self.set_carried(recv_carried, recv_prov);
+                } else {
+                    let idx = param_is_borrow_in.iter().position(|b| *b).unwrap();
+                    self.set_carried(per_arg[idx].clone(), per_prov[idx].clone());
+                }
+            } else {
+                self.clear_carried();
+            }
+        } else {
+            self.clear_carried();
+        }
+        ret
     }
 }
 
