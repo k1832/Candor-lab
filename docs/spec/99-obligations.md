@@ -4215,15 +4215,13 @@ checker, backend, or `aot_runtime.c` change; built entirely on the already-nativ
   `split_lines(a, read s)`. `LinesIoResult { ok Ok(Vec[String]), Err(IoError) }` is a
   Vec-carrying sibling of the module's non-generic `IoResult` (the audited module
   stays NON-GENERIC), the `?` widening via the identity `From[IoError] for IoError`.
-- TWO CHECKER/INTERP QUIRKS worked around WITHOUT compiler change (both reported,
-  not patched): (1) re-borrowing an already-`read Vec` param — `len(read v)` /
-  `get(read v, i)` on a `v: read Vec[T]` param mis-dispatches/mis-reads; pass the
-  borrow param DIRECTLY (`len(v)`, `get(v, i)`). (2) `as_str`/`as_bytes` chained on a
-  `get(v,i).*` result fault at runtime ("unknown name as_str") because the interp's
-  `expr_static_ty` can't type a builtin `get` call's return; instead pass the element
-  to a `fn(s: read String)` helper (`read get(v, i).*`) whose OWN `read s.*` types
-  cleanly. Both are pre-existing limitations of Vec-element String access, orthogonal
-  to this slice.
+- TWO CHECKER/INTERP QUIRKS were originally worked around in this fixture; both are
+  now FIXED at the compiler level (see COLLECTION-OP-ERGONOMICS below), and
+  `sum_line_lengths` in the fixture was flipped to the DIRECT forms to prove it:
+  (1) re-borrowing an already-`read Vec` param — `len(read v)` / `get(read v, i)` on a
+  `v: read Vec[T]` param — now dispatches identically to the bare `v`; (2)
+  `as_str`/`as_bytes` chained on a `get(v,i).*` result (`as_str(read get(read v, i).*)`)
+  now type-checks and runs on all engines without the `fn(s: read String)` helper.
 - GATES. `tests/lines.rs` (`split_lines_all_cases_all_engines`) drives the
   `tests/fixtures/run/split_lines.cnr` fixture — the five split cases plus a `fold`
   compose (sum of `["hello","world","!"]` line lengths = 11 over the 0009 Iter
@@ -4244,3 +4242,54 @@ checker, backend, or `aot_runtime.c` change; built entirely on the already-nativ
 NEXT: the deferred `str_from`/`substr` native lowering; a streaming `Lines: Iter`
 adapter (blocked on 0009 RefIndexed borrowed-yield — a Vec-backed iterator must yield
 each line by borrow); a buffered reader/writer.
+
+## COLLECTION-OP-ERGONOMICS — builtin-call return typing + re-borrow dispatch (2026-07-13)
+
+Two general collection-op friction bugs that the file-I/O and collection slices
+repeatedly worked around in-fixture, now fixed at the compiler level. Both are
+DISPATCH/STATIC-TYPING fixes only — no collection-op MIR/semantics change, no
+borrow-checking or soundness change; the checker's builtin result types are the
+single source of truth and were NOT altered (the interp and MIR static-typers now
+MIRROR them).
+
+- (A) BUILTIN-CALL RETURN TYPING. A method/field/deref chain on a builtin
+  collection-op result (`as_str(get(v,i).*)`, `as_bytes(as_str(read get(v,i).*))`)
+  faulted at runtime ("unknown name `as_str`" on the tree-walker; "indirect/unknown
+  aggregate call" / "unsupported place" on MIR/native) because neither static-typer
+  could type a builtin `get`/`as_str`/... call's return, so the chain never resolved to
+  a builtin. The checker ALREADY typed these (its `arg0_is_*` peels through
+  `synth_arg_type`), but the tree-walker's `expr_static_ty` (`src/interp/eval.rs`) and
+  the MIR builder's `static_ty` (`src/mir/build.rs`) returned `None` for a builtin
+  call. FIX: each gained a `builtin_static_ret(name, args)` that mirrors the checker's
+  `check_builtin` result types (`get(Vec[T],_) -> read T`, `get(Map[V],_) -> read V`,
+  `as_str`/`str_from_unchecked`/`substr` -> `str`, `str_from` -> `Utf8Res`, `char_at` ->
+  `CharStep`, `len`/`char_count` -> `usize`, `as_bytes` -> `[u8]`, `pop` -> `Opt`,
+  `unbox`/ptr ops, ...), gated by the same arg0 collection guards so a same-named user
+  fn still resolves. The MIR agg/value collection lowering also gained `collection_base`,
+  which addresses a by-value collection place (`get(v,i).*`) by reference so the
+  receiver is a single pointer to the collection.
+
+- (B) RE-BORROW DISPATCH on an already-borrowed collection param. With `v: read
+  Vec[T]`, `len(read v)` / `get(read v, i)` mis-dispatched vs the direct `len(v)` /
+  `get(v,i)`: the checker's `arg0_is_*` recognition (via `synth_arg_type`, which peels
+  ONE borrow) left the re-borrow as `&&C` and failed the receiver test (E0103 "unknown
+  name"); the interp/MIR addressing then read one indirection short. FIX: the checker's
+  `arg0_collection_ty` peels EVERY leading borrow (a collection is never itself a
+  borrow); the interp's `deref_borrows` follows the whole borrow chain to the base
+  address (`vec_base`/`map_base`/`string_base`/`bi_len`); and the MIR's
+  `collection_base` collapses each extra borrow layer with a `Load`. Borrow-checking is
+  unchanged — a re-borrow of a `read` borrow is still validated as before; only the
+  DISPATCH recognition and base addressing were corrected.
+
+- GATE. `tests/fixtures/run/split_lines.cnr` `sum_line_lengths` was flipped from the
+  `fn(s: read String)` helper + direct-pass workaround to `as_bytes(as_str(read
+  get(read v, i).*))` with `len(read v)` / `get(read v, i)` — exercising BOTH fixes in
+  one chain, byte-identical across all five engines (`split_lines_all_cases_all_engines`
+  drives tree, MIR, Cranelift no-opt/opt; the AOT ELF and LLVM `clang -O2` corpora
+  auto-scan the fixture). Full `cargo nextest` green (683 tests); clippy clean.
+
+STILL DEFERRED (unchanged by this fix): `str_from`/`substr` native lowering; a
+streaming `Lines: Iter` adapter (0009 RefIndexed borrowed-yield); a buffered
+reader/writer. Also orthogonal and still pre-existing: `len(<call returning a slice>)`
+inline (e.g. `len(as_bytes(x))`) — the non-collection `len` path lowers its arg as a
+place, so bind the slice to a local first (as the fixtures already do).

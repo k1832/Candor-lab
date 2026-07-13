@@ -1562,28 +1562,39 @@ impl<'a> Checker<'a> {
 
     // ----- builtins (spelled as ordinary calls, design 0002 §0.5) ---------
 
-    /// Does the first argument (peeling a `read`/`write` borrow) have type
-    /// `String`? Routes the overloaded builtins (`push`/`append`/`as_str`) to the
-    /// String forms, leaving same-named user functions (e.g. an Arena `push`) alone.
+    /// The first argument's underlying collection type, peeling *every* leading
+    /// `read`/`write` borrow. A collection is never itself a borrow, so peeling
+    /// all layers recognizes the receiver through a re-borrow of an already-
+    /// borrowed param (`get(read v, i)` where `v: read Vec[T]`) identically to
+    /// the bare `v` — dispatch recognition only; the arm bodies still borrow-check
+    /// the argument. (`synth_arg_type` peels the outermost borrow; a re-borrow
+    /// leaves a second one, which this loop strips.)
+    fn arg0_collection_ty(&mut self, args: &[Expr]) -> Option<Type> {
+        let mut t = self.synth_arg_type(args.first()?);
+        while let Type::Borrow(inner) | Type::BorrowMut(inner) = t {
+            t = *inner;
+        }
+        Some(t)
+    }
+
+    /// Does the first argument have type `String`? Routes the overloaded builtins
+    /// (`push`/`append`/`as_str`) to the String forms, leaving same-named user
+    /// functions (e.g. an Arena `push`) alone.
     fn arg0_is_string(&mut self, args: &[Expr]) -> bool {
-        args.first()
-            .map(|a| matches!(self.synth_arg_type(a), Type::Named(n) if n == "String"))
-            .unwrap_or(false)
+        matches!(self.arg0_collection_ty(args), Some(Type::Named(n)) if n == "String")
     }
 
-    /// Does the first argument (peeling a `read`/`write` borrow) have type
-    /// `Vec[T]`? Routes the overloaded collection builtins (`push`/`pop`/`get`/
-    /// `set`/`len`) to the `Vec` forms, leaving same-named user functions alone.
+    /// Does the first argument have type `Vec[T]`? Routes the overloaded collection
+    /// builtins (`push`/`pop`/`get`/`set`/`len`) to the `Vec` forms, leaving
+    /// same-named user functions alone.
     fn arg0_is_vec(&mut self, args: &[Expr]) -> bool {
-        args.first()
-            .map(|a| matches!(self.synth_arg_type(a), Type::App(n, _) if n == "Vec"))
-            .unwrap_or(false)
+        matches!(self.arg0_collection_ty(args), Some(Type::App(n, _)) if n == "Vec")
     }
 
-    /// The element type `T` of the `Vec[T]` named by the first argument (peeling a
-    /// `read`/`write` borrow). `Error` if the argument is not a `Vec`.
+    /// The element type `T` of the `Vec[T]` named by the first argument. `Error`
+    /// if the argument is not a `Vec`.
     fn vec_arg_elem(&mut self, args: &[Expr]) -> Type {
-        match args.first().map(|a| self.synth_arg_type(a)) {
+        match self.arg0_collection_ty(args) {
             Some(Type::App(n, targs)) if n == "Vec" => targs.first().cloned().unwrap_or(Type::Error),
             _ => Type::Error,
         }
@@ -1592,14 +1603,12 @@ impl<'a> Checker<'a> {
     /// Does the first argument have type `Map[V]`? Routes the overloaded collection
     /// builtins (`insert`/`contains`/`get`) to the `Map` forms.
     fn arg0_is_map(&mut self, args: &[Expr]) -> bool {
-        args.first()
-            .map(|a| matches!(self.synth_arg_type(a), Type::App(n, _) if n == "Map"))
-            .unwrap_or(false)
+        matches!(self.arg0_collection_ty(args), Some(Type::App(n, _)) if n == "Map")
     }
 
     /// The value type `V` of the `Map[V]` named by the first argument.
     fn map_arg_valty(&mut self, args: &[Expr]) -> Type {
-        match args.first().map(|a| self.synth_arg_type(a)) {
+        match self.arg0_collection_ty(args) {
             Some(Type::App(n, targs)) if n == "Map" => targs.first().cloned().unwrap_or(Type::Error),
             _ => Type::Error,
         }

@@ -1484,13 +1484,20 @@ impl<'a> Interp<'a> {
         }
     }
 
-    /// The return type of a statically-resolvable call: a free function, a
-    /// nominal-dispatched interface method, or an `extern` shim. An indirect
-    /// call through a fn-pointer value has no statically-known callee here, so
-    /// it yields `None` (unchanged from before).
-    fn call_static_ret(&self, callee: &Expr, _args: &[Expr]) -> Option<Type> {
+    /// The return type of a statically-resolvable call: a builtin collection/
+    /// text op, a free function, a nominal-dispatched interface method, or an
+    /// `extern` shim. An indirect call through a fn-pointer value has no
+    /// statically-known callee here, so it yields `None` (unchanged from before).
+    fn call_static_ret(&self, callee: &Expr, args: &[Expr]) -> Option<Type> {
         match &callee.kind {
             ExprKind::Ident(name) => {
+                // Builtins shadow same-named user fns exactly as `eval_builtin`
+                // dispatches them (builtins tried first, gated by the arg0
+                // collection guards), so a chain on `get(v,i).*` / `as_str(..)`
+                // resolves to the builtin's result type.
+                if let Some(t) = self.builtin_static_ret(name, args) {
+                    return Some(t);
+                }
                 if let Some(sig) = self.items.fns.get(name.as_str()) {
                     return Some(sig.ret.clone());
                 }
@@ -1503,6 +1510,62 @@ impl<'a> Interp<'a> {
             }
             _ => None,
         }
+    }
+
+    /// The result type of a builtin collection/text op call, mirroring the
+    /// checker's `check_builtin` result types (src/check/expr.rs) so a method/
+    /// field/deref chain on a builtin-call result resolves and dispatches the
+    /// same way it would on a user call. Returns `None` for a name/arg-shape
+    /// that is not a builtin here (so a same-named user fn still resolves) or
+    /// whose result type is fixed by the annotation rather than the arguments
+    /// (`vec_new`/`map_new`) and is never chained. The collection ops
+    /// (`get`/`push`/`pop`/`set`/`insert`/`contains`/`as_str`) carry the same
+    /// arg0 guards `eval_builtin` uses, so an unrelated user `push`/`get` on a
+    /// non-collection is left alone.
+    fn builtin_static_ret(&self, name: &str, args: &[Expr]) -> Option<Type> {
+        let ty = match name {
+            "unbox" => match self.expr_static_ty(args.first()?)? {
+                Type::Box(inner) => *inner,
+                _ => return None,
+            },
+            "ptr_read" => match self.expr_static_ty(args.first()?)? {
+                Type::RawPtr(inner) => *inner,
+                _ => return None,
+            },
+            "ptr_write" => Type::unit(),
+            "ptr_offset" => self.expr_static_ty(args.first()?)?,
+            "is_null" => Type::bool(),
+            "ptr_to_addr" => Type::usize(),
+            "addr_of" | "addr_of_mut" => {
+                Type::RawPtr(Box::new(self.expr_static_ty(args.first()?)?))
+            }
+            "subslice" => match self.expr_static_ty(args.first()?)? {
+                t @ (Type::Slice(_) | Type::SliceMut(_)) => t,
+                _ => return None,
+            },
+            "as_bytes" => Type::Slice(Box::new(Type::Scalar(ScalarTy::U8))),
+            "str_from" => Type::Named("Utf8Res".to_string()),
+            "str_from_unchecked" | "substr" => Type::Str,
+            "char_at" => Type::Named("CharStep".to_string()),
+            "char_count" | "len" => Type::usize(),
+            "string_new" => Type::Named("String".to_string()),
+            "push" | "append" if self.arg0_is_string(args) => Type::unit(),
+            "as_str" if self.arg0_is_string(args) => Type::Str,
+            "push" | "set" if self.arg0_is_vec(args) => Type::unit(),
+            "pop" if self.arg0_is_vec(args) => Type::Named("Opt".to_string()),
+            "get" if self.arg0_is_vec(args) => {
+                Type::Borrow(Box::new(self.vec_elem_of(args.first()?)))
+            }
+            "insert" if self.arg0_is_map(args) => Type::unit(),
+            "contains" if self.arg0_is_map(args) => Type::bool(),
+            "get" if self.arg0_is_map(args) => {
+                Type::Borrow(Box::new(self.map_valty_of(args.first()?)))
+            }
+            "cancelled" => Type::bool(),
+            "trace" => Type::unit(),
+            _ => return None,
+        };
+        Some(ty)
     }
 
     fn eval_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> R<RVal> {
@@ -2128,16 +2191,16 @@ impl<'a> Interp<'a> {
 
     fn bi_len(&mut self, args: &[Expr]) -> R<RVal> {
         let sv = self.eval_value(&args[0], None)?;
-        // `len(read Vec[T])`: the length field is at offset 8 of the Vec, which the
-        // `read`/`write` borrow points at.
-        let peeled = match &sv.ty { Type::Borrow(e) | Type::BorrowMut(e) => (**e).clone(), t => t.clone() };
-        if matches!(&peeled, Type::App(n, _) if n == "Vec" || n == "Map") {
-            let vbase = match &sv.ty { Type::Borrow(_) | Type::BorrowMut(_) => self.read_u64(sv.addr)?, _ => sv.addr };
-            let n = self.read_u64(vbase + 8)?;
+        // Peel every borrow layer so a re-borrow (`len(read v)` where `v: read
+        // Vec[T]` — a pointer-to-pointer) reaches the same base as `len(v)`. The
+        // length field is at offset 8 of the Vec/Map the borrow chain points at.
+        let (base, ty) = self.deref_borrows(&sv)?;
+        if matches!(&ty, Type::App(n, _) if n == "Vec" || n == "Map") {
+            let n = self.read_u64(base + 8)?;
             return self.usize_val(n);
         }
-        let n = match &sv.ty {
-            Type::Slice(_) | Type::SliceMut(_) | Type::Str => self.read_u64(sv.addr + 8)?,
+        let n = match &ty {
+            Type::Slice(_) | Type::SliceMut(_) | Type::Str => self.read_u64(base + 8)?,
             Type::Array(_, len) => self.lay().array_len(len),
             _ => 0,
         };
@@ -2329,10 +2392,7 @@ impl<'a> Interp<'a> {
     /// The base address of the `String` a `read`/`write` borrow argument names.
     fn string_base(&mut self, e: &Expr) -> R<u64> {
         let v = self.eval_value(e, None)?;
-        match &v.ty {
-            Type::Borrow(_) | Type::BorrowMut(_) => self.read_u64(v.addr),
-            _ => Ok(v.addr),
-        }
+        Ok(self.deref_borrows(&v)?.0)
     }
 
     fn string_field_off(&self, field: &str) -> u64 {
@@ -2480,13 +2540,25 @@ impl<'a> Interp<'a> {
         }
     }
 
+    /// Peel EVERY borrow layer of an evaluated receiver, following each pointer,
+    /// to the base address of the underlying value and its type. A bare `read v`
+    /// on an already-borrowed param (`v: read Vec[T]`) is a pointer-to-pointer, so
+    /// a single deref stops one level short; this follows the whole chain so a
+    /// re-borrow dispatches to the same base as the direct `v`.
+    fn deref_borrows(&mut self, rv: &RVal) -> R<(u64, Type)> {
+        let mut addr = rv.addr;
+        let mut ty = rv.ty.clone();
+        while let Type::Borrow(inner) | Type::BorrowMut(inner) = ty {
+            addr = self.read_u64(addr)?;
+            ty = *inner;
+        }
+        Ok((addr, ty))
+    }
+
     /// The base address of the `Vec` a `read`/`write`/owned argument names.
     fn vec_base(&mut self, e: &Expr) -> R<u64> {
         let v = self.eval_value(e, None)?;
-        match &v.ty {
-            Type::Borrow(_) | Type::BorrowMut(_) => self.read_u64(v.addr),
-            _ => Ok(v.addr),
-        }
+        Ok(self.deref_borrows(&v)?.0)
     }
 
     fn vec_stride(&self, elem: &Type) -> u64 {
@@ -2667,10 +2739,7 @@ impl<'a> Interp<'a> {
     /// The base address of the `Map` a `read`/`write`/owned argument names.
     fn map_base(&mut self, e: &Expr) -> R<u64> {
         let v = self.eval_value(e, None)?;
-        match &v.ty {
-            Type::Borrow(_) | Type::BorrowMut(_) => self.read_u64(v.addr),
-            _ => Ok(v.addr),
-        }
+        Ok(self.deref_borrows(&v)?.0)
     }
 
     fn map_stride(&self, valty: &Type) -> u64 {

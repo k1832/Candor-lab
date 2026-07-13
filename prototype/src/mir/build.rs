@@ -2074,8 +2074,72 @@ impl<'a> Lowerer<'a> {
                 Type::Box(e) | Type::Borrow(e) | Type::BorrowMut(e) | Type::RawPtr(e) => Some(*e),
                 _ => None,
             },
+            // A builtin collection/text-op call's result type, so a chain on
+            // `get(v,i).*` / `as_str(..)` resolves here just as it does for a
+            // user call. Mirrors the interp static-typer and the checker's
+            // `check_builtin` result types.
+            ExprKind::Call { callee, args } => match &callee.kind {
+                ExprKind::Ident(name) => self.builtin_static_ret(name, args),
+                _ => None,
+            },
             _ => None,
         }
+    }
+
+    /// The result type of a builtin collection/text op call, mirroring the
+    /// checker's `check_builtin` types (src/check/expr.rs) and the interp
+    /// static-typer (src/interp/eval.rs). Returns `None` for a name/arg-shape
+    /// that is not a builtin here (so a same-named user fn still resolves) or
+    /// whose result type is fixed by the annotation rather than the arguments
+    /// (`vec_new`/`map_new`, never chained). The collection ops carry the same
+    /// receiver guard (`collection_ty`) the lowering uses.
+    fn builtin_static_ret(&self, name: &str, args: &[Expr]) -> Option<Type> {
+        let recv = || args.first().and_then(|a| self.collection_ty(a));
+        let ty = match name {
+            "unbox" => match self.static_ty(args.first()?)? {
+                Type::Box(inner) => *inner,
+                _ => return None,
+            },
+            "ptr_read" => match self.static_ty(args.first()?)? {
+                Type::RawPtr(inner) => *inner,
+                _ => return None,
+            },
+            "ptr_write" => Type::unit(),
+            "ptr_offset" => self.static_ty(args.first()?)?,
+            "is_null" => Type::bool(),
+            "ptr_to_addr" => Type::usize(),
+            "addr_of" | "addr_of_mut" => Type::RawPtr(Box::new(self.static_ty(args.first()?)?)),
+            "subslice" => match self.static_ty(args.first()?)? {
+                t @ (Type::Slice(_) | Type::SliceMut(_)) => t,
+                _ => return None,
+            },
+            "as_bytes" => Type::Slice(Box::new(Type::Scalar(ScalarTy::U8))),
+            "str_from" => Type::Named("Utf8Res".to_string()),
+            "str_from_unchecked" | "substr" => Type::Str,
+            "char_at" => Type::Named("CharStep".to_string()),
+            "char_count" | "len" => Type::usize(),
+            "string_new" => Type::Named("String".to_string()),
+            "push" | "append" if matches!(recv(), Some(Type::Named(n)) if n == "String") => Type::unit(),
+            "as_str" if matches!(recv(), Some(Type::Named(n)) if n == "String") => Type::Str,
+            "push" | "set" if matches!(recv(), Some(Type::App(n, _)) if n == "Vec") => Type::unit(),
+            "pop" if matches!(recv(), Some(Type::App(n, _)) if n == "Vec") => {
+                Type::Named("Opt".to_string())
+            }
+            "get" if matches!(recv(), Some(Type::App(n, _)) if n == "Vec") => match recv()? {
+                Type::App(_, targs) => Type::Borrow(Box::new(targs.into_iter().next().unwrap_or(Type::Error))),
+                _ => return None,
+            },
+            "insert" if matches!(recv(), Some(Type::App(n, _)) if n == "Map") => Type::unit(),
+            "contains" if matches!(recv(), Some(Type::App(n, _)) if n == "Map") => Type::bool(),
+            "get" if matches!(recv(), Some(Type::App(n, _)) if n == "Map") => match recv()? {
+                Type::App(_, targs) => Type::Borrow(Box::new(targs.into_iter().next().unwrap_or(Type::Error))),
+                _ => return None,
+            },
+            "cancelled" => Type::bool(),
+            "trace" => Type::unit(),
+            _ => return None,
+        };
+        Some(ty)
     }
     fn static_nominal(&self, e: &Expr) -> Option<String> {
         strip_to_nominal(&self.static_ty(e)?)
@@ -2189,7 +2253,7 @@ impl<'a> Lowerer<'a> {
                 // `len(read Vec[T]/Map[V])`: the length word lives at offset 8 of the
                 // collection the borrow names (same field the oracle's `bi_len` reads).
                 if matches!(self.collection_ty(&args[0]), Some(Type::App(n, _)) if n == "Vec" || n == "Map") {
-                    let (base, _) = self.lower_value(&args[0], None)?;
+                    let (base, _) = self.collection_base(&args[0])?;
                     let root = self.operand_local(base, Type::usize());
                     let place = Place {
                         root,
@@ -2260,6 +2324,45 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Lower a collection-op receiver to a SINGLE pointer to the collection. The
+    /// collection ops perform exactly one `Deref` on the base, so the base must
+    /// carry exactly one borrow layer. Two shapes need adjustment:
+    ///   * a re-borrow (`read v` where `v: read Vec[T]`) is a pointer-to-pointer
+    ///     (`&&C`); each extra borrow layer is collapsed with a `Load`.
+    ///   * a receiver naming the collection BY VALUE (`get(v,i).*`, an owned
+    ///     `v`) is addressed by reference (`&C`) rather than loaded as an
+    ///     aggregate value, mirroring `alloc_addr_operand`.
+    fn collection_base(&mut self, e: &Expr) -> LR<(Operand, Type)> {
+        let by_borrow = matches!(
+            &e.kind,
+            ExprKind::Prefix { op: PrefixOp::Read | PrefixOp::Write, .. }
+        ) || matches!(self.static_ty(e), Some(Type::Borrow(_)) | Some(Type::BorrowMut(_)));
+        let (mut op, mut ty) = if by_borrow {
+            self.lower_value(e, None)?
+        } else {
+            let (pl, pty) = self.lower_place(e)?;
+            let rty = Type::Borrow(Box::new(pty.clone()));
+            let id = self.emit_temp(rty.clone(), Rvalue::Ref(pl), self.cur_span);
+            (Operand::Local(id), rty)
+        };
+        while let Type::Borrow(inner) | Type::BorrowMut(inner) = &ty {
+            if !matches!(&**inner, Type::Borrow(_) | Type::BorrowMut(_)) {
+                break;
+            }
+            let inner_ty = (**inner).clone();
+            let root = self.operand_local(op, ty.clone());
+            let place = Place { root, proj: vec![Proj::Deref { inner: inner_ty.clone() }] };
+            let id = self.emit_temp(
+                inner_ty.clone(),
+                Rvalue::Load { place, ty: inner_ty.clone() },
+                self.cur_span,
+            );
+            op = Operand::Local(id);
+            ty = inner_ty;
+        }
+        Ok((op, ty))
+    }
+
     /// Root an operand in a local (materializing a const into a temp), for building
     /// a projected place over it.
     fn operand_local(&mut self, op: Operand, ty: Type) -> LocalId {
@@ -2290,11 +2393,11 @@ impl<'a> Lowerer<'a> {
             }
             "pop" => {
                 let elem = self.collection_elem(&args[0])?;
-                let (base, _) = self.lower_value(&args[0], None)?;
+                let (base, _) = self.collection_base(&args[0])?;
                 CollOp::VecPop { base, elem }
             }
             "as_str" => {
-                let (base, _) = self.lower_value(&args[0], None)?;
+                let (base, _) = self.collection_base(&args[0])?;
                 CollOp::StringAsStr { base }
             }
             _ => return unsupported(format!("collection aggregate `{name}`")),
@@ -2333,7 +2436,7 @@ impl<'a> Lowerer<'a> {
         let op = match name {
             "push" if is_vec => {
                 let elem = first_targ;
-                let (base, _) = self.lower_value(&args[0], None)?;
+                let (base, _) = self.collection_base(&args[0])?;
                 let value = self.materialize_place(&args[1], &elem)?;
                 if !is_copy(&elem, self.items) {
                     self.mark_moved(&args[1]);
@@ -2343,7 +2446,7 @@ impl<'a> Lowerer<'a> {
                 CollOp::VecPush { base, elem, value, span: args[1].span }
             }
             "push" if is_string => {
-                let (base, _) = self.lower_value(&args[0], None)?;
+                let (base, _) = self.collection_base(&args[0])?;
                 let (ch, _) = self.lower_value(&args[1], Some(&Type::Scalar(ScalarTy::U32)))?;
                 // `bi_string_push` resets `cur_span` to the call span before its
                 // scalar-value backstop / OOM fault.
@@ -2351,7 +2454,7 @@ impl<'a> Lowerer<'a> {
             }
             "set" if is_vec => {
                 let elem = first_targ;
-                let (base, _) = self.lower_value(&args[0], None)?;
+                let (base, _) = self.collection_base(&args[0])?;
                 let (index, _) = self.lower_value(&args[1], Some(&Type::usize()))?;
                 // Mirror `bi_vec_set`'s order: bounds-check BEFORE evaluating the
                 // value arg, so an out-of-bounds set faults without running the
@@ -2383,7 +2486,7 @@ impl<'a> Lowerer<'a> {
             }
             "get" if is_vec => {
                 let elem = first_targ;
-                let (base, _) = self.lower_value(&args[0], None)?;
+                let (base, _) = self.collection_base(&args[0])?;
                 let (index, _) = self.lower_value(&args[1], Some(&Type::usize()))?;
                 let rty = Type::Borrow(Box::new(elem.clone()));
                 let dst = self.new_local(rty.clone(), None);
@@ -2399,7 +2502,7 @@ impl<'a> Lowerer<'a> {
             }
             "get" if is_map => {
                 let valty = first_targ;
-                let (base, _) = self.lower_value(&args[0], None)?;
+                let (base, _) = self.collection_base(&args[0])?;
                 let key = self.coll_view_place(&args[1])?;
                 let rty = Type::Borrow(Box::new(valty.clone()));
                 let dst = self.new_local(rty.clone(), None);
@@ -2415,7 +2518,7 @@ impl<'a> Lowerer<'a> {
             }
             "insert" if is_map => {
                 let valty = first_targ;
-                let (base, _) = self.lower_value(&args[0], None)?;
+                let (base, _) = self.collection_base(&args[0])?;
                 let key = self.coll_view_place(&args[1])?;
                 let value = self.materialize_place(&args[2], &valty)?;
                 if !is_copy(&valty, self.items) {
@@ -2426,7 +2529,7 @@ impl<'a> Lowerer<'a> {
             }
             "contains" if is_map => {
                 let valty = first_targ;
-                let (base, _) = self.lower_value(&args[0], None)?;
+                let (base, _) = self.collection_base(&args[0])?;
                 let key = self.coll_view_place(&args[1])?;
                 let dst = self.new_local(Type::bool(), None);
                 self.emit(
@@ -2437,7 +2540,7 @@ impl<'a> Lowerer<'a> {
                 return Ok(Some((Operand::Local(dst), Type::bool())));
             }
             "append" if is_string => {
-                let (base, _) = self.lower_value(&args[0], None)?;
+                let (base, _) = self.collection_base(&args[0])?;
                 let view = self.coll_view_place(&args[1])?;
                 // OOM span: the view arg's span (`bi_string_append` reads it, leaving
                 // `cur_span` at the arg before the reserve/OOM check).

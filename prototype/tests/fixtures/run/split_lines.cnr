@@ -191,21 +191,25 @@ fn dump_vec(v: read Vec[String]) alloc -> unit {
     loop { if i >= n { break; } trace_line(read get(v, i).*); i = i + 1usize; }
 }
 
-fn line_len(s: read String) alloc -> i64 {
-    let sb: [u8] = as_bytes(as_str(read s.*));
-    return conv i64 len(sb);
-}
-
 // Compose the split output with the Iter `fold` adapter: materialize each line's
 // byte length into a List[i64], then fold-sum it (order-independent). Proves a
 // Vec[String] of lines flows into the 0009 iterator adapters.
+//
+// This function exercises two collection-op ergonomics directly, without any
+// `fn(s: read String)` element-access helper:
+//   * chaining `as_str`/`as_bytes`/`len` straight onto the builtin `get`
+//     result (`as_str(read get(read v, i).*)`) — the interp/MIR static-typers
+//     resolve a builtin op's result type, so the chain dispatches; and
+//   * re-borrowing the already-`read` collection param (`len(read v)` /
+//     `get(read v, i)`), which dispatches identically to the bare `v`.
 fn sum_line_lengths(a: read Alloc, v: read Vec[String]) alloc -> i64 {
     let mut lens: List[i64] = List::Nil;
-    let n: usize = len(v);
+    let n: usize = len(read v);
     let mut i: usize = 0usize;
     loop {
         if i >= n { break; }
-        lens = prepend(a, line_len(read get(v, i).*), lens);
+        let sb: [u8] = as_bytes(as_str(read get(read v, i).*));
+        lens = prepend(a, conv i64 len(sb), lens);
         i = i + 1usize;
     }
     return fold(lens, 0, add);
