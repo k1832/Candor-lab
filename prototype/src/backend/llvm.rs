@@ -64,8 +64,8 @@ use crate::interp::layout::Layout;
 use crate::interp::mem::{round_up, STATIC_BASE};
 use crate::interp::FaultKind;
 use crate::mir::{
-    FaultEdge, MirFn, MirProgram, Operand, Place, Proj, Regime, ReplayPolicy, Rvalue, Statement,
-    StatementKind, Terminator,
+    CollOp, FaultEdge, MirFn, MirProgram, Operand, Place, Proj, Regime, ReplayPolicy, Rvalue,
+    Statement, StatementKind, Terminator,
 };
 use crate::resolve::Items;
 use crate::span::Span;
@@ -1250,6 +1250,140 @@ impl<'a> FnEmit<'a> {
         r
     }
 
+    /// The `String` collection intrinsics (design 0013), lowered inline to mirror
+    /// `mir::interp::collection_op` byte-for-byte (the twin of `lower::collection_op`).
+    fn collection_op(&mut self, dst: &Place, op: &CollOp) -> Result<(), String> {
+        match op {
+            CollOp::New { alloc } => {
+                let alloc_addr = self.operand(alloc);
+                let astruct = self.alloc_struct_name();
+                let ctx_off = self.field_off(&astruct, "ctx");
+                let vt_off = self.field_off(&astruct, "vt");
+                let ca = self.add_off_candor(&alloc_addr, ctx_off);
+                let ctx = self.load_u64(&ca);
+                let va = self.add_off_candor(&alloc_addr, vt_off);
+                let vt = self.load_u64(&va);
+                let (daddr, _) = self.place_addr(dst)?;
+                self.store_u64(&daddr, "0");
+                let d8 = self.add_off_candor(&daddr, 8);
+                self.store_u64(&d8, "0");
+                let d16 = self.add_off_candor(&daddr, 16);
+                self.store_u64(&d16, "0");
+                let d24 = self.add_off_candor(&daddr, 24);
+                self.store_u64(&d24, &ctx);
+                let d32 = self.add_off_candor(&daddr, 32);
+                self.store_u64(&d32, &vt);
+            }
+            CollOp::StringAsStr { base } => {
+                let base = self.operand(base);
+                let buf = self.load_u64(&base);
+                let b8 = self.add_off_candor(&base, 8);
+                let len = self.load_u64(&b8);
+                let (daddr, _) = self.place_addr(dst)?;
+                self.store_u64(&daddr, &buf);
+                let d8 = self.add_off_candor(&daddr, 8);
+                self.store_u64(&d8, &len);
+            }
+            CollOp::StringAppend { base, view, span } => {
+                let base = self.operand(base);
+                let (vaddr, _) = self.place_addr(view)?;
+                let ptr = self.load_u64(&vaddr);
+                let v8 = self.add_off_candor(&vaddr, 8);
+                let slen = self.load_u64(&v8);
+                self.string_reserve(&base, &slen, *span);
+                let buf = self.load_u64(&base);
+                let b8 = self.add_off_candor(&base, 8);
+                let len = self.load_u64(&b8);
+                let dstp = self.t();
+                self.line(&format!("{dstp} = add i64 {buf}, {len}"));
+                self.rt_copy_val(&dstp, &ptr, &slen);
+                let newlen = self.t();
+                self.line(&format!("{newlen} = add i64 {len}, {slen}"));
+                self.store_u64(&b8, &newlen);
+            }
+            _ => return Err(format!("out of LLVM subset: {op:?}")),
+        }
+        Ok(())
+    }
+
+    /// Grow a `String`'s buffer to fit `need` more bytes (alloc-new + copy + free-
+    /// old), mirroring `mir::interp::string_reserve` — `newcap =
+    /// (len+need).max(cap*2).max(8)`, OOM faults `Panic`.
+    fn string_reserve(&mut self, base: &str, need: &str, span: Span) {
+        let b8 = self.add_off_candor(base, 8);
+        let len = self.load_u64(&b8);
+        let b16 = self.add_off_candor(base, 16);
+        let cap = self.load_u64(&b16);
+        let lenneed = self.t();
+        self.line(&format!("{lenneed} = add i64 {len}, {need}"));
+        let need_grow = self.t();
+        self.line(&format!("{need_grow} = icmp ugt i64 {lenneed}, {cap}"));
+        let grow_b = self.l();
+        let cont = self.l();
+        self.line(&format!("br i1 {need_grow}, label %{grow_b}, label %{cont}"));
+
+        self.label(&grow_b);
+        let cap2 = self.t();
+        self.line(&format!("{cap2} = mul i64 {cap}, 2"));
+        let m1 = self.umax(&lenneed, &cap2);
+        let newcap = self.umax(&m1, "8");
+        let b24 = self.add_off_candor(base, 24);
+        let ctx = self.load_u64(&b24);
+        let b32 = self.add_off_candor(base, 32);
+        let vt = self.load_u64(&b32);
+        let newbuf = self.call_alloc(&ctx, &vt, &newcap, 1);
+        let is_oom = self.t();
+        self.line(&format!("{is_oom} = icmp eq i64 {newbuf}, 0"));
+        self.fault_if(&is_oom, FaultKind::Panic, span);
+        let oldbuf = self.load_u64(base);
+        let has_old = self.t();
+        self.line(&format!("{has_old} = icmp ne i64 {oldbuf}, 0"));
+        let cp_b = self.l();
+        let after = self.l();
+        self.line(&format!("br i1 {has_old}, label %{cp_b}, label %{after}"));
+        self.label(&cp_b);
+        self.rt_copy_val(&newbuf, &oldbuf, &len);
+        self.call_free_val(&ctx, &vt, &oldbuf, &cap, 1);
+        self.line(&format!("br label %{after}"));
+        self.label(&after);
+        self.store_u64(base, &newbuf);
+        self.store_u64(&b16, &newcap);
+        self.line(&format!("br label %{cont}"));
+        self.label(&cont);
+    }
+
+    /// Unsigned max via select (wrapping arithmetic; matches the interp `.max`).
+    fn umax(&mut self, a: &str, b: &str) -> String {
+        let c = self.t();
+        self.line(&format!("{c} = icmp ugt i64 {a}, {b}"));
+        let r = self.t();
+        self.line(&format!("{r} = select i1 {c}, i64 {a}, i64 {b}"));
+        r
+    }
+
+    /// Call the carried allocator's `alloc` vtable slot with a runtime `size`
+    /// (mirrors `box_op`'s alloc dispatch; `align` is a small constant).
+    fn call_alloc(&mut self, ctx: &str, vt: &str, size: &str, align: u64) -> String {
+        let alloc_off = self.field_off(&self.alloc_vtable_name(), "alloc");
+        let aa = self.add_off_candor(vt, alloc_off);
+        let afn = self.load_u64(&aa);
+        self.call_fnptr_id(&afn, &[ctx.to_string(), size.to_string(), format!("{align}")])
+    }
+
+    /// Free through the vtable with a runtime `size` (the String buffer capacity).
+    fn call_free_val(&mut self, ctx: &str, vt: &str, ptr: &str, size: &str, align: u64) {
+        let free_off = self.field_off(&self.alloc_vtable_name(), "free");
+        let fa = self.add_off_candor(vt, free_off);
+        let ffn = self.load_u64(&fa);
+        self.call_fnptr_id(&ffn, &[ctx.to_string(), ptr.to_string(), size.to_string(), format!("{align}")]);
+    }
+
+    /// Byte-copy with a runtime length (the `rt_copy` counterpart for dynamic
+    /// collection-buffer sizes).
+    fn rt_copy_val(&mut self, dst: &str, src: &str, len: &str) {
+        self.line(&format!("call void @rt_copy(i64 {dst}, i64 {src}, i64 {len})"));
+    }
+
     fn call_free(&mut self, ctx: &str, vt: &str, ptr: &str, size: u64, align: u64) {
         let free_off = self.field_off(&self.alloc_vtable_name(), "free");
         let fa = self.add_off_candor(vt, free_off);
@@ -1515,7 +1649,12 @@ impl<'a> FnEmit<'a> {
             }
             StatementKind::ScopeBegin => self.line("call void @rt_scope_begin()"),
             StatementKind::ScopeEnd => self.line("call void @rt_scope_end()"),
-            other => return Err(format!("out of LLVM-S5 subset: {other:?}")),
+            // The compiler-known `String` intrinsics (design 0013), lowered inline to
+            // mirror `mir::interp::collection_op` byte-for-byte (Cranelift `lower`'s
+            // twin). `Vec`/`Map` + String `push` (UTF-8) are the remaining slices.
+            StatementKind::CollectionOp { dst, op } => {
+                self.collection_op(dst, op)?;
+            }
         }
         Ok(())
     }

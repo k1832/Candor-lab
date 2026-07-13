@@ -3741,3 +3741,56 @@ and `alloc` reuses.
   build module counts updated 8 -> 9 accordingly.
 - Full `cargo nextest` green (657 tests); clippy clean. This is the foundation
   for native growable collections + buffered I/O.
+
+## NATIVE-COLLECTIONS-S1 — `String` (New / Append / AsStr) landed native on BOTH backends (2026-07-13)
+
+The first native collection slice (design 0013, Path A: native intrinsic lowering).
+The three non-UTF-8 `String` `CollectionOp` arms — `New`, `StringAppend`,
+`StringAsStr` — are lowered INLINE in both native backends, mirroring
+`mir::interp::collection_op` byte-for-byte (the MIR interpreter is the native
+oracle, `src/mir/mod.rs`). Purely additive: no change to the `String` representation
+(the 5-word header `{buf@0, len@8, cap@16, ctx@24, vt@32}`, `src/resolve.rs`), the
+checker, or the MIR. `aot_runtime.c` reused UNCHANGED — NO new runtime symbol.
+
+- WHAT LANDED (`src/backend/lower.rs` Cranelift + `src/backend/llvm.rs` LLVM, in
+  lockstep). `collection_op` handles `New` (write `buf=0/len=0/cap=0` and `ctx`/`vt`
+  read from the `Alloc` handle exactly as `box_op` does), `StringAsStr` (write the
+  16-byte `{buf, len}` fat pointer — the same fat pointer the S1/S5 str/slice
+  machinery already carries), and `StringAppend` (`string_reserve(need)` then
+  `rt_copy` the view's `len` bytes into `buf+len`, bump `len`). The shared
+  `string_reserve` growth helper is the reusable substrate: when `len+need > cap`,
+  `newcap = (len+need).max(cap*2).max(8)` (byte-exact with the interp cap-growth
+  formula), `alloc` a new buffer through the carried `Alloc` vtable (the `box_op`
+  alloc path), `rt_copy` the existing `len` bytes over, `free` the old buffer, then
+  update `buf`/`cap`. OOM (a null alloc return) FAULTS `Panic` at the append span,
+  matching the interp. No `nsw`/`nuw` (wrapping `add`/`mul`; `.max` via `icmp`+
+  `select`). New runtime-length `rt_copy`/`free`/`alloc` helper variants were added
+  (the buffer size is dynamic, unlike `box_op`'s compile-time size) — pure IR
+  emitters, no C-runtime symbol.
+- GATE (`tests/string_native.rs` + `tests/fixtures/run/string_native.cnr`):
+  `string_new` over the reclaiming free-list allocator, then empty (`len 0`), a
+  single sub-cap append (`"hi"`), and four appends crossing the initial cap
+  (`5 -> 10 -> 15 -> 20` bytes, forcing `string_reserve` growth more than once);
+  content read back through `as_str` + `as_bytes` byte index (a native `str` has no
+  direct index surface). Asserted BYTE-IDENTICAL — trace `[0, 2, 104, 105, 20, 97,
+  107, 116]`, ret `20` — under the oracle, the MIR interpreter, and Cranelift native
+  no-opt + opt. The fixture lives in `tests/fixtures/run/`, so `tests/aot.rs`
+  (Cranelift ELF), `tests/llvm.rs` (clang-`-O2` ELF fifth-engine), and
+  `tests/stage_d.rs` (four-engine) full-corpus gates cover it transitively — six
+  engines agree.
+- REUSE-READY: `New` and `string_reserve` are the `Vec`/`Map` substrate (identical
+  5-word header + alloc-copy-free growth; the interp's `vec_reserve` differs only in
+  `stride`/`align`/`.max(4)` and `map_reserve` in rehash). This slice is
+  deliberately the three non-UTF-8 arms only.
+- DEFERRED (next slices, in order): String `push` (UTF-8 scalar encode +
+  `is_scalar_value` `Requires` backstop), then `Vec` (`push`/`pop`/`get`/`set`),
+  then `Map` (FNV-1a + linear-probe `insert`/`contains`/`get`). GAP: a native
+  `String`'s buffer is NOT yet freed on scope-end drop (the interp/`eval` special-
+  case it; native `emit_drop` treats `String` as a plain struct = no-op) — a leak,
+  not a divergence: it is observable-independent (nothing inspects allocator
+  liveness after the final drop), and the gate is built to not depend on it. The
+  drop-free (`alloc_on_drop` for `String`/`Vec`/`Map` in `emit_drop`) should land
+  with the collection-drop slice.
+- Full `cargo nextest` green (658 tests, was 657 + this gate); `--profile fast`
+  green (538); `tests/text.rs` (36) / fmt / print / std_io interp gates unchanged;
+  clippy clean.

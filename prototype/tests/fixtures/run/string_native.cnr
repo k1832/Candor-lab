@@ -1,0 +1,150 @@
+// Native `String` (design 0013): `string_new` over a reclaiming free-list
+// allocator, `append` byte-views that force `string_reserve` growth across the
+// initial capacity, then read back through `as_str` + byte `len`/index. Every
+// engine — the tree-walking oracle, the MIR interpreter, and the Cranelift /
+// LLVM native backends — must agree byte-for-byte on the traced content and the
+// returned byte length (the New / StringAppend / StringAsStr intrinsics lowered
+// inline in the backends, mirroring `mir::interp::collection_op`).
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+
+struct FreeList { next: usize, end: usize, head: rawptr u8 }
+struct FreeBlock { next: rawptr u8, size: usize }
+
+fn with_window(base: usize, size: usize) -> FreeList {
+    unsafe "the empty free list starts with a null head; no block is threaded yet" {
+        return FreeList { next: base, end: base + size, head: ptr_null[u8]() };
+    }
+}
+
+fn block_span(size: usize, align: usize) -> usize {
+    let mut need: usize = size;
+    if need < 16usize {
+        need = 16usize;
+    }
+    return (need + align - 1usize) / align * align;
+}
+
+fn freelist_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live FreeList whose [next, end) window and address-ordered free chain are reserved to this arena alone; every carved block stays inside [next, end) and is >= header-sized, and a split remainder (kept only when >= MIN_SPLIT) is written into the block's own tail" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let need: usize = block_span(size, align);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) {
+            let blk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if blk.size >= need {
+                if blk.size - need >= 32usize {
+                    let rem: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(cur) + need);
+                    ptr_write(cast_ptr[FreeBlock](rem), FreeBlock { next: blk.next, size: blk.size - need });
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: rem });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: rem, size: pblk.size });
+                    }
+                } else {
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: blk.next });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: blk.next, size: pblk.size });
+                    }
+                }
+                return cur;
+            }
+            prev = cur;
+            cur = blk.next;
+        }
+        let aligned: usize = (st.next + align - 1usize) / align * align;
+        if aligned + need > st.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: aligned + need, end: st.end, head: st.head });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+
+fn freelist_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    unsafe "the free list is kept ADDRESS-ORDERED; the freed block's own storage (>= header-sized, guaranteed by block_span in alloc) holds its FreeBlock header {next, size}, and a merge joins two blocks ONLY when their byte spans are exactly adjacent (addr + size == neighbour addr), so a merge can never overlap live memory nor bridge a gap" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let mut cap: usize = block_span(size, align);
+        let a: usize = ptr_to_addr(ptr);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) && ptr_to_addr(cur) < a {
+            let cblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            prev = cur;
+            cur = cblk.next;
+        }
+        let mut link: rawptr u8 = cur;
+        if !is_null(cur) {
+            let nblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if a + cap == ptr_to_addr(cur) {
+                cap = cap + nblk.size;
+                link = nblk.next;
+            }
+        }
+        if !is_null(prev) {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            if ptr_to_addr(prev) + pblk.size == a {
+                ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: link, size: pblk.size + cap });
+                return;
+            }
+        }
+        ptr_write(cast_ptr[FreeBlock](ptr), FreeBlock { next: link, size: cap });
+        if is_null(prev) {
+            ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: ptr });
+        } else {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: ptr, size: pblk.size });
+        }
+    }
+}
+
+static FREELIST_VT: AllocVtable = AllocVtable { alloc: freelist_alloc, free: freelist_free };
+
+fn mk_alloc(state: write FreeList) -> Alloc {
+    unsafe "ctx (the caller's FreeList local) and vt (the static FREELIST_VT) outlive every String this handle serves; the caller keeps the window and FREELIST_VT alive for the whole run and drops every String before the window dies" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(FREELIST_VT) };
+    }
+}
+
+fn main() alloc -> i64 {
+    let mut st: FreeList = with_window(16777216usize, 1048576usize);
+    let a: Alloc = mk_alloc(write st);
+
+    // Empty string: no buffer is ever allocated; `as_str` is a {0, 0} view.
+    let e: String = string_new(read a);
+    let ev: str = as_str(read e);
+    trace(conv i64 len(ev));
+
+    // A single append below the initial capacity (cap 0 -> 8): no re-grow yet.
+    // Content is read back through `as_bytes` (the str -> [u8] free retype) + byte
+    // index, since a native str carries no direct indexing surface.
+    let mut one: String = string_new(read a);
+    append(write one, "hi");
+    let ov: str = as_str(read one);
+    let ob: [u8] = as_bytes(ov);
+    trace(conv i64 len(ov));
+    trace(conv i64 ob[0]);
+    trace(conv i64 ob[1]);
+
+    // Repeated appends crossing the initial cap force `string_reserve` growth
+    // (alloc-new + rt_copy + free-old) more than once: 5 -> 10 -> 15 -> 20 bytes.
+    let mut s: String = string_new(read a);
+    append(write s, "abcde");
+    append(write s, "fghij");
+    append(write s, "klmno");
+    append(write s, "pqrst");
+    let v: str = as_str(read s);
+    let vb: [u8] = as_bytes(v);
+    trace(conv i64 len(v));
+    trace(conv i64 vb[0]);
+    trace(conv i64 vb[10]);
+    trace(conv i64 vb[19]);
+    return conv i64 len(v);
+}

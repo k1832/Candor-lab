@@ -44,8 +44,8 @@ use crate::interp::layout::Layout;
 use crate::interp::FaultKind;
 use crate::ast::{BinOp, UnOp};
 use crate::mir::{
-    FaultEdge, MirFn, MirProgram, Operand, Place, Proj, Regime, Rvalue, Statement, StatementKind,
-    Terminator,
+    CollOp, FaultEdge, MirFn, MirProgram, Operand, Place, Proj, Regime, Rvalue, Statement,
+    StatementKind, Terminator,
 };
 use crate::resolve::Items;
 use crate::span::Span;
@@ -1215,11 +1215,11 @@ impl<M: Module> Cg<'_, '_, M> {
             StatementKind::Subslice { dst, src, lo, hi, stride, span } => {
                 self.subslice_op(dst, src, lo, hi, *stride, *span, mf);
             }
-            // The compiler-known `Vec`/`Map`/`String` intrinsics (design 0013) run
-            // through the precise MIR interpreter (`mir::interp`); native codegen of
-            // their alloc-copy-free / hash-probe bodies is a forward dependency.
-            StatementKind::CollectionOp { .. } => {
-                unimplemented!("native backend: Vec/Map/String collection intrinsics are MIR-interp only")
+            // The compiler-known `String` intrinsics (design 0013) lowered inline,
+            // mirroring the MIR interpreter byte-for-byte (`mir::interp::collection_op`).
+            // `Vec`/`Map` + String `push` (UTF-8) are the remaining forward slices.
+            StatementKind::CollectionOp { dst, op } => {
+                self.collection_op(dst, op, mf);
             }
             // Stage 2 (design 0012 §6): `spawn` becomes real thread creation, the
             // `scope` markers push/join a frame. Args are evaluated on the PARENT
@@ -1609,6 +1609,140 @@ impl<M: Module> Cg<'_, '_, M> {
         let (daddr, _) = self.place_addr(dst, mf);
         self.call_copy(daddr, ptr, size);
         self.call_free(ctx, vt, ptr, size, align);
+    }
+
+    /// The `String` collection intrinsics (design 0013), lowered inline to mirror
+    /// `mir::interp::collection_op` byte-for-byte. `New` (the shared empty-header
+    /// init) and `string_reserve` (alloc-new + rt_copy + free-old growth) are the
+    /// reusable substrate for the coming `Vec`/`Map` slices.
+    fn collection_op(&mut self, dst: &Place, op: &CollOp, mf: &MirFn) {
+        match op {
+            CollOp::New { alloc } => {
+                let alloc_addr = self.eval_operand(alloc, mf);
+                let astruct = self.alloc_struct_name();
+                let ctx_off = self.field_off(&astruct, "ctx");
+                let vt_off = self.field_off(&astruct, "vt");
+                let ca = self.add_off(alloc_addr, ctx_off);
+                let ctx = self.load_u64(ca);
+                let va = self.add_off(alloc_addr, vt_off);
+                let vt = self.load_u64(va);
+                let (daddr, _) = self.place_addr(dst, mf);
+                let zero = self.iconst(0);
+                self.store_u64(daddr, zero);
+                let d8 = self.add_off(daddr, 8);
+                self.store_u64(d8, zero);
+                let d16 = self.add_off(daddr, 16);
+                self.store_u64(d16, zero);
+                let d24 = self.add_off(daddr, 24);
+                self.store_u64(d24, ctx);
+                let d32 = self.add_off(daddr, 32);
+                self.store_u64(d32, vt);
+            }
+            CollOp::StringAsStr { base } => {
+                let base = self.eval_operand(base, mf);
+                let buf = self.load_u64(base);
+                let b8 = self.add_off(base, 8);
+                let len = self.load_u64(b8);
+                let (daddr, _) = self.place_addr(dst, mf);
+                self.store_u64(daddr, buf);
+                let d8 = self.add_off(daddr, 8);
+                self.store_u64(d8, len);
+            }
+            CollOp::StringAppend { base, view, span } => {
+                let base = self.eval_operand(base, mf);
+                let (vaddr, _) = self.place_addr(view, mf);
+                let ptr = self.load_u64(vaddr);
+                let v8 = self.add_off(vaddr, 8);
+                let slen = self.load_u64(v8);
+                self.string_reserve(base, slen, *span);
+                let buf = self.load_u64(base);
+                let b8 = self.add_off(base, 8);
+                let len = self.load_u64(b8);
+                let dstp = self.b.ins().iadd(buf, len);
+                self.call_copy_val(dstp, ptr, slen);
+                let newlen = self.b.ins().iadd(len, slen);
+                self.store_u64(b8, newlen);
+            }
+            _ => unimplemented!(
+                "native backend: Vec/Map + String::push collection intrinsics are MIR-interp only"
+            ),
+        }
+    }
+
+    /// Grow a `String`'s buffer to fit `need` more bytes (alloc-new + copy + free-
+    /// old; the vtable has no realloc), mirroring `mir::interp::string_reserve` —
+    /// `newcap = (len+need).max(cap*2).max(8)`, OOM faults `Panic`.
+    fn string_reserve(&mut self, base: Value, need: Value, span: Span) {
+        let b8 = self.add_off(base, 8);
+        let len = self.load_u64(b8);
+        let b16 = self.add_off(base, 16);
+        let cap = self.load_u64(b16);
+        let lenneed = self.b.ins().iadd(len, need);
+        let need_grow = self.b.ins().icmp(IntCC::UnsignedGreaterThan, lenneed, cap);
+        let grow_b = self.b.create_block();
+        let cont = self.b.create_block();
+        self.b.ins().brif(need_grow, grow_b, &[], cont, &[]);
+
+        self.b.switch_to_block(grow_b);
+        let two = self.iconst(2);
+        let cap2 = self.b.ins().imul(cap, two);
+        let m1 = self.umax(lenneed, cap2);
+        let eight = self.iconst(8);
+        let newcap = self.umax(m1, eight);
+        let b24 = self.add_off(base, 24);
+        let ctx = self.load_u64(b24);
+        let b32 = self.add_off(base, 32);
+        let vt = self.load_u64(b32);
+        let newbuf = self.call_alloc(ctx, vt, newcap, 1);
+        let zero = self.iconst(0);
+        let is_oom = self.b.ins().icmp(IntCC::Equal, newbuf, zero);
+        self.fault_if(is_oom, FaultKind::Panic, span);
+        let oldbuf = self.load_u64(base);
+        let has_old = self.b.ins().icmp(IntCC::NotEqual, oldbuf, zero);
+        let cp_b = self.b.create_block();
+        let after = self.b.create_block();
+        self.b.ins().brif(has_old, cp_b, &[], after, &[]);
+        self.b.switch_to_block(cp_b);
+        self.call_copy_val(newbuf, oldbuf, len);
+        self.call_free_val(ctx, vt, oldbuf, cap, 1);
+        self.b.ins().jump(after, &[]);
+        self.b.switch_to_block(after);
+        self.store_u64(base, newbuf);
+        self.store_u64(b16, newcap);
+        self.b.ins().jump(cont, &[]);
+        self.b.switch_to_block(cont);
+    }
+
+    /// Unsigned max via select (wrapping arithmetic only; matches the interp `.max`).
+    fn umax(&mut self, a: Value, b: Value) -> Value {
+        let gt = self.b.ins().icmp(IntCC::UnsignedGreaterThan, a, b);
+        self.b.ins().select(gt, a, b)
+    }
+
+    /// Call the carried allocator's `alloc` vtable slot with a runtime `size`
+    /// (mirrors `box_op`'s alloc dispatch; `align` is a small constant).
+    fn call_alloc(&mut self, ctx: Value, vt: Value, size: Value, align: i64) -> Value {
+        let alloc_off = self.field_off(&self.alloc_vtable_name(), "alloc");
+        let aa = self.add_off(vt, alloc_off);
+        let afn = self.load_u64(aa);
+        let al = self.iconst(align);
+        self.call_fnptr_id(afn, &[ctx, size, al])
+    }
+
+    /// Free through the vtable with a runtime `size` (the String buffer capacity).
+    fn call_free_val(&mut self, ctx: Value, vt: Value, ptr: Value, size: Value, align: i64) {
+        let free_off = self.field_off(&self.alloc_vtable_name(), "free");
+        let fa = self.add_off(vt, free_off);
+        let ffn = self.load_u64(fa);
+        let al = self.iconst(align);
+        self.call_fnptr_id(ffn, &[ctx, ptr, size, al]);
+    }
+
+    /// Byte-copy with a runtime length (the `call_copy` counterpart for dynamic
+    /// collection-buffer sizes).
+    fn call_copy_val(&mut self, dst: Value, src: Value, len: Value) {
+        let r = self.shimref("copy", self.shims.copy);
+        self.b.ins().call(r, &[dst, src, len]);
     }
 
     fn subslice_op(&mut self, dst: &Place, src: &Place, lo: &Operand, hi: &Operand, stride: u64, span: Span, mf: &MirFn) {
