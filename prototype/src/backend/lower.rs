@@ -2397,6 +2397,9 @@ impl<M: Module> Cg<'_, '_, M> {
         match ty {
             Type::Array(e, _) => self.needs_drop(e),
             Type::Box(_) | Type::BoxResult(_) => true,
+            // Compiler-known collections own a heap buffer freed on drop.
+            Type::App(n, _) if n == "Vec" || n == "Map" => true,
+            Type::Named(n) if n == "String" => true,
             Type::Named(n) if self.items.lookup_struct(n).is_some() => {
                 if self.prog.drop_hooks.contains_key(n) {
                     return true;
@@ -2429,6 +2432,18 @@ impl<M: Module> Cg<'_, '_, M> {
             }
             Type::Box(inner) => self.drop_box(addr, inner),
             Type::BoxResult(_) => self.drop_enum(addr, ty, moved, path),
+            // Compiler-known collections: drop live elements/values, free the
+            // buffer through the carried allocator (mirror of `mir::interp`).
+            // Precedes the struct arm — `String` is a synthesized nominal struct.
+            Type::App(n, args) if n == "Vec" => {
+                let elem = args.first().cloned().unwrap_or(Type::Error);
+                self.drop_vec(addr, &elem);
+            }
+            Type::App(n, args) if n == "Map" => {
+                let valty = args.first().cloned().unwrap_or(Type::Error);
+                self.drop_map(addr, &valty);
+            }
+            Type::Named(n) if n == "String" => self.drop_string(addr),
             Type::Named(n) if self.items.lookup_struct(n).is_some() => {
                 let partial = partially(moved, path);
                 if !partial {
@@ -2466,6 +2481,129 @@ impl<M: Module> Cg<'_, '_, M> {
         let size = self.size_of(inner);
         let align = self.align_of(inner);
         self.call_free(ctx, vt, ptr, size, align);
+        self.b.ins().jump(cont, &[]);
+        self.b.switch_to_block(cont);
+    }
+
+    /// Drop a compiler-known `Vec[T]` at `addr` (mirror of `mir::interp` drop_value):
+    /// with a non-null buffer, drop each live element in reverse index order, then
+    /// free the buffer through the carried allocator (`cap * stride` bytes, elem align).
+    fn drop_vec(&mut self, addr: Value, elem: &Type) {
+        let buf = self.load_u64(addr);
+        let zero = self.iconst(0);
+        let nz = self.b.ins().icmp(IntCC::NotEqual, buf, zero);
+        let dob = self.b.create_block();
+        let cont = self.b.create_block();
+        self.b.ins().brif(nz, dob, &[], cont, &[]);
+        self.b.switch_to_block(dob);
+        let stride = crate::interp::mem::round_up(self.size_of(elem), self.align_of(elem));
+        let align = self.align_of(elem);
+        let stridev = self.iconst(stride as i64);
+        if self.needs_drop(elem) {
+            let a8 = self.add_off(addr, 8);
+            let len = self.load_u64(a8);
+            let head = self.b.create_block();
+            let icur = self.b.append_block_param(head, types::I64);
+            let body = self.b.create_block();
+            let after = self.b.create_block();
+            self.b.ins().jump(head, &[BlockArg::from(len)]);
+            self.b.switch_to_block(head);
+            let more = self.b.ins().icmp(IntCC::UnsignedGreaterThan, icur, zero);
+            self.b.ins().brif(more, body, &[], after, &[]);
+            self.b.switch_to_block(body);
+            let one = self.iconst(1);
+            let idx = self.b.ins().isub(icur, one);
+            let off = self.b.ins().imul(idx, stridev);
+            let ea = self.b.ins().iadd(buf, off);
+            self.emit_drop(ea, elem, &[], &mut Vec::new());
+            self.b.ins().jump(head, &[BlockArg::from(idx)]);
+            self.b.switch_to_block(after);
+        }
+        let a16 = self.add_off(addr, 16);
+        let cap = self.load_u64(a16);
+        let a24 = self.add_off(addr, 24);
+        let ctx = self.load_u64(a24);
+        let a32 = self.add_off(addr, 32);
+        let vt = self.load_u64(a32);
+        let size = self.b.ins().imul(cap, stridev);
+        self.call_free_val(ctx, vt, buf, size, align as i64);
+        self.b.ins().jump(cont, &[]);
+        self.b.switch_to_block(cont);
+    }
+
+    /// Drop a compiler-known `Map[V]` at `addr` (mirror of `mir::interp` drop_value):
+    /// with a non-null buffer, for each occupied slot free its owned key bytes then
+    /// drop its value, then free the bucket buffer (`cap * stride` bytes, align 8).
+    fn drop_map(&mut self, addr: Value, valty: &Type) {
+        let buf = self.load_u64(addr);
+        let zero = self.iconst(0);
+        let nz = self.b.ins().icmp(IntCC::NotEqual, buf, zero);
+        let dob = self.b.create_block();
+        let cont = self.b.create_block();
+        self.b.ins().brif(nz, dob, &[], cont, &[]);
+        self.b.switch_to_block(dob);
+        let stride = crate::interp::mem::round_up(24 + self.size_of(valty), 8);
+        let stridev = self.iconst(stride as i64);
+        let a16 = self.add_off(addr, 16);
+        let cap = self.load_u64(a16);
+        let a24 = self.add_off(addr, 24);
+        let ctx = self.load_u64(a24);
+        let a32 = self.add_off(addr, 32);
+        let vt = self.load_u64(a32);
+        let one = self.iconst(1);
+        let head = self.b.create_block();
+        let icur = self.b.append_block_param(head, types::I64);
+        let body = self.b.create_block();
+        let after = self.b.create_block();
+        self.b.ins().jump(head, &[BlockArg::from(zero)]);
+        self.b.switch_to_block(head);
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, icur, cap);
+        self.b.ins().brif(more, body, &[], after, &[]);
+        self.b.switch_to_block(body);
+        let off = self.b.ins().imul(icur, stridev);
+        let b = self.b.ins().iadd(buf, off);
+        let occ = self.load_u64(b);
+        let isocc = self.b.ins().icmp(IntCC::Equal, occ, one);
+        let slotb = self.b.create_block();
+        let next = self.b.create_block();
+        self.b.ins().brif(isocc, slotb, &[], next, &[]);
+        self.b.switch_to_block(slotb);
+        let b8 = self.add_off(b, 8);
+        let kptr = self.load_u64(b8);
+        let b16 = self.add_off(b, 16);
+        let klen = self.load_u64(b16);
+        self.call_free_val(ctx, vt, kptr, klen, 1);
+        let b24 = self.add_off(b, 24);
+        self.emit_drop(b24, valty, &[], &mut Vec::new());
+        self.b.ins().jump(next, &[]);
+        self.b.switch_to_block(next);
+        let inc = self.b.ins().iadd(icur, one);
+        self.b.ins().jump(head, &[BlockArg::from(inc)]);
+        self.b.switch_to_block(after);
+        let size = self.b.ins().imul(cap, stridev);
+        self.call_free_val(ctx, vt, buf, size, 8);
+        self.b.ins().jump(cont, &[]);
+        self.b.switch_to_block(cont);
+    }
+
+    /// Drop a compiler-known `String` at `addr` (mirror of `mir::interp` drop_value):
+    /// free its UTF-8 buffer through the carried allocator (`cap` bytes, align 1) when
+    /// the buffer is non-null. Bytes are POD, so there are no element drops.
+    fn drop_string(&mut self, addr: Value) {
+        let buf = self.load_u64(addr);
+        let zero = self.iconst(0);
+        let nz = self.b.ins().icmp(IntCC::NotEqual, buf, zero);
+        let dob = self.b.create_block();
+        let cont = self.b.create_block();
+        self.b.ins().brif(nz, dob, &[], cont, &[]);
+        self.b.switch_to_block(dob);
+        let a16 = self.add_off(addr, 16);
+        let cap = self.load_u64(a16);
+        let a24 = self.add_off(addr, 24);
+        let ctx = self.load_u64(a24);
+        let a32 = self.add_off(addr, 32);
+        let vt = self.load_u64(a32);
+        self.call_free_val(ctx, vt, buf, cap, 1);
         self.b.ins().jump(cont, &[]);
         self.b.switch_to_block(cont);
     }
@@ -2570,6 +2708,11 @@ fn walk_glue(
             walk_glue(&bx, lay, items, prog, seen, out);
         }
         Type::Array(e, _) => walk_glue(e, lay, items, prog, seen, out),
+        Type::App(n, args) if n == "Vec" || n == "Map" => {
+            for a in args {
+                walk_glue(a, lay, items, prog, seen, out);
+            }
+        }
         Type::Named(n) if items.lookup_struct(n).is_some() => {
             let (fields, _, _) = lay.struct_layout(n);
             for (_, fty, _) in fields {
@@ -2594,6 +2737,8 @@ fn type_needs_drop(ty: &Type, lay: &Layout, items: &Items, prog: &MirProgram) ->
     match ty {
         Type::Array(e, _) => type_needs_drop(e, lay, items, prog),
         Type::Box(_) | Type::BoxResult(_) => true,
+        Type::App(n, _) if n == "Vec" || n == "Map" => true,
+        Type::Named(n) if n == "String" => true,
         Type::Named(n) if items.lookup_struct(n).is_some() => {
             if prog.drop_hooks.contains_key(n) {
                 return true;

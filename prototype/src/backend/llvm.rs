@@ -1095,6 +1095,9 @@ impl<'a> FnEmit<'a> {
         match ty {
             Type::Array(e, _) => self.needs_drop(e),
             Type::Box(_) | Type::BoxResult(_) => true,
+            // Compiler-known collections own a heap buffer freed on drop.
+            Type::App(n, _) if n == "Vec" || n == "Map" => true,
+            Type::Named(n) if n == "String" => true,
             Type::Named(n) if self.lay.items.lookup_struct(n).is_some() => {
                 if self.drop_hooks.contains_key(n) {
                     return true;
@@ -1147,6 +1150,18 @@ impl<'a> FnEmit<'a> {
             }
             Type::Box(inner) => self.drop_box(addr, inner),
             Type::BoxResult(_) => self.drop_enum(addr, ty, moved, path)?,
+            // Compiler-known collections: drop live elements/values, free the
+            // buffer through the carried allocator (mirror of `mir::interp`).
+            // Precedes the struct arm — `String` is a synthesized nominal struct.
+            Type::App(n, args) if n == "Vec" => {
+                let elem = args.first().cloned().unwrap_or(Type::Error);
+                self.drop_vec(addr, &elem)?;
+            }
+            Type::App(n, args) if n == "Map" => {
+                let valty = args.first().cloned().unwrap_or(Type::Error);
+                self.drop_map(addr, &valty)?;
+            }
+            Type::Named(n) if n == "String" => self.drop_string(addr),
             Type::Named(n) if self.lay.items.lookup_struct(n).is_some() => {
                 // A partially-moved struct skips its whole-value hook (the moved
                 // field carried the ownership the hook would observe).
@@ -2220,6 +2235,151 @@ impl<'a> FnEmit<'a> {
         let size = self.lay.size_of(inner);
         let align = self.lay.align_of(inner);
         self.call_free(&ctx, &vt, &ptr, size, align);
+        self.line(&format!("br label %{cont}"));
+        self.label(&cont);
+    }
+
+    /// Drop a compiler-known `Vec[T]` at `addr` (mirror of `mir::interp` drop_value):
+    /// with a non-null buffer, drop each live element in reverse index order, then
+    /// free the buffer through the carried allocator (`cap * stride` bytes, elem align).
+    fn drop_vec(&mut self, addr: &str, elem: &Type) -> Result<(), String> {
+        let buf = self.load_u64(addr);
+        let nz = self.t();
+        self.line(&format!("{nz} = icmp ne i64 {buf}, 0"));
+        let dob = self.l();
+        let cont = self.l();
+        self.line(&format!("br i1 {nz}, label %{dob}, label %{cont}"));
+        self.label(&dob);
+        let stride = round_up(self.lay.size_of(elem), self.lay.align_of(elem));
+        let align = self.lay.align_of(elem);
+        if self.needs_drop(elem) {
+            let a8 = self.add_off_candor(addr, 8);
+            let len = self.load_u64(&a8);
+            let pre = self.l();
+            let head = self.l();
+            let body = self.l();
+            let next = self.l();
+            let done = self.l();
+            let i = self.t();
+            let idx = self.t();
+            let inext = self.t();
+            self.line(&format!("br label %{pre}"));
+            self.label(&pre);
+            self.line(&format!("br label %{head}"));
+            self.label(&head);
+            self.line(&format!("{i} = phi i64 [ {len}, %{pre} ], [ {inext}, %{next} ]"));
+            let more = self.t();
+            self.line(&format!("{more} = icmp ugt i64 {i}, 0"));
+            self.line(&format!("br i1 {more}, label %{body}, label %{done}"));
+            self.label(&body);
+            self.line(&format!("{idx} = sub i64 {i}, 1"));
+            let off = self.t();
+            self.line(&format!("{off} = mul i64 {idx}, {stride}"));
+            let ea = self.t();
+            self.line(&format!("{ea} = add i64 {buf}, {off}"));
+            self.emit_drop(&ea, elem, &[], &mut Vec::new())?;
+            self.line(&format!("br label %{next}"));
+            self.label(&next);
+            self.line(&format!("{inext} = sub i64 {i}, 1"));
+            self.line(&format!("br label %{head}"));
+            self.label(&done);
+        }
+        let a16 = self.add_off_candor(addr, 16);
+        let cap = self.load_u64(&a16);
+        let a24 = self.add_off_candor(addr, 24);
+        let ctx = self.load_u64(&a24);
+        let a32 = self.add_off_candor(addr, 32);
+        let vt = self.load_u64(&a32);
+        let size = self.t();
+        self.line(&format!("{size} = mul i64 {cap}, {stride}"));
+        self.call_free_val(&ctx, &vt, &buf, &size, align);
+        self.line(&format!("br label %{cont}"));
+        self.label(&cont);
+        Ok(())
+    }
+
+    /// Drop a compiler-known `Map[V]` at `addr` (mirror of `mir::interp` drop_value):
+    /// with a non-null buffer, for each occupied slot free its owned key bytes then
+    /// drop its value, then free the bucket buffer (`cap * stride` bytes, align 8).
+    fn drop_map(&mut self, addr: &str, valty: &Type) -> Result<(), String> {
+        let buf = self.load_u64(addr);
+        let nz = self.t();
+        self.line(&format!("{nz} = icmp ne i64 {buf}, 0"));
+        let dob = self.l();
+        let cont = self.l();
+        self.line(&format!("br i1 {nz}, label %{dob}, label %{cont}"));
+        self.label(&dob);
+        let stride = round_up(24 + self.lay.size_of(valty), 8);
+        let a16 = self.add_off_candor(addr, 16);
+        let cap = self.load_u64(&a16);
+        let a24 = self.add_off_candor(addr, 24);
+        let ctx = self.load_u64(&a24);
+        let a32 = self.add_off_candor(addr, 32);
+        let vt = self.load_u64(&a32);
+        let pre = self.l();
+        let head = self.l();
+        let body = self.l();
+        let slotb = self.l();
+        let next = self.l();
+        let done = self.l();
+        let i = self.t();
+        let inext = self.t();
+        self.line(&format!("br label %{pre}"));
+        self.label(&pre);
+        self.line(&format!("br label %{head}"));
+        self.label(&head);
+        self.line(&format!("{i} = phi i64 [ 0, %{pre} ], [ {inext}, %{next} ]"));
+        let more = self.t();
+        self.line(&format!("{more} = icmp ult i64 {i}, {cap}"));
+        self.line(&format!("br i1 {more}, label %{body}, label %{done}"));
+        self.label(&body);
+        let off = self.t();
+        self.line(&format!("{off} = mul i64 {i}, {stride}"));
+        let b = self.t();
+        self.line(&format!("{b} = add i64 {buf}, {off}"));
+        let occ = self.load_u64(&b);
+        let isocc = self.t();
+        self.line(&format!("{isocc} = icmp eq i64 {occ}, 1"));
+        self.line(&format!("br i1 {isocc}, label %{slotb}, label %{next}"));
+        self.label(&slotb);
+        let b8 = self.add_off_candor(&b, 8);
+        let kptr = self.load_u64(&b8);
+        let b16 = self.add_off_candor(&b, 16);
+        let klen = self.load_u64(&b16);
+        self.call_free_val(&ctx, &vt, &kptr, &klen, 1);
+        let b24 = self.add_off_candor(&b, 24);
+        self.emit_drop(&b24, valty, &[], &mut Vec::new())?;
+        self.line(&format!("br label %{next}"));
+        self.label(&next);
+        self.line(&format!("{inext} = add i64 {i}, 1"));
+        self.line(&format!("br label %{head}"));
+        self.label(&done);
+        let size = self.t();
+        self.line(&format!("{size} = mul i64 {cap}, {stride}"));
+        self.call_free_val(&ctx, &vt, &buf, &size, 8);
+        self.line(&format!("br label %{cont}"));
+        self.label(&cont);
+        Ok(())
+    }
+
+    /// Drop a compiler-known `String` at `addr` (mirror of `mir::interp` drop_value):
+    /// free its UTF-8 buffer through the carried allocator (`cap` bytes, align 1) when
+    /// the buffer is non-null. Bytes are POD, so there are no element drops.
+    fn drop_string(&mut self, addr: &str) {
+        let buf = self.load_u64(addr);
+        let nz = self.t();
+        self.line(&format!("{nz} = icmp ne i64 {buf}, 0"));
+        let dob = self.l();
+        let cont = self.l();
+        self.line(&format!("br i1 {nz}, label %{dob}, label %{cont}"));
+        self.label(&dob);
+        let a16 = self.add_off_candor(addr, 16);
+        let cap = self.load_u64(&a16);
+        let a24 = self.add_off_candor(addr, 24);
+        let ctx = self.load_u64(&a24);
+        let a32 = self.add_off_candor(addr, 32);
+        let vt = self.load_u64(&a32);
+        self.call_free_val(&ctx, &vt, &buf, &cap, 1);
         self.line(&format!("br label %{cont}"));
         self.label(&cont);
     }

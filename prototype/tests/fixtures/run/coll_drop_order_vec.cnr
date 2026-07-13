@@ -1,0 +1,28 @@
+// GATE (Vec element drop order): a drop-hooked element E traces its id. When the
+// Vec is dropped, native `emit_drop` must drop the live elements in reverse index
+// order (5,4,3,2,1), matching the interpreter's `(0..len).rev()`, byte-exact on
+// every engine; `live` returns to 0.
+struct AllocVtable { alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8, free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit }
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize, live: i64 }
+fn with_window(base: usize, size: usize) -> Bump { return Bump { next: base, end: base + size, live: 0 }; }
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 { unsafe "reserved window" { let b: Bump = ptr_read(cast_ptr[Bump](ctx)); let a: usize = (b.next + align - 1) / align * align; if a + size > b.end { return ptr_null[u8](); } ptr_write(cast_ptr[Bump](ctx), Bump { next: a + size, end: b.end, live: b.live + 1 }); return addr_to_ptr[u8](a); } }
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit { unsafe "reserved window" { let b: Bump = ptr_read(cast_ptr[Bump](ctx)); ptr_write(cast_ptr[Bump](ctx), Bump { next: b.next, end: b.end, live: b.live - 1 }); } }
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+fn mk_alloc(state: write Bump) -> Alloc { unsafe "outlives every alloc" { return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) }; } }
+struct E { id: i64 }
+drop(write self) { trace(self.id); }
+fn use_vec(al: Alloc) alloc -> unit {
+    let mut v: Vec[E] = vec_new(read al);
+    push(write v, E { id: 1 });
+    push(write v, E { id: 2 });
+    push(write v, E { id: 3 });
+    push(write v, E { id: 4 });
+    push(write v, E { id: 5 });
+}
+fn main() alloc -> i64 {
+    let mut bs: Bump = with_window(16777216, 1048576);
+    let al: Alloc = mk_alloc(write bs);
+    use_vec(al);
+    return bs.live;
+}

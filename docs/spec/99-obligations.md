@@ -4003,3 +4003,86 @@ the String UTF-8 and Vec stride arithmetic). This makes ALL THREE collections
   running per-element/per-value drop glue at scope end, so a live collection no
   longer leaks and a hook-bearing collection's scope-end drops become cross-engine
   observable.
+
+## NATIVE-COLLECTIONS-S5 — collection DROP-FREE: native `emit_drop` frees String/Vec/Map buffers (and drops live elements/values, frees Map keys) at scope end → the native-collections arc CLOSES (2026-07-13)
+
+The fifth and CLOSING collection slice — the deferred GAP from S1–S4. Native
+`emit_drop` / `needs_drop` / `walk_glue` gain the compiler-known collection arm in
+BOTH backends (`src/backend/lower.rs`, `src/backend/llvm.rs`), so a live
+`String`/`Vec`/`Map` frees its heap buffer (and drops its remaining elements /
+values, and frees a `Map`'s owned key byte-copies) at the schedule's drop site —
+BYTE-EXACT with the interpreter's `alloc_on_drop` (`mir::interp::drop_value`, the
+oracle). Purely additive: no representation, checker, MIR, or `aot_runtime.c`
+change — only backend `emit_drop` lowering + tests. This closes the arc: `String`,
+`Vec`, `Map` are now FULLY native AND memory-owning on both backends.
+
+- THE ARM (mirror of `mir::interp::drop_value`, byte-exact order + free args):
+  `needs_drop` and the standalone `type_needs_drop` return true for
+  `Type::App("Vec"|"Map")` and `Type::Named("String")` (each owns a buffer); the
+  `String` arm PRECEDES the generic-struct arm (`String` is a synthesized nominal
+  struct). `emit_drop` dispatches to `drop_vec`/`drop_map`/`drop_string`.
+  - `Vec[T]`: if `buf != 0`, drop each live element in REVERSE index order
+    (`(0..len).rev()`, guarded by `needs_drop(T)`), at `buf + i*stride`
+    (`stride = round_up(size_of T, align_of T)`), then
+    `free(buf, cap*stride, align_of T)`.
+  - `Map[V]`: if `buf != 0`, for each slot `0..cap` FORWARD, if occupied
+    (`state==1`) free its owned key bytes (`free(keyptr, keylen, 1)`) THEN drop its
+    value at `slot+24` (`emit_drop V`); then `free(buf, cap*stride, 8)`
+    (`stride = round_up(24 + size_of V, 8)`). The key free runs for every occupied
+    slot regardless of `V` (POD keys), matching the interp.
+  - `String`: if `buf != 0`, `free(buf, cap, 1)` — bytes are POD, no element drops.
+  Every free goes through the SAME carried `Alloc` vtable handle the collection
+  allocated with (`ctx@24`, `vt@32`), reusing the box-op `call_free`/`call_free_val`
+  path. No `nsw`/`nuw` on any index/offset arithmetic.
+- MEMORY SAFETY (the free happens EXACTLY once, only for a real buffer):
+  - The `buf != 0` guard means a `new`'d-but-never-allocated collection frees
+    nothing (the allocator was never called) — matches the interp.
+  - Element/value drops PRECEDE the buffer free (so a `Vec[Box]`/`Map[Box]` frees
+    each inner Box before releasing the block it lived in).
+  - A MOVED-OUT collection is not double-freed: `mir::build::emit_drop` emits NO
+    `Drop` statement when the whole value is moved (empty path in the move mask),
+    exactly as for `Box` — so the caller-side drop is already suppressed; the callee
+    that now owns the value drops it. No drop flags. Tested explicitly.
+- `walk_glue`/`type_needs_drop` gained `Type::App("Vec"|"Map")` arms (recurse into
+  the element/value types) so a `Box[Vec[..]]` pointee gets drop glue and a
+  `Vec[Box[T]]`/`Map[Box[T]]` whose inner box itself needs drop reaches that glue.
+  A plain `Vec[Box[i64]]` needs no glue (the element `emit_drop` → `drop_box` frees
+  the box inline; `i64` needs no glue), so this is the general, not the common, path.
+- LLVM LOWERING NOTE: the element/slot loops are textual-IR blocks with `phi`
+  induction variables entered through a named pre-block; the loop-carried next value
+  is computed in a dedicated back-edge block so the `phi` predecessor is a concrete
+  label even though the body's `emit_drop` may open its own blocks. Cranelift uses
+  `BlockArg` block parameters for the same loops. No tiering change (drop reads flat
+  addresses already available).
+- GATES (all byte-identical under oracle / MIR / Cranelift no-opt + opt, and LLVM
+  `-O2` transitively via the auto-scanned `run/` fixtures — `tests/collection_drop.rs`
+  + `tests/fixtures/run/coll_drop_*.cnr`):
+  - `coll_drop_balance` — a grown String + Vec + Map dropped at scope end return the
+    counting allocator to `live == 0` (every buffer + Map key freed once).
+  - `coll_drop_box_elems` — `Vec[Box i64]` / `Map[Box i64]`: each inner Box freed by
+    the element/value drop before the buffer → `live == 0`.
+  - `coll_drop_empty` — `new`'d-but-unallocated (`buf == 0`) collections drop with NO
+    free, no fault, no double-free → `live == 0`.
+  - `coll_drop_moved` — a Vec/String/Map moved into a callee is dropped once by the
+    callee; the move mask suppresses the caller drop → `live == 0` (a double free
+    would drive it negative).
+  - `coll_drop_reuse` — a reclaiming FREE-LIST with a 2048-byte window services 200
+    build-and-drop `Vec[i64]` cycles (each ~128-byte buffer) ONLY because every
+    dropped buffer is returned and reused (`ret 21700`); a leak OOM-faults
+    `vec_reserve` within a dozen iterations.
+  - `coll_drop_order_vec` — a drop-hooked element traces its id; the Vec drop runs
+    them in reverse index order (`trace 5,4,3,2,1`).
+  - `coll_drop_order_map` — a drop-hooked value traces its id; the Map drop runs every
+    occupied slot's value in slot order (`trace 33,44,11,22`), asserted against the
+    oracle's observed order.
+  Teeth verified: neutering the `emit_drop` collection arm makes `coll_drop_balance`
+  return `live == 11`, `coll_drop_reuse` OOM-panic, and `coll_drop_order_vec` lose its
+  trace — each diverging from the oracle.
+- Full `cargo nextest` green (671 tests, incl. the self-host interp/lower/checker/
+  analyses/codegen tiers and the aot/llvm/stage_d native corpus gates that auto-scan
+  the 7 new fixtures); `--profile fast` green; the S1–S4 native gates
+  (string/vec/map_native) and the text/vec/map interp gates unchanged; clippy clean.
+- GAP CLEARED: the S1/S2/S3/S4 deferred collection-drop leak is closed. Native
+  collections now fully own their memory — allocate AND free through the carried
+  `Alloc`, byte-exact with the interpreter, on both the Cranelift and LLVM backends.
+  Nothing deferred from this slice.
