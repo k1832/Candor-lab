@@ -1747,10 +1747,147 @@ impl<M: Module> Cg<'_, '_, M> {
                 let newlen = self.b.ins().iadd(len, enc_len);
                 self.store_u64(b8, newlen);
             }
+            CollOp::VecPush { base, elem, value, span } => {
+                let base = self.eval_operand(base, mf);
+                let stride = crate::interp::mem::round_up(self.size_of(elem), self.align_of(elem));
+                let align = self.align_of(elem);
+                self.vec_reserve(base, stride as i64, align as i64, 1, *span);
+                let buf = self.load_u64(base);
+                let b8 = self.add_off(base, 8);
+                let len = self.load_u64(b8);
+                let (vaddr, _) = self.place_addr(value, mf);
+                let stridev = self.iconst(stride as i64);
+                let off = self.b.ins().imul(len, stridev);
+                let slot = self.b.ins().iadd(buf, off);
+                self.call_copy(slot, vaddr, self.size_of(elem));
+                let one = self.iconst(1);
+                let newlen = self.b.ins().iadd(len, one);
+                self.store_u64(b8, newlen);
+            }
+            CollOp::VecGet { base, elem, index, span } => {
+                let base = self.eval_operand(base, mf);
+                let b8 = self.add_off(base, 8);
+                let len = self.load_u64(b8);
+                let i = self.eval_operand(index, mf);
+                let oob = self.b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, i, len);
+                self.fault_if(oob, FaultKind::Bounds, *span);
+                let stride = crate::interp::mem::round_up(self.size_of(elem), self.align_of(elem));
+                let buf = self.load_u64(base);
+                let stridev = self.iconst(stride as i64);
+                let off = self.b.ins().imul(i, stridev);
+                let slot = self.b.ins().iadd(buf, off);
+                let (daddr, _) = self.place_addr(dst, mf);
+                self.store_u64(daddr, slot);
+            }
+            CollOp::VecSet { base, elem, index, value, span } => {
+                let base = self.eval_operand(base, mf);
+                let b8 = self.add_off(base, 8);
+                let len = self.load_u64(b8);
+                let i = self.eval_operand(index, mf);
+                let oob = self.b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, i, len);
+                self.fault_if(oob, FaultKind::Bounds, *span);
+                let stride = crate::interp::mem::round_up(self.size_of(elem), self.align_of(elem));
+                let buf = self.load_u64(base);
+                let stridev = self.iconst(stride as i64);
+                let off = self.b.ins().imul(i, stridev);
+                let slot = self.b.ins().iadd(buf, off);
+                let (vaddr, _) = self.place_addr(value, mf);
+                // Drop-on-overwrite: run the old element's drop glue before the move,
+                // mirroring the interp's `drop_value(slot, elem)` in `VecSet`.
+                self.emit_drop(slot, elem, &[], &mut Vec::new());
+                self.call_copy(slot, vaddr, self.size_of(elem));
+            }
+            CollOp::VecPop { base, elem } => {
+                let base = self.eval_operand(base, mf);
+                let (daddr, _) = self.place_addr(dst, mf);
+                let b8 = self.add_off(base, 8);
+                let len = self.load_u64(b8);
+                // Opt discriminants + the `Some` payload offset are compile-time layout.
+                let opt = Type::Named("Opt".to_string());
+                let einfo = self.lay().enum_info(&opt).expect("unknown enum `Opt`");
+                let some_idx = einfo.iter().position(|(n, _)| n == "Some").unwrap_or(0);
+                let none_idx = einfo.iter().position(|(n, _)| n == "None").unwrap_or(1);
+                let some_payloads = einfo[some_idx].1.clone();
+                let (_, poff) = self.lay().payload_offset(&some_payloads, 0);
+                let zero = self.iconst(0);
+                let is_empty = self.b.ins().icmp(IntCC::Equal, len, zero);
+                let none_b = self.b.create_block();
+                let some_b = self.b.create_block();
+                let cont = self.b.create_block();
+                self.b.ins().brif(is_empty, none_b, &[], some_b, &[]);
+                self.b.switch_to_block(none_b);
+                let nidx = self.iconst(none_idx as i64);
+                self.store_u64(daddr, nidx);
+                self.b.ins().jump(cont, &[]);
+                self.b.switch_to_block(some_b);
+                let one = self.iconst(1);
+                let newlen = self.b.ins().isub(len, one);
+                let stride = crate::interp::mem::round_up(self.size_of(elem), self.align_of(elem));
+                let buf = self.load_u64(base);
+                let stridev = self.iconst(stride as i64);
+                let off = self.b.ins().imul(newlen, stridev);
+                let src = self.b.ins().iadd(buf, off);
+                self.store_u64(b8, newlen);
+                let sidx = self.iconst(some_idx as i64);
+                self.store_u64(daddr, sidx);
+                let pdst = self.add_off(daddr, poff);
+                self.call_copy(pdst, src, self.size_of(elem));
+                self.b.ins().jump(cont, &[]);
+                self.b.switch_to_block(cont);
+            }
             _ => unimplemented!(
-                "native backend: Vec/Map + String::push collection intrinsics are MIR-interp only"
+                "native backend: Map collection intrinsics are MIR-interp only"
             ),
         }
+    }
+
+    /// Grow a `Vec`'s buffer to fit `need` more elements (alloc-new + copy + free-
+    /// old), mirroring `mir::interp::vec_reserve` — element `stride`/`align` scale
+    /// the byte sizes, `newcap = (len+need).max(cap*2).max(4)`, OOM faults `Panic`.
+    fn vec_reserve(&mut self, base: Value, stride: i64, align: i64, need: i64, span: Span) {
+        let b8 = self.add_off(base, 8);
+        let len = self.load_u64(b8);
+        let b16 = self.add_off(base, 16);
+        let cap = self.load_u64(b16);
+        let needv = self.iconst(need);
+        let lenneed = self.b.ins().iadd(len, needv);
+        let need_grow = self.b.ins().icmp(IntCC::UnsignedGreaterThan, lenneed, cap);
+        let grow_b = self.b.create_block();
+        let cont = self.b.create_block();
+        self.b.ins().brif(need_grow, grow_b, &[], cont, &[]);
+
+        self.b.switch_to_block(grow_b);
+        let two = self.iconst(2);
+        let cap2 = self.b.ins().imul(cap, two);
+        let m1 = self.umax(lenneed, cap2);
+        let four = self.iconst(4);
+        let newcap = self.umax(m1, four);
+        let stridev = self.iconst(stride);
+        let allocsz = self.b.ins().imul(newcap, stridev);
+        let b24 = self.add_off(base, 24);
+        let ctx = self.load_u64(b24);
+        let b32 = self.add_off(base, 32);
+        let vt = self.load_u64(b32);
+        let newbuf = self.call_alloc(ctx, vt, allocsz, align);
+        let zero = self.iconst(0);
+        let is_oom = self.b.ins().icmp(IntCC::Equal, newbuf, zero);
+        self.fault_if(is_oom, FaultKind::Panic, span);
+        let oldbuf = self.load_u64(base);
+        let has_old = self.b.ins().icmp(IntCC::NotEqual, oldbuf, zero);
+        let cp_b = self.b.create_block();
+        let after = self.b.create_block();
+        self.b.ins().brif(has_old, cp_b, &[], after, &[]);
+        self.b.switch_to_block(cp_b);
+        let copysz = self.b.ins().imul(len, stridev);
+        self.call_copy_val(newbuf, oldbuf, copysz);
+        let capsz = self.b.ins().imul(cap, stridev);
+        self.call_free_val(ctx, vt, oldbuf, capsz, align);
+        self.b.ins().jump(after, &[]);
+        self.b.switch_to_block(after);
+        self.store_u64(base, newbuf);
+        self.store_u64(b16, newcap);
+        self.b.ins().jump(cont, &[]);
+        self.b.switch_to_block(cont);
     }
 
     /// Grow a `String`'s buffer to fit `need` more bytes (alloc-new + copy + free-

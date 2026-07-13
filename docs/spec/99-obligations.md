@@ -3843,3 +3843,70 @@ runtime symbol (the encode is inline branches, not an `rt_utf8_encode` call).
 - Full `cargo nextest` green (659 tests, was 658 + this fault gate); `--profile fast`
   green (539); `tests/text.rs` (36) / fmt / print / std_io interp gates unchanged;
   the aot / llvm / stage_d native corpus gates green; clippy clean.
+
+
+## NATIVE-COLLECTIONS-S3 — `Vec[T]` (push/pop/get/set/len + drop-on-overwrite) landed native on BOTH backends over the shared substrate (2026-07-13)
+
+The third native collection slice (design 0013, Path A). Every `Vec` `CollectionOp`
+arm is now lowered INLINE in both native backends (`src/backend/lower.rs` Cranelift +
+`src/backend/llvm.rs` LLVM-text), mirroring `mir::interp::collection_op` /
+`vec_reserve` byte-for-byte over the same 5-word header `{buf@0,len@8,cap@16,ctx@24,
+vt@32}` the S1/S2 `String` slices established.
+- REUSED SUBSTRATE: `New` (the shared empty-header init) is unchanged; a new
+  `vec_reserve` mirrors `string_reserve` but scales every byte size by the element
+  `stride = round_up(size_of(elem), align_of(elem))` and grows `newcap =
+  (len+need).max(cap*2).max(4)` (vs String's `.max(8)`, byte stride 1), allocating
+  `newcap*stride` / freeing `cap*stride` / copying `len*stride` through the same
+  `Alloc` vtable (alloc-new + rt_copy + free-old; no realloc). OOM faults `Panic`.
+- OPS: `VecPush` (`vec_reserve(len+1)`, write the element at `buf+len*stride` via
+  `rt_copy` for the exact `size_of(elem)` bytes — scalar OR struct — then bump `len`);
+  `VecGet` (bounds-check `idx < len`, write the slot borrow `buf+idx*stride` to the
+  `read elem` dst); `VecSet` (bounds-check, DROP the overwritten element via
+  `emit_drop(slot, elem)` BEFORE the move, then `rt_copy` the new value);
+  `VecPop` (empty → write `Opt::None` discriminant; else decrement `len`, write
+  `Opt::Some` + `rt_copy` the last element into the `Some` payload — the Opt indices
+  and payload offset are compile-time layout). `len` on a `Vec` is unchanged (an
+  offset-8 word Load, not a `CollOp`). No `nsw`/`nuw`; `.max` via `icmp`+`select`.
+- DROP-ON-OVERWRITE LANDED: `VecSet` runs the old element's drop glue (reusing
+  `emit_drop`, the byte-exact twin of the interp's `drop_value`) in the correct order.
+  For a hook-bearing struct element this fires the hook directly (`callref`, no glue
+  table needed) and is proven byte-exact across all engines.
+- BOUNDS FAULT: `idx >= len` faults `Bounds` at the index arg's span — the SAME
+  `emit_fault`/`fault_if` the array/String faults use — byte-identical kind AND span.
+- LLVM TIERING: `classify_tiers` now marks a `CollectionOp`'s result dst and its
+  `VecPush`/`VecSet` value operand Tier-F (they are read/written through place
+  ADDRESSES via `place_addr`, like Box/Subslice operands), so a wordy `read elem`
+  borrow dst gets addressable flat storage. Cranelift stack-allocates every local, so
+  it needed no tiering change. `aot_runtime.c` untouched.
+- GATES: `tests/vec_native.rs` + `tests/fixtures/run/vec_native.cnr` (auto-scanned by
+  the aot / stage_d four-engine and llvm fifth-engine corpus gates). The fixture,
+  over the reclaiming FREE-LIST allocator, pushes a `Vec[i64]` past cap 0→4→8 (two
+  `vec_reserve` growths), then `get`/`set`/`len`/`pop` (trace `6,10,60,99,60,5,5`),
+  and a `Vec[Pair]` (stride 16 > 8, `rt_copy` element moves) with `push`/`get`/`set`
+  (trace `1,10,30,40`), ret 5 — asserted BYTE-IDENTICAL under the oracle, MIR, and
+  Cranelift no-opt + opt; LLVM `-O2` covers it transitively. A FAULT gate
+  (`vec_get_set_out_of_bounds_faults_bounds_all_engines`) drives an OOB `get` AND
+  `set` (index 5 on a 1-element Vec) and asserts the `Bounds` kind AND span byte-exact
+  across the oracle, MIR, and Cranelift no-opt + opt. A DROP gate
+  (`vec_set_drops_overwritten_element_all_engines` + `tests/fixtures/run/
+  vec_drop_overwrite.cnr`) drains the Vec empty so the (deferred) scope-end collection
+  drop is a no-op, isolating the overwrite drop: `set` over E{1} then draining E{2},
+  E{9} traces `1,100,2,200,9` byte-identical across all five engines.
+- GAP (deferred to the collection-drop slice, unchanged from S1/S2): a live `Vec`'s
+  buffer + remaining elements are NOT freed/dropped on scope-end drop (native
+  `emit_drop`/`needs_drop`/`walk_glue` have no `Type::App` arm; the interp's
+  `drop_value` DOES via its `Vec` arm). This is a leak, not an observable divergence,
+  as long as the fixture's element drops are not observed at scope end — hence every
+  drop gate drains its Vec empty. Two sub-items fold into the NEXT slice: (1) the
+  `Type::App("Vec")` arm in native `emit_drop`/`needs_drop` (per-element reverse drop
+  + buffer free through the carried vtable); (2) `walk_glue` needs a `Vec` arm so a
+  `Vec[Box[T]]` element's Box drop-glue is collected (today only hook-bearing / non-
+  Box element drops are reachable at a `VecSet` overwrite — a `Vec<Box>` overwrite
+  would silently skip the Box free; not exercised by any current fixture).
+- Full `cargo nextest` green; `--profile fast` green; `tests/vec.rs` (interp) unchanged
+  and now additionally native-runnable; text/fmt/print/std_io interp gates unchanged;
+  the aot / llvm / stage_d native corpus gates green (they auto-scan the two new
+  `run/` fixtures); clippy clean.
+- DEFERRED (next slices, in order): `Map` (FNV-1a hash + linear-probe
+  `insert`/`contains`/`get`), then collection-drop-free (`alloc_on_drop` for
+  `String`/`Vec`/`Map` in `emit_drop`).

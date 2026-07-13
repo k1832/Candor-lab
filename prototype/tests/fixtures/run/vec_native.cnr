@@ -1,0 +1,161 @@
+// Native `Vec[T]` (native collections slice #3): `vec_new` over a reclaiming
+// free-list allocator, `push`es that force `vec_reserve` growth across the
+// initial capacity (cap 0 -> 4 -> 8), then `get`/`set`/`len`/`pop`. Exercised for
+// a scalar element (`i64`, stride 8) AND a small struct (`Pair`, stride 16 > 8,
+// moved with `rt_copy`). Every engine — the tree-walking oracle, the MIR
+// interpreter, and the Cranelift / LLVM native backends — must agree byte-for-byte
+// on the traced values and the returned length (the New / VecPush / VecGet /
+// VecSet / VecPop intrinsics lowered inline in the backends, mirroring
+// `mir::interp::collection_op`).
+enum Opt { Some(i64), None }
+struct Pair { a: i64, b: i64 }
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+
+struct FreeList { next: usize, end: usize, head: rawptr u8 }
+struct FreeBlock { next: rawptr u8, size: usize }
+
+fn with_window(base: usize, size: usize) -> FreeList {
+    unsafe "the empty free list starts with a null head; no block is threaded yet" {
+        return FreeList { next: base, end: base + size, head: ptr_null[u8]() };
+    }
+}
+
+fn block_span(size: usize, align: usize) -> usize {
+    let mut need: usize = size;
+    if need < 16usize {
+        need = 16usize;
+    }
+    return (need + align - 1usize) / align * align;
+}
+
+fn freelist_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live FreeList whose [next, end) window and address-ordered free chain are reserved to this arena alone; every carved block stays inside [next, end) and is >= header-sized, and a split remainder (kept only when >= MIN_SPLIT) is written into the block's own tail" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let need: usize = block_span(size, align);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) {
+            let blk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if blk.size >= need {
+                if blk.size - need >= 32usize {
+                    let rem: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(cur) + need);
+                    ptr_write(cast_ptr[FreeBlock](rem), FreeBlock { next: blk.next, size: blk.size - need });
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: rem });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: rem, size: pblk.size });
+                    }
+                } else {
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: blk.next });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: blk.next, size: pblk.size });
+                    }
+                }
+                return cur;
+            }
+            prev = cur;
+            cur = blk.next;
+        }
+        let aligned: usize = (st.next + align - 1usize) / align * align;
+        if aligned + need > st.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: aligned + need, end: st.end, head: st.head });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+
+fn freelist_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    unsafe "the free list is kept ADDRESS-ORDERED; the freed block's own storage (>= header-sized, guaranteed by block_span in alloc) holds its FreeBlock header {next, size}, and a merge joins two blocks ONLY when their byte spans are exactly adjacent (addr + size == neighbour addr), so a merge can never overlap live memory nor bridge a gap" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let mut cap: usize = block_span(size, align);
+        let a: usize = ptr_to_addr(ptr);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) && ptr_to_addr(cur) < a {
+            let cblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            prev = cur;
+            cur = cblk.next;
+        }
+        let mut link: rawptr u8 = cur;
+        if !is_null(cur) {
+            let nblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if a + cap == ptr_to_addr(cur) {
+                cap = cap + nblk.size;
+                link = nblk.next;
+            }
+        }
+        if !is_null(prev) {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            if ptr_to_addr(prev) + pblk.size == a {
+                ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: link, size: pblk.size + cap });
+                return;
+            }
+        }
+        ptr_write(cast_ptr[FreeBlock](ptr), FreeBlock { next: link, size: cap });
+        if is_null(prev) {
+            ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: ptr });
+        } else {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: ptr, size: pblk.size });
+        }
+    }
+}
+
+static FREELIST_VT: AllocVtable = AllocVtable { alloc: freelist_alloc, free: freelist_free };
+
+fn mk_alloc(state: write FreeList) -> Alloc {
+    unsafe "ctx (the caller's FreeList local) and vt (the static FREELIST_VT) outlive every String this handle serves; the caller keeps the window and FREELIST_VT alive for the whole run and drops every String before the window dies" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(FREELIST_VT) };
+    }
+}
+
+fn main() alloc -> i64 {
+    let mut st: FreeList = with_window(16777216usize, 1048576usize);
+    let a: Alloc = mk_alloc(write st);
+
+    // Vec[i64]: push past the initial capacity (0 -> 4 -> 8) to force two
+    // `vec_reserve` growths (alloc-new + rt_copy + free-old), then read back.
+    let mut v: Vec[i64] = vec_new(read a);
+    push(write v, 10);
+    push(write v, 20);
+    push(write v, 30);
+    push(write v, 40);
+    push(write v, 50);
+    push(write v, 60);
+    trace(conv i64 len(read v));   // 6
+    trace(get(read v, 0).*);       // 10
+    trace(get(read v, 5).*);       // 60
+    set(write v, 2, 99);
+    trace(get(read v, 2).*);       // 99
+    let o: Opt = pop(write v);     // Some(60), len -> 5
+    match o {
+        Opt::Some(x) => { trace(x); }
+        Opt::None => { trace(0 - 1); }
+    }
+    trace(conv i64 len(read v));   // 5
+
+    // Vec[Pair]: stride 16 > 8 exercises the rt_copy element move on push / get /
+    // set (and the growth copy scaling by stride).
+    let mut ps: Vec[Pair] = vec_new(read a);
+    push(write ps, Pair { a: 1, b: 2 });
+    push(write ps, Pair { a: 3, b: 4 });
+    push(write ps, Pair { a: 5, b: 6 });
+    push(write ps, Pair { a: 7, b: 8 });
+    push(write ps, Pair { a: 9, b: 10 });
+    trace(conv i64 len(read ps));      // 5
+    trace(get(read ps, 0).*.a);        // 1
+    trace(get(read ps, 4).*.b);        // 10
+    set(write ps, 1, Pair { a: 30, b: 40 });
+    trace(get(read ps, 1).*.a);        // 30
+    trace(get(read ps, 1).*.b);        // 40
+
+    return conv i64 len(read v);
+}

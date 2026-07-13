@@ -405,6 +405,17 @@ fn classify_tiers(mf: &MirFn) -> Vec<bool> {
                     mark(dst, &mut tf);
                     mark(src, &mut tf);
                 }
+                // Collection ops write their result and read element/value operands
+                // through place ADDRESSES (`place_addr`), so those slots must be flat.
+                StatementKind::CollectionOp { dst, op } => {
+                    mark(dst, &mut tf);
+                    match op {
+                        CollOp::VecPush { value, .. } | CollOp::VecSet { value, .. } => {
+                            mark(value, &mut tf)
+                        }
+                        _ => {}
+                    }
+                }
                 _ => {}
             }
         }
@@ -1388,9 +1399,153 @@ impl<'a> FnEmit<'a> {
                 self.line(&format!("{newlen} = add i64 {len}, {enc_len}"));
                 self.store_u64(&b8, &newlen);
             }
+            CollOp::VecPush { base, elem, value, span } => {
+                let base = self.operand(base);
+                let stride = round_up(self.lay.size_of(elem), self.lay.align_of(elem));
+                let align = self.lay.align_of(elem);
+                self.vec_reserve(&base, stride, align, 1, *span);
+                let buf = self.load_u64(&base);
+                let b8 = self.add_off_candor(&base, 8);
+                let len = self.load_u64(&b8);
+                let (vaddr, _) = self.place_addr(value)?;
+                let off = self.t();
+                self.line(&format!("{off} = mul i64 {len}, {stride}"));
+                let slot = self.t();
+                self.line(&format!("{slot} = add i64 {buf}, {off}"));
+                self.rt_copy(&slot, &vaddr, self.lay.size_of(elem));
+                let newlen = self.t();
+                self.line(&format!("{newlen} = add i64 {len}, 1"));
+                self.store_u64(&b8, &newlen);
+            }
+            CollOp::VecGet { base, elem, index, span } => {
+                let base = self.operand(base);
+                let b8 = self.add_off_candor(&base, 8);
+                let len = self.load_u64(&b8);
+                let i = self.operand(index);
+                let oob = self.t();
+                self.line(&format!("{oob} = icmp uge i64 {i}, {len}"));
+                self.fault_if(&oob, FaultKind::Bounds, *span);
+                let stride = round_up(self.lay.size_of(elem), self.lay.align_of(elem));
+                let buf = self.load_u64(&base);
+                let off = self.t();
+                self.line(&format!("{off} = mul i64 {i}, {stride}"));
+                let slot = self.t();
+                self.line(&format!("{slot} = add i64 {buf}, {off}"));
+                let (daddr, _) = self.place_addr(dst)?;
+                self.store_u64(&daddr, &slot);
+            }
+            CollOp::VecSet { base, elem, index, value, span } => {
+                let base = self.operand(base);
+                let b8 = self.add_off_candor(&base, 8);
+                let len = self.load_u64(&b8);
+                let i = self.operand(index);
+                let oob = self.t();
+                self.line(&format!("{oob} = icmp uge i64 {i}, {len}"));
+                self.fault_if(&oob, FaultKind::Bounds, *span);
+                let stride = round_up(self.lay.size_of(elem), self.lay.align_of(elem));
+                let buf = self.load_u64(&base);
+                let off = self.t();
+                self.line(&format!("{off} = mul i64 {i}, {stride}"));
+                let slot = self.t();
+                self.line(&format!("{slot} = add i64 {buf}, {off}"));
+                let (vaddr, _) = self.place_addr(value)?;
+                // Drop-on-overwrite: run the old element's drop glue before the move,
+                // mirroring the interp's `drop_value(slot, elem)` in `VecSet`.
+                self.emit_drop(&slot, elem, &[], &mut Vec::new())?;
+                self.rt_copy(&slot, &vaddr, self.lay.size_of(elem));
+            }
+            CollOp::VecPop { base, elem } => {
+                let base = self.operand(base);
+                let (daddr, _) = self.place_addr(dst)?;
+                let b8 = self.add_off_candor(&base, 8);
+                let len = self.load_u64(&b8);
+                // Opt discriminants + the `Some` payload offset are compile-time layout.
+                let opt = Type::Named("Opt".to_string());
+                let einfo = self.lay.enum_info(&opt).ok_or("unknown enum `Opt`")?;
+                let some_idx = einfo.iter().position(|(n, _)| n == "Some").unwrap_or(0);
+                let none_idx = einfo.iter().position(|(n, _)| n == "None").unwrap_or(1);
+                let some_payloads = einfo[some_idx].1.clone();
+                let (_, poff) = self.lay.payload_offset(&some_payloads, 0);
+                let is_empty = self.t();
+                self.line(&format!("{is_empty} = icmp eq i64 {len}, 0"));
+                let none_b = self.l();
+                let some_b = self.l();
+                let cont = self.l();
+                self.line(&format!("br i1 {is_empty}, label %{none_b}, label %{some_b}"));
+                self.label(&none_b);
+                self.store_u64(&daddr, &format!("{none_idx}"));
+                self.line(&format!("br label %{cont}"));
+                self.label(&some_b);
+                let newlen = self.t();
+                self.line(&format!("{newlen} = sub i64 {len}, 1"));
+                let stride = round_up(self.lay.size_of(elem), self.lay.align_of(elem));
+                let buf = self.load_u64(&base);
+                let off = self.t();
+                self.line(&format!("{off} = mul i64 {newlen}, {stride}"));
+                let src = self.t();
+                self.line(&format!("{src} = add i64 {buf}, {off}"));
+                self.store_u64(&b8, &newlen);
+                self.store_u64(&daddr, &format!("{some_idx}"));
+                let pdst = self.add_off_candor(&daddr, poff);
+                self.rt_copy(&pdst, &src, self.lay.size_of(elem));
+                self.line(&format!("br label %{cont}"));
+                self.label(&cont);
+            }
             _ => return Err(format!("out of LLVM subset: {op:?}")),
         }
         Ok(())
+    }
+
+    /// Grow a `Vec`'s buffer to fit `need` more elements (alloc-new + copy + free-
+    /// old), mirroring `mir::interp::vec_reserve` — element `stride`/`align` scale
+    /// the byte sizes, `newcap = (len+need).max(cap*2).max(4)`, OOM faults `Panic`.
+    fn vec_reserve(&mut self, base: &str, stride: u64, align: u64, need: u64, span: Span) {
+        let b8 = self.add_off_candor(base, 8);
+        let len = self.load_u64(&b8);
+        let b16 = self.add_off_candor(base, 16);
+        let cap = self.load_u64(&b16);
+        let lenneed = self.t();
+        self.line(&format!("{lenneed} = add i64 {len}, {need}"));
+        let need_grow = self.t();
+        self.line(&format!("{need_grow} = icmp ugt i64 {lenneed}, {cap}"));
+        let grow_b = self.l();
+        let cont = self.l();
+        self.line(&format!("br i1 {need_grow}, label %{grow_b}, label %{cont}"));
+
+        self.label(&grow_b);
+        let cap2 = self.t();
+        self.line(&format!("{cap2} = mul i64 {cap}, 2"));
+        let m1 = self.umax(&lenneed, &cap2);
+        let newcap = self.umax(&m1, "4");
+        let allocsz = self.t();
+        self.line(&format!("{allocsz} = mul i64 {newcap}, {stride}"));
+        let b24 = self.add_off_candor(base, 24);
+        let ctx = self.load_u64(&b24);
+        let b32 = self.add_off_candor(base, 32);
+        let vt = self.load_u64(&b32);
+        let newbuf = self.call_alloc(&ctx, &vt, &allocsz, align);
+        let is_oom = self.t();
+        self.line(&format!("{is_oom} = icmp eq i64 {newbuf}, 0"));
+        self.fault_if(&is_oom, FaultKind::Panic, span);
+        let oldbuf = self.load_u64(base);
+        let has_old = self.t();
+        self.line(&format!("{has_old} = icmp ne i64 {oldbuf}, 0"));
+        let cp_b = self.l();
+        let after = self.l();
+        self.line(&format!("br i1 {has_old}, label %{cp_b}, label %{after}"));
+        self.label(&cp_b);
+        let copysz = self.t();
+        self.line(&format!("{copysz} = mul i64 {len}, {stride}"));
+        self.rt_copy_val(&newbuf, &oldbuf, &copysz);
+        let capsz = self.t();
+        self.line(&format!("{capsz} = mul i64 {cap}, {stride}"));
+        self.call_free_val(&ctx, &vt, &oldbuf, &capsz, align);
+        self.line(&format!("br label %{after}"));
+        self.label(&after);
+        self.store_u64(base, &newbuf);
+        self.store_u64(&b16, &newcap);
+        self.line(&format!("br label %{cont}"));
+        self.label(&cont);
     }
 
     /// Grow a `String`'s buffer to fit `need` more bytes (alloc-new + copy + free-
