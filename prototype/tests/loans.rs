@@ -295,6 +295,80 @@ fn slice_copy_dead_before_conflict_is_clean() {
     );
 }
 
+// ---- str/[u8]-view use-after-free (design 0015 review F1 residual) ---------
+// `as_str`/`as_bytes`/`substr`/`str_from_unchecked` produce a `str`/`[u8]` VIEW
+// into a native String's heap buffer. The view must keep a loan on the source
+// String live for its own range: without it the checker admitted a use-after-
+// free — a `push`/`append` that forces a `string_reserve` GROWTH (alloc-new +
+// copy + FREE-old), or a move/drop of the source, while the view still points
+// into the freed old buffer. Each rejection below checked CLEAN before the fix
+// (the confirmed repro read stale/garbage bytes on every engine). `use_i` and
+// the `Alloc` handle struct come from `PREAMBLE`/`STR_PREAMBLE`.
+
+// Real (`.cnr`) syntax: the `str`/`String` view builtins and the `conv` cast used
+// below are real-surface constructs, so these go through `check_source_real`.
+const STR_PREAMBLE: &str = "
+struct AllocVtable { alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8, free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit }
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+fn use_i(v: i64) -> unit { }
+";
+
+fn str_codes(src: &str) -> Vec<String> {
+    let full = format!("{STR_PREAMBLE}{src}");
+    let diags = candor_proto::check_source_real(&full).expect("parse ok");
+    diags.into_iter().map(|d| d.code).collect()
+}
+
+fn assert_str_has(src: &str, code: &str) {
+    let cs = str_codes(src);
+    assert!(cs.iter().any(|c| c == code), "expected `{code}` for:\n{src}\ngot {cs:?}");
+}
+
+fn assert_str_clean(src: &str) {
+    let cs = str_codes(src);
+    assert!(cs.is_empty(), "expected clean for:\n{src}\ngot {cs:?}");
+}
+
+#[test]
+fn str_view_realloc_while_view_live() {
+    // The confirmed repro: `vb = as_bytes(as_str(read s))` views s's buffer, then
+    // `append` forces a grow (free-old) while vb is live — E0801 (the grow's
+    // `write s` conflicts with the view's shared loan on s).
+    assert_str_has(
+        "fn f(a: read Alloc) alloc -> unit { let mut s: String = string_new(a);          append(write s, \"abcde\"); let v: str = as_str(read s); let vb: [u8] = as_bytes(v);          append(write s, \"fghij\"); use_i(conv i64 vb[0]); }",
+        "E0801",
+    );
+}
+
+#[test]
+fn str_view_move_source_while_view_live() {
+    // Moving the source String out while a view of it is live is E0802: the view
+    // would dangle into the moved-from buffer.
+    assert_str_has(
+        "fn f(a: read Alloc) alloc -> unit { let mut s: String = string_new(a);          append(write s, \"abcde\"); let v: str = as_str(read s); let owned: String = s;          use_i(conv i64 len(v)); }",
+        "E0802",
+    );
+}
+
+#[test]
+fn substr_view_realloc_while_view_live() {
+    // The loan propagates transitively through `substr` (str -> str sub-view):
+    // `sub` copies `v`'s loan on s, so a later grow of s is still E0801.
+    assert_str_has(
+        "fn f(a: read Alloc) alloc -> unit { let mut s: String = string_new(a);          append(write s, \"abcdefgh\"); let v: str = as_str(read s);          let sub: str = substr(v, 0usize, 3usize); append(write s, \"ijklmnop\");          use_i(conv i64 len(sub)); }",
+        "E0801",
+    );
+}
+
+#[test]
+fn str_view_dead_before_mutation_is_clean() {
+    // NLL positive (the pervasive make-view-use-done pattern): the view dies at
+    // its last use, so a subsequent grow of s is accepted — no false positive.
+    assert_str_clean(
+        "fn f(a: read Alloc) alloc -> unit { let mut s: String = string_new(a);          append(write s, \"abcde\"); let v: str = as_str(read s); let vb: [u8] = as_bytes(v);          use_i(conv i64 vb[0]); append(write s, \"fghij\"); }",
+    );
+}
+
 // ---- §3.3: signature regions & provenance ---------------------------------
 
 #[test]

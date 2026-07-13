@@ -4469,7 +4469,47 @@ that stays clean) each checked CLEAN pre-fix. Full `cargo nextest` green (699 + 
 existing test changed verdict — the heavy slice corpus (vec / vec_native / std_io / selfhost
 checker/analyses/interp/lower / stage_a-d native gates) stays green, so no valid slice code was
 newly rejected. Scoped deliberately to `Slice`/`SliceMut`; a separate observation (NOT this
-sub-class, not fixed): `as_str`/`as_bytes`/`substr` views of a native `String` record no loan at
+sub-class): `as_str`/`as_bytes`/`substr` views of a native `String` record no loan at
 all (they retype through `arg0`/`Use::Value`), so a String realloc while a view is live is
-accepted even without any copy — but that path does not fault in the current engines (no verified
-UAF), so it is left as a distinct open question rather than folded in here.
+accepted even without any copy. That path is NOW VERIFIED AND CLOSED — see STR-VIEW-UAF below.
+
+## STR-VIEW-UAF — a `str`/`[u8]` view of a native String recorded no loan: a safe-code use-after-free (memory-safety fix, 2026-07-13)
+
+The retype builtins `as_str`/`as_bytes`/`substr`/`str_from_unchecked` produce a `str`/`[u8]`
+VIEW aliasing a native `String`'s heap buffer, but recorded NO loan tying the view to its
+source: they retype through `arg0`/`Use::Value`, and neither `carries_borrow` nor
+`propagate_place_loans` recognized the view types, so the transient `read`-loan on the source
+died at the end of the retype statement. A `push`/`append` that forces a `string_reserve`
+GROWTH (alloc-new + copy + FREE-old), or a move/drop of the source, while the view was live
+was ACCEPTED — the view then dangled into the freed old buffer.
+
+VERIFIED REPRO (check-clean + stale-read on EVERY engine, not merely a latent hole). Over the
+reclaiming free-list allocator: `append(write s, "abcde")` (buf B0 = "abcde"), `let v = as_str(read s);
+let vb = as_bytes(v);` (vb -> B0), read `vb[0]` = 97 (`'a'`), then `append(write s, "fghij")`
+crosses cap 8 -> grow: alloc B1, copy, FREE B0. Reading `vb[0]` again returns 0 — the free-list
+`free` wrote its `FreeBlock{next,size}` header into the freed B0, overwriting the string bytes the
+view still points at. `candor check` exited 0; the return value `before*1000 + after` was 97000
+(a sound program yields 97097) identically on the tree-walker, the MIR interpreter, and the
+Cranelift native engine. This is a stale-read UAF (untracked view provenance), independent of any
+copy — the view carried no loan in the first place.
+
+FIX (record the source loan on the view, mirroring the LOAN-COPY / SLICE-COPY mechanism).
+`carries_borrow` (`src/check/stmt.rs`) now recognizes the four retype calls
+(`as_str`/`as_bytes`/`substr`/`str_from_unchecked`) and a bare place of type `str`, and
+`propagate_place_loans` (`src/check/mod.rs`) is extended to `Type::Str`. For `as_str(read s)`
+the `read s` already records a shared loan on `s` and marks it carried; recognizing `as_str`
+anchors that loan to the view binding's live range. For the chaining cases
+(`as_bytes(v)`/`substr(v, ..)`/`str_from_unchecked(b)`) the argument view carries the source
+loan, which propagates through the retype to the result. NLL (backward liveness) releases the
+view's loan at the binding's LAST use, so the pervasive make-view-use-done pattern is unaffected;
+only a mutate/realloc/move/drop of the source WHILE a view is still live is rejected.
+
+GATES. The repro now fails `candor check` E0801 (the grow's `write s` conflicts with the view's
+live shared borrow of `s`). Four regressions in `tests/loans.rs` (real-syntax, `str_view_*` /
+`substr_view_*`): as_bytes-of-as_str view then realloc (E0801), move-source-while-view-live
+(E0802), substr-chained view then realloc (E0801, proving transitive propagation), plus an NLL
+positive (view dies before the grow -> clean). Full `cargo nextest` green (703 + 4 = 707),
+including the heavy `as_bytes`/`as_str` corpus (text, string_native, std_io, lines, buf_io, fmt,
+print) and the selfhost + native (stage_a-d, *_native) gates; `--profile fast` green; clippy
+clean. No existing test changed verdict — no valid make-view-use-done pattern was newly rejected.
+This closes the last known loan-tracking gap before 0015 resumes.
