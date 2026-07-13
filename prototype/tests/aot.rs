@@ -515,3 +515,61 @@ fn gate_aot_native_read_lines() {
     assert_eq!(output.stdout, content.as_bytes(), "the four lines, reassembled newline-terminated");
     assert_eq!(exp_ret, 4, "four lines split from the file");
 }
+
+#[test]
+fn gate_aot_native_buf_io() {
+    assert!(cc_available(), "cc/linker unavailable: cannot build runnable executables");
+    let _g = io_guard();
+    // The buffered I/O layer (`BufReader.read_line` + `BufWriter`): reads a real
+    // file line by line through the streaming `read_line` (a [64]u8 refill window
+    // with cross-refill line assembly, mutated through a `write BufReader` param),
+    // writing each line back newline-terminated through the buffered `BufWriter`
+    // (auto-flushing past 4096 bytes, resetting the accumulator to a fresh
+    // String). The native binary calling real libc must match the shim oracle, and
+    // the reconstruction must equal the newline-terminated file body byte-for-byte.
+    let cnr = fixtures_dir().join("std_io_readpath/buf_io_native.cnr");
+    let src = std::fs::read_to_string(&cnr).expect("read buf-io fixture");
+    let work = std::env::temp_dir().join(format!("candor-aot-bufio-{}", std::process::id()));
+    std::fs::create_dir_all(&work).unwrap();
+    // > 4096 bytes so the BufWriter auto-flush fires mid-stream; a 200-byte line
+    // spans many 64-byte refills; multibyte chars straddle refill boundaries; an
+    // interior empty line is preserved; every line is newline-terminated so the
+    // per-line reconstruction reproduces the body exactly.
+    let mut content = String::from("hi\ncand\u{00f6}r\n\u{03c0}\n\n");
+    content.push_str(&"x".repeat(200));
+    content.push('\n');
+    for i in 0..120 {
+        content.push_str(&format!("line {i} \u{00e9}\u{20ac}\u{1f600} 0123456789 padding-xyz\n"));
+    }
+    let line_count = content.matches('\n').count() as i64;
+    assert!(content.len() > 4096, "must cross the BufWriter flush threshold");
+    std::fs::write(work.join("rt.txt"), content.as_bytes()).unwrap();
+
+    foreign_io::reset();
+    foreign_io::set_root(&work);
+    foreign_io::register_std_io();
+    let (exp_ret, exp_out) = match run_source_real(&src) {
+        RunResult::Ok(r) => (r.ret, foreign_io::take_stdout()),
+        _ => {
+            foreign_io::unregister_std_io();
+            panic!("shim-backed interpreter should run the buf-io demonstrator");
+        }
+    };
+    foreign_io::unregister_std_io();
+
+    let srcpath = work.join("prog.cnr");
+    std::fs::write(&srcpath, &src).unwrap();
+    let out = std::env::temp_dir().join(format!("candor-aot-bufio-bin-{}", std::process::id()));
+    candor_proto::compile_path(&srcpath, &out).expect("compile buf-io demonstrator");
+    let output = std::process::Command::new(&out)
+        .current_dir(&work)
+        .output()
+        .expect("run compiled buf-io binary");
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_dir_all(&work);
+
+    assert_eq!(output.status.code(), Some(exp_ret as u8 as i32), "exit byte vs shim run");
+    assert_eq!(output.stdout, exp_out, "stdout bytes vs shim run");
+    assert_eq!(output.stdout, content.as_bytes(), "lines reassembled newline-terminated, byte-for-byte");
+    assert_eq!(exp_ret, line_count, "read_line yields one owned String per newline");
+}

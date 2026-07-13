@@ -904,3 +904,177 @@ fn read_lines_splits_file_into_line_vec_tree_and_mir() {
     assert_eq!(tw_out, content.as_bytes(), "tree: lines reassembled newline-terminated");
     assert_eq!(mir_out, content.as_bytes(), "MIR: lines reassembled newline-terminated");
 }
+
+// ===========================================================================
+// Buffered I/O layer: `BufReader.read_line` (streaming, owned per-line Strings,
+// cross-refill line assembly) and `BufWriter` (accumulate + threshold flush).
+// The `buf_io_native.cnr` fixture reads "rt.txt" line by line through
+// `read_line` and writes each line back newline-terminated through a buffered
+// `BufWriter` (auto-flushing past 4096 bytes), so stdout equals the file body
+// re-split by `split_lines`' convention. The read path is native
+// (`str_from_unchecked` lowers), so this runs on the tree-walker AND the MIR
+// engine through the same real shims; the Cranelift + LLVM native gates live in
+// tests/aot.rs and tests/llvm.rs.
+// ===========================================================================
+fn buf_io_fixture() -> String {
+    let path = format!("{}/tests/fixtures/std_io_readpath/buf_io_native.cnr", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(&path).expect("read buf-io fixture")
+}
+
+/// Replicate `split_lines`' convention, then rebuild the newline-terminated body
+/// the fixture writes back: a trailing '\n' yields no final empty line; interior
+/// empty lines are kept; the empty input yields zero lines.
+fn expected_reconstruction(body: &[u8]) -> (Vec<u8>, i64) {
+    let mut lines: Vec<&[u8]> = Vec::new();
+    let mut start = 0usize;
+    for (i, &b) in body.iter().enumerate() {
+        if b == 10 {
+            lines.push(&body[start..i]);
+            start = i + 1;
+        }
+    }
+    if start < body.len() {
+        lines.push(&body[start..]);
+    }
+    let mut out = Vec::new();
+    for l in &lines {
+        out.extend_from_slice(l);
+        out.push(10);
+    }
+    (out, lines.len() as i64)
+}
+
+fn run_buf_io_both(tag: &str, content: &[u8]) {
+    let src = buf_io_fixture();
+    let tdir = std::env::temp_dir().join(format!("candor-bufio-{}-{}", tag, std::process::id()));
+    std::fs::create_dir_all(&tdir).unwrap();
+    std::fs::write(tdir.join("rt.txt"), content).unwrap();
+    let (expected, count) = expected_reconstruction(content);
+
+    // tree-walker
+    foreign_io::reset();
+    foreign_io::set_root(&tdir);
+    foreign_io::register_std_io();
+    let tw = run_ok(&src);
+    let tw_out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+
+    // MIR engine (BufReader/BufWriter lower: native String + str_from_unchecked)
+    foreign_io::reset();
+    foreign_io::set_root(&tdir);
+    foreign_io::register_std_io();
+    let mir = run_ok_mir(&src);
+    let mir_out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+    let _ = std::fs::remove_dir_all(&tdir);
+
+    assert_eq!(tw, count, "{tag}: tree line count");
+    assert_eq!(mir, count, "{tag}: MIR line count matches the tree oracle");
+    assert_eq!(tw_out, expected, "{tag}: tree reassembled newline-terminated");
+    assert_eq!(mir_out, expected, "{tag}: MIR reassembled newline-terminated");
+}
+
+// ---- streaming read_line: file > buffer, lines spanning refills, auto-flush ----
+#[test]
+fn buf_reader_read_line_streams_large_file_tree_and_mir() {
+    let _g = lock();
+    // > 4096 bytes so the BufWriter auto-flush fires mid-stream; a 200-byte line
+    // spans many 64-byte refills; multibyte chars straddle refill boundaries; an
+    // interior empty line is preserved; trailing '\n' yields no extra empty line.
+    let mut content = String::new();
+    content.push_str("hi\ncand\u{00f6}r\n\u{03c0}\n\n");
+    content.push_str(&"x".repeat(200));
+    content.push('\n');
+    for i in 0..120 {
+        content.push_str(&format!("line {i} \u{00e9}\u{20ac}\u{1f600} 0123456789 padding-xyz\n"));
+    }
+    assert!(content.len() > 4096, "must cross the BufWriter flush threshold");
+    run_buf_io_both("large", content.as_bytes());
+}
+
+// ---- edge cases: empty file (-> None immediately), no trailing newline, interior empty ----
+#[test]
+fn buf_reader_read_line_edge_cases_tree_and_mir() {
+    let _g = lock();
+    run_buf_io_both("empty", b""); // read_line -> None immediately, zero lines
+    run_buf_io_both("no_trailing_nl", b"alpha\nbeta\ngamma"); // final line without '\n' still returned
+    run_buf_io_both("interior_empty", b"a\n\nb\n"); // interior empty line kept, trailing '\n' drops final empty
+    run_buf_io_both("single_no_nl", b"solo"); // single line, no newline
+}
+
+// ---- BufWriter round-trip: buffered writes crossing the flush threshold --------
+// Buffers 300 * 20 bytes + a 4-byte tail (6004 bytes) through `bw_write_str`,
+// auto-flushing each time the accumulator passes 4096, then a final `bw_flush`.
+// The captured stdout must equal the concatenation of every string written,
+// byte-for-byte, on BOTH engines (BufWriter is all-native: append + write_all).
+const BUFWRITER_DEFS: &str = r#"
+struct BufWriter { fd: i32, al: Alloc, buf: String }
+fn buf_writer(a: Alloc, fd: i32) alloc -> BufWriter {
+    return BufWriter { fd: fd, al: a, buf: string_new(a) };
+}
+fn bw_flush(w: write BufWriter) alloc -> IoResult {
+    let n: usize = write_all(w.fd, as_bytes(as_str(read w.buf)))?;
+    w.*.buf = string_new(w.al);
+    return IoResult::Ok(n);
+}
+fn bw_write_str(w: write BufWriter, s: str) alloc -> IoResult {
+    append(write w.*.buf, s);
+    let view: [u8] = as_bytes(as_str(read w.buf));
+    if len(view) >= 4096usize {
+        let n: usize = bw_flush(w)?;
+    }
+    return IoResult::Ok(0usize);
+}
+fn main() alloc -> i64 {
+    let mut st: FreeList = with_window(16777216usize, 1048576usize);
+    let a: Alloc = mk_alloc(write st);
+    let mut bw: BufWriter = buf_writer(a, stdout());
+    let mut i: i64 = 0i64;
+    loop {
+        if i >= 300i64 { break; }
+        match bw_write_str(write bw, "candor-buffered-0123") {
+            IoResult::Ok(c) => { },
+            IoResult::Err(e) => { return 0i64 - 1i64; },
+        }
+        i = i + 1i64;
+    }
+    match bw_write_str(write bw, "TAIL") {
+        IoResult::Ok(c) => { },
+        IoResult::Err(e) => { return 0i64 - 2i64; },
+    }
+    match bw_flush(write bw) {
+        IoResult::Ok(c) => { },
+        IoResult::Err(e) => { return 0i64 - 3i64; },
+    }
+    return i + 1i64;
+}
+"#;
+
+#[test]
+fn buf_writer_round_trip_crosses_flush_threshold_both_engines() {
+    let _g = lock();
+    let src = format!("{}{}{}", module_prefix(), FILE_API, BUFWRITER_DEFS);
+    let mut expected: Vec<u8> = Vec::new();
+    for _ in 0..300 {
+        expected.extend_from_slice(b"candor-buffered-0123");
+    }
+    expected.extend_from_slice(b"TAIL");
+
+    foreign_io::reset();
+    foreign_io::register_std_io();
+    let tw = run_ok(&src);
+    let tw_out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+
+    foreign_io::reset();
+    foreign_io::register_std_io();
+    let mir = run_ok_mir(&src);
+    let mir_out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+
+    assert_eq!(tw, 301, "301 buffered writes");
+    assert_eq!(mir, 301);
+    assert_eq!(tw_out, expected, "tree: buffered writes flushed in order, byte-exact");
+    assert_eq!(mir_out, expected, "MIR: buffered writes flushed in order, byte-exact");
+    assert_eq!(expected.len(), 6004, "300*20 + 4 bytes");
+}

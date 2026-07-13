@@ -4293,3 +4293,66 @@ streaming `Lines: Iter` adapter (0009 RefIndexed borrowed-yield); a buffered
 reader/writer. Also orthogonal and still pre-existing: `len(<call returning a slice>)`
 inline (e.g. `len(as_bytes(x))`) — the non-collection `len` path lowers its arg as a
 place, so bind the slice to a local first (as the fixtures already do).
+
+## STD-IO-BUFFERED — streaming buffered I/O: `BufReader.read_line` (owned per-line Strings, cross-refill assembly) + `BufWriter` (accumulate + threshold flush) (2026-07-13)
+
+Adds the streaming buffered layer over the whole-file layer, fully native
+(tree-walker · MIR · Cranelift · LLVM). Purely additive — no extern/trust-clause,
+compiler, MIR, checker, backend, or `aot_runtime.c` change; built entirely on the
+already-native `String`/`str_from_unchecked`/`subslice`/`slice_of[_mut]`/`read_into`/
+`write_all` intrinsics.
+
+- `BufReader { fd: i32, buf: [64]u8, pos: usize, filled: usize }` with
+  `buf_reader(fd) -> BufReader`. `read_line(a: read Alloc, r: write BufReader) alloc
+  -> LineIoResult` scans `buf[pos..filled]` for '\n' (10); on a hit at k the owned
+  line is `buf[pos..k]` (a `subslice` cut only at the ASCII newline, valid UTF-8) and
+  `pos` advances past the newline. On a miss it appends `buf[pos..filled]` to the
+  owned accumulator `String` and REFILLS (`read_into` -> `pos=0, filled=n`): `Ok(0)`
+  is EOF (return the accumulator if non-empty, else `None`), `Ok(n)` continues the
+  scan — so a line SPANNING multiple refills (a line longer than 64, and lines
+  straddling a refill boundary) is assembled correctly. A final line without a
+  trailing '\n' is still returned; a trailing '\n' yields no extra empty line;
+  interior empty lines are kept — MATCHING `split_lines`' convention. Owned-String
+  yield (not a borrowed str-view) sidesteps the 0009 RefIndexed borrowed-yield gap; a
+  streaming `Lines: Iter` stays blocked on it. Result: `LineIoResult { ok Ok(Opt),
+  Err(IoError) }` over `enum Opt { Some(String), None }` (a monomorphic Opt in the
+  vec_native idiom; the audited module stays NON-GENERIC), `?` propagating `IoError`.
+- `BufWriter { fd: i32, al: Alloc, buf: String }` with `buf_writer(a: Alloc, fd) alloc
+  -> BufWriter`. `bw_write_str(w: write BufWriter, s: str) alloc -> IoResult` appends
+  into the owned `buf`, auto-flushing once it reaches 4096 bytes; `bw_flush(w: write
+  BufWriter) alloc -> IoResult` does `write_all(fd, as_bytes(as_str(read w.buf)))` and
+  RESETS the accumulator. String has NO in-place clear/reset primitive, so the reset
+  is a fresh `w.*.buf = string_new(w.al)` (the old String's heap freed by the field
+  reassignment's drop) — the `Alloc` is stored in the struct for exactly this. If a
+  `string_clear`/`string_truncate` primitive is later added it would avoid the
+  per-flush realloc; not needed for correctness.
+- MUTABLE `write BufReader`/`write BufWriter` STATE ACROSS CALLS worked CLEANLY — no
+  borrow/checker workaround. Field reads (`r.fd`, `r.buf[k]`, `r.pos`, `r.filled`),
+  field-array slicing through the borrow (`slice_of(r.buf)`, `slice_of_mut(r.buf)`,
+  `subslice(slice_of(r.buf), ..)`), and field writes (`r.*.pos = ..`, `w.*.buf =
+  string_new(..)`) all check and lower on every engine, matching the arena's
+  `write Arena` field-mutation pattern (11_5_arena).
+- ONE PRE-EXISTING NATIVE LIMITATION hit (not new, already deferred under
+  COLLECTION-OP-ERGONOMICS): the non-collection `len` lowers its argument as a PLACE,
+  so `len(as_bytes(as_str(read w.buf)))` (a `len` of a temporary slice) is "unsupported
+  place" on the native backends. FIX in-fixture (idiomatic, as the read path already
+  does): bind the byte view to a local first — `let view: [u8] = as_bytes(as_str(read
+  w.buf)); if len(view) >= 4096usize { .. }`.
+- GATES. `tests/std_io.rs`: `buf_reader_read_line_streams_large_file_tree_and_mir`
+  (>4096-byte multibyte file with a 200-byte line spanning many 64-byte refills, an
+  interior empty line, trailing newline — reconstruction byte-exact + line count on
+  tree AND MIR), `buf_reader_read_line_edge_cases_tree_and_mir` (empty file -> None
+  immediately / no trailing newline / interior empty / single line no newline), and
+  `buf_writer_round_trip_crosses_flush_threshold_both_engines` (300*20+4 = 6004 buffered
+  bytes crossing the auto-flush threshold, flushed in order, byte-exact on tree AND
+  MIR). Linked Cranelift and clang -O2 binaries calling real libc over the
+  self-contained `tests/fixtures/std_io_readpath/buf_io_native.cnr`
+  (`gate_aot_native_buf_io`, `gate_llvm_native_buf_io`): read a real >4096-byte file
+  line by line through `read_line`, write each line back newline-terminated through the
+  buffered `BufWriter` (auto-flushing) == the file body byte-for-byte, ret == line
+  count. Full `cargo nextest` green (688 tests, +5); clippy clean.
+
+NEXT: a streaming `Lines: Iter` adapter (blocked on 0009 RefIndexed borrowed-yield —
+must yield each line by borrow); the `String` realloc ABI / an in-place
+`string_clear` (would drop BufWriter's per-flush realloc); `str[i]` byte indexing and
+the deferred `str_from`/`substr` native lowering.
