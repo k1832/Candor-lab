@@ -143,6 +143,96 @@ fn box_moved_while_pointee_borrowed() {
     );
 }
 
+// ---- loan-copy use-after-free (design 0015 review F1) ---------------------
+// A borrow copied into a new binding must keep its source loan live under the
+// copy: without it `let c = b;` shed the loan and the checker admitted a
+// use-after-free (a move/write/exclusive access to the borrowed place while the
+// copy still points in). Each rejection below was accepted before the fix.
+
+#[test]
+fn loan_copy_then_move_out_box() {
+    // The verified repro shape: `c` copies a borrow into the box, then the box
+    // is moved out while `c` is still live.
+    assert_has(
+        "fn sink(b: Box S) -> unit { } \
+         fn f(boxv: Box S) -> unit { \
+             let b = read (deref boxv); let c = b; sink(boxv); use_i((deref c).n); }",
+        "E0802",
+    );
+}
+
+#[test]
+fn loan_copy_then_move_out_local() {
+    assert_has(
+        "fn f() -> unit { let x: S = mk(); let b = read x; let c = b; \
+             let y = x; use_i((deref c).n); }",
+        "E0802",
+    );
+}
+
+#[test]
+fn loan_copy_chained_then_move_out() {
+    // Propagation is transitive: `d` copies `c` copies `b`; the loan on `x`
+    // reaches `d` and freezes the move.
+    assert_has(
+        "fn f() -> unit { let x: S = mk(); let b = read x; let c = b; let d = c; \
+             let y = x; use_i((deref d).n); }",
+        "E0802",
+    );
+}
+
+#[test]
+fn loan_copy_then_write_source() {
+    assert_has(
+        "fn f() -> unit { let mut x: S = mk(); let b = read x; let c = b; \
+             x = mk(); use_i((deref c).n); }",
+        "E0803",
+    );
+}
+
+#[test]
+fn loan_copy_exclusive_then_read_source() {
+    // An exclusive-borrow copy (a move of the `write` borrow) still freezes the
+    // source: reading it while the copy is live is E0804.
+    assert_has(
+        "fn f() -> unit { let mut x: S = mk(); let b = write x; let c = b; \
+             use_i(x.n); use_i((deref c).n); }",
+        "E0804",
+    );
+}
+
+#[test]
+fn loan_copy_then_return_borrow_of_local() {
+    // The copy still traces to the local, so returning it escapes a borrow of a
+    // dying local (E0806) — the copy did not launder the provenance.
+    assert_has(
+        "fn f() -> read S { let x: S = mk(); let b = read x; let c = b; return c; }",
+        "E0806",
+    );
+}
+
+#[test]
+fn loan_copy_of_return_extended_borrow_then_write() {
+    // A copy of a call's return-extended borrow keeps the underlying argument
+    // loan: a later write to the source is a conflict.
+    assert_has(
+        "fn first(s: read S) -> read S { return read (deref s); } \
+         fn f() -> unit { let mut x: S = mk(); let r = first(read x); let c = r; \
+             x = mk(); use_i((deref c).n); }",
+        "E0803",
+    );
+}
+
+#[test]
+fn loan_copy_dead_before_conflict_is_clean() {
+    // NLL positive: the copy dies before the source is rewritten, so the copy
+    // pattern itself introduces no false positive.
+    assert_clean(
+        "fn f() -> unit { let mut x: S = mk(); let b = read x; let c = b; \
+             use_i((deref c).n); x = mk(); }",
+    );
+}
+
 // ---- slices are borrows of the array --------------------------------------
 
 #[test]

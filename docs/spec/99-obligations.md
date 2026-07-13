@@ -4409,3 +4409,52 @@ NEXT (unchanged remaining debt): a streaming `Lines: Iter` adapter (blocked on
 realloc ABI / an in-place `string_clear`/`string_truncate` (would drop
 BufWriter's per-flush realloc); the deferred `str_from`/`substr` are already
 native, `str[i]` and non-place `len` are now landed.
+
+## LOAN-COPY-UAF — a borrow copied into a binding shed its loan: a safe-code use-after-free (memory-safety fix, 2026-07-13)
+
+The 0015 borrowed-iteration review's finding F1 (SINK-grade, pre-existing) verified a
+safe-code use-after-free the Stage-3 borrow checker ACCEPTED: a borrow copied into a new
+binding shed its loan, so a later move/free/write of the borrowed place went unflagged.
+Repro (`docs/reviews/0015-loan-copy-uaf-repro.cn`): `let b = read (deref bx); let c = b;
+let owned = unbox(bx); use_it(read (deref c));` — `candor check` exited 0, `candor run`
+faulted reading a freed slot.
+
+ROOT CAUSE. Loans are created at each borrow (`record_borrow`, `src/check/mod.rs`) as
+transient loans marked *carried*, then anchored to the landing binding's live range at the
+`let`/assign site (`stmt.rs`). The anchor decision consulted `carries_borrow`, a syntactic
+whitelist that returned `false` for a bare identifier — so `let c = b` anchored NOTHING, and
+`b`'s own loan on `bx` died at `b`'s last use (the copy). `c` then aliased into `bx` with no
+loan restricting it, and `unbox(bx)` (a move of the box) conflicted with nothing. NOTE the
+deref-root anchoring was NOT part of the hole here: `read (deref bx)` canonicalizes to root
+`bx` (deref collapses to the box binding, `dataflow.rs` `canonical`), which is exactly the
+place that must stay frozen — `b`'s loan was correctly on `bx`; it was just shed on copy.
+
+FIX (a real loan-propagation correction, not a repro special-case). A borrow value read out
+of a place as a plain value ALIASES the source's borrow, so the source loan(s) must extend to
+wherever the value lands. New `propagate_place_loans` (`src/check/mod.rs`), called from the
+place-read arm of `check_expr` for `Use::Value` (`src/check/expr.rs`): when the value is a
+`read`/`write` borrow, it records fresh transient copies (same place, kind, span) of every
+loan anchored to the source binding and marks them carried. `carries_borrow` (`stmt.rs`) is
+extended to recognize a bare place already holding a `read`/`write` borrow, so the existing
+anchor path fastens the propagated loan onto the new binding's live range. Propagation is
+transitive (`b -> c -> d`) and composes with call return-extension (a copy of a returned
+borrow keeps the underlying argument loan). Deliberately kept to `Type::Borrow`/`BorrowMut`:
+the anchor stays gated by `carries_borrow` (a syntactic/type test), so a `deref`-through to a
+pointee copy or a non-borrow-returning builtin argument (e.g. `len(read a.dcode)`) that leaves
+a stale carried loan is NOT anchored — this is what avoids false positives across the corpus.
+
+GATES. `docs/reviews/0015-loan-copy-uaf-repro.cn` now fails `candor check` with E0802 ("cannot
+move out of `bx` while it is borrowed"). Eight regression tests in `tests/loans.rs`
+(`loan_copy_*`): copy-then-move-out (box + local), chained-copy-then-move (transitive),
+copy-then-write (E0803), exclusive-copy-then-read-source (E0804), return-a-copied-borrow-of-a-
+local (E0806), copy-of-a-return-extended-borrow-then-write (E0803), plus an NLL positive
+(copy dies before the source is rewritten → clean). Full `cargo nextest` green (691 + 8 =
+699), including the loans / selfhost_loans oracle, selfhost checker/analyses, generics, and the
+native collections/allocator corpus; `--profile fast` green; clippy clean. No existing test
+changed verdict — no valid borrow-copy/reborrow pattern was newly rejected.
+
+RESIDUAL (reported, not closed). Slice values (`Type::Slice`/`SliceMut`) are `copy` and alias
+their backing array the same way; a `let s2 = s;` copy still sheds (a separate, pre-existing
+sub-class, not the F1-verified hole). Extending propagation to slices was left out to avoid
+perturbing the heavy slice corpus without a verified repro; it should be revisited with its own
+repro before closing.

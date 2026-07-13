@@ -589,6 +589,45 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A borrow value read out of an existing place *aliases* that place's
+    /// borrow: a copy or move of a `read`/`write` borrow points into the same
+    /// borrowed memory, so the loan(s) the source binding holds must extend to
+    /// wherever the value lands (design §2.3). This is what makes `let c = b;`
+    /// keep `b`'s loan live under `c`; without it the copy sheds the loan and a
+    /// later move/free of the borrowed place is a use-after-free the checker
+    /// misses. Fresh transient loans (same place, kind, span) are recorded and
+    /// marked carried, so the landing binding anchors them to its own live range
+    /// exactly as a fresh borrow would.
+    pub(super) fn propagate_place_loans(&mut self, place: &Option<Place>, ty: &Type) {
+        let root = match place {
+            Some(p) if matches!(ty, Type::Borrow(_) | Type::BorrowMut(_)) => p.root.clone(),
+            _ => return,
+        };
+        let sources: Vec<LoanInfo> = self
+            .f
+            .loans
+            .iter()
+            .filter(|l| matches!(&l.anchor, Anchor::Binding(n) if *n == root))
+            .cloned()
+            .collect();
+        if sources.is_empty() {
+            return;
+        }
+        let mut ids = Vec::new();
+        for li in sources {
+            let id = self.f.loans.len();
+            self.f.loans.push(LoanInfo {
+                place: li.place,
+                kind: li.kind,
+                span: li.span,
+                anchor: Anchor::Temp,
+            });
+            ids.push(id);
+        }
+        self.f.carried = ids;
+        self.f.carried_prov = Some(root);
+    }
+
     /// Anchor the currently-carried loans to a landing binding `name` (a `let` or
     /// assignment target): they are now in scope over `name`'s live range (§2.3).
     pub(super) fn anchor_carried(&mut self, name: &str) {

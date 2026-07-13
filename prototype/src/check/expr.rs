@@ -27,6 +27,14 @@ impl<'a> Checker<'a> {
             } => {
                 let (t, place) = self.check_place(e);
                 self.emit_place_action(&place, u, &t, e.span);
+                // A borrow value read here as a plain value (copy or move) aliases
+                // its source place's borrow: the source loan(s) must follow it to
+                // its landing binding (design §2.3). A `read`/`write`/reborrow of a
+                // place instead flows through `Use::Borrow*`, which records its own
+                // loan; only the bare-value read propagates the source loan.
+                if matches!(u, Use::Value) {
+                    self.propagate_place_loans(&place, &t);
+                }
                 t
             }
             ExprKind::Paren(inner) => self.check_expr(inner, u),

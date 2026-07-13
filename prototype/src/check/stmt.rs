@@ -58,9 +58,12 @@ impl<'a> Checker<'a> {
                             Access::Assign { needs_drop: nd, box_paths: bp },
                             s.span,
                         );
-                        // A borrow value landing in a binding anchors its loan(s)
-                        // to this binding's live range (design §2.3).
-                        if carries_borrow(self, e) {
+                        // A borrow value landing in a binding anchors the loan(s)
+                        // it carries to this binding's live range (design §2.3):
+                        // a fresh borrow, a return-extended call result, or a copy
+                        // of an existing borrow (a bare identifier used to shed its
+                        // loan here — the loan-copy UAF).
+                        if self.carries_borrow(e) {
                             self.anchor_carried(name);
                         } else {
                             self.clear_carried();
@@ -90,15 +93,16 @@ impl<'a> Checker<'a> {
                         s.span,
                     );
                 }
-                if let (true, Some(p)) = (carries_borrow(self, value), &place) {
-                    if p.proj.is_empty() {
+                match &place {
+                    // A borrow value assigned to a whole binding anchors the loan(s)
+                    // it carries to that binding (§2.3); a store through a projection
+                    // targets no borrow binding (§3.4 bans borrow fields), so any
+                    // carried loan is dropped.
+                    Some(p) if self.carries_borrow(value) && p.proj.is_empty() => {
                         let name = p.root.clone();
                         self.anchor_carried(&name);
-                    } else {
-                        self.clear_carried();
                     }
-                } else {
-                    self.clear_carried();
+                    _ => self.clear_carried(),
                 }
             }
             StmtKind::Expr(e) => {
@@ -163,32 +167,41 @@ impl<'a> Checker<'a> {
     pub(super) fn ret_ty_clone(&self) -> Type {
         self.f.ret_ty.clone()
     }
-}
 
-/// Whether an expression's *value* is a borrow that carries a loan needing to be
-/// anchored at its landing binding (design §2.1/§3.1). A conservative syntactic
-/// whitelist: explicit borrows, slice ops, and calls that return a borrow.
-fn carries_borrow(c: &Checker, e: &crate::ast::Expr) -> bool {
-    match &e.kind {
-        ExprKind::Paren(i) => carries_borrow(c, i),
-        ExprKind::Prefix {
-            op: PrefixOp::Read | PrefixOp::Write,
-            ..
-        } => true,
-        ExprKind::Call { callee, .. } => {
-            if let ExprKind::Ident(name) = &callee.kind {
-                if matches!(name.as_str(), "slice_of" | "slice_of_mut" | "subslice") {
-                    return true;
+    /// Whether an expression's *value* is a borrow that carries a loan needing to
+    /// be anchored at its landing binding (design §2.1/§3.1). Recognized: an
+    /// explicit `read`/`write` borrow, a slice op, a call whose signature returns
+    /// a borrow (its return-extended loan is carried), and a bare place already
+    /// holding a `read`/`write` borrow — a copy that aliases the source, so the
+    /// source loan must extend to the new binding (`let c = b;`). Without the last
+    /// case a copied borrow shed its loan, admitting a use-after-free.
+    pub(super) fn carries_borrow(&self, e: &crate::ast::Expr) -> bool {
+        match &e.kind {
+            ExprKind::Paren(i) => self.carries_borrow(i),
+            ExprKind::Prefix {
+                op: PrefixOp::Read | PrefixOp::Write,
+                ..
+            } => true,
+            ExprKind::Ident(name) => matches!(
+                self.lookup_local(name).map(|li| &li.ty),
+                Some(Type::Borrow(_) | Type::BorrowMut(_))
+            ),
+            ExprKind::Call { callee, .. } => {
+                if let ExprKind::Ident(name) = &callee.kind {
+                    if matches!(name.as_str(), "slice_of" | "slice_of_mut" | "subslice") {
+                        return true;
+                    }
+                    if let Some(sig) = self.items.fns.get(name) {
+                        return matches!(
+                            sig.ret,
+                            crate::types::Type::Borrow(_) | crate::types::Type::BorrowMut(_)
+                        );
+                    }
                 }
-                if let Some(sig) = c.items.fns.get(name) {
-                    return matches!(
-                        sig.ret,
-                        crate::types::Type::Borrow(_) | crate::types::Type::BorrowMut(_)
-                    );
-                }
+                false
             }
-            false
+            _ => false,
         }
-        _ => false,
     }
 }
+
