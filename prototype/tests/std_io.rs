@@ -373,3 +373,465 @@ fn open_app_question_widens_open_error_both_engines() {
     assert_eq!(tw, -5, "missing file -> widened IoError -> AppErr::Io arm");
     assert_eq!(mir, -5);
 }
+
+
+// ---------------------------------------------------------------------------
+// File-I/O layer over the std_io boundary (native-String payoff): read a whole
+// file into a growable `String`, write a `String` out. Defined as a probe
+// prelude (like WRITE_APP_PROBE above) rather than baked into the audited
+// `main.cnr` module: `read_to_string` needs a `[u8] -> str` reinterpret to append
+// the file bytes, and the only such primitive (`str_from_unchecked`) lowers on
+// the tree-walker ONLY — not the MIR/native builtin set. Baking it into the
+// shared fixture would make every MIR std_io test `Unsupported` (MIR lowering is
+// whole-program/eager). So the read path is proven on the tree-walker via the
+// shims; `write_str` (all-native: `as_bytes(as_str(..))` + `write_all`) is proven
+// on BOTH engines below.
+//
+// `StrIoResult` is a String-carrying sibling of the module's non-generic
+// `IoResult` (the audited module stays non-generic — see the fork note above); `?`
+// propagates `IoError` across it via the identity `From` impl.
+const FILE_API: &str = r#"
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+
+struct FreeList { next: usize, end: usize, head: rawptr u8 }
+struct FreeBlock { next: rawptr u8, size: usize }
+
+fn with_window(base: usize, size: usize) -> FreeList {
+    unsafe "the empty free list starts with a null head; no block is threaded yet" {
+        return FreeList { next: base, end: base + size, head: ptr_null[u8]() };
+    }
+}
+
+fn block_span(size: usize, align: usize) -> usize {
+    let mut need: usize = size;
+    if need < 16usize {
+        need = 16usize;
+    }
+    return (need + align - 1usize) / align * align;
+}
+
+fn freelist_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live FreeList whose [next, end) window and address-ordered free chain are reserved to this arena alone; every carved block stays inside [next, end) and is >= header-sized, and a split remainder (kept only when >= MIN_SPLIT) is written into the block's own tail" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let need: usize = block_span(size, align);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) {
+            let blk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if blk.size >= need {
+                if blk.size - need >= 32usize {
+                    let rem: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(cur) + need);
+                    ptr_write(cast_ptr[FreeBlock](rem), FreeBlock { next: blk.next, size: blk.size - need });
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: rem });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: rem, size: pblk.size });
+                    }
+                } else {
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: blk.next });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: blk.next, size: pblk.size });
+                    }
+                }
+                return cur;
+            }
+            prev = cur;
+            cur = blk.next;
+        }
+        let aligned: usize = (st.next + align - 1usize) / align * align;
+        if aligned + need > st.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: aligned + need, end: st.end, head: st.head });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+
+fn freelist_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    unsafe "the free list is kept ADDRESS-ORDERED; the freed block's own storage (>= header-sized, guaranteed by block_span in alloc) holds its FreeBlock header {next, size}, and a merge joins two blocks ONLY when their byte spans are exactly adjacent (addr + size == neighbour addr), so a merge can never overlap live memory nor bridge a gap" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let mut cap: usize = block_span(size, align);
+        let a: usize = ptr_to_addr(ptr);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) && ptr_to_addr(cur) < a {
+            let cblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            prev = cur;
+            cur = cblk.next;
+        }
+        let mut link: rawptr u8 = cur;
+        if !is_null(cur) {
+            let nblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if a + cap == ptr_to_addr(cur) {
+                cap = cap + nblk.size;
+                link = nblk.next;
+            }
+        }
+        if !is_null(prev) {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            if ptr_to_addr(prev) + pblk.size == a {
+                ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: link, size: pblk.size + cap });
+                return;
+            }
+        }
+        ptr_write(cast_ptr[FreeBlock](ptr), FreeBlock { next: link, size: cap });
+        if is_null(prev) {
+            ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: ptr });
+        } else {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: ptr, size: pblk.size });
+        }
+    }
+}
+
+static FREELIST_VT: AllocVtable = AllocVtable { alloc: freelist_alloc, free: freelist_free };
+
+fn mk_alloc(state: write FreeList) -> Alloc {
+    unsafe "ctx (the caller's FreeList local) and vt (the static FREELIST_VT) outlive every String this handle serves; the caller keeps the window and FREELIST_VT alive for the whole run and drops every String before the window dies" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(FREELIST_VT) };
+    }
+}
+
+interface From[E] { fn from(e: E) -> Self; }
+impl From[IoError] for IoError { fn from(e: IoError) -> Self { return e; } }
+enum StrIoResult { ok Ok(String), Err(IoError) }
+
+// Loop `read_into` a fixed [64]u8 stack buffer into an owned growable String:
+// `Ok(0)` is EOF (return the String); `Ok(n)` appends the first n bytes; `Err` is
+// propagated by `?`. The n bytes are appended as a bounded str-view of buf[0..n];
+// `str_from_unchecked` is required (not `str_from`) because a multibyte char may
+// straddle a read boundary — per-chunk UTF-8 validation would wrongly reject a
+// whole that is valid. The bytes are only ever copied (append never re-validates);
+// the assembled String is valid UTF-8 iff the source is.
+fn read_to_string(a: read Alloc, fd: i32) alloc -> StrIoResult {
+    let mut s: String = string_new(a);
+    let mut buf: [64]u8 = [0u8; 64];
+    loop {
+        let n: usize = read_into(fd, slice_of_mut(buf))?;
+        if n == 0usize { break; }
+        let bytes: [u8] = subslice(slice_of(buf), 0usize, n);
+        unsafe "file bytes appended raw: a multibyte char may straddle a read boundary, so per-chunk validation would wrongly reject a valid whole; the accumulated String is valid UTF-8 iff the source is" {
+            append(write s, str_from_unchecked(bytes));
+        }
+    }
+    return StrIoResult::Ok(s);
+}
+
+// open -> read_to_string -> close. On the read-error path the `?` early-returns
+// BEFORE `close`, leaking the fd (accepted for this slice: closing cleanly on the
+// error arm fights the owned-String-through-`?` flow).
+fn read_file(a: read Alloc, path: read [u8]) alloc -> StrIoResult {
+    let fd: usize = open_read(path)?;
+    let s: String = read_to_string(a, conv i32 fd)?;
+    let cr: IoResult = close(conv i32 fd);
+    return StrIoResult::Ok(s);
+}
+
+// Write the String's bytes: `as_str` borrows the built text, `as_bytes` is the
+// free str -> [u8] retype, `write_all` does the syscall. All-native (no str-view
+// constructor), so this lowers on the MIR/native backends too.
+fn write_str(fd: i32, s: read String) -> IoResult {
+    return write_all(fd, as_bytes(as_str(read s.*)));
+}
+"#;
+
+fn file_probe(main_body: &str) -> String {
+    format!("{}{}{}", module_prefix(), FILE_API, main_body)
+}
+
+// The all-native `write_str` in isolation (no `read_to_string`, so no tree-only
+// str-view constructor): builds a String from literals + `push`, writes it. This
+// program lowers on the MIR backend, so `write_str` is proven on BOTH engines.
+const WRITE_STR_NATIVE: &str = r#"
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+
+struct FreeList { next: usize, end: usize, head: rawptr u8 }
+struct FreeBlock { next: rawptr u8, size: usize }
+
+fn with_window(base: usize, size: usize) -> FreeList {
+    unsafe "the empty free list starts with a null head; no block is threaded yet" {
+        return FreeList { next: base, end: base + size, head: ptr_null[u8]() };
+    }
+}
+
+fn block_span(size: usize, align: usize) -> usize {
+    let mut need: usize = size;
+    if need < 16usize {
+        need = 16usize;
+    }
+    return (need + align - 1usize) / align * align;
+}
+
+fn freelist_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live FreeList whose [next, end) window and address-ordered free chain are reserved to this arena alone; every carved block stays inside [next, end) and is >= header-sized, and a split remainder (kept only when >= MIN_SPLIT) is written into the block's own tail" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let need: usize = block_span(size, align);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) {
+            let blk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if blk.size >= need {
+                if blk.size - need >= 32usize {
+                    let rem: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(cur) + need);
+                    ptr_write(cast_ptr[FreeBlock](rem), FreeBlock { next: blk.next, size: blk.size - need });
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: rem });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: rem, size: pblk.size });
+                    }
+                } else {
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: blk.next });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: blk.next, size: pblk.size });
+                    }
+                }
+                return cur;
+            }
+            prev = cur;
+            cur = blk.next;
+        }
+        let aligned: usize = (st.next + align - 1usize) / align * align;
+        if aligned + need > st.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: aligned + need, end: st.end, head: st.head });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+
+fn freelist_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    unsafe "the free list is kept ADDRESS-ORDERED; the freed block's own storage (>= header-sized, guaranteed by block_span in alloc) holds its FreeBlock header {next, size}, and a merge joins two blocks ONLY when their byte spans are exactly adjacent (addr + size == neighbour addr), so a merge can never overlap live memory nor bridge a gap" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let mut cap: usize = block_span(size, align);
+        let a: usize = ptr_to_addr(ptr);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) && ptr_to_addr(cur) < a {
+            let cblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            prev = cur;
+            cur = cblk.next;
+        }
+        let mut link: rawptr u8 = cur;
+        if !is_null(cur) {
+            let nblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if a + cap == ptr_to_addr(cur) {
+                cap = cap + nblk.size;
+                link = nblk.next;
+            }
+        }
+        if !is_null(prev) {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            if ptr_to_addr(prev) + pblk.size == a {
+                ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: link, size: pblk.size + cap });
+                return;
+            }
+        }
+        ptr_write(cast_ptr[FreeBlock](ptr), FreeBlock { next: link, size: cap });
+        if is_null(prev) {
+            ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: ptr });
+        } else {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: ptr, size: pblk.size });
+        }
+    }
+}
+
+static FREELIST_VT: AllocVtable = AllocVtable { alloc: freelist_alloc, free: freelist_free };
+
+fn mk_alloc(state: write FreeList) -> Alloc {
+    unsafe "ctx (the caller's FreeList local) and vt (the static FREELIST_VT) outlive every String this handle serves; the caller keeps the window and FREELIST_VT alive for the whole run and drops every String before the window dies" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(FREELIST_VT) };
+    }
+}
+
+fn write_str(fd: i32, s: read String) -> IoResult {
+    return write_all(fd, as_bytes(as_str(read s.*)));
+}
+fn main() alloc -> i64 {
+    let mut st: FreeList = with_window(16777216usize, 1048576usize);
+    let a: Alloc = mk_alloc(write st);
+    let mut s: String = string_new(a);
+    append(write s, "Hi, ");
+    append(write s, "Candor");
+    push(write s, 33);
+    match write_str(stdout(), read s) {
+        IoResult::Ok(c) => { return conv i64 c; },
+        IoResult::Err(e) => { return 0i64 - 2i64; },
+    }
+}
+"#;
+
+
+// ===========================================================================
+// File-I/O layer: read a file into a native String, write a String out.
+// ===========================================================================
+
+const ROUND_TRIP_MAIN: &str = r#"
+fn main() alloc -> i64 {
+    let mut st: FreeList = with_window(16777216usize, 1048576usize);
+    let a: Alloc = mk_alloc(write st);
+    let s: String = match read_to_string(read a, stdin()) {
+        StrIoResult::Ok(v) => v,
+        StrIoResult::Err(e) => { return 0i64 - 1i64; },
+    };
+    match write_str(stdout(), read s) {
+        IoResult::Ok(c) => { return conv i64 c; },
+        IoResult::Err(e) => { return 0i64 - 2i64; },
+    }
+}
+"#;
+const READ_FILE_MAIN: &str = r#"
+fn main() alloc -> i64 {
+    let mut st: FreeList = with_window(16777216usize, 1048576usize);
+    let a: Alloc = mk_alloc(write st);
+    let name: [7]u8 = [114u8, 116u8, 46u8, 116u8, 120u8, 116u8, 0u8];
+    let s: String = match read_file(read a, slice_of(name)) {
+        StrIoResult::Ok(v) => v,
+        StrIoResult::Err(e) => { return 0i64 - 1i64; },
+    };
+    match write_str(stdout(), read s) {
+        IoResult::Ok(c) => { return conv i64 c; },
+        IoResult::Err(e) => { return 0i64 - 2i64; },
+    }
+}
+"#;
+const ERROR_MAIN: &str = r#"
+fn main() alloc -> i64 {
+    let mut st: FreeList = with_window(16777216usize, 1048576usize);
+    let a: Alloc = mk_alloc(write st);
+    let name: [9]u8 = [110u8, 111u8, 112u8, 101u8, 46u8, 116u8, 120u8, 116u8, 0u8];
+    match read_file(read a, slice_of(name)) {
+        StrIoResult::Ok(v) => { return 1i64; },
+        StrIoResult::Err(e) => { match e { IoError::Errno(n) => { return conv i64 n; }, } },
+    }
+}
+"#;
+
+// The read path uses `str_from_unchecked` to append buf[0..n], a tree-walker-only
+// intrinsic, so these run on the tree-walker (via the real shims). See FILE_API.
+
+// ---- round-trip: stdin -> read_to_string -> String -> write_str -> stdout ----
+#[test]
+fn read_to_string_round_trip_byte_equal_tree() {
+    let _g = lock();
+    // multi-line, multi-byte (UTF-8) content, smaller than the 64-byte buffer.
+    let content = "hi\ncand\u{00f6}r\n\u{03c0}\n".to_string();
+    let src = file_probe(ROUND_TRIP_MAIN);
+    foreign_io::reset();
+    foreign_io::register_std_io();
+    foreign_io::set_stdin(content.as_bytes());
+    let ret = run_ok(&src);
+    let out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+    assert_eq!(out, content.as_bytes(), "String round-tripped byte-for-byte");
+    assert_eq!(ret, content.len() as i64, "write_str returns the byte count");
+}
+
+// ---- multi-fill: content > the 64-byte buffer forces the loop + String growth --
+#[test]
+fn read_to_string_multi_fill_grows_across_reads_tree() {
+    let _g = lock();
+    // ~300 bytes of multi-byte content: many buffer-fills (n == 64) then a short
+    // final read (n < 64), so read_to_string loops and the String grows repeatedly.
+    let unit = "line \u{00e9}\u{20ac}\u{1f600} 0123456789\n"; // multi-byte, straddles boundaries
+    let content = unit.repeat(12);
+    assert!(content.len() > 64, "must exceed the internal buffer");
+    let src = file_probe(ROUND_TRIP_MAIN);
+    foreign_io::reset();
+    foreign_io::register_std_io();
+    foreign_io::set_stdin(content.as_bytes());
+    let ret = run_ok(&src);
+    let out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+    assert_eq!(out, content.as_bytes(), "multi-fill reassembled exactly");
+    assert_eq!(ret, content.len() as i64);
+}
+
+// ---- read_file: real open + read + close, then write it back out --------------
+#[test]
+fn read_file_opens_reads_closes_tree() {
+    let _g = lock();
+    let content = "file body\n\u{00e9}\u{20ac}\u{1f600}\nlast\n".to_string();
+    let tdir = std::env::temp_dir().join(format!("candor-io-file-{}", std::process::id()));
+    std::fs::create_dir_all(&tdir).unwrap();
+    std::fs::write(tdir.join("rt.txt"), content.as_bytes()).unwrap();
+    let src = file_probe(READ_FILE_MAIN);
+    foreign_io::reset();
+    foreign_io::set_root(&tdir);
+    foreign_io::register_std_io();
+    let ret = run_ok(&src);
+    let out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+    let _ = std::fs::remove_dir_all(&tdir);
+    assert_eq!(out, content.as_bytes(), "read_file returned the file bytes exactly");
+    assert_eq!(ret, content.len() as i64);
+}
+
+// ---- error path: read_file of a missing path is the Err arm (via `?`) ---------
+#[test]
+fn read_file_missing_path_is_err_tree() {
+    let _g = lock();
+    let empty = std::env::temp_dir().join(format!("candor-io-file-empty-{}", std::process::id()));
+    std::fs::create_dir_all(&empty).unwrap();
+    let src = file_probe(ERROR_MAIN);
+    foreign_io::reset();
+    foreign_io::set_root(&empty);
+    foreign_io::register_std_io();
+    let ret = run_ok(&src);
+    foreign_io::unregister_std_io();
+    assert_eq!(ret, -1, "open of a missing file -> `?` propagates IoError::Errno(-1)");
+}
+
+// ---- write_str is all-native: proven on the tree-walker AND the MIR engine -----
+#[test]
+fn write_str_writes_string_bytes_both_engines() {
+    let _g = lock();
+    // tree-walker
+    foreign_io::reset();
+    foreign_io::register_std_io();
+    let src = format!("{}{}", module_prefix(), WRITE_STR_NATIVE);
+    let tw = run_ok(&src);
+    let tw_out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+    // MIR engine (write_str lowers: as_bytes(as_str(..)) + write_all, no str-view ctor)
+    foreign_io::reset();
+    foreign_io::register_std_io();
+    let mir = run_ok_mir(&src);
+    let mir_out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+    assert_eq!(tw, 11, "wrote 11 bytes");
+    assert_eq!(mir, 11);
+    assert_eq!(tw_out, b"Hi, Candor!");
+    assert_eq!(mir_out, b"Hi, Candor!");
+}
+
+// ---- the reported native gap: read_to_string is tree-walker only --------------
+// Appending buf[0..n] as a bounded str-view needs `str_from_unchecked` (a
+// `[u8] -> str` reinterpret). That intrinsic — like `str_from`/`substr` — is NOT
+// in the MIR/native builtin set (`mir::build::is_builtin`), so the whole program
+// is rejected at lowering ("indirect/unknown aggregate call"). Pinned as
+// `Unsupported`: if a native `[u8] -> str` (or a byte-append to String) ever lands
+// and this flips, promote the read-path tests to MIR/native and delete this pin.
+#[test]
+fn read_to_string_mir_native_gap_is_unsupported() {
+    let _g = lock();
+    let src = file_probe(ROUND_TRIP_MAIN);
+    match run_source_real_mir(&src) {
+        MirRunResult::Unsupported(_) => {}
+        other => panic!("expected MIR Unsupported (str-view ctor gap), got ok={}", matches!(other, MirRunResult::Ok(_))),
+    }
+}

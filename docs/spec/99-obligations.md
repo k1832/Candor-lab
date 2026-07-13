@@ -4086,3 +4086,60 @@ change — only backend `emit_drop` lowering + tests. This closes the arc: `Stri
   collections now fully own their memory — allocate AND free through the carried
   `Alloc`, byte-exact with the interpreter, on both the Cranelift and LLVM backends.
   Nothing deferred from this slice.
+
+## STD-IO-FILE — whole-file String I/O over the std_io boundary: `read_file`/`read_to_string`/`write_str`, with the read path pinned tree-walker-only (2026-07-13)
+
+The native-`String` payoff for I/O: read a whole file into a growable `String`,
+write a `String` out, over the existing `std_io` boundary. Purely additive — no
+extern/trust-clause, compiler, MIR, checker, backend, or `aot_runtime.c` change.
+The three functions live as a probe prelude (`FILE_API`) in `tests/std_io.rs`, NOT
+baked into the audited `main.cnr` module, for the lowering reason below.
+
+- THE THREE FNS. `read_to_string(a: read Alloc, fd: i32) alloc -> StrIoResult`
+  loops `read_into` into a fixed `[64]u8` stack buffer: `Ok(0)` is EOF (return the
+  owned String), `Ok(n)` appends `buf[0..n]`, `Err` propagates via `?`. Growth is
+  the native `String` append (`string_reserve`). `read_file(a, path) alloc ->
+  StrIoResult` = `open_read(path)? -> read_to_string(a, fd)? -> close(fd)`.
+  `write_str(fd, s: read String) -> IoResult` = `write_all(fd, as_bytes(as_str(read
+  s.*)))`.
+- THE BOUNDED STR-VIEW PRIMITIVE. Appending exactly the n read bytes needs a
+  `[u8] -> str` reinterpret: `subslice(slice_of(buf), 0, n)` yields the bounded
+  `[u8]` (design 0013 byte-view; the `subslice` builtin), then `str_from_unchecked`
+  reinterprets it to a `str` (`append` requires a `str`). `str_from_unchecked`, NOT
+  the checked `str_from`, is REQUIRED: a multibyte char may straddle a read
+  boundary, so per-chunk UTF-8 validation would wrongly reject a whole that is
+  valid. It is sound here — `append` only COPIES bytes (`bi_string_append` never
+  re-validates) and the partial `str` is never exposed; the assembled String is
+  valid UTF-8 iff the source is. Carries an `unsafe` justification (P1).
+- REPORTED NATIVE GAP (read path is tree-walker only). `str_from_unchecked`,
+  `str_from`, and `substr` are NOT in `mir::build::is_builtin`, so any program
+  containing them is rejected at MIR/native lowering ("indirect/unknown aggregate
+  call") — and MIR lowering is whole-program/eager, so a single such fn taints the
+  whole image. This is the same class as STD-IO-ERROR's `and_then` aggregate-call
+  gap. Consequence: `read_to_string`/`read_file` run on the TREE-WALKER only.
+  Pinned by `read_to_string_mir_native_gap_is_unsupported` (asserts MIR
+  `Unsupported`); if a native `[u8] -> str` (or a byte-append-to-String) intrinsic
+  ever lands, the pin flips and the read tests promote to MIR/native. Per the
+  standing rule, NO compiler surface was added to force it.
+- `write_str` IS FULLY NATIVE. It uses only `as_str`/`as_bytes` (free retypes,
+  both in the native path) + `write_all`, no str-view constructor, so it lowers on
+  the MIR/native backends. Proven on BOTH engines by
+  `write_str_writes_string_bytes_both_engines` (tree + MIR, captured stdout).
+- fd LEAK ON THE ERROR PATH (noted). In `read_file`, a `read_to_string` error
+  `?`-early-returns BEFORE `close`, leaking the fd. Accepted for this slice:
+  closing on the error arm fights the owned-String-through-`?` flow; a clean close
+  needs a match (not `?`) or a defer/scope-guard the edition lacks.
+- RESULT TYPE. `read_to_string`/`read_file` return `StrIoResult { ok Ok(String),
+  Err(IoError) }`, a String-carrying sibling of the module's non-generic `IoResult`
+  (the audited module stays NON-GENERIC — see the STD-IO-ERROR fork). `?` moves
+  `IoError` across it via an identity `impl From[IoError] for IoError`.
+- GATE. `tests/std_io.rs` now 22 (16 prior + 6 new): round-trip (build a String,
+  write it, read it back byte-equal via stdin->read_to_string->write_str->stdout),
+  multi-fill (~300-byte multi-byte content > the 64-byte buffer forces the loop +
+  repeated String growth, reassembled exactly), read_file (real open+read+close of
+  a temp file), the error path (`read_file` of a missing path -> `Err` via `?`),
+  the `write_str` both-engines proof, and the MIR-gap pin. Full `cargo nextest`
+  green incl. the std_io AOT/LLVM native gates; clippy clean.
+
+NEXT: a lines iterator + a buffered reader/writer. A native `[u8] -> str` (or a
+byte-append-to-String) intrinsic would let the read path go native.
