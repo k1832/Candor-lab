@@ -26,3 +26,6 @@ cranelift-native = "=0.132.3"
 [[bench]]
 name = "p20"
 harness = false
+
+[dev-dependencies]
+wasmi = "1.1.0"

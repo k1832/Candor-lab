@@ -858,3 +858,407 @@ fn memory_size_and_grow() {
     };
     assert_eq!(run_ret_all(&program(&grow_fail)), -1);
 }
+
+// ===========================================================================
+// M3 — real `.wasm` off disk + a DIFFERENTIAL gate vs an independent reference
+// ===========================================================================
+//
+// Two deliverables:
+//   A. The interpreter runs a module read from a FILE (`read_all_bytes` loops
+//      `read_into` a fixed buffer into a growable `Vec[u8]`), on the interp
+//      engines (foreign_io shims here) and native/real-libc (tests/aot.rs +
+//      tests/llvm.rs). Proves it runs actual `.wasm` off disk, not just embedded
+//      bytes.
+//   B. A differential corpus: the SAME real bytes through (a) the Candor
+//      interpreter and (b) `wasmi` (a pure-Rust, spec-compliant reference), with
+//      the results asserted EQUAL — values AND trap-equivalence. Upgrades the gate
+//      from "matches a hand-written value" to "matches an independent spec impl".
+
+use candor_proto::foreign_io;
+use std::sync::{Mutex, MutexGuard};
+
+// foreign_io state is process-global; serialize the file-run tests (plain
+// `cargo test` shares a process; nextest isolates per test, so this is a no-op
+// there but keeps `cargo test` correct).
+static IO_GUARD: Mutex<()> = Mutex::new(());
+fn io_lock() -> MutexGuard<'static, ()> {
+    IO_GUARD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+const FILE_RUN_SRC: &str = include_str!("fixtures/wasm/run_wasm_file.cnr");
+const STD_IO_SRC: &str = include_str!("fixtures/std_io/main.cnr");
+
+fn std_io_prefix() -> &'static str {
+    let idx = STD_IO_SRC.find("fn main").expect("std_io fixture has a main");
+    &STD_IO_SRC[..idx]
+}
+
+// ---- A. drift guard: the file-run fixture reuses the canonical interpreter ---
+
+#[test]
+fn file_run_fixture_reuses_canonical_interp() {
+    // run_wasm_file.cnr must be the std::io boundary prefix + the canonical
+    // interpreter (verbatim, above the harness split) + the file-run tail. If
+    // interp.cnr changes above the split, this fails until the fixture is
+    // regenerated — the same drift discipline as the run/ corpus copy.
+    assert!(
+        FILE_RUN_SRC.starts_with(std_io_prefix()),
+        "run_wasm_file.cnr must open with the std::io boundary prefix"
+    );
+    assert!(
+        FILE_RUN_SRC.contains(interp_fns().trim_end()),
+        "run_wasm_file.cnr drifted from the canonical interp.cnr (regenerate it)"
+    );
+    assert!(
+        FILE_RUN_SRC.contains("fn read_all_bytes(a: read Alloc, fd: i32)"),
+        "run_wasm_file.cnr must define read_all_bytes"
+    );
+}
+
+// ---- A. the interpreter runs a real `.wasm` FILE off disk (interp engines) ---
+
+/// Run the file-run program with `mod.wasm` = `bytes` in a temp dir, on the
+/// tree-walker AND the MIR engine (via the foreign_io shims, like tests/std_io.rs).
+/// Returns (tree_ret, mir_ret).
+fn run_wasm_file(bytes: &[u8], tag: &str) -> (i64, i64) {
+    let dir = std::env::temp_dir().join(format!("candor-wasm-file-{}-{}", tag, std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("mod.wasm"), bytes).unwrap();
+
+    foreign_io::reset();
+    foreign_io::set_root(&dir);
+    foreign_io::register_std_io();
+    let tw = match run_source_real(FILE_RUN_SRC) {
+        RunResult::Ok(r) => r.ret,
+        RunResult::Fault(f) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: tree-walker faulted: {}", f.to_json());
+        }
+        RunResult::CheckErrors(d) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>());
+        }
+        RunResult::ParseError(d) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: parse error: {}", d.to_json());
+        }
+    };
+    foreign_io::unregister_std_io();
+
+    foreign_io::reset();
+    foreign_io::set_root(&dir);
+    foreign_io::register_std_io();
+    let mir = match run_source_real_mir(FILE_RUN_SRC) {
+        MirRunResult::Ok(r) => r.ret,
+        MirRunResult::Fault(f) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: MIR faulted: {}", f.to_json());
+        }
+        MirRunResult::Unsupported(m) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: MIR unsupported: {m}");
+        }
+        MirRunResult::CheckErrors(d) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: MIR check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>());
+        }
+        MirRunResult::ParseError(d) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: MIR parse error: {}", d.to_json());
+        }
+    };
+    foreign_io::unregister_std_io();
+    let _ = std::fs::remove_dir_all(&dir);
+    (tw, mir)
+}
+
+#[test]
+fn file_run_reads_real_wasm_off_disk() {
+    let _g = io_lock();
+    // A 74-byte module (> the 64-byte read buffer, so read_all_bytes genuinely
+    // loops and grows the Vec): fib(10) = 55, read off disk and executed.
+    let bytes = fib_module(10);
+    assert_eq!(bytes, FIB10_MODULE, "the module written to disk is the anchored fib(10)");
+    assert!(bytes.len() > 64, "must exceed the read buffer to exercise the loop");
+    let (tw, mir) = run_wasm_file(&bytes, "fib10");
+    assert_eq!(tw, 55, "tree-walker ran fib(10) off disk");
+    assert_eq!(mir, 55, "MIR ran fib(10) off disk");
+}
+
+#[test]
+fn file_run_matches_embedded_across_modules() {
+    let _g = io_lock();
+    // Reading off disk must agree with the embedded-bytes path across a spread of
+    // modules (arith, i64, memory data-segment). The file read yields the exact
+    // module bytes, so the two paths compute the same result.
+    for (tag, bytes, expected) in [
+        ("sum100", sum_module(100), 5050i64),
+        ("mul", arith32(6, 7, 0x6c), 42),
+        ("i64", arith64(0x100000000, 3, 0x7e), 12884901888),
+        ("data", {
+            let mut body = c32(8);
+            body.extend(mop(0x28, 2, 0));
+            body.push(0x0b);
+            wasm_mem_module(I32, 1, None, &[(8, vec![0xef, 0xbe, 0xad, 0xde])], vec![], body)
+        }, 0xdeadbeefu32 as i32 as i64),
+    ] {
+        let (tw, mir) = run_wasm_file(&bytes, tag);
+        assert_eq!(tw, expected, "{tag}: tree-walker off disk");
+        assert_eq!(mir, expected, "{tag}: MIR off disk");
+        assert_eq!(run_ret_all(&program(&bytes)), expected, "{tag}: embedded path agrees");
+    }
+}
+
+// ---- B. the DIFFERENTIAL gate against wasmi (independent spec reference) -----
+
+/// Run `bytes` through the wasmi reference interpreter. `Ok(i64)` normalizes an
+/// i32 result by sign-extension (matching the Candor interp's i32-in-i64 result
+/// representation); `Err` on any validation / instantiation / trap error, so a
+/// Candor trap and a wasmi error are compared as equivalent.
+fn wasmi_run(bytes: &[u8]) -> Result<i64, String> {
+    use wasmi::{Engine, Linker, Module, Store, Val};
+    let engine = Engine::default();
+    let module = Module::new(&engine, bytes).map_err(|e| format!("compile: {e}"))?;
+    let mut store = Store::new(&engine, ());
+    let linker = <Linker<()>>::new(&engine);
+    let instance =
+        linker.instantiate_and_start(&mut store, &module).map_err(|e| format!("instantiate: {e}"))?;
+    let func = instance.get_func(&store, "main").ok_or("no `main` export")?;
+    let nres = func.ty(&store).results().len();
+    let mut out = vec![Val::I32(0); nres];
+    func.call(&mut store, &[], &mut out).map_err(|e| format!("trap: {e}"))?;
+    match out.first() {
+        Some(Val::I32(x)) => Ok(*x as i64),
+        Some(Val::I64(x)) => Ok(*x),
+        other => Err(format!("unexpected result: {other:?}")),
+    }
+}
+
+/// The oracle (tree-walker) result, for the differential corpus. The corpus is
+/// large, so it runs on the tree-walker only (the task's "on the tree-walker at
+/// least"); cross-engine (MIR + Cranelift native) agreement over the same
+/// instruction classes is already gated by the hand-asserted M0-M2 tests above
+/// (`run_ret_all`) and the file-run test.
+fn run_ret_oracle(src: &str) -> i64 {
+    match run_source_real(src) {
+        RunResult::Ok(r) => r.ret,
+        RunResult::Fault(f) => panic!("oracle faulted: {}", f.to_json()),
+        RunResult::CheckErrors(d) => {
+            panic!("check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>())
+        }
+        RunResult::ParseError(d) => panic!("parse error: {}", d.to_json()),
+    }
+}
+
+fn run_fault_oracle(src: &str) -> FaultKind {
+    match run_source_real(src) {
+        RunResult::Fault(f) => f.kind,
+        RunResult::Ok(r) => panic!("expected fault, got ret {}", r.ret),
+        RunResult::CheckErrors(d) => {
+            panic!("expected fault, got check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>())
+        }
+        RunResult::ParseError(d) => panic!("expected fault, got parse error: {}", d.to_json()),
+    }
+}
+
+/// The Candor interpreter and wasmi must agree on the value.
+fn assert_diff(bytes: &[u8], label: &str) {
+    let candor = run_ret_oracle(&program(bytes));
+    match wasmi_run(bytes) {
+        Ok(w) => assert_eq!(candor, w, "{label}: candor={candor} != wasmi={w}"),
+        Err(e) => panic!("{label}: candor returned {candor} but wasmi did not: {e}"),
+    }
+}
+
+/// Trap-equivalence: the module traps in Candor (Panic) AND errors in wasmi.
+fn assert_diff_trap(bytes: &[u8], label: &str) {
+    assert_eq!(run_fault_oracle(&program(bytes)), FaultKind::Panic, "{label}: candor should trap");
+    if let Ok(w) = wasmi_run(bytes) {
+        panic!("{label}: candor trapped but wasmi returned {w}");
+    }
+}
+
+#[test]
+fn diff_i32_arithmetic() {
+    for (op, name) in [
+        (0x6au8, "add"), (0x6b, "sub"), (0x6c, "mul"), (0x6d, "div_s"), (0x6e, "div_u"),
+        (0x6f, "rem_s"), (0x70, "rem_u"), (0x71, "and"), (0x72, "or"), (0x73, "xor"),
+        (0x74, "shl"), (0x75, "shr_s"), (0x76, "shr_u"), (0x77, "rotl"), (0x78, "rotr"),
+    ] {
+        for (a, b) in [(-7i32, 2i32), (100, 7), (1, 33), (0x40000000, 3), (-1, 3), (i32::MIN, 5)] {
+            assert_diff(&arith32(a, b, op), &format!("i32.{name}({a},{b})"));
+        }
+    }
+}
+
+#[test]
+fn diff_i32_unary_and_compares() {
+    for (op, name) in [(0x67u8, "clz"), (0x68, "ctz"), (0x69, "popcnt"), (0x45, "eqz")] {
+        for a in [0i32, 1, 8, 0xff, -1, i32::MIN, 0x00ff00ff] {
+            assert_diff(&un32(a, op), &format!("i32.{name}({a})"));
+        }
+    }
+    for (op, name) in [
+        (0x46u8, "eq"), (0x47, "ne"), (0x48, "lt_s"), (0x49, "lt_u"), (0x4a, "gt_s"),
+        (0x4b, "gt_u"), (0x4c, "le_s"), (0x4d, "le_u"), (0x4e, "ge_s"), (0x4f, "ge_u"),
+    ] {
+        for (a, b) in [(-5i32, 3i32), (3, 3), (7, 2), (-1, -2), (i32::MIN, i32::MAX)] {
+            assert_diff(&arith32(a, b, op), &format!("i32.{name}({a},{b})"));
+        }
+    }
+}
+
+#[test]
+fn diff_i64_arithmetic_and_compares() {
+    for (op, name) in [
+        (0x7cu8, "add"), (0x7d, "sub"), (0x7e, "mul"), (0x7f, "div_s"), (0x80, "div_u"),
+        (0x81, "rem_s"), (0x82, "rem_u"), (0x83, "and"), (0x84, "or"), (0x85, "xor"),
+        (0x86, "shl"), (0x87, "shr_s"), (0x88, "shr_u"), (0x89, "rotl"), (0x8a, "rotr"),
+    ] {
+        for (a, b) in [
+            (0x100000000i64, 3i64), (-9, 4), (-1, 10), (1, 63), (i64::MIN, 7), (-1, 60),
+        ] {
+            assert_diff(&arith64(a, b, op), &format!("i64.{name}({a},{b})"));
+        }
+    }
+    // i64 comparisons consume two i64 operands but PRODUCE an i32 — the module's
+    // result type must be I32 (a mismatch that the non-validating Candor interp
+    // runs but wasmi correctly rejects, so the corpus must be well-typed).
+    for (op, name) in [
+        (0x51u8, "eq"), (0x52, "ne"), (0x53, "lt_s"), (0x54, "lt_u"), (0x55, "gt_s"),
+        (0x56, "gt_u"), (0x57, "le_s"), (0x58, "le_u"), (0x59, "ge_s"), (0x5a, "ge_u"),
+    ] {
+        for (a, b) in [(-1i64, 0i64), (5, 5), (7, 2), (i64::MIN, i64::MAX)] {
+            let mut body = c64(a);
+            body.extend(c64(b));
+            body.push(op);
+            body.push(0x0b);
+            assert_diff(&one_func(I32, body, vec![]), &format!("i64.{name}({a},{b})"));
+        }
+    }
+    // i64 unary bit-counts and eqz.
+    for (op, name) in [(0x79u8, "clz"), (0x7a, "ctz"), (0x7b, "popcnt")] {
+        for a in [0i64, 1, 0xff, -1, i64::MIN] {
+            let mut body = c64(a);
+            body.push(op);
+            body.push(0x0b);
+            assert_diff(&one_func(I64, body, vec![]), &format!("i64.{name}({a})"));
+        }
+    }
+}
+
+#[test]
+fn diff_control_flow_and_recursion() {
+    for n in [0i32, 1, 5, 7, 10, 15] {
+        assert_diff(&fib_module(n), &format!("fib({n})"));
+    }
+    for n in [1i32, 5, 10, 100] {
+        assert_diff(&sum_module(n), &format!("sum({n})"));
+    }
+    for sel in [0i32, 1, 2, 5, -1] {
+        assert_diff(&brtable_module(sel), &format!("br_table({sel})"));
+    }
+}
+
+#[test]
+fn diff_linear_memory() {
+    // store/load round-trip at various widths (little-endian), sign/zero extension.
+    assert_diff(&store_then_load(0x36, 2, 0x28, 2, 0, 0x12345678, I32), "i32.store/load");
+    assert_diff(&store_then_load(0x3a, 0, 0x2c, 0, 0, 0xff, I32), "i32.load8_s");
+    assert_diff(&store_then_load(0x3a, 0, 0x2d, 0, 0, 0xff, I32), "i32.load8_u");
+    assert_diff(&store_then_load(0x3b, 1, 0x2e, 1, 0, 0xffff, I32), "i32.load16_s");
+    assert_diff(&store_then_load(0x3b, 1, 0x2f, 1, 0, 0xffff, I32), "i32.load16_u");
+    // i64.load8_s: store an i64 value with i64.store8 (the value operand must be
+    // i64, so store_then_load's i32.const value would be ill-typed for wasmi).
+    let i64_load8s = {
+        let mut body = c32(0);
+        body.extend(c64(0xff));
+        body.extend(mop(0x3c, 0, 0));
+        body.extend(c32(0));
+        body.extend(mop(0x30, 0, 0));
+        body.push(0x0b);
+        wasm_mem_module(I64, 1, None, &[], vec![], body)
+    };
+    assert_diff(&i64_load8s, "i64.load8_s");
+    assert_diff(&store_then_load(0x36, 2, 0x2d, 0, 3, 0x04030201, I32), "little-endian byte 3");
+
+    // i64 full-width round-trip.
+    let m64 = {
+        let mut body = c32(32);
+        body.extend(c64(0x0102030405060708));
+        body.extend(mop(0x37, 3, 0));
+        body.extend(c32(32));
+        body.extend(mop(0x29, 3, 0));
+        body.push(0x0b);
+        wasm_mem_module(I64, 1, None, &[], vec![], body)
+    };
+    assert_diff(&m64, "i64.store/load");
+
+    // data segment init read little-endian.
+    let data = {
+        let mut body = c32(8);
+        body.extend(mop(0x28, 2, 0));
+        body.push(0x0b);
+        wasm_mem_module(I32, 1, None, &[(8, vec![0xef, 0xbe, 0xad, 0xde])], vec![], body)
+    };
+    assert_diff(&data, "data-segment i32.load");
+
+    // memory.grow returns the old page count; grow-then-size adds.
+    let grow_then_size = {
+        let mut body = c32(2);
+        body.extend([0x40, 0x00]);
+        body.extend([0x3f, 0x00]);
+        body.push(0x6a);
+        body.push(0x0b);
+        wasm_mem_module(I32, 1, None, &[], vec![], body)
+    };
+    assert_diff(&grow_then_size, "memory.grow+size");
+    // grow beyond a declared max returns -1.
+    let grow_fail = {
+        let mut body = c32(5);
+        body.extend([0x40, 0x00]);
+        body.push(0x0b);
+        wasm_mem_module(I32, 1, Some(2), &[], vec![], body)
+    };
+    assert_diff(&grow_fail, "memory.grow-fail");
+}
+
+#[test]
+fn diff_traps_are_equivalent() {
+    // divide-by-zero (i32 + i64, div + rem, signed + unsigned).
+    assert_diff_trap(&arith32(10, 0, 0x6d), "i32.div_s/0");
+    assert_diff_trap(&arith32(10, 0, 0x6e), "i32.div_u/0");
+    assert_diff_trap(&arith32(10, 0, 0x6f), "i32.rem_s/0");
+    assert_diff_trap(&arith32(10, 0, 0x70), "i32.rem_u/0");
+    assert_diff_trap(&arith64(10, 0, 0x7f), "i64.div_s/0");
+    assert_diff_trap(&arith64(10, 0, 0x80), "i64.div_u/0");
+    // signed division overflow INT_MIN / -1.
+    assert_diff_trap(&arith32(i32::MIN, -1, 0x6d), "i32.div_s overflow");
+    assert_diff_trap(&arith64(i64::MIN, -1, 0x7f), "i64.div_s overflow");
+    // out-of-bounds load and store.
+    let load_oob = {
+        let mut body = c32(65536);
+        body.extend(mop(0x28, 2, 0));
+        body.push(0x0b);
+        wasm_mem_module(I32, 1, None, &[], vec![], body)
+    };
+    assert_diff_trap(&load_oob, "load OOB");
+    let store_oob = {
+        let mut body = c32(65534);
+        body.extend(c32(1));
+        body.extend(mop(0x36, 2, 0));
+        body.push(0x0b);
+        wasm_mem_module(I32, 1, None, &[], vec![], body)
+    };
+    assert_diff_trap(&store_oob, "store OOB");
+    // active data segment out of bounds (an instantiation trap).
+    let data_oob = wasm_mem_module(I32, 1, None, &[(65534, vec![1, 2, 3, 4])], vec![], {
+        let mut b = c32(0);
+        b.push(0x0b);
+        b
+    });
+    assert_diff_trap(&data_oob, "data segment OOB");
+    // unreachable.
+    let unreachable = one_func(I32, vec![0x00, 0x0b], vec![]);
+    assert_diff_trap(&unreachable, "unreachable");
+}

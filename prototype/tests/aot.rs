@@ -573,3 +573,48 @@ fn gate_aot_native_buf_io() {
     assert_eq!(output.stdout, content.as_bytes(), "lines reassembled newline-terminated, byte-for-byte");
     assert_eq!(exp_ret, line_count, "read_line yields one owned String per newline");
 }
+
+#[test]
+fn gate_aot_native_wasm_file_off_disk() {
+    assert!(cc_available(), "cc/linker unavailable: cannot build runnable executables");
+    let _g = io_guard();
+    // M3 capstone (the AOT path): the WebAssembly interpreter written IN Candor,
+    // compiled to a REAL native binary, reads a REAL `.wasm` module off disk via
+    // `read_all_bytes` (loop `read_into` into a growable `Vec[u8]`) over real libc
+    // open/read/close, decodes it, and runs its exported `main`. fib(10) = 55.
+    let src = std::fs::read_to_string(fixtures_dir().join("wasm/run_wasm_file.cnr"))
+        .expect("read wasm file-run fixture");
+    let module = std::fs::read(fixtures_dir().join("wasm/fib10.wasm")).expect("read fib10.wasm");
+    let work = std::env::temp_dir().join(format!("candor-aot-wasmfile-{}", std::process::id()));
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("mod.wasm"), &module).unwrap();
+
+    // Oracle: the shim-backed interpreter rooted at the work dir.
+    foreign_io::reset();
+    foreign_io::set_root(&work);
+    foreign_io::register_std_io();
+    let exp_ret = match run_source_real(&src) {
+        RunResult::Ok(r) => r.ret,
+        _ => {
+            foreign_io::unregister_std_io();
+            panic!("shim-backed interpreter should run the wasm file-run demonstrator");
+        }
+    };
+    foreign_io::unregister_std_io();
+
+    // Native: a linked binary calling real libc, run with the work dir as cwd so
+    // `open("mod.wasm")` resolves to the module we wrote.
+    let srcpath = work.join("prog.cnr");
+    std::fs::write(&srcpath, &src).unwrap();
+    let out = std::env::temp_dir().join(format!("candor-aot-wasmfile-bin-{}", std::process::id()));
+    candor_proto::compile_path(&srcpath, &out).expect("compile wasm file-run demonstrator");
+    let output = Command::new(&out)
+        .current_dir(&work)
+        .output()
+        .expect("run compiled wasm file-run binary");
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_dir_all(&work);
+
+    assert_eq!(output.status.code(), Some(exp_ret as u8 as i32), "exit byte vs shim run");
+    assert_eq!(exp_ret, 55, "fib(10) read off disk and executed");
+}

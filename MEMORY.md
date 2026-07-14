@@ -792,3 +792,51 @@ One lesson per entry, one-line summary first.
   run/ copy byte-identical. M3 next: read a real `.wasm` off disk (read_into +
   read_all_bytes) and gate output byte-exact vs a wasmtime/node reference over a
   module corpus. (WASM M2, 2026-07-14).
+
+- **WASM interpreter M3 (real `.wasm` off disk + a DIFFERENTIAL gate vs the
+  independent `wasmi` spec reference) — three load-bearing facts: (1) the Candor
+  interp is NON-VALIDATING, so a type-incorrect module RUNS on it but a spec
+  reference REJECTS it — a differential corpus must be well-typed (an i64 compare
+  yields an i32, so its function result is I32 not I64; an i64.store8 takes an i64
+  value, not an i32.const); the two encoder bugs this surfaced are exactly what a
+  real reference catches that a hand-written expected value cannot. (2) Reading a
+  module off disk into a `Vec[u8]` needs a free-list window DISJOINT from the
+  [16MiB,24MiB) one `run_module` carves for the module's linear memory — overlap
+  is silent until the Vec's Drop walks a free-chain the interp's memory clobbered;
+  the file reader uses [32MiB,40MiB). (3) There is NO `Vec[u8] -> [u8]` builtin,
+  so bridge the read bytes through a fixed stack array + `subslice(slice_of(arr),
+  0, n)` (run_module's `[u8]` signature — the byte-source-decoupled decode — is
+  unchanged).**
+  A. `read_all_bytes(a: read Alloc, fd) -> VecIoResult` (the raw-bytes sibling of
+  `read_to_string`): loop `read_into` a fixed `[64]u8` stack buffer, `push` the `n`
+  read bytes onto a growable `Vec[u8]` until `Ok(0)` (EOF); `?` propagates read
+  errors via an identity `From[IoError]`. `run_wasm_file.cnr` = the std::io
+  boundary prefix + the canonical interpreter VERBATIM (above the harness split) +
+  the file-run tail; a drift-guard test (`file_run_fixture_reuses_canonical_interp`)
+  keeps it in sync with `interp.cnr` (same discipline as the run/ corpus copy). Its
+  `main` opens a fixed `mod.wasm`, `read_all_bytes`, then decodes+runs it. Proven
+  reading a REAL 74-byte fib(10) module (> the 64-byte buffer, so the loop + Vec
+  growth genuinely run) off disk → 55 on the tree-walker AND the MIR engine (via the
+  foreign_io shims, `tests/wasm.rs`), AND on a native Cranelift binary AND a
+  clang -O2 binary calling REAL libc open/read/close (`tests/aot.rs`,
+  `tests/llvm.rs`, cwd = the temp dir holding `mod.wasm`).
+  B. `wasmi` 1.1.0 added as a `[dev-dependencies]` (pure-Rust, no C deps, fetched +
+  built offline; the library keeps its own deps). `wasmi_run` compiles+instantiates
+  +calls exported `main`, normalizing an i32 result by sign-extension to match the
+  interp's i32-in-i64 representation, and maps any validate/instantiate/trap error
+  to Err. Six differential tests assert the Candor tree-walker result == wasmi over
+  a corpus covering: i32 arith (add/sub/mul/div_s/div_u/rem_s/rem_u/and/or/xor/shl/
+  shr_s/shr_u/rotl/rotr) × 6 operand pairs; i32 unary (clz/ctz/popcnt/eqz) +
+  compares (eq/ne/lt/gt/le/ge, signed+unsigned); the full i64 set (arith, shifts,
+  rotl/rotr, clz/ctz/popcnt, compares); control flow + recursion (fib, sum-loop,
+  br_table); linear memory (i32/i64 store→load at every width, little-endian, data
+  segments, memory.grow); and TRAP-EQUIVALENCE (div/rem by zero i32+i64, signed
+  div overflow, OOB load/store, OOB data segment, unreachable — each traps in BOTH).
+  The hand-asserted M0-M2 tests stay (a fast cross-engine check); the differential
+  corpus runs on the tree-walker only (the task's "tree-walker at least") to keep
+  the suite fast — cross-engine (MIR + Cranelift + clang) agreement over the same
+  instruction classes is already gated by the M0-M2 `run_ret_all` tests + the
+  file-run gate. 750 nextest green (+11 over M2's 739: 9 wasm + 1 aot + 1 llvm; full
+  + fast profiles), clippy clean, run/ copy byte-identical. WASM MVP capstone done;
+  post-MVP options: host imports / a WASI-lite print, f32/f64 floats (needs the
+  language float prerequisite), a JIT-to-LLVM. (WASM M3, 2026-07-14).
