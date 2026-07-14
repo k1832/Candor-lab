@@ -369,21 +369,38 @@ fn eq_name(buf: [u8], blen: usize, lit: [u8], litlen: usize) -> bool {
     return true;
 }
 
-// Resolve an import's (module, field) name to a host-function id. The WASI-lite
-// set lives under module "env": `print_i32` -> 1, `print_str` -> 2. Anything else
-// resolves to 0 and TRAPS only if it is actually called.
+// Resolve an import's (module, field) name to a host-function id. Module "env"
+// holds the WASI-lite set (`print_i32` -> 1, `print_str` -> 2); module
+// "wasi_snapshot_preview1" holds the real WASI Preview 1 core (`fd_write` -> 3,
+// `proc_exit` -> 4). Anything else resolves to 0 and TRAPS only if actually called.
 fn resolve_host(mn: [u8], mlen: usize, field: [u8], flen: usize) -> usize {
     let env: [3]u8 = [0x65u8, 0x6eu8, 0x76u8];
-    if !eq_name(mn, mlen, slice_of(env), 3usize) {
+    if eq_name(mn, mlen, slice_of(env), 3usize) {
+        let pi: [9]u8 = [0x70u8, 0x72u8, 0x69u8, 0x6eu8, 0x74u8, 0x5fu8, 0x69u8, 0x33u8, 0x32u8];
+        if eq_name(field, flen, slice_of(pi), 9usize) {
+            return 1usize;
+        }
+        let ps: [9]u8 = [0x70u8, 0x72u8, 0x69u8, 0x6eu8, 0x74u8, 0x5fu8, 0x73u8, 0x74u8, 0x72u8];
+        if eq_name(field, flen, slice_of(ps), 9usize) {
+            return 2usize;
+        }
         return 0usize;
     }
-    let pi: [9]u8 = [0x70u8, 0x72u8, 0x69u8, 0x6eu8, 0x74u8, 0x5fu8, 0x69u8, 0x33u8, 0x32u8];
-    if eq_name(field, flen, slice_of(pi), 9usize) {
-        return 1usize;
-    }
-    let ps: [9]u8 = [0x70u8, 0x72u8, 0x69u8, 0x6eu8, 0x74u8, 0x5fu8, 0x73u8, 0x74u8, 0x72u8];
-    if eq_name(field, flen, slice_of(ps), 9usize) {
-        return 2usize;
+    // "wasi_snapshot_preview1" (22 bytes) then "fd_write" (8) / "proc_exit" (9).
+    let wasi: [22]u8 = [
+        0x77u8, 0x61u8, 0x73u8, 0x69u8, 0x5fu8, 0x73u8, 0x6eu8, 0x61u8, 0x70u8, 0x73u8, 0x68u8,
+        0x6fu8, 0x74u8, 0x5fu8, 0x70u8, 0x72u8, 0x65u8, 0x76u8, 0x69u8, 0x65u8, 0x77u8, 0x31u8,
+    ];
+    if eq_name(mn, mlen, slice_of(wasi), 22usize) {
+        let fw: [8]u8 = [0x66u8, 0x64u8, 0x5fu8, 0x77u8, 0x72u8, 0x69u8, 0x74u8, 0x65u8];
+        if eq_name(field, flen, slice_of(fw), 8usize) {
+            return 3usize;
+        }
+        let pe: [9]u8 = [0x70u8, 0x72u8, 0x6fu8, 0x63u8, 0x5fu8, 0x65u8, 0x78u8, 0x69u8, 0x74u8];
+        if eq_name(field, flen, slice_of(pe), 9usize) {
+            return 4usize;
+        }
+        return 0usize;
     }
     return 0usize;
 }
@@ -1316,13 +1333,70 @@ fn emit_i32_dec(hout: write Vec[u8], v: i64) alloc -> unit {
     push(write hout.*, 0x0au8);
 }
 
-// Dispatch a resolved host import (WASI-lite): `print_i32` appends the argument's
-// decimal + newline; `print_str(ptr, len)` copies `len` bytes of LINEAR MEMORY at
-// `ptr` (bounds-checked — an out-of-range span TRAPS) to the host output buffer.
-// Output is BUFFERED in `hout`: the pure interpreter has no I/O boundary and
-// simply discards an empty buffer, while the std::io boundary runner flushes the
-// buffer to real stdout after the run.
-fn host_call(hid: usize, a0: i64, a1: i64, mem: read Vec[u8], hout: write Vec[u8]) alloc -> unit {
+// A host call's outcome: the i32 `value` it returns (an errno for `fd_write`;
+// ignored when the import declares no result) and — for `proc_exit` — an `exit`
+// request carrying the program's `exit_code`. `exit` is the exec driver's clean-
+// termination signal, DISTINCT from a trap (a panic) and from a normal return.
+copy struct HostOutcome {
+    value: i64,
+    exit: bool,
+    exit_code: i64,
+}
+
+// WASI Preview 1 `fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) -> errno`: gather
+// `iovs_len` ciovec structs from linear memory at `iovs_ptr` — each 8 bytes, a
+// little-endian `buf_ptr` at offset 0 and `buf_len` at offset 4 — appending every
+// buffer's bytes to the host-output buffer, then write the TOTAL byte count back
+// as a little-endian i32 at `nwritten_ptr`. fd 1 (stdout) and fd 2 (stderr) both
+// route to the single buffered output (MVP: stderr is merged into stdout); any
+// other fd returns EBADF (8) without writing. Every span is bounds-checked and
+// TRAPS past the end of memory. Returns 0 (success) once the write completes.
+fn do_fd_write(fd_arg: i64, iovs_arg: i64, len_arg: i64, nwr_arg: i64, mem: write Vec[u8], hout: write Vec[u8]) alloc -> i64 {
+    let mask: i64 = 0xffffffffi64;
+    let fd: i64 = fd_arg & mask;
+    if fd != 1i64 && fd != 2i64 {
+        return 8i64;
+    }
+    let iovs_ptr: usize = conv usize (iovs_arg & mask);
+    let iovs_len: usize = conv usize (len_arg & mask);
+    let nwritten_ptr: usize = conv usize (nwr_arg & mask);
+    let mut total: i64 = 0i64;
+    let mut iv: usize = 0usize;
+    while iv < iovs_len {
+        let iov_base: usize = iovs_ptr + iv * 8usize;
+        if iov_base + 8usize > len(read mem.*) {
+            panic("out of bounds memory access");
+        }
+        let buf_ptr: usize = conv usize (mem_load_bytes(read mem.*, iov_base, 4usize) & mask);
+        let buf_len: usize = conv usize (mem_load_bytes(read mem.*, iov_base + 4usize, 4usize) & mask);
+        if buf_ptr + buf_len > len(read mem.*) {
+            panic("out of bounds memory access");
+        }
+        let mut k: usize = 0usize;
+        while k < buf_len {
+            push(write hout.*, get(read mem.*, buf_ptr + k).*);
+            k = k + 1usize;
+        }
+        wrapping { total = total + conv i64 buf_len; }
+        iv = iv + 1usize;
+    }
+    if nwritten_ptr + 4usize > len(read mem.*) {
+        panic("out of bounds memory access");
+    }
+    mem_store_bytes(write mem.*, nwritten_ptr, 4usize, total);
+    return 0i64;
+}
+
+// Dispatch a resolved host import. `print_i32` (1) appends the argument's decimal
+// + newline; `print_str(ptr, len)` (2) copies `len` bytes of LINEAR MEMORY at
+// `ptr` (bounds-checked — an out-of-range span TRAPS) to the output buffer;
+// `fd_write` (3) is the WASI Preview 1 gather-write (returns an errno); `proc_exit`
+// (4) requests clean termination with its i32 argument as the exit code. Output is
+// BUFFERED in `hout`: the pure interpreter has no I/O boundary and simply discards
+// an empty buffer, while the std::io boundary runner flushes it to real stdout
+// after the run.
+fn host_call(hid: usize, a0: i64, a1: i64, a2: i64, a3: i64, mem: write Vec[u8], hout: write Vec[u8]) alloc -> HostOutcome {
+    let mut hr: HostOutcome = HostOutcome { value: 0i64, exit: false, exit_code: 0i64 };
     if hid == 1usize {
         emit_i32_dec(write hout.*, a0);
     } else if hid == 2usize {
@@ -1337,9 +1411,15 @@ fn host_call(hid: usize, a0: i64, a1: i64, mem: read Vec[u8], hout: write Vec[u8
             push(write hout.*, get(read mem.*, ptr + k).*);
             k = k + 1usize;
         }
+    } else if hid == 3usize {
+        hr.value = do_fd_write(a0, a1, a2, a3, write mem.*, write hout.*);
+    } else if hid == 4usize {
+        hr.exit = true;
+        hr.exit_code = a0;
     } else {
         panic("unknown host import");
     }
+    return hr;
 }
 
 // Non-recursive interpreter driver. The WORKING state (frame `f`, reader `r`,
@@ -1348,6 +1428,9 @@ fn host_call(hid: usize, a0: i64, a1: i64, mem: read Vec[u8], hout: write Vec[u8
 // to the callee; function-return (an outermost `end`, `return`, or a branch to
 // the function body) pops the snapshot and pushes the callee's result. Host
 // recursion is O(1), so WASM call depth is bounded only by `saved`'s capacity.
+// A WASI `proc_exit` import is a THIRD outcome: it halts the whole run immediately
+// (unwinding no activations, and distinct from a trap), surfacing its exit code as
+// the driver's return value.
 fn exec(bytes: [u8], m: read Module, mem: write Vec[u8], hout: write Vec[u8]) alloc -> i64 {
     let mut saved: [256]Act = [zero_act(); 256];
     let mut fp: usize = 0;
@@ -1495,9 +1578,10 @@ fn exec(bytes: [u8], m: read Module, mem: write Vec[u8], hout: write Vec[u8]) al
             }
             if callee < m.nimports {
                 // Host import (func index < K): pop the params, run the host
-                // effect, push no result (the WASI-lite print functions return
-                // nothing). No activation is pushed — the non-recursive driver is
-                // untouched.
+                // effect, and push its result IF the import declares one (an errno
+                // for `fd_write`; the print functions declare none). No activation
+                // is pushed — the non-recursive driver is untouched. A `proc_exit`
+                // import instead requests clean termination (handled just below).
                 let nh: usize = m.fnparams[callee];
                 let mut hargs: [32]i64 = [0i64; 32];
                 let mut jh: usize = nh;
@@ -1506,7 +1590,15 @@ fn exec(bytes: [u8], m: read Module, mem: write Vec[u8], hout: write Vec[u8]) al
                     f.sp = f.sp - 1usize;
                     hargs[jh] = f.stack[f.sp];
                 }
-                host_call(m.imp_host[callee], hargs[0], hargs[1], read mem.*, write hout.*);
+                let hres: HostOutcome = host_call(m.imp_host[callee], hargs[0], hargs[1], hargs[2], hargs[3], write mem.*, write hout.*);
+                if m.fnresults[callee] == 1usize {
+                    f.stack[f.sp] = as_i32(hres.value);
+                    f.sp = f.sp + 1usize;
+                }
+                if hres.exit {
+                    retval = hres.exit_code;
+                    running = false;
+                }
             } else {
                 // Defined function (func index >= K): its metadata lives at the
                 // same index (Function/Code stored it offset past the imports).

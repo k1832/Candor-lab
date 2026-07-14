@@ -2520,3 +2520,317 @@ fn m6_call_indirect_traps() {
     // function's actual signature -> a runtime trap in both (the core safety check).
     assert_diff_trap(&indirect_mismatch_module(), "call_indirect signature mismatch");
 }
+
+// ===========================================================================
+// M7 — WASI Preview 1 (fd_write + proc_exit): the real WASI output/exit surface
+// ===========================================================================
+//
+// The interpreter now hosts the core WASI Preview 1 imports under module
+// "wasi_snapshot_preview1". `fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) ->
+// errno` gathers ciovec structs (8 bytes each: a little-endian buf_ptr at offset 0
+// + buf_len at offset 4) out of LINEAR MEMORY, writes the gathered bytes to fd 1/2
+// (the buffered host output path), writes the total byte count back as an i32 at
+// nwritten_ptr, and returns errno 0 (EBADF = 8 for an unsupported fd). `proc_exit(
+// code)` halts the run immediately, surfacing `code` as the exit code (distinct
+// from a trap and from a normal return).
+//
+// HONESTY: the environment has NO wasm toolchain (no clang/rustc -> wasm32-wasi,
+// no wat2wasm), so these modules are HAND-ASSEMBLED by the encoder below — but they
+// use the REAL WASI ABI, so a genuine toolchain-compiled .wasm targeting the same
+// imports would run against this host unchanged. The gate asserts captured stdout +
+// exit code on the interp shims (tree-walker + MIR) and, via WASI host functions
+// registered against wasmi's engine over the SAME ABI, a wasmi-engine differential
+// (the M4 print-gate discipline; the heavyweight wasi-common host is not pulled in).
+
+/// The exact bytes of `wasi_module(1, &[b"hello, wasi\n"], WasiTail::Exit(0))`,
+/// committed as `tests/fixtures/wasm/wasi_hello.wasm` for the native AOT gate.
+const WASI_HELLO_MODULE: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x10, 0x03, 0x60,
+    0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x00, 0x60,
+    0x00, 0x00, 0x02, 0x46, 0x02, 0x16, 0x77, 0x61, 0x73, 0x69, 0x5f, 0x73,
+    0x6e, 0x61, 0x70, 0x73, 0x68, 0x6f, 0x74, 0x5f, 0x70, 0x72, 0x65, 0x76,
+    0x69, 0x65, 0x77, 0x31, 0x08, 0x66, 0x64, 0x5f, 0x77, 0x72, 0x69, 0x74,
+    0x65, 0x00, 0x00, 0x16, 0x77, 0x61, 0x73, 0x69, 0x5f, 0x73, 0x6e, 0x61,
+    0x70, 0x73, 0x68, 0x6f, 0x74, 0x5f, 0x70, 0x72, 0x65, 0x76, 0x69, 0x65,
+    0x77, 0x31, 0x09, 0x70, 0x72, 0x6f, 0x63, 0x5f, 0x65, 0x78, 0x69, 0x74,
+    0x00, 0x01, 0x03, 0x02, 0x01, 0x02, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07,
+    0x11, 0x02, 0x04, 0x6d, 0x61, 0x69, 0x6e, 0x00, 0x02, 0x06, 0x6d, 0x65,
+    0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x0a, 0x26, 0x01, 0x24, 0x01, 0x01,
+    0x7f, 0x41, 0x00, 0x41, 0x80, 0x08, 0x36, 0x02, 0x00, 0x41, 0x04, 0x41,
+    0x0c, 0x36, 0x02, 0x00, 0x41, 0x01, 0x41, 0x00, 0x41, 0x01, 0x41, 0x80,
+    0x04, 0x10, 0x00, 0x21, 0x00, 0x41, 0x00, 0x10, 0x01, 0x0b, 0x0b, 0x13,
+    0x01, 0x00, 0x41, 0x80, 0x08, 0x0b, 0x0c, 0x68, 0x65, 0x6c, 0x6c, 0x6f,
+    0x2c, 0x20, 0x77, 0x61, 0x73, 0x69, 0x0a,
+];
+
+const WASI_MOD: &str = "wasi_snapshot_preview1";
+
+/// The tail of a WASI `main`: what it does with `fd_write`'s errno result.
+enum WasiTail {
+    /// Consume the errno, then `proc_exit(code)`; `main` is `() -> ()`.
+    Exit(i32),
+    /// `proc_exit(code)`, then a dead `i32.const 999` return; `main` is `() -> i32`.
+    /// Proves proc_exit halts BEFORE the return path.
+    ExitOverridesReturn(i32),
+    /// Leave the errno as `main`'s `i32` result (no proc_exit).
+    Errno,
+    /// Consume the errno, then load and return nwritten as `main`'s `i32` result.
+    Nwritten,
+}
+
+/// Append `i32.const addr; i32.const val; i32.store` to `out`.
+fn wasi_store_i32(addr: i32, val: i32, out: &mut Vec<u8>) {
+    out.extend(c32(addr));
+    out.extend(c32(val));
+    out.extend(mop(0x36, 2, 0));
+}
+
+/// A hand-assembled WASI module using the REAL Preview 1 ABI. It imports
+/// `wasi_snapshot_preview1.fd_write` (funcidx 0) and `.proc_exit` (funcidx 1),
+/// declares one memory (exported as "memory") with a data segment per iovec string,
+/// and defines `main` (funcidx 2) which writes the iovec array into linear memory,
+/// calls `fd_write(fd, iov_array_ptr=0, iovs_len=N, nwritten_ptr=512)`, then runs
+/// `tail`. Memory layout: iovec array at 0, nwritten at 512, strings from 1024.
+fn wasi_module(fd: i32, iovecs: &[&[u8]], tail: WasiTail) -> Vec<u8> {
+    const NWRITTEN: i32 = 512;
+    const STR_BASE: i32 = 1024;
+    let main_result: &[u8] = match tail {
+        WasiTail::Exit(_) => &[],
+        _ => &[I32],
+    };
+    let mut m = MAGIC.to_vec();
+    let types = wasm_vec(&[
+        functype(&[I32, I32, I32, I32], &[I32]), // t0: fd_write
+        functype(&[I32], &[]),                   // t1: proc_exit
+        functype(&[], main_result),              // t2: main
+    ]);
+    wasm_section(&mut m, 0x01, &types);
+    let imports = wasm_vec(&[
+        import_entry(WASI_MOD, "fd_write", &[0x00, 0x00]),
+        import_entry(WASI_MOD, "proc_exit", &[0x00, 0x01]),
+    ]);
+    wasm_section(&mut m, 0x02, &imports);
+    wasm_section(&mut m, 0x03, &wasm_vec(&[vec![0x02]])); // main : t2
+    wasm_section(&mut m, 0x05, &[0x01, 0x00, 0x01]); // 1 memory, min 1 page
+    let exports = wasm_vec(&[
+        {
+            let mut e = wasm_vec(&"main".bytes().map(|c| vec![c]).collect::<Vec<_>>());
+            e.push(0x00);
+            leb_u32(2, &mut e);
+            e
+        },
+        {
+            let mut e = wasm_vec(&"memory".bytes().map(|c| vec![c]).collect::<Vec<_>>());
+            e.push(0x02);
+            leb_u32(0, &mut e);
+            e
+        },
+    ]);
+    wasm_section(&mut m, 0x07, &exports);
+
+    let mut data: Vec<Vec<u8>> = Vec::new();
+    let mut body: Vec<u8> = Vec::new();
+    let mut str_off = STR_BASE;
+    for (i, s) in iovecs.iter().enumerate() {
+        data.push(data_seg(str_off as u32, s));
+        wasi_store_i32(i as i32 * 8, str_off, &mut body); // buf_ptr
+        wasi_store_i32(i as i32 * 8 + 4, s.len() as i32, &mut body); // buf_len
+        str_off += s.len() as i32;
+    }
+    body.extend(c32(fd));
+    body.extend(c32(0)); // iov_array_ptr
+    body.extend(c32(iovecs.len() as i32)); // iovs_len
+    body.extend(c32(NWRITTEN)); // nwritten_ptr
+    body.extend([0x10, 0x00]); // call 0 (fd_write) -> errno on stack
+    // The interpreter has no `drop`; consume the errno with `local.set 0` instead.
+    match tail {
+        WasiTail::Errno => {}
+        WasiTail::Nwritten => {
+            body.extend([0x21, 0x00]); // local.set 0 (consume errno)
+            body.extend(c32(NWRITTEN));
+            body.extend(mop(0x28, 2, 0)); // i32.load nwritten -> result
+        }
+        WasiTail::Exit(code) => {
+            body.extend([0x21, 0x00]); // local.set 0 (consume errno)
+            body.extend(c32(code));
+            body.extend([0x10, 0x01]); // call 1 (proc_exit)
+        }
+        WasiTail::ExitOverridesReturn(code) => {
+            body.extend([0x21, 0x00]); // local.set 0 (consume errno)
+            body.extend(c32(code));
+            body.extend([0x10, 0x01]); // call 1 (proc_exit) — halts here
+            body.extend(c32(999)); // dead; keeps main () -> i32 well-typed
+        }
+    }
+    body.push(0x0b); // end
+    wasm_section(&mut m, 0x0a, &wasm_vec(&[code_body(&[(1, I32)], &body)]));
+    wasm_section(&mut m, 0x0b, &wasm_vec(&data));
+    m
+}
+
+/// Run `bytes` through wasmi with the WASI Preview 1 imports registered against
+/// wasmi's engine over the SAME ABI (the M4 differential discipline): `fd_write`
+/// gathers iovecs from the exported memory into a captured buffer and writes
+/// nwritten back; `proc_exit` records the code and unwinds via a trap. Returns the
+/// captured stdout and the run's exit value (the proc_exit code, else `main`'s i32
+/// result), matching the Candor interpreter's top-level result.
+fn wasmi_run_wasi(bytes: &[u8]) -> Result<(Vec<u8>, i64), String> {
+    use wasmi::{Caller, Engine, Error, Extern, Linker, Module, Store, Val};
+    struct WasiState {
+        out: Vec<u8>,
+        exit: Option<i32>,
+    }
+    let engine = Engine::default();
+    let module = Module::new(&engine, bytes).map_err(|e| format!("compile: {e}"))?;
+    let mut store = Store::new(&engine, WasiState { out: Vec::new(), exit: None });
+    let mut linker = <Linker<WasiState>>::new(&engine);
+    linker
+        .func_wrap(
+            WASI_MOD,
+            "fd_write",
+            |mut caller: Caller<'_, WasiState>,
+             fd: i32,
+             iovs: i32,
+             iovs_len: i32,
+             nwritten: i32|
+             -> Result<i32, Error> {
+                let mem = match caller.get_export("memory") {
+                    Some(Extern::Memory(m)) => m,
+                    _ => return Err(Error::new("fd_write: no memory export")),
+                };
+                if fd != 1 && fd != 2 {
+                    return Ok(8); // EBADF
+                }
+                let (gathered, total) = {
+                    let data = mem.data(&caller);
+                    let mut gathered: Vec<u8> = Vec::new();
+                    let mut total: u32 = 0;
+                    for i in 0..(iovs_len as usize) {
+                        let base = iovs as usize + i * 8;
+                        if base + 8 > data.len() {
+                            return Err(Error::new("fd_write: iovec out of bounds"));
+                        }
+                        let buf_ptr =
+                            u32::from_le_bytes(data[base..base + 4].try_into().unwrap()) as usize;
+                        let buf_len =
+                            u32::from_le_bytes(data[base + 4..base + 8].try_into().unwrap()) as usize;
+                        if buf_ptr + buf_len > data.len() {
+                            return Err(Error::new("fd_write: buffer out of bounds"));
+                        }
+                        gathered.extend_from_slice(&data[buf_ptr..buf_ptr + buf_len]);
+                        total += buf_len as u32;
+                    }
+                    (gathered, total)
+                };
+                caller.data_mut().out.extend_from_slice(&gathered);
+                mem.write(&mut caller, nwritten as usize, &total.to_le_bytes())
+                    .map_err(|e| Error::new(format!("fd_write: nwritten write: {e}")))?;
+                Ok(0)
+            },
+        )
+        .map_err(|e| format!("link fd_write: {e}"))?;
+    linker
+        .func_wrap(
+            WASI_MOD,
+            "proc_exit",
+            |mut caller: Caller<'_, WasiState>, code: i32| -> Result<(), Error> {
+                caller.data_mut().exit = Some(code);
+                Err(Error::new(format!("wasi proc_exit({code})")))
+            },
+        )
+        .map_err(|e| format!("link proc_exit: {e}"))?;
+    let instance =
+        linker.instantiate_and_start(&mut store, &module).map_err(|e| format!("instantiate: {e}"))?;
+    let func = instance.get_func(&store, "main").ok_or("no `main` export")?;
+    let nres = func.ty(&store).results().len();
+    let mut out = vec![Val::I32(0); nres];
+    match func.call(&mut store, &[], &mut out) {
+        Ok(()) => {
+            let ret = match out.first() {
+                Some(Val::I32(x)) => *x as i64,
+                Some(Val::I64(x)) => *x,
+                _ => 0,
+            };
+            Ok((store.into_data().out, ret))
+        }
+        Err(e) => match store.data().exit {
+            // proc_exit unwinds via a trap carrying the recorded exit code.
+            Some(code) => Ok((store.into_data().out, code as i64)),
+            None => Err(format!("trap: {e}")),
+        },
+    }
+}
+
+#[test]
+fn m7_wasi_fd_write_stdout_and_exit() {
+    let _g = io_lock();
+    // fd_write(1, iov, 1, nwritten) of "hello, wasi\n", then proc_exit(0).
+    let bytes = wasi_module(1, &[b"hello, wasi\n"], WasiTail::Exit(0));
+    let expected = b"hello, wasi\n".to_vec();
+    let (tw, tw_out, mir, mir_out) = run_wasm_file_stdout(&bytes, "wasi_hello");
+    assert_eq!(tw_out, expected, "tree-walker fd_write stdout");
+    assert_eq!(mir_out, expected, "MIR fd_write stdout");
+    assert_eq!(tw, 0, "proc_exit(0) exit code");
+    assert_eq!(mir, 0);
+    let (w_out, w_ret) = wasmi_run_wasi(&bytes).expect("wasmi runs the WASI module");
+    assert_eq!(w_out, expected, "wasmi captured stdout");
+    assert_eq!(w_ret, 0, "wasmi proc_exit(0)");
+    assert_eq!(tw_out, w_out, "candor-interp stdout == wasmi stdout");
+}
+
+#[test]
+fn m7_wasi_fd_write_multi_iovec_nwritten() {
+    let _g = io_lock();
+    // Gather TWO iovecs; main returns nwritten, proving the multi-iovec gather AND
+    // the nwritten write-back (the returned total came out of linear memory).
+    let bytes = wasi_module(1, &[b"multi ", b"iovec\n"], WasiTail::Nwritten);
+    let expected = b"multi iovec\n".to_vec();
+    let (tw, tw_out, mir, mir_out) = run_wasm_file_stdout(&bytes, "wasi_multi");
+    assert_eq!(tw_out, expected, "tree-walker gathered stdout");
+    assert_eq!(mir_out, expected, "MIR gathered stdout");
+    assert_eq!(tw, expected.len() as i64, "nwritten = total bytes gathered");
+    assert_eq!(mir, expected.len() as i64);
+    let (w_out, w_ret) = wasmi_run_wasi(&bytes).expect("wasmi runs multi-iovec");
+    assert_eq!(w_out, expected, "wasmi gathered stdout");
+    assert_eq!(w_ret, expected.len() as i64, "wasmi nwritten");
+    assert_eq!(tw, w_ret, "candor nwritten == wasmi nwritten");
+}
+
+#[test]
+fn m7_wasi_proc_exit_nonzero_overrides_return() {
+    let _g = io_lock();
+    // proc_exit(7) halts BEFORE main's `i32.const 999` return — proving proc_exit is
+    // a distinct termination outcome, not a normal return.
+    let bytes = wasi_module(1, &[b"bye\n"], WasiTail::ExitOverridesReturn(7));
+    let (tw, tw_out, mir, mir_out) = run_wasm_file_stdout(&bytes, "wasi_exit7");
+    assert_eq!(tw_out, b"bye\n".to_vec(), "tree-walker stdout before exit");
+    assert_eq!(mir_out, b"bye\n".to_vec(), "MIR stdout before exit");
+    assert_eq!(tw, 7, "exit code from proc_exit(7), not the 999 return");
+    assert_eq!(mir, 7);
+    let (w_out, w_ret) = wasmi_run_wasi(&bytes).expect("wasmi runs proc_exit(7)");
+    assert_eq!(w_out, b"bye\n".to_vec(), "wasmi stdout before exit");
+    assert_eq!(w_ret, 7, "wasmi proc_exit(7)");
+}
+
+#[test]
+fn m7_wasi_fd_write_bad_fd_errno() {
+    let _g = io_lock();
+    // fd 3 is unsupported -> EBADF (8), nothing written; main returns the errno.
+    let bytes = wasi_module(3, &[b"nope\n"], WasiTail::Errno);
+    let (tw, tw_out, mir, mir_out) = run_wasm_file_stdout(&bytes, "wasi_badfd");
+    assert!(tw_out.is_empty(), "bad fd writes nothing (tree-walker)");
+    assert!(mir_out.is_empty(), "bad fd writes nothing (MIR)");
+    assert_eq!(tw, 8, "EBADF errno returned");
+    assert_eq!(mir, 8);
+    let (w_out, w_ret) = wasmi_run_wasi(&bytes).expect("wasmi runs bad-fd");
+    assert!(w_out.is_empty(), "wasmi bad fd writes nothing");
+    assert_eq!(w_ret, 8, "wasmi EBADF");
+}
+
+/// Byte anchor: the encoder reproduces the exact `wasi_hello.wasm` module bytes
+/// the native AOT gate assembles and writes to disk (two independent listings, as
+/// M0/M1 anchor `wasm_add_module`/`fib_module`).
+#[test]
+fn m7_wasi_hello_matches_native_gate_bytes() {
+    assert_eq!(wasi_module(1, &[b"hello, wasi\n"], WasiTail::Exit(0)), WASI_HELLO_MODULE);
+}

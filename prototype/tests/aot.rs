@@ -667,3 +667,54 @@ fn gate_aot_native_wasm_print_off_disk() {
     assert_eq!(output.stdout, b"hello, wasm\n42\n", "print_str (linear memory) + print_i32 bytes");
     assert_eq!(exp_ret, 0, "main returns nothing -> 0");
 }
+
+#[test]
+fn gate_aot_native_wasi_off_disk() {
+    assert!(cc_available(), "cc/linker unavailable: cannot build runnable executables");
+    let _g = io_guard();
+    // M7 capstone (the AOT path): the WebAssembly interpreter written IN Candor,
+    // compiled to a REAL native binary, reads a module that imports the REAL WASI
+    // Preview 1 core (`wasi_snapshot_preview1.fd_write` + `.proc_exit`) and runs it
+    // over real libc. `fd_write` gathers an iovec out of LINEAR MEMORY and writes
+    // "hello, wasi\n" to stdout via libc write; `proc_exit(0)` ends the run. The
+    // module is hand-assembled with the REAL WASI ABI (no wasm toolchain here), so
+    // a toolchain-compiled wasm32-wasi module hitting the same imports would run too.
+    let src = std::fs::read_to_string(fixtures_dir().join("wasm/run_wasm_file.cnr"))
+        .expect("read wasm file-run fixture");
+    let module =
+        std::fs::read(fixtures_dir().join("wasm/wasi_hello.wasm")).expect("read wasi_hello.wasm");
+    let work = std::env::temp_dir().join(format!("candor-aot-wasihello-{}", std::process::id()));
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("mod.wasm"), &module).unwrap();
+
+    // Oracle: the shim-backed interpreter rooted at the work dir, capturing stdout.
+    foreign_io::reset();
+    foreign_io::set_root(&work);
+    foreign_io::register_std_io();
+    let exp_ret = match run_source_real(&src) {
+        RunResult::Ok(r) => r.ret,
+        _ => {
+            foreign_io::unregister_std_io();
+            panic!("shim-backed interpreter should run the WASI module");
+        }
+    };
+    let exp_out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+
+    // Native: a linked binary calling real libc, run with the work dir as cwd.
+    let srcpath = work.join("prog.cnr");
+    std::fs::write(&srcpath, &src).unwrap();
+    let out = std::env::temp_dir().join(format!("candor-aot-wasihello-bin-{}", std::process::id()));
+    candor_proto::compile_path(&srcpath, &out).expect("compile WASI demonstrator");
+    let output = Command::new(&out)
+        .current_dir(&work)
+        .output()
+        .expect("run compiled WASI binary");
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_dir_all(&work);
+
+    assert_eq!(output.status.code(), Some(exp_ret as u8 as i32), "exit byte vs shim run");
+    assert_eq!(output.stdout, exp_out, "native stdout == shim-captured stdout");
+    assert_eq!(output.stdout, b"hello, wasi\n", "fd_write gathered iovec bytes");
+    assert_eq!(exp_ret, 0, "proc_exit(0) exit code");
+}

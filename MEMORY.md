@@ -876,6 +876,40 @@ One lesson per entry, one-line summary first.
   not care). Post-MVP remaining: f32/f64 floats (needs a language float prerequisite),
   a JIT-to-LLVM. (WASM M4, 2026-07-14).
 
+- **WASM M7 — the real WASI Preview 1 output/exit surface (`fd_write` + `proc_exit`),
+  making the interp a genuine WASI host.** Four load-bearing lessons. (1) A HOST
+  IMPORT THAT RETURNS A VALUE + A THIRD EXEC OUTCOME. `host_call` was unit/2-arg;
+  now it takes 4 args + `write` memory (fd_write writes nwritten back, so mem must be
+  writable) and returns a `copy struct HostOutcome { value, exit, exit_code }`. The
+  exec call site pushes the host result ONLY when `m.fnresults[callee]==1` (generic:
+  fd_write's errno rides the module's own type signature; the print funcs stay
+  0-result). `proc_exit` is modeled as a THIRD driver outcome, distinct from a normal
+  return (which pops the `saved` activation stack) and a trap (panic): it sets
+  `running=false` + `retval=exit_code` DIRECTLY, unwinding NO activations, so exec's
+  i64 return surfaces the exit code. (2) fd_write is the REAL ABI: read `iovs_len`
+  ciovecs (8 bytes each, LE `buf_ptr`@0 + `buf_len`@4) from linear memory, gather each
+  buffer into `hout`, write the TOTAL back as an i32 LE at `nwritten_ptr`, return errno
+  0; fd 1/2 -> hout (MVP merges stderr into stdout), any other fd -> EBADF (8) with no
+  write; every span bounds-checked -> TRAP on OOB. resolve_host gained module
+  "wasi_snapshot_preview1" (fd_write->3, proc_exit->4) alongside "env". Reuses the M4
+  buffered-hout + boundary-flush + drift-guard verbatim (interp.cnr == run/ copy;
+  run_wasm_file.cnr still contains interp_fns). (3) THE INTERP HAS NO `drop`/`select`
+  opcode (the dispatch else-branch treats an unknown op as a binary numeric and
+  panics) — a test module must consume fd_write's errno with `local.set 0`, not
+  `drop`. (4) TOOLCHAIN HONESTY + the differential: the box has NO clang/rustc-wasm /
+  wat2wasm, so the modules are HAND-ASSEMBLED by the Rust encoder — but with the REAL
+  WASI ABI, so a genuine wasm32-wasi module hitting these imports would run unchanged.
+  `wasmi_wasi` v1.1.0 exists and resolves, but pulls the heavyweight `wasi-common` 36
+  tree (cap-std/wiggle/witx/windows-sys, ~30 transitive crates) — disproportionate for
+  a language prototype, so I used the M4 discipline instead: `func_wrap` fd_write +
+  proc_exit against wasmi's ENGINE over the SAME ABI (proc_exit unwinds via an `Err`
+  carrying the code stashed in `Store` data), asserting captured stdout + exit value
+  equal to Candor's on the SAME module bytes (a true execution differential; only the
+  host funcs are hand-written, not wasi-common's). Gate: interp shims (tw+MIR) + native
+  libc AOT ("hello, wasi\n", exit 0), a 2-iovec gather returning nwritten, proc_exit(7)
+  halting BEFORE a dead `i32.const 999` return (proves distinct-from-return), and a
+  bad-fd EBADF. All M0-M6 + prior tests stay green; clippy clean. (WASM M7, 2026-07-14).
+
 ## Adding a new scalar type (e.g. `f64`) — the full cross-engine checklist + traps
 Adding `f64` (design 0016) touched ~18 files across every layer. The mechanical
 spine: add the `ScalarTy` variant, then let `cargo build` enumerate every
