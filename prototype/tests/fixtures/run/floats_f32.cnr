@@ -1,0 +1,50 @@
+// Single-precision (`f32`) corpus fixture (design 0016). Mirrors `floats.cnr`
+// in `f32`: exercises `f32` `+ - * /`, unary neg, ordered comparison, and
+// int<->`f32` / `f32`<->`f64` `conv` in loops — Newton's-method sqrt and a dot
+// product/average — so every engine (tree-walker, MIR, Cranelift no-opt/opt,
+// LLVM) must agree bit-for-bit on the traced 32-bit patterns. IEEE-754 binary32
+// is deterministic, so the traced bits are identical across all engines.
+// (No NaN here: a computed NaN's sign bit is IEEE-unspecified — see
+// tests/floats_f32.rs, which gates NaN by behaviour instead.)
+
+fn main() -> i64 {
+    // Newton's method for sqrt(2), all in f32.
+    let mut x: f32 = 1.0f32;
+    let two: f32 = 2.0f32;
+    let half: f32 = 0.5f32;
+    let mut i: i64 = 0;
+    while i < 8 {
+        x = half * (x + two / x);
+        i = i + 1;
+    }
+    trace(x);
+
+    // Dot product of [1,2,3] . [4,5,6] = 32.0 in f32.
+    let mut dot: f32 = 0.0f32;
+    let mut a: f32 = 1.0f32;
+    let mut b: f32 = 4.0f32;
+    let mut j: i64 = 0;
+    while j < 3 {
+        dot = dot + a * b;
+        a = a + 1.0f32;
+        b = b + 1.0f32;
+        j = j + 1;
+    }
+    trace(dot);
+
+    // Average via an int->f32 conv of the count: 32.0 / 3.0 in f32.
+    let avg: f32 = dot / conv f32 (j);
+    trace(avg);
+
+    // Widen the f32 average to f64 and trace its 64-bit pattern (exact widening).
+    let avg64: f64 = conv f64 (avg);
+    trace(avg64);
+
+    // Ordered comparison + unary neg drive the sentinel.
+    let neg: f32 = -x;
+    if neg < x {
+        // f32 -> i64 truncation toward zero: floor(sqrt(2)) = 1.
+        return conv i64 (x);
+    }
+    return 0;
+}

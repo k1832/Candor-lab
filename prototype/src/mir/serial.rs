@@ -266,6 +266,7 @@ fn scalar_kw(t: ScalarTy) -> &'static str {
         ScalarTy::Bool => "bool",
         ScalarTy::Unit => "unit",
         ScalarTy::F64 => "f64",
+        ScalarTy::F32 => "f32",
     }
 }
 fn scalar_from(kw: &str) -> Result<ScalarTy, String> {
@@ -283,6 +284,7 @@ fn scalar_from(kw: &str) -> Result<ScalarTy, String> {
         "bool" => ScalarTy::Bool,
         "unit" => ScalarTy::Unit,
         "f64" => ScalarTy::F64,
+        "f32" => ScalarTy::F32,
         other => return Err(format!("unknown scalar type `{other}`")),
     })
 }

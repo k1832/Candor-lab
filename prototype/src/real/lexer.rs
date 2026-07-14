@@ -7,7 +7,7 @@
 
 use crate::diag::Diag;
 use crate::span::Span;
-use crate::token::scalar_from_str;
+use crate::token::{scalar_from_str, ScalarTy};
 
 use super::token::{real_keyword_from_str, RTok, RToken};
 
@@ -284,21 +284,47 @@ impl<'a> RLexer<'a> {
                 return Err(Diag::error("L0008", "float exponent has no digits", Span::new(start, self.pos)));
             }
         }
-        // A trailing identifier is a (rejected) suffix — float literals take none.
+        // The numeric text ends here; an optional `f32` suffix selects single
+        // precision (design 0016). A suffix-less float form stays `f64` (the
+        // default float type); any other suffix is rejected.
+        let num_end = self.pos;
+        let mut float_ty = ScalarTy::F64;
         if let Some(b) = self.peek() {
             if is_ident_start(b) {
-                return Err(Diag::error(
-                    "L0005",
-                    "a float literal takes no type suffix (design 0016)",
-                    Span::new(start, self.pos + 1),
-                ));
+                let suf_start = self.pos;
+                while let Some(c) = self.peek() {
+                    if is_ident_continue(c) {
+                        self.pos += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let suf = std::str::from_utf8(&self.src[suf_start..self.pos]).expect("ascii");
+                if suf == "f32" {
+                    float_ty = ScalarTy::F32;
+                } else {
+                    return Err(Diag::error(
+                        "L0005",
+                        format!("`{suf}` is not a valid float-literal suffix (only `f32`; design 0016)"),
+                        Span::new(suf_start, self.pos),
+                    ));
+                }
             }
         }
-        let text = std::str::from_utf8(&self.src[start..self.pos]).expect("ascii float");
-        let value: f64 = text
-            .parse()
-            .map_err(|_| Diag::error("L0009", "malformed float literal", Span::new(start, self.pos)))?;
-        Ok(RToken { kind: RTok::Float { bits: value.to_bits() }, span: Span::new(start, self.pos) })
+        let text = std::str::from_utf8(&self.src[start..num_end]).expect("ascii float");
+        // Parse at the literal's precision so an over-range magnitude yields the
+        // type's `±inf` (Rust `str::parse` semantics), mirroring the `f64` slice.
+        let bits = match float_ty {
+            ScalarTy::F32 => text
+                .parse::<f32>()
+                .map_err(|_| Diag::error("L0009", "malformed float literal", Span::new(start, num_end)))?
+                .to_bits() as u64,
+            _ => text
+                .parse::<f64>()
+                .map_err(|_| Diag::error("L0009", "malformed float literal", Span::new(start, num_end)))?
+                .to_bits(),
+        };
+        Ok(RToken { kind: RTok::Float { bits, ty: float_ty }, span: Span::new(start, self.pos) })
     }
 
     fn lex_string(&mut self, start: usize, is_bytes: bool) -> Result<RToken, Diag> {

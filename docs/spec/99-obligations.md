@@ -4614,3 +4614,57 @@ corpus. Existing integer arithmetic / regime / conv tests unperturbed (f64 exclu
 `is_integer`, so no int typing/regime path changed). NEXT: f32; `fmt_f64` float FORMATTING (a
 separate slice); WASM float opcodes (now unblocked); math functions (`sqrt`/`sin`/…); the full
 NaN-payload / signaling-NaN edge cases; a flexible float-literal type.
+
+## FLOATS-S2 — `f32` (IEEE-754 binary32) landed end-to-end, bit-identical across ALL FIVE engines (2026-07-14)
+
+CONTEXT. Completes the float family: adds `f32` mirroring the `f64` slice (FLOATS-S1) at single
+precision. Design pinned in `docs/design/0016-floats.md` §9. Everything in §2 (regime-EXEMPT IEEE),
+§4 (NaN/inf), §6 (value repr) carries over unchanged; only the two `f32`-specific decisions are new.
+
+DECISIONS. (1) **Literal grammar — an `f32` *suffix* on a float form.** `f64` stays suffix-free (a
+`.`/exponent literal is `f64`); `f32` is spelled by adding `f32` to a *float-form* literal:
+`1.5f32`, `1.0e-5f32`. The suffix attaches ONLY to a float form — `10f32` (integer form) is a lex
+error (`L0005`), keeping the integer-suffix space integer-only; write `10.0f32`. `f32` is the ONLY
+float suffix; any other (incl. `f64`) on a float form is rejected. Over-range magnitude → `±inf`
+(`str::parse::<f32>`). Still no flexible float-lit type. (2) **Conversions.** No implicit promotion
+between `f32`/`f64`/int (`f32 + f64` rejected exactly like `f64 + i64`). `conv f32 <int>` rounds;
+`conv f64 <f32>` widens EXACTLY (`fpromote`/`fpext`); `conv f32 <f64>` narrows with rounding, may →
+`±inf` (`fdemote`/`fptrunc`); `conv i{N} <f32>` truncates toward zero, SATURATING (NaN→0, clamp;
+Rust `as` = Cranelift `fcvt_to_*int_sat` = LLVM `llvm.fpto*i.sat.iN.f32`); `f32`↔`f32` identity.
+All IEEE, regime-exempt, never fault.
+
+VALUE REPR / HOW f32 IS DISTINGUISHED. An `f32` is carried as its `f32::to_bits()` 32-bit pattern
+**zero-extended** into the shared i128/i64 register slot and **4 bytes** in flat memory;
+`ty_range(f32)` is unsigned-32 so it is never sign-extended. **No new width tag was needed anywhere.**
+The existing `ScalarTy` tag already distinguishes `F32` from `F64` and is carried at every op site
+that needs it — `Operand::Const(_, ScalarTy)` and the `ty: ScalarTy` on MIR `Bin`/`Un`/`Conv` — while
+`Cmp` recovers the width from its operands (both are the same float type, checker-guaranteed).
+`ast::ExprKind::FloatLit` and the real `Float` token gained a `ty: ScalarTy` field so the literal
+width survives to lowering; the Conv wire format is UNCHANGED (source/target from operand/`to`),
+preserving self-host MIR parity.
+
+IMPLEMENTATION. Same layers as FLOATS-S1: real lexer (`f32`-suffix on `finish_float`),
+`token::ScalarTy::F32` + `is_float`, `FloatLit{bits,ty}`, checker (`unify_arith` now requires the
+SAME float type — rejects `f32`+`f64`; Neg/conv/trace over any float; `%` still rejected), both
+interpreters (parametric `float_arith`/`float_cmp`/`float_neg`/`float_conv` over the width), MIR
+`build`/`interp`/`serial`, and both backends (Cranelift `as_float`/`float_bits` via
+`ireduce`+`bitcast F32` / `uextend`, `fpromote`/`fdemote`, `fcvt_*` at F32; LLVM `trunc`+`bitcast float`
+/ `bitcast`+`zext`, `fpext`/`fptrunc`, `sitofp`/`fptosi.sat.*.f32`). `opt` is DCE-only (type-agnostic),
+untouched. f64 and integer paths byte-unchanged.
+
+ONE TRAP. The tree-walker `Eq`/`Ne` branch computes an `equal` bool that the caller flips for `!=`
+(`res = if Eq {equal} else {!equal}`). Routing `float_cmp(op, …)` (which itself returns the `!=`
+result for `Ne`) into `equal` DOUBLE-NEGATES `!=`. Fix: pass `BinOp::Eq` to get equality and let the
+outer flip handle `!=`. Caught because the f64 `!=` oracle regressed (`1.0 != 2.0` → false) — the MIR
+Cmp (which takes `op` directly) was already correct, so the divergence pinpointed the oracle bug.
+
+GATES. `cargo nextest` full: **808 passed / 0 failed** (incl. all f64, integer arithmetic/regime,
+self-host lexer/parser, native aot/stage, and wasm gates); `--profile fast` 678 green; clippy clean.
+New `tests/floats_f32.rs` (19): exact-bits arithmetic/precedence/rounding, ordered comparisons, ±inf
+exact bits, NaN by BEHAVIOUR, int↔f32 conv + saturation + round-trip, `f32`↔`f64` widening (exact) +
+narrowing (precision loss asserted), a Newton-sqrt + dot-product loop, and negative checks
+(`f32`+`f64`, `f32`+int, `f32 %`, `10f32`, `1.5f16` all rejected) — BIT-IDENTICAL across tree-walker /
+MIR / Cranelift no-opt / Cranelift -O2 / LLVM -O2 via `f32::to_bits`. New
+`tests/fixtures/run/floats_f32.cnr` auto-joins the aot/stage native corpus. NEXT: **WASM float
+opcodes** (`f32` + `f64` loads/stores/arith — now that both float types exist); math functions
+(`sqrt`/…); the full NaN-payload / signaling-NaN edge cases; a flexible float-literal type.

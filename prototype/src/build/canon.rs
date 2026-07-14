@@ -422,9 +422,12 @@ impl Printer {
                 self.push(&value.to_string());
                 self.suffix(suffix);
             }
-            ExprKind::FloatLit { bits } => {
+            ExprKind::FloatLit { bits, ty } => {
                 self.push("f");
                 self.push(&bits.to_string());
+                if *ty == crate::token::ScalarTy::F32 {
+                    self.push("f32");
+                }
             }
             ExprKind::StrLit(s) => {
                 self.push("\"");

@@ -952,3 +952,34 @@ once you add the literal node). Key design/impl facts worth reusing:
   0x3e`) and OR-combined tests that literal-only match can't express, and the
   run/ copy must stay byte-identical to the drift-guard source — disproportionate
   risk for no functional gain. (2026-07-14).
+
+- **Adding `f32` to complete the float family (mirror `f64`) needs NO new width
+  tag — the `ScalarTy` enum already distinguishes the two, and it is carried at
+  every op site.** `f32` is 4 bytes / align 4, carried as its `to_bits()` 32-bit
+  pattern ZERO-extended in the same i128/i64 register model (`ty_range(f32)` =
+  unsigned-32, so no path sign-extends it). The register/load-store machinery is
+  fully parametric over `ty_range` + `Layout::scalar_size`, so `f32` "just works"
+  once those two return `(32,false)` / `4`; only the float decode/encode branches
+  (which bit-cast to a native single) plus the literal grammar are genuinely new.
+  `Operand::Const(_, ScalarTy)` and the `ty: ScalarTy` on MIR `Bin`/`Un`/`Conv`
+  already carry the width; `Cmp` recovers it from its operands (both the same float
+  type, checker-guaranteed). Add a `ty: ScalarTy` field to `ast::FloatLit` + the
+  real `Float` token for the literal width; the Conv wire format stays UNCHANGED
+  (recover source/target from operand/`to`) — do NOT add a `from` field, it breaks
+  self-host MIR byte-parity (same trap the f64 slice hit). Literal grammar chosen:
+  an `f32` *suffix* on a FLOAT-form literal (`1.5f32`); `10f32` (integer form) and
+  any non-`f32` suffix are lex errors — keeps the integer-suffix space integer-only.
+  Parametrize the interps with free `float_arith`/`float_cmp`/`float_neg`/
+  `float_conv(bits, from, to)` helpers over the width instead of duplicating the
+  f64 branches. THE TRAP: the tree-walker `Eq`/`Ne` arm computes an `equal` bool the
+  caller flips for `!=` (`res = if Eq {equal} else {!equal}`); feeding
+  `float_cmp(op,…)` (which returns the `!=` result for `Ne`) into `equal`
+  DOUBLE-NEGATES `!=`. Pass `BinOp::Eq` to get equality; the ordered branch
+  (Lt/Le/Gt/Ge, assigned straight to `res`) takes `op` directly and is fine. The
+  MIR Cmp (takes `op` directly) was already correct, so the f64-oracle `!=`
+  regression pinpointed the bug. Backend bit-casts differ by width: Cranelift
+  `ireduce I32`+`bitcast F32` / `bitcast I32`+`uextend`; LLVM `trunc`+`bitcast
+  float` / `bitcast`+`zext`; `fpromote`/`fdemote` (Cranelift) = `fpext`/`fptrunc`
+  (LLVM) for f32↔f64. `mir/opt.rs` is DCE-only (type-agnostic) — nothing to do.
+  New `tests/fixtures/run/floats_f32.cnr` auto-joins the aot/stage native corpus
+  gates for free. Full nextest 808 green, clippy clean. (2026-07-14).

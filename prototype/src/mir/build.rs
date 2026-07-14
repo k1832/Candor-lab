@@ -722,10 +722,10 @@ impl<'a> Lowerer<'a> {
                 let sty = self.int_type(suffix, expected);
                 Ok((Operand::Const(-(*value as i128), sty), Type::Scalar(sty)))
             }
-            ExprKind::FloatLit { bits } => Ok((
-                // The f64 bit pattern is carried (zero-extended) in the const slot.
-                Operand::Const(*bits as i128, ScalarTy::F64),
-                Type::Scalar(ScalarTy::F64),
+            ExprKind::FloatLit { bits, ty } => Ok((
+                // The float bit pattern is carried (zero-extended) in the const slot.
+                Operand::Const(*bits as i128, *ty),
+                Type::Scalar(*ty),
             )),
             ExprKind::BoolLit(b) => Ok((Operand::Const(*b as i128, ScalarTy::Bool), Type::bool())),
             ExprKind::Ident(name) => {
@@ -1980,10 +1980,9 @@ impl<'a> Lowerer<'a> {
             if name == "trace" {
                 // Observe the arg at its own width so an `f64` traces its bit pattern
                 // and a float arithmetic arg is computed with IEEE, not int, ops.
-                let exp = if matches!(self.static_ty(&args[0]), Some(Type::Scalar(ScalarTy::F64))) {
-                    ScalarTy::F64
-                } else {
-                    ScalarTy::I64
+                let exp = match self.static_ty(&args[0]) {
+                    Some(Type::Scalar(s)) if s.is_float() => s,
+                    _ => ScalarTy::I64,
                 };
                 let (v, _) = self.lower_value(&args[0], Some(&Type::Scalar(exp)))?;
                 self.emit(StatementKind::Trace(v), span, true);

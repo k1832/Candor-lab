@@ -157,6 +157,7 @@ pub fn scalar_name(s: ScalarTy) -> &'static str {
         ScalarTy::Bool => "bool",
         ScalarTy::Unit => "unit",
         ScalarTy::F64 => "f64",
+        ScalarTy::F32 => "f32",
     }
 }
 

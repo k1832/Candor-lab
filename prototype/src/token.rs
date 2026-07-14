@@ -26,6 +26,10 @@ pub enum ScalarTy {
     /// IEEE-754 binary64 (design 0016). NOT an integer, so not a valid literal
     /// suffix, and exempt from the arithmetic regime system.
     F64,
+    /// IEEE-754 binary32 (design 0016). Spelled only via a float-form `f32`-suffixed
+    /// literal (`1.5f32`) or `conv f32 (..)`; like `f64`, not an integer and exempt
+    /// from the arithmetic regime system.
+    F32,
 }
 
 impl ScalarTy {
@@ -47,9 +51,9 @@ impl ScalarTy {
         )
     }
 
-    /// Is this the floating-point type (design 0016)?
+    /// Is this a floating-point type (`f32`/`f64`; design 0016)?
     pub fn is_float(self) -> bool {
-        matches!(self, ScalarTy::F64)
+        matches!(self, ScalarTy::F64 | ScalarTy::F32)
     }
 }
 
@@ -177,6 +181,7 @@ pub fn scalar_from_str(s: &str) -> Option<ScalarTy> {
         "u64" => ScalarTy::U64,
         "usize" => ScalarTy::Usize,
         "f64" => ScalarTy::F64,
+        "f32" => ScalarTy::F32,
         "bool" => ScalarTy::Bool,
         "unit" => ScalarTy::Unit,
         _ => return None,

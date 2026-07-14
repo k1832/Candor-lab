@@ -1,15 +1,17 @@
-# 0016 — Floating point (`f64`)
+# 0016 — Floating point (`f64`, `f32`)
 
-Status: accepted (prototype slice). Adds one IEEE-754 binary64 scalar type to
-Candor. This is a design *note*, not a full adversarial-review round: floats are
-standard; only the decisions below need pinning.
+Status: accepted (prototype slice). Adds the IEEE-754 binary64 (`f64`) and
+binary32 (`f32`) scalar types to Candor. This is a design *note*, not a full
+adversarial-review round: floats are standard; only the decisions below need
+pinning. `f64` landed first (§1–§8); `f32` mirrors it (§9).
 
 ## 1. Scope
 
-- **`f64` first.** One new scalar type, `f64` (IEEE-754 binary64). `f32` is
-  deferred to a later slice.
-- Size 8, align 8. `f64` is `copy` and drop-inert (a scalar leaf, exactly like
-  `i64`), and `portable` (owned value data, no borrow/rawptr).
+- **`f64` first, then `f32`.** Two new scalar types, `f64` (IEEE-754 binary64)
+  and `f32` (IEEE-754 binary32). `f64` landed first; `f32` (§9) mirrors it.
+- `f64`: size 8, align 8. `f32`: size 4, align 4. Both are `copy` and drop-inert
+  (a scalar leaf, exactly like `i64`), and `portable` (owned value data, no
+  borrow/rawptr).
 
 ## 2. IEEE semantics — floats are EXEMPT from the arithmetic regime system
 
@@ -84,7 +86,7 @@ engines (tree-walker, MIR interp, Cranelift no-opt/opt, LLVM -O2) produce
 
 ## 7. Deferred (noted, not built)
 
-`f32`; **shortest** round-trip formatting (Ryū/Grisu) and scientific-notation
+**shortest** round-trip formatting (Ryū/Grisu) and scientific-notation
 output (the initial `fmt_f64` slice landed — see §8); transcendental / math
 functions (`sqrt`, `sin`, …); WASM float opcodes (now unblocked); the full
 NaN-payload / signaling-NaN edge cases; a flexible float-literal type.
@@ -117,3 +119,72 @@ shortest round trip (Ryū), which is deferred (§7):
   String-free twin, `tests/fixtures/run/fmt_f64_trace.cnr`, reproduces the same
   algorithm and TRACES the ASCII bytes; the corpus gates prove those bytes are
   byte-identical across all five engines.
+
+
+## 9. `f32` (IEEE-754 binary32) — landed
+
+`f32` mirrors `f64` exactly, at single precision. Everything in §2 (regime-EXEMPT
+IEEE), §4 (NaN/inf), and §6 (value representation) applies unchanged, with 4-byte
+single precision in place of 8-byte double. Only the two decisions where `f32`
+differs from `f64` are pinned here.
+
+### 9.1 Literal grammar — an `f32` *suffix* on a float form
+
+`f64` literals are suffix-free: a suffix-less `.`/exponent literal is always `f64`
+(§3). An `f32` literal is spelled by adding the **`f32` suffix** to a *float-form*
+literal:
+
+- `1.5f32`, `10.0f32`, `1.0e-5f32`, `6.022e23f32` are `f32`.
+- The suffix attaches ONLY to a float form (a `.` with a digit on both sides, or
+  an exponent). An **integer form + `f32` is rejected**: `10f32` is a lex error
+  (the integer-literal suffix space stays integer-only). Write `10.0f32`.
+- `f32` is the only float-literal suffix. Any other suffix on a float form —
+  including `f64` — is rejected (`1.5f64` is a lex error, `L0005`), keeping `f64`
+  the suffix-free default float type.
+- The text before the suffix is parsed at the literal's precision
+  (`str::parse::<f32>`), so an over-range magnitude yields `±inf` (as `f64` does).
+
+Rationale: a suffix is far more usable than forcing every `f32` through
+`conv f32 (..)`, and confining the float suffix to float forms keeps a clean rule
+— *integer* suffixes on integer forms, the *`f32`* suffix on float forms — with no
+ambiguity. There is still no flexible float-literal type: `f32`/`f64` are concrete.
+
+### 9.2 Conversions (`conv`) — scope
+
+No implicit promotion between `f32`, `f64`, and integers (mixed operands are a type
+error; `f32 + f64` is rejected exactly like `f64 + i64`). All crossings are explicit
+`conv`, all IEEE and regime-exempt (never fault):
+
+- **`conv f32 <int>`** (int→f32): rounds to nearest, ties to even.
+- **`conv f64 <f32>`** (widening): **exact** (`fpromote` / `fpext`).
+- **`conv f32 <f64>`** (narrowing): rounds to nearest; may lose precision and may
+  overflow to `±inf` (`fdemote` / `fptrunc`). A value that survives f64→f32→f64
+  therefore differs in bits from the original f64 — asserted in the gate.
+- **`conv i{N} <f32>`** (f32→int): truncates toward zero, **saturating**
+  (NaN→0, out-of-range clamps), identical to Rust `as` / Cranelift
+  `fcvt_to_*int_sat` / LLVM `llvm.fpto*i.sat.iN.f32`.
+- **`conv f32 <f32>`** / **`conv f64 <f64>`** are identity.
+
+### 9.3 Value representation & how `f32` is distinguished from `f64`
+
+An `f32` is carried as its `f32::to_bits()` 32-bit pattern **zero-extended** into
+the same i128/i64 register slot, and **4 bytes** in flat memory. `ty_range(f32)` is
+unsigned-32, so the pattern is never sign-extended (as `f64` is unsigned-64).
+
+No new width tag was needed anywhere. The existing `ScalarTy` tag already
+distinguishes `F32` from `F64`, and it is carried at every op site that needs it —
+`Operand::Const(_, ScalarTy)`, and the `ty: ScalarTy` field on MIR `Bin`/`Un`/`Conv`
+— while `Cmp` recovers the width from its operands' scalar type (both operands are
+the same float type, checker-guaranteed). `ast::ExprKind::FloatLit` / the real
+`Float` token gained a `ty: ScalarTy` field (`F32` or `F64`) so the literal's width
+survives to lowering. The Conv wire format is still UNCHANGED (source and target
+recovered from the operand type / `to` field), preserving self-host MIR parity.
+
+Each float op bit-casts the pattern to a native single (`f32` in the interpreters;
+Cranelift `bitcast` after an `ireduce`/`uextend`; LLVM `trunc`/`bitcast` +
+`bitcast`/`zext`), computes real IEEE `f32` arithmetic, and casts back. Because
+IEEE-754 binary32 is deterministic on the shared x86-64 target, all five engines
+produce **bit-identical** results, asserted via `f32::to_bits` in
+`tests/floats_f32.rs` and the `tests/fixtures/run/floats_f32.cnr` native corpus
+fixture. NaN keeps the §4 caveat: a computed NaN's sign is IEEE-unspecified across
+engines, so NaN is gated by behaviour, not exact bits.

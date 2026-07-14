@@ -481,20 +481,12 @@ impl<'a> Engine<'a> {
             Rvalue::Cmp { op, l, r } => {
                 let a = self.eval_operand(l, mf, frame)?;
                 let b = self.eval_operand(r, mf, frame)?;
-                let is_float = operand_sty(l, mf) == ScalarTy::F64
-                    || operand_sty(r, mf) == ScalarTy::F64;
-                let res = if is_float {
+                let (lsty, rsty) = (operand_sty(l, mf), operand_sty(r, mf));
+                let res = if lsty.is_float() || rsty.is_float() {
                     // IEEE comparison: any NaN operand yields false (except `!=`).
-                    let (fa, fb) = (f64::from_bits(a as u64), f64::from_bits(b as u64));
-                    match op {
-                        BinOp::Eq => fa == fb,
-                        BinOp::Ne => fa != fb,
-                        BinOp::Lt => fa < fb,
-                        BinOp::Le => fa <= fb,
-                        BinOp::Gt => fa > fb,
-                        BinOp::Ge => fa >= fb,
-                        _ => unreachable!("non-comparison in Cmp"),
-                    }
+                    // Both operands share the same float type (checker-guaranteed).
+                    let sty = if lsty.is_float() { lsty } else { rsty };
+                    float_cmp(*op, sty, a as u64, b as u64)
                 } else {
                     match op {
                         BinOp::Eq => a == b,
@@ -512,17 +504,9 @@ impl<'a> Engine<'a> {
                 use BinOp::*;
                 let lv = self.eval_operand(l, mf, frame)?;
                 let rv2 = self.eval_operand(r, mf, frame)?;
-                if *ty == ScalarTy::F64 {
+                if ty.is_float() {
                     // IEEE-754: never faults; regime-exempt (design 0016 §2).
-                    let (fa, fb) = (f64::from_bits(lv as u64), f64::from_bits(rv2 as u64));
-                    let res = match op {
-                        Add => fa + fb,
-                        Sub => fa - fb,
-                        Mul => fa * fb,
-                        Div => fa / fb,
-                        _ => unreachable!("only + - * / reach f64 Bin"),
-                    };
-                    return Ok(res.to_bits() as i128);
+                    return Ok(float_arith(*op, *ty, lv as u64, rv2 as u64) as i128);
                 }
                 let (regime, ty, span, fault) = (*regime, *ty, *span, fault.as_ref());
                 let out = match op {
@@ -565,9 +549,7 @@ impl<'a> Engine<'a> {
                 let x = self.eval_operand(v, mf, frame)?;
                 match op {
                     UnOp::Not => Ok((x == 0) as i128),
-                    UnOp::Neg if *ty == ScalarTy::F64 => {
-                        Ok((-f64::from_bits(x as u64)).to_bits() as i128)
-                    }
+                    UnOp::Neg if ty.is_float() => Ok(float_neg(*ty, x as u64) as i128),
                     UnOp::Neg => fit(-x, *ty, *regime, fault.as_ref()),
                     UnOp::BitNot => Ok(fit_bits(!x, *ty)),
                 }
@@ -575,15 +557,10 @@ impl<'a> Engine<'a> {
             Rvalue::Conv { to, regime, v, fault } => {
                 let from = operand_sty(v, mf);
                 let x = self.eval_operand(v, mf, frame)?;
-                if *to == ScalarTy::F64 || from == ScalarTy::F64 {
-                    // int<->f64 (design 0016 §5): IEEE, regime-exempt, never faults.
-                    if from == ScalarTy::F64 && *to == ScalarTy::F64 {
-                        return Ok(x);
-                    }
-                    if *to == ScalarTy::F64 {
-                        return Ok((x as f64).to_bits() as i128);
-                    }
-                    return Ok(f64_to_int(f64::from_bits(x as u64), *to));
+                if to.is_float() || from.is_float() {
+                    // int<->float / f32<->f64 (design 0016 §5): IEEE, regime-exempt,
+                    // never faults.
+                    return Ok(float_conv(x, from, *to));
                 }
                 convert(x, *to, *regime, fault.as_ref())
             }
@@ -1339,7 +1316,102 @@ fn f64_to_int(f: f64, tsty: ScalarTy) -> i128 {
         ScalarTy::U32 => f as u32 as i128,
         ScalarTy::U64 | ScalarTy::Usize => f as u64 as i128,
         // Non-integer targets never reach here (the checker rejects them).
-        ScalarTy::Bool | ScalarTy::Unit | ScalarTy::F64 => 0,
+        ScalarTy::Bool | ScalarTy::Unit | ScalarTy::F64 | ScalarTy::F32 => 0,
+    }
+}
+
+/// Convert an `f32` to a target integer scalar (design 0016 §5): truncate toward
+/// zero, saturating on out-of-range and mapping NaN to 0 (Rust `as` semantics).
+fn f32_to_int(f: f32, tsty: ScalarTy) -> i128 {
+    match tsty {
+        ScalarTy::I8 => f as i8 as i128,
+        ScalarTy::I16 => f as i16 as i128,
+        ScalarTy::I32 => f as i32 as i128,
+        ScalarTy::I64 | ScalarTy::Isize => f as i64 as i128,
+        ScalarTy::U8 => f as u8 as i128,
+        ScalarTy::U16 => f as u16 as i128,
+        ScalarTy::U32 => f as u32 as i128,
+        ScalarTy::U64 | ScalarTy::Usize => f as u64 as i128,
+        // Non-integer targets never reach here (the checker rejects them).
+        ScalarTy::Bool | ScalarTy::Unit | ScalarTy::F64 | ScalarTy::F32 => 0,
+    }
+}
+
+/// IEEE ordered/`==` comparison, shared by `f32`/`f64` (design 0016 §4).
+fn float_ord_cmp<T: PartialOrd>(op: BinOp, a: T, b: T) -> bool {
+    match op {
+        BinOp::Eq => a == b,
+        BinOp::Ne => a != b,
+        BinOp::Lt => a < b,
+        BinOp::Le => a <= b,
+        BinOp::Gt => a > b,
+        BinOp::Ge => a >= b,
+        _ => unreachable!("non-comparison in a float compare"),
+    }
+}
+
+/// IEEE `+ - * /` over a float scalar's raw bit pattern (design 0016 §2). `l`/`r`
+/// are the operand bit patterns; the result is the pattern (`f32` zero-extended).
+/// Never faults; regime-exempt.
+fn float_arith(op: BinOp, sty: ScalarTy, l: u64, r: u64) -> u64 {
+    use BinOp::*;
+    if sty == ScalarTy::F32 {
+        let (a, b) = (f32::from_bits(l as u32), f32::from_bits(r as u32));
+        let res = match op {
+            Add => a + b,
+            Sub => a - b,
+            Mul => a * b,
+            Div => a / b,
+            _ => unreachable!("only + - * / reach a float Bin"),
+        };
+        res.to_bits() as u64
+    } else {
+        let (a, b) = (f64::from_bits(l), f64::from_bits(r));
+        let res = match op {
+            Add => a + b,
+            Sub => a - b,
+            Mul => a * b,
+            Div => a / b,
+            _ => unreachable!("only + - * / reach a float Bin"),
+        };
+        res.to_bits()
+    }
+}
+
+/// IEEE comparison over a float scalar's raw bits (design 0016 §4): any NaN operand
+/// yields `false`, except `!=` (which is `true`).
+fn float_cmp(op: BinOp, sty: ScalarTy, l: u64, r: u64) -> bool {
+    if sty == ScalarTy::F32 {
+        float_ord_cmp(op, f32::from_bits(l as u32), f32::from_bits(r as u32))
+    } else {
+        float_ord_cmp(op, f64::from_bits(l), f64::from_bits(r))
+    }
+}
+
+/// IEEE negate (sign flip) over a float scalar's raw bits (design 0016).
+fn float_neg(sty: ScalarTy, bits: u64) -> u64 {
+    if sty == ScalarTy::F32 {
+        (-f32::from_bits(bits as u32)).to_bits() as u64
+    } else {
+        (-f64::from_bits(bits)).to_bits()
+    }
+}
+
+/// A numeric `conv` where the source and/or target is a float (design 0016 §5):
+/// int->float rounds; `f64`->`f32` rounds (narrowing, may -> `±inf`); `f32`->`f64`
+/// is exact (widening); float->int truncates toward zero, saturating (NaN -> 0).
+/// `x` is the source's sign-correct register value; the result is the target's.
+fn float_conv(x: i128, from: ScalarTy, to: ScalarTy) -> i128 {
+    use ScalarTy::*;
+    match (from, to) {
+        (F32, F32) | (F64, F64) => x,
+        (F32, F64) => (f32::from_bits(x as u32) as f64).to_bits() as i128,
+        (F64, F32) => (f64::from_bits(x as u64) as f32).to_bits() as i128,
+        (F32, t) => f32_to_int(f32::from_bits(x as u32), t),
+        (F64, t) => f64_to_int(f64::from_bits(x as u64), t),
+        (_, F32) => (x as f32).to_bits() as i128,
+        (_, F64) => (x as f64).to_bits() as i128,
+        _ => unreachable!("float_conv called with no float operand"),
     }
 }
 
@@ -1353,8 +1425,9 @@ fn ty_range(sty: ScalarTy) -> (i128, i128, u32, bool) {
         ScalarTy::U16 => (16, false),
         ScalarTy::U32 => (32, false),
         ScalarTy::U64 | ScalarTy::Usize => (64, false),
-        // `f64` bit pattern: unsigned so it is never sign-extended (design 0016).
+        // A float bit pattern is unsigned so it is never sign-extended (design 0016).
         ScalarTy::F64 => (64, false),
+        ScalarTy::F32 => (32, false),
         _ => (64, true),
     };
     let (min, max) = if signed {

@@ -443,7 +443,7 @@ pub enum ExprKind {
     /// An `f64` floating-point literal (design 0016). Carries the parsed value's
     /// IEEE-754 bit pattern for exact, lossless round-tripping; the literal is
     /// always the concrete type `f64` (a `.` or exponent makes it a float).
-    FloatLit { bits: u64 },
+    FloatLit { bits: u64, ty: crate::token::ScalarTy },
     StrLit(String),
     /// `b"..."` — a byte-string literal (design 0013): denotes a `[u8]` view over
     /// the raw UTF-8 bytes of the source content. The genuinely-binary escape

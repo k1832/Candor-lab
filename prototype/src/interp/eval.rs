@@ -764,9 +764,9 @@ impl<'a> Interp<'a> {
                 self.write_int(a, -(*value as i128), sty)?;
                 Ok(RVal { ty: Type::Scalar(sty), addr: a, origin: Origin::None })
             }
-            ExprKind::FloatLit { bits } => {
-                let a = self.alloc_f64(f64::from_bits(*bits))?;
-                Ok(RVal { ty: Type::Scalar(ScalarTy::F64), addr: a, origin: Origin::None })
+            ExprKind::FloatLit { bits, ty } => {
+                let a = self.alloc_float(*ty, *bits)?;
+                Ok(RVal { ty: Type::Scalar(*ty), addr: a, origin: Origin::None })
             }
             ExprKind::Try(inner) => self.eval_try(inner, e.span),
             ExprKind::BoolLit(b) => {
@@ -967,7 +967,102 @@ fn f64_to_int(f: f64, tsty: ScalarTy) -> i128 {
         ScalarTy::U32 => f as u32 as i128,
         ScalarTy::U64 | ScalarTy::Usize => f as u64 as i128,
         // Non-integer targets never reach here (the checker rejects them).
-        ScalarTy::Bool | ScalarTy::Unit | ScalarTy::F64 => 0,
+        ScalarTy::Bool | ScalarTy::Unit | ScalarTy::F64 | ScalarTy::F32 => 0,
+    }
+}
+
+/// Convert an `f32` to a target integer scalar (design 0016 §5): truncate toward
+/// zero, saturating on out-of-range and mapping NaN to 0 (Rust `as` semantics).
+fn f32_to_int(f: f32, tsty: ScalarTy) -> i128 {
+    match tsty {
+        ScalarTy::I8 => f as i8 as i128,
+        ScalarTy::I16 => f as i16 as i128,
+        ScalarTy::I32 => f as i32 as i128,
+        ScalarTy::I64 | ScalarTy::Isize => f as i64 as i128,
+        ScalarTy::U8 => f as u8 as i128,
+        ScalarTy::U16 => f as u16 as i128,
+        ScalarTy::U32 => f as u32 as i128,
+        ScalarTy::U64 | ScalarTy::Usize => f as u64 as i128,
+        // Non-integer targets never reach here (the checker rejects them).
+        ScalarTy::Bool | ScalarTy::Unit | ScalarTy::F64 | ScalarTy::F32 => 0,
+    }
+}
+
+/// IEEE ordered/`==` comparison, shared by `f32`/`f64` (design 0016 §4).
+fn float_ord_cmp<T: PartialOrd>(op: BinOp, a: T, b: T) -> bool {
+    match op {
+        BinOp::Eq => a == b,
+        BinOp::Ne => a != b,
+        BinOp::Lt => a < b,
+        BinOp::Le => a <= b,
+        BinOp::Gt => a > b,
+        BinOp::Ge => a >= b,
+        _ => unreachable!("non-comparison in a float compare"),
+    }
+}
+
+/// IEEE `+ - * /` over a float scalar's raw bit pattern (design 0016 §2). `l`/`r`
+/// are the operand bit patterns; the result is the pattern (`f32` zero-extended).
+/// Never faults; regime-exempt.
+fn float_arith(op: BinOp, sty: ScalarTy, l: u64, r: u64) -> u64 {
+    use BinOp::*;
+    if sty == ScalarTy::F32 {
+        let (a, b) = (f32::from_bits(l as u32), f32::from_bits(r as u32));
+        let res = match op {
+            Add => a + b,
+            Sub => a - b,
+            Mul => a * b,
+            Div => a / b,
+            _ => unreachable!("only + - * / reach a float Bin"),
+        };
+        res.to_bits() as u64
+    } else {
+        let (a, b) = (f64::from_bits(l), f64::from_bits(r));
+        let res = match op {
+            Add => a + b,
+            Sub => a - b,
+            Mul => a * b,
+            Div => a / b,
+            _ => unreachable!("only + - * / reach a float Bin"),
+        };
+        res.to_bits()
+    }
+}
+
+/// IEEE comparison over a float scalar's raw bits (design 0016 §4): any NaN operand
+/// yields `false`, except `!=` (which is `true`).
+fn float_cmp(op: BinOp, sty: ScalarTy, l: u64, r: u64) -> bool {
+    if sty == ScalarTy::F32 {
+        float_ord_cmp(op, f32::from_bits(l as u32), f32::from_bits(r as u32))
+    } else {
+        float_ord_cmp(op, f64::from_bits(l), f64::from_bits(r))
+    }
+}
+
+/// IEEE negate (sign flip) over a float scalar's raw bits (design 0016).
+fn float_neg(sty: ScalarTy, bits: u64) -> u64 {
+    if sty == ScalarTy::F32 {
+        (-f32::from_bits(bits as u32)).to_bits() as u64
+    } else {
+        (-f64::from_bits(bits)).to_bits()
+    }
+}
+
+/// A numeric `conv` where the source and/or target is a float (design 0016 §5):
+/// int->float rounds; `f64`->`f32` rounds (narrowing, may -> `±inf`); `f32`->`f64`
+/// is exact (widening); float->int truncates toward zero, saturating (NaN -> 0).
+/// `x` is the source's sign-correct register value; the result is the target's.
+fn float_conv(x: i128, from: ScalarTy, to: ScalarTy) -> i128 {
+    use ScalarTy::*;
+    match (from, to) {
+        (F32, F32) | (F64, F64) => x,
+        (F32, F64) => (f32::from_bits(x as u32) as f64).to_bits() as i128,
+        (F64, F32) => (f64::from_bits(x as u64) as f32).to_bits() as i128,
+        (F32, t) => f32_to_int(f32::from_bits(x as u32), t),
+        (F64, t) => f64_to_int(f64::from_bits(x as u64), t),
+        (_, F32) => (x as f32).to_bits() as i128,
+        (_, F64) => (x as f64).to_bits() as i128,
+        _ => unreachable!("float_conv called with no float operand"),
     }
 }
 
@@ -981,9 +1076,10 @@ fn ty_range(sty: ScalarTy) -> (i128, i128, u32, bool) {
         ScalarTy::U16 => (16, false),
         ScalarTy::U32 => (32, false),
         ScalarTy::U64 | ScalarTy::Usize => (64, false),
-        // `f64` is carried as its 64-bit pattern; treat as unsigned so no path
+        // A float is carried as its bit pattern; treat as unsigned so no path
         // sign-extends it (design 0016 §6).
         ScalarTy::F64 => (64, false),
+        ScalarTy::F32 => (32, false),
         _ => (64, true),
     };
     let (min, max) = if signed {
@@ -1002,17 +1098,18 @@ impl<'a> Interp<'a> {
         }
     }
 
-    /// Read an `f64` value out of a place (its 64-bit pattern lives in 8 bytes).
-    fn read_f64(&mut self, addr: u64) -> R<f64> {
-        Ok(f64::from_bits(self.read_int(addr, ScalarTy::F64)? as u64))
+    /// Read a float scalar's raw bit pattern from a place (`f32`: 4 bytes; `f64`:
+    /// 8 bytes), zero-extended into a `u64` — the value the `float_*` helpers take.
+    fn read_float_bits(&mut self, addr: u64, sty: ScalarTy) -> R<u64> {
+        Ok(self.read_int(addr, sty)? as u64)
     }
-    /// Write an `f64` value (its 64-bit pattern) into a freshly-allocated slot.
-    fn alloc_f64(&mut self, v: f64) -> R<u64> {
-        let a = self.mem.stack_alloc(8, 8);
-        self.write_int(a, v.to_bits() as i128, ScalarTy::F64)?;
+    /// Allocate a float scalar slot and write `bits` (its IEEE pattern) into it.
+    fn alloc_float(&mut self, sty: ScalarTy, bits: u64) -> R<u64> {
+        let size = Layout::scalar_size(sty).max(1);
+        let a = self.mem.stack_alloc(size, size);
+        self.write_int(a, bits as i128, sty)?;
         Ok(a)
     }
-
     fn read_int(&mut self, addr: u64, sty: ScalarTy) -> R<i128> {
         let size = Layout::scalar_size(sty).max(1);
         let raw = self.mem.read_uint(addr, size, true).map_err(|_| self.fault(FaultKind::BadPointer, "read"))?;
@@ -1072,11 +1169,11 @@ impl<'a> Interp<'a> {
             UnOp::Neg => {
                 let v = self.eval_value(expr, expected)?;
                 let sty = self.concretize(&v.ty);
-                if sty == ScalarTy::F64 {
+                if sty.is_float() {
                     // IEEE negate (flips the sign bit); never faults (design 0016).
-                    let neg = -self.read_f64(v.addr)?;
-                    let a = self.alloc_f64(neg)?;
-                    return Ok(RVal { ty: Type::Scalar(ScalarTy::F64), addr: a, origin: Origin::None });
+                    let bits = self.read_float_bits(v.addr, sty)?;
+                    let a = self.alloc_float(sty, float_neg(sty, bits))?;
+                    return Ok(RVal { ty: Type::Scalar(sty), addr: a, origin: Origin::None });
                 }
                 let x = self.read_int(v.addr, sty)?;
                 let r = self.fit(-x, sty)?;
@@ -1151,9 +1248,11 @@ impl<'a> Interp<'a> {
                 let l = self.eval_value(lhs, None)?;
                 let ot = self.concretize(&l.ty);
                 let r = self.eval_value(rhs, Some(&Type::Scalar(ot)))?;
-                let equal = if ot == ScalarTy::F64 {
+                let equal = if ot.is_float() {
                     // IEEE `==`: any NaN operand compares unequal (NaN == NaN is false).
-                    self.read_f64(l.addr)? == self.read_f64(r.addr)?
+                    // `equal` is the equality outcome; the outer `res` applies `!` for `!=`.
+                    let (lb, rb) = (self.read_float_bits(l.addr, ot)?, self.read_float_bits(r.addr, ot)?);
+                    float_cmp(BinOp::Eq, ot, lb, rb)
                 } else if ot == ScalarTy::Bool || l.ty.is_integer() {
                     self.read_int(l.addr, ot)? == self.read_int(r.addr, ot)?
                 } else {
@@ -1169,15 +1268,10 @@ impl<'a> Interp<'a> {
                 let l = self.eval_value(lhs, None)?;
                 let ot = self.concretize(&l.ty);
                 let r = self.eval_value(rhs, Some(&Type::Scalar(ot)))?;
-                let res = if ot == ScalarTy::F64 {
+                let res = if ot.is_float() {
                     // IEEE ordered comparison: any NaN operand yields false.
-                    let (lv, rv) = (self.read_f64(l.addr)?, self.read_f64(r.addr)?);
-                    match op {
-                        Lt => lv < rv,
-                        Le => lv <= rv,
-                        Gt => lv > rv,
-                        _ => lv >= rv,
-                    }
+                    let (lb, rb) = (self.read_float_bits(l.addr, ot)?, self.read_float_bits(r.addr, ot)?);
+                    float_cmp(op, ot, lb, rb)
                 } else {
                     let lv = self.read_int(l.addr, ot)?;
                     let rv = self.read_int(r.addr, ot)?;
@@ -1200,21 +1294,14 @@ impl<'a> Interp<'a> {
                     Some(Type::Scalar(s)) => *s,
                     _ => self.concretize(&l.ty),
                 };
-                if sty == ScalarTy::F64 {
+                if sty.is_float() {
                     // IEEE-754 arithmetic: never faults; exempt from the regime
                     // system (design 0016 §2). `%` never reaches here (checker).
-                    let r = self.eval_value(rhs, Some(&Type::Scalar(ScalarTy::F64)))?;
-                    let lv = self.read_f64(l.addr)?;
-                    let rv = self.read_f64(r.addr)?;
-                    let res = match op {
-                        Add => lv + rv,
-                        Sub => lv - rv,
-                        Mul => lv * rv,
-                        Div => lv / rv,
-                        _ => unreachable!("`%` on f64 is rejected by the checker"),
-                    };
-                    let a = self.alloc_f64(res)?;
-                    return Ok(RVal { ty: Type::Scalar(ScalarTy::F64), addr: a, origin: Origin::None });
+                    let r = self.eval_value(rhs, Some(&Type::Scalar(sty)))?;
+                    let lb = self.read_float_bits(l.addr, sty)?;
+                    let rb = self.read_float_bits(r.addr, sty)?;
+                    let a = self.alloc_float(sty, float_arith(op, sty, lb, rb))?;
+                    return Ok(RVal { ty: Type::Scalar(sty), addr: a, origin: Origin::None });
                 }
                 let r = self.eval_value(rhs, Some(&Type::Scalar(sty)))?;
                 let lv = self.read_int(l.addr, sty)?;
@@ -1309,23 +1396,12 @@ impl<'a> Interp<'a> {
             Type::Scalar(s) => s,
             _ => ScalarTy::I64,
         };
-        // Numeric conversions involving `f64` are IEEE and regime-exempt
-        // (design 0016 §5): int->f64 rounds; f64->int truncates toward zero,
-        // saturating out-of-range and mapping NaN to 0 (Rust `as` semantics).
-        if tsty == ScalarTy::F64 || ssty == ScalarTy::F64 {
-            if ssty == ScalarTy::F64 && tsty == ScalarTy::F64 {
-                let same = self.read_f64(src.addr)?;
-                let a = self.alloc_f64(same)?;
-                return Ok(RVal { ty: Type::Scalar(ScalarTy::F64), addr: a, origin: Origin::None });
-            }
-            if tsty == ScalarTy::F64 {
-                let f = self.read_int(src.addr, ssty)? as f64;
-                let a = self.alloc_f64(f)?;
-                return Ok(RVal { ty: Type::Scalar(ScalarTy::F64), addr: a, origin: Origin::None });
-            }
-            // f64 -> integer.
-            let f = self.read_f64(src.addr)?;
-            let out = f64_to_int(f, tsty);
+        // Numeric conversions involving a float are IEEE and regime-exempt
+        // (design 0016 §5): int->float rounds; f64->f32 rounds (narrowing);
+        // f32->f64 is exact; float->int truncates toward zero, saturating (NaN->0).
+        if tsty.is_float() || ssty.is_float() {
+            let x = self.read_int(src.addr, ssty)?;
+            let out = float_conv(x, ssty, tsty);
             let a = self.mem.stack_alloc(Layout::scalar_size(tsty).max(1), Layout::scalar_size(tsty).max(1));
             self.write_int(a, out, tsty)?;
             return Ok(RVal { ty: Type::Scalar(tsty), addr: a, origin: Origin::None });
@@ -2079,10 +2155,9 @@ impl<'a> Interp<'a> {
             "trace" => {
                 // Observe the arg at its own width: an `f64` traces its bit pattern,
                 // and a float arithmetic arg is computed with IEEE ops (design 0016).
-                let sty = if matches!(self.eval_ty_probe(&args[0]), Some(Type::Scalar(ScalarTy::F64))) {
-                    ScalarTy::F64
-                } else {
-                    ScalarTy::I64
+                let sty = match self.eval_ty_probe(&args[0]) {
+                    Some(Type::Scalar(s)) if s.is_float() => s,
+                    _ => ScalarTy::I64,
                 };
                 let v = self.eval_value(&args[0], Some(&Type::Scalar(sty)))?;
                 let n = self.read_int(v.addr, sty)?;

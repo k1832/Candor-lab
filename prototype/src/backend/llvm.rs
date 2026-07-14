@@ -96,8 +96,9 @@ fn ty_range(sty: ScalarTy) -> (i128, i128, u32, bool) {
         ScalarTy::U16 => (16, false),
         ScalarTy::U32 => (32, false),
         ScalarTy::U64 | ScalarTy::Usize => (64, false),
-        // `f64` bit pattern: unsigned so it is never sign-extended (design 0016).
+        // A float bit pattern is unsigned so it is never sign-extended (design 0016).
         ScalarTy::F64 => (64, false),
+        ScalarTy::F32 => (32, false),
         _ => (64, true),
     };
     let (min, max) = if signed {
@@ -563,6 +564,36 @@ impl<'a> FnEmit<'a> {
         self.line(&format!("{b} = bitcast double {d} to i64"));
         b
     }
+    /// The LLVM scalar type of a float scalar (`float` for `f32`, `double` for f64).
+    fn float_llty(sty: ScalarTy) -> &'static str {
+        if sty == ScalarTy::F32 { "float" } else { "double" }
+    }
+    /// Reinterpret an i64 register as a native float of width `sty` (design 0016).
+    /// For `f32` the 32-bit pattern lives in the register's low half.
+    fn as_float(&mut self, sty: ScalarTy, bits: &str) -> String {
+        if sty == ScalarTy::F32 {
+            let w = self.t();
+            self.line(&format!("{w} = trunc i64 {bits} to i32"));
+            let f = self.t();
+            self.line(&format!("{f} = bitcast i32 {w} to float"));
+            f
+        } else {
+            self.as_f64(bits)
+        }
+    }
+    /// Reinterpret a native float of width `sty` back to its (zero-extended) i64
+    /// bit-pattern register value (design 0016).
+    fn float_bits(&mut self, sty: ScalarTy, f: &str) -> String {
+        if sty == ScalarTy::F32 {
+            let w = self.t();
+            self.line(&format!("{w} = bitcast float {f} to i32"));
+            let z = self.t();
+            self.line(&format!("{z} = zext i32 {w} to i64"));
+            z
+        } else {
+            self.f64_bits(f)
+        }
+    }
 
     /// Byte-copy `len` bytes src -> dst within the flat model (mirrors lower::call_copy).
     fn rt_copy(&mut self, dst: &str, src: &str, len: u64) {
@@ -829,11 +860,14 @@ impl<'a> FnEmit<'a> {
                 let rsty = self.operand_sty(r);
                 let lv = self.operand(l);
                 let rv = self.operand(r);
-                if lsty == ScalarTy::F64 || rsty == ScalarTy::F64 {
+                if lsty.is_float() || rsty.is_float() {
                     // IEEE compare: ordered predicates (`oeq`/`olt`/…) are false on a
                     // NaN operand; `une` (unordered-or-not-equal) makes NaN != NaN true.
-                    let fa = self.as_f64(&lv);
-                    let fb = self.as_f64(&rv);
+                    // Both operands share the same float type (checker-guaranteed).
+                    let sty = if lsty.is_float() { lsty } else { rsty };
+                    let ll = Self::float_llty(sty);
+                    let fa = self.as_float(sty, &lv);
+                    let fb = self.as_float(sty, &rv);
                     let cc = match op {
                         BinOp::Eq => "oeq",
                         BinOp::Ne => "une",
@@ -844,7 +878,7 @@ impl<'a> FnEmit<'a> {
                         _ => return Err(format!("non-comparison {op:?} in Cmp")),
                     };
                     let c = self.t();
-                    self.line(&format!("{c} = fcmp {cc} double {fa}, {fb}"));
+                    self.line(&format!("{c} = fcmp {cc} {ll} {fa}, {fb}"));
                     let r = self.t();
                     self.line(&format!("{r} = zext i1 {c} to i64"));
                     return Ok(r);
@@ -884,11 +918,12 @@ impl<'a> FnEmit<'a> {
                         self.line(&format!("{n} = xor i64 {x}, -1"));
                         Ok(self.canon(&n, *ty))
                     }
-                    UnOp::Neg if *ty == ScalarTy::F64 => {
-                        let f = self.as_f64(&x);
+                    UnOp::Neg if ty.is_float() => {
+                        let ll = Self::float_llty(*ty);
+                        let f = self.as_float(*ty, &x);
                         let n = self.t();
-                        self.line(&format!("{n} = fneg double {f}"));
-                        Ok(self.f64_bits(&n))
+                        self.line(&format!("{n} = fneg {ll} {f}"));
+                        Ok(self.float_bits(*ty, &n))
                     }
                     UnOp::Neg => {
                         let x128 = self.ext128(&x, *ty);
@@ -901,7 +936,7 @@ impl<'a> FnEmit<'a> {
             Rvalue::Conv { to, regime, v, fault } => {
                 let sty = self.operand_sty(v);
                 let x = self.operand(v);
-                if *to == ScalarTy::F64 || sty == ScalarTy::F64 {
+                if to.is_float() || sty.is_float() {
                     return self.eval_float_conv(sty, *to, &x);
                 }
                 let x128 = self.ext128(&x, sty);
@@ -967,27 +1002,43 @@ impl<'a> FnEmit<'a> {
         }
     }
 
-    /// int<->f64 conversion (design 0016 §5). int->f64: `sitofp`/`uitofp` (rounds).
-    /// f64->int: `llvm.fpto{s,u}i.sat` to the target width (truncate toward zero,
-    /// saturating; NaN->0), then extend to the canonical i64.
+    /// A numeric `conv` where the source and/or target is a float (design 0016 §5).
+    /// int->float: `sitofp`/`uitofp` (rounds). `f32`->`f64`: `fpext` (exact);
+    /// `f64`->`f32`: `fptrunc` (rounds). float->int: `llvm.fpto{s,u}i.sat` to the
+    /// target width (truncate toward zero, saturating; NaN->0), then extend to i64.
     fn eval_float_conv(&mut self, from: ScalarTy, to: ScalarTy, x: &str) -> Result<String, String> {
-        if from == ScalarTy::F64 && to == ScalarTy::F64 {
-            return Ok(x.to_string());
+        // float -> float (widen/narrow), or a same-width identity.
+        if from.is_float() && to.is_float() {
+            if from == to {
+                return Ok(x.to_string());
+            }
+            let f = self.as_float(from, x);
+            let g = self.t();
+            if to == ScalarTy::F64 {
+                self.line(&format!("{g} = fpext float {f} to double"));
+            } else {
+                self.line(&format!("{g} = fptrunc double {f} to float"));
+            }
+            return Ok(self.float_bits(to, &g));
         }
-        if to == ScalarTy::F64 {
+        // int -> float.
+        if to.is_float() {
+            let ll = Self::float_llty(to);
             let (_, _, _, signed) = ty_range(from);
             let opn = if signed { "sitofp" } else { "uitofp" };
             let d = self.t();
-            self.line(&format!("{d} = {opn} i64 {x} to double"));
-            return Ok(self.f64_bits(&d));
+            self.line(&format!("{d} = {opn} i64 {x} to {ll}"));
+            return Ok(self.float_bits(to, &d));
         }
-        // f64 -> int.
+        // float -> int.
+        let ll = Self::float_llty(from);
+        let suf = if from == ScalarTy::F32 { "f32" } else { "f64" };
         let (_, _, bits, signed) = ty_range(to);
-        let f = self.as_f64(x);
+        let f = self.as_float(from, x);
         let intr = if signed { "fptosi" } else { "fptoui" };
         let narrow = self.t();
         self.line(&format!(
-            "{narrow} = call i{bits} @llvm.{intr}.sat.i{bits}.f64(double {f})"
+            "{narrow} = call i{bits} @llvm.{intr}.sat.i{bits}.{suf}({ll} {f})"
         ));
         if bits >= 64 {
             Ok(narrow)
@@ -1013,20 +1064,21 @@ impl<'a> FnEmit<'a> {
         use BinOp::*;
         let lv = self.operand(l);
         let rv = self.operand(r);
-        if ty == ScalarTy::F64 {
+        if ty.is_float() {
             // IEEE-754 arithmetic: bit-cast, native op, bit-cast back. Never faults.
-            let fa = self.as_f64(&lv);
-            let fb = self.as_f64(&rv);
+            let ll = Self::float_llty(ty);
+            let fa = self.as_float(ty, &lv);
+            let fb = self.as_float(ty, &rv);
             let opn = match op {
                 Add => "fadd",
                 Sub => "fsub",
                 Mul => "fmul",
                 Div => "fdiv",
-                _ => return Err(format!("only + - * / reach f64 Bin, got {op:?}")),
+                _ => return Err(format!("only + - * / reach a float Bin, got {op:?}")),
             };
             let r = self.t();
-            self.line(&format!("{r} = {opn} double {fa}, {fb}"));
-            return Ok(self.f64_bits(&r));
+            self.line(&format!("{r} = {opn} {ll} {fa}, {fb}"));
+            return Ok(self.float_bits(ty, &r));
         }
         let (min, max, bits, signed) = ty_range(ty);
         match op {

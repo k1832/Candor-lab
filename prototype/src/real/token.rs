@@ -68,8 +68,9 @@ pub enum RKw {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RTok {
     Int { value: u64, suffix: Option<ScalarTy> },
-    /// An `f64` literal, carrying its IEEE-754 bit pattern (design 0016).
-    Float { bits: u64 },
+    /// A float literal, carrying its IEEE-754 bit pattern and float type
+    /// (`f64` by default, or `f32` for an `f32`-suffixed float form; design 0016).
+    Float { bits: u64, ty: crate::token::ScalarTy },
     Str(String),
     Bytes(String),
     Ident(String),

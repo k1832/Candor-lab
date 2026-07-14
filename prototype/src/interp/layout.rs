@@ -27,7 +27,7 @@ impl<'a> Layout<'a> {
             ScalarTy::Unit => 0,
             ScalarTy::Bool | ScalarTy::I8 | ScalarTy::U8 => 1,
             ScalarTy::I16 | ScalarTy::U16 => 2,
-            ScalarTy::I32 | ScalarTy::U32 => 4,
+            ScalarTy::I32 | ScalarTy::U32 | ScalarTy::F32 => 4,
             ScalarTy::I64
             | ScalarTy::U64
             | ScalarTy::Isize

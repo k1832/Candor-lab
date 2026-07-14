@@ -1497,9 +1497,9 @@ impl RParser {
                 self.bump();
                 ExprKind::IntLit { value, suffix }
             }
-            RTok::Float { bits } => {
+            RTok::Float { bits, ty } => {
                 self.bump();
-                ExprKind::FloatLit { bits }
+                ExprKind::FloatLit { bits, ty }
             }
             RTok::Str(s) => {
                 self.bump();
