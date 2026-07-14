@@ -4734,3 +4734,66 @@ tree-walker / MIR / Cranelift no-opt / Cranelift -O2 / LLVM -O2. New
 value-conversion semantics UNCHANGED. NEXT: **WASM float opcodes** (now unblocked — the
 interp can reinterpret its i64-held stack bits as f32/f64); math functions
 (`sqrt`/…); the full NaN-payload / signaling-NaN edge cases; a flexible float-lit type.
+
+
+## WASM-FLOAT — the WebAssembly float ISA landed in the Candor-written interpreter, gated == wasmi + bit-exact across the Candor engines (2026-07-14)
+
+CONTEXT. The M0-M4 WASM interpreter (`prototype/tests/fixtures/wasm/interp.cnr`,
+written IN Candor: LEB128 byte cursor, id-dispatched section walk, non-recursive
+`exec` over a `[256]i64` operand stack + `[256]Act` activation stack, integer ISA /
+structured control / linear memory / host imports) carried only integers. FLOATS-S1/
+S2/S3 gave Candor `f64`/`f32` + `bitcast`; this slice implements the WASM MVP float
+opcodes on top. Floats RIDE THE i64 OPERAND STACK as their IEEE bit pattern (f64 as
+its 64-bit `to_bits`, f32 zero-extended into the low word, mirroring `f32.load`/
+`f32.const`); each op reinterprets the slot with `bitcast` AT THE BOUNDARY, does real
+IEEE math with Candor `f32`/`f64` ops, and `bitcast`s the result back. The Candor
+COMPILER is untouched — this is pure interpreter (Candor) + harness (Rust) work.
+
+SCOPE (implemented). const (f32/f64, raw LE bytes); load/store (f32.load 0x2a /
+f64.load 0x2b / f32.store 0x38 / f64.store 0x39, little-endian bytes <-> the bit slot,
+bounds-trapped via the M2 memory path); arithmetic add/sub/mul/div (both widths);
+abs/neg (sign-bit ops on the slot — exact for -0/NaN); copysign (bit splice); min/max
+(WASM rules: NaN in -> NaN out; min(-0,+0)=-0, max=+0 via OR/AND of the sign-carrying
+patterns); ceil/floor/trunc/nearest (ALL FOUR bit-exact, no intrinsic: trunc via an
+in-range int round-trip + sign restore; nearest via the add/sub-2^52 magic under the
+IEEE round-nearest-even default; ceil/floor off trunc ± 1); comparisons eq/ne/lt/gt/le/
+ge (push i32 0/1, IEEE); conversions — trapping trunc i32/i64.trunc_f32/f64_s/u,
+convert i32/i64_s/u -> f32/f64, f32.demote_f64 / f64.promote_f32, and the four
+reinterpret ops (a same-slot width re-canonicalization). Type/blocktype decode already
+accepted f32(0x7d)/f64(0x7c) valtypes (they are counted, not validated; blocktype
+`>= 0x7c` yields arity 1), and `skip_immediates` learned f32.const=4 / f64.const=8 raw
+immediate bytes so the control-flow forward scans don't misread a float const.
+
+KEY SEMANTICS. (1) **trunc TRAPS vs Candor's SATURATING conv.** WASM MVP
+`i{N}.trunc_f*_s/u` TRAP on NaN or out-of-range; Candor's `conv i{N} <float>` SATURATES
+(0016 §5). So the interp RANGE-CHECKS in the float domain against the exact
+representable bounds (e.g. f64->i32_s traps iff `x >= 2^31 || x <= -(2^31+1)`; f32->i32_s
+iff `x >= 2^31 || x < -2^31`, since f32 has no representable value between -2^31 and
+-2^31-1) THEN uses `conv` (in range -> exact truncation), rather than trusting `conv`'s
+saturation. (2) **NaN sign is unspecified** for arithmetic-generated NaNs (0016 §4/§9.3,
+and WASM's canonical arithmetic NaN): the gate compares NaN results by IS-NAN, non-NaN
+by EXACT bits.
+
+DEFERRED (next chain links, reported precisely). **`f32.sqrt` (0x91) / `f64.sqrt`
+(0x9f)** — correctly-rounded IEEE sqrt needs a Candor `sqrt` INTRINSIC; a Newton
+iteration is not bit-identical to hardware sqrt, so the interp TRAPS on these rather
+than shipping a wrong answer (do NOT ship a non-bit-exact float op). **trunc_sat**
+(the saturating `0xFC`-prefixed truncations) — a later opcode set, not implemented. No
+rounding op was deferred: all of ceil/floor/trunc/nearest are bit-exact here.
+
+GATES. Extended `prototype/tests/wasm.rs` with a wasmi (1.1.0) differential over float
+modules: each module runs through the Candor interp AND wasmi with results asserted
+equal — non-NaN float results BIT-EXACT (`to_bits`), NaN results by IS-NAN, and the
+trapping trunc conversions trap in BOTH. Coverage: f32/f64 arithmetic, min/max (incl.
+NaN and -0/+0), abs/neg/copysign, all four rounding ops, comparisons, int<->float
+conversions, promote/demote, reinterpret, f32/f64 load/store round-trip, the trunc
+TRAP (out-of-range/NaN), and a mixed int+float module (compute f64 -> trunc to i32 ->
+combine). The large matrices run on the tree-walker oracle (like the M3 corpus); a
+`float_cross_engine_agreement` test asserts the interpreter is BYTE-IDENTICAL across
+all four Candor engines (tree-walker / MIR / Cranelift no-opt / -O2) over a
+representative float set — non-NaN bit-exact, NaN by is-nan. `tests/fixtures/run/
+wasm_interp.cnr` stays byte-identical to the canonical `interp.cnr` (drift guard), and
+`run_wasm_file.cnr` regenerated to embed the updated interp. `cargo nextest run` (full)
++ `--profile fast` green; clippy clean. NEXT: a Candor `sqrt` (and broader math)
+INTRINSIC to unblock `f*.sqrt`; then trunc_sat; the full NaN-payload / signaling-NaN
+edges.

@@ -249,6 +249,12 @@ fn skip_immediates(bytes: [u8], r: write Reader, op: u8) -> unit {
         let x: u32 = read_u32(bytes, r);
     } else if op == 0x41u8 || op == 0x42u8 {
         let v: i64 = read_i64(bytes, r);
+    } else if op == 0x43u8 {
+        let mut c: usize = 0usize;
+        while c < 4usize { let b: u8 = read_byte(bytes, r); c = c + 1usize; }
+    } else if op == 0x44u8 {
+        let mut c: usize = 0usize;
+        while c < 8usize { let b: u8 = read_byte(bytes, r); c = c + 1usize; }
     } else if op >= 0x28u8 && op <= 0x3eu8 {
         let algn: u32 = read_u32(bytes, r);
         let offs: u32 = read_u32(bytes, r);
@@ -914,6 +920,253 @@ fn eval_binop(op: u8, a: i64, b: i64) -> i64 {
     return res;
 }
 
+// ---- floating point (WASM float ISA) ----------------------------------------
+//
+// Floats ride the i64 operand stack as their IEEE BIT PATTERN: an f64 as its
+// 64-bit `to_bits()`, an f32 as its 32-bit pattern zero-extended into the low
+// word (mirroring `f32.load`/`f32.const`, which read zero-extended). Every float
+// op reinterprets the slot with `bitcast` at the stack boundary, does the actual
+// math with Candor's IEEE `f32`/`f64` ops, and `bitcast`s the result back — so
+// the arithmetic is real IEEE-754, deterministic across every engine. Bit ops on
+// the slot handle abs/neg/copysign exactly (sign-bit only, so -0/NaN are exact).
+
+// copysign: the magnitude of `mag` with the sign of `sgn` (a pure bit splice).
+fn copysign64(mag: f64, sgn: f64) -> f64 {
+    let mut smask: i64 = 0i64;
+    wrapping { smask = 1i64 << 63i64; }
+    let mb: i64 = bitcast i64 (mag) & 0x7fffffffffffffffi64;
+    let sb: i64 = bitcast i64 (sgn) & smask;
+    return bitcast f64 (mb | sb);
+}
+fn copysign32(mag: f32, sgn: f32) -> f32 {
+    let mb: i64 = conv i64 (bitcast u32 (mag)) & 0x7fffffffi64;
+    let sb: i64 = conv i64 (bitcast u32 (sgn)) & 0x80000000i64;
+    return bitcast f32 (conv u32 (mb | sb));
+}
+
+// Round-toward-zero. Below 2^52 (f64) / 2^23 (f32) a value may have a fractional
+// part, dropped exactly by an int round-trip (in range, so `conv` is exact and
+// never saturates); the sign is restored so trunc(-0.5) is -0. At/above that
+// magnitude the value is already integral (and NaN/inf fall through unchanged).
+fn ftrunc64(x: f64) -> f64 {
+    let lim: f64 = 4503599627370496.0;
+    if x < lim && x > (0.0 - lim) {
+        return copysign64(conv f64 (conv i64 (x)), x);
+    }
+    return x;
+}
+fn ffloor64(x: f64) -> f64 { let t: f64 = ftrunc64(x); if t > x { return t - 1.0; } return t; }
+fn fceil64(x: f64) -> f64 { let t: f64 = ftrunc64(x); if t < x { return t + 1.0; } return t; }
+// Round to nearest, ties to even: adding then subtracting 2^52 with a matching
+// sign rounds under the IEEE default mode (round-nearest-even), exactly WASM's
+// `nearest`. Sign restored for the -0 / small-negative cases.
+fn fnearest64(x: f64) -> f64 {
+    let lim: f64 = 4503599627370496.0;
+    if x < lim && x > (0.0 - lim) {
+        let mut r: f64 = 0.0;
+        if x >= 0.0 { r = (x + lim) - lim; } else { r = (x - lim) + lim; }
+        return copysign64(r, x);
+    }
+    return x;
+}
+fn ftrunc32(x: f32) -> f32 {
+    let lim: f32 = 8388608.0f32;
+    if x < lim && x > (0.0f32 - lim) {
+        return copysign32(conv f32 (conv i32 (x)), x);
+    }
+    return x;
+}
+fn ffloor32(x: f32) -> f32 { let t: f32 = ftrunc32(x); if t > x { return t - 1.0f32; } return t; }
+fn fceil32(x: f32) -> f32 { let t: f32 = ftrunc32(x); if t < x { return t + 1.0f32; } return t; }
+fn fnearest32(x: f32) -> f32 {
+    let lim: f32 = 8388608.0f32;
+    if x < lim && x > (0.0f32 - lim) {
+        let mut r: f32 = 0.0f32;
+        if x >= 0.0f32 { r = (x + lim) - lim; } else { r = (x - lim) + lim; }
+        return copysign32(r, x);
+    }
+    return x;
+}
+
+// WASM min/max: NaN in -> NaN out; for equal-but-signed zeros, min picks -0 and
+// max picks +0 (an OR / AND of the two sign-carrying patterns yields exactly that,
+// and is the identity when the operands are equal non-zeros).
+fn fmin64(a: f64, b: f64) -> f64 {
+    if a != a { return a; }
+    if b != b { return b; }
+    if a < b { return a; }
+    if b < a { return b; }
+    return bitcast f64 (bitcast i64 (a) | bitcast i64 (b));
+}
+fn fmax64(a: f64, b: f64) -> f64 {
+    if a != a { return a; }
+    if b != b { return b; }
+    if a > b { return a; }
+    if b > a { return b; }
+    return bitcast f64 (bitcast i64 (a) & bitcast i64 (b));
+}
+fn fmin32(a: f32, b: f32) -> f32 {
+    if a != a { return a; }
+    if b != b { return b; }
+    if a < b { return a; }
+    if b < a { return b; }
+    return bitcast f32 (conv u32 (conv i64 (bitcast u32 (a)) | conv i64 (bitcast u32 (b))));
+}
+fn fmax32(a: f32, b: f32) -> f32 {
+    if a != a { return a; }
+    if b != b { return b; }
+    if a > b { return a; }
+    if b > a { return b; }
+    return bitcast f32 (conv u32 (conv i64 (bitcast u32 (a)) & conv i64 (bitcast u32 (b))));
+}
+
+// Unary float dispatch: abs/neg (bit ops), the exact rounding ops, the TRAPPING
+// float->int truncations (WASM MVP: trap on NaN / out of range — checked in the
+// float domain against the exact representable bounds, since Candor's `conv`
+// SATURATES rather than trapping), int->float conversions, promote/demote, and
+// reinterpret (a same-slot width re-canonicalization). `sqrt` is DEFERRED: it
+// needs a correctly-rounded Candor `sqrt` intrinsic (a Newton iteration is not
+// bit-identical to hardware), so it traps here rather than shipping a wrong answer.
+fn eval_funop(op: u8, a: i64) -> i64 {
+    let mut res: i64 = 0i64;
+    if op == 0x8bu8 { res = a & 0x7fffffffi64; }
+    else if op == 0x8cu8 { res = a ^ 0x80000000i64; }
+    else if op == 0x8du8 { res = conv i64 (bitcast u32 (fceil32(bitcast f32 (conv u32 (a & 0xffffffffi64))))); }
+    else if op == 0x8eu8 { res = conv i64 (bitcast u32 (ffloor32(bitcast f32 (conv u32 (a & 0xffffffffi64))))); }
+    else if op == 0x8fu8 { res = conv i64 (bitcast u32 (ftrunc32(bitcast f32 (conv u32 (a & 0xffffffffi64))))); }
+    else if op == 0x90u8 { res = conv i64 (bitcast u32 (fnearest32(bitcast f32 (conv u32 (a & 0xffffffffi64))))); }
+    else if op == 0x91u8 { panic("unimplemented: f32.sqrt needs a Candor sqrt intrinsic"); }
+    else if op == 0x99u8 { res = a & 0x7fffffffffffffffi64; }
+    else if op == 0x9au8 { let mut m: i64 = 0i64; wrapping { m = 1i64 << 63i64; } res = a ^ m; }
+    else if op == 0x9bu8 { res = bitcast i64 (fceil64(bitcast f64 (a))); }
+    else if op == 0x9cu8 { res = bitcast i64 (ffloor64(bitcast f64 (a))); }
+    else if op == 0x9du8 { res = bitcast i64 (ftrunc64(bitcast f64 (a))); }
+    else if op == 0x9eu8 { res = bitcast i64 (fnearest64(bitcast f64 (a))); }
+    else if op == 0x9fu8 { panic("unimplemented: f64.sqrt needs a Candor sqrt intrinsic"); }
+    else if op == 0xa8u8 {
+        let x: f32 = bitcast f32 (conv u32 (a & 0xffffffffi64));
+        if x != x { panic("invalid conversion to integer"); }
+        if x >= 2147483648.0f32 { panic("integer overflow"); }
+        if x < (0.0f32 - 2147483648.0f32) { panic("integer overflow"); }
+        res = conv i64 (conv i32 (x));
+    }
+    else if op == 0xa9u8 {
+        let x: f32 = bitcast f32 (conv u32 (a & 0xffffffffi64));
+        if x != x { panic("invalid conversion to integer"); }
+        if x >= 4294967296.0f32 { panic("integer overflow"); }
+        if x <= (0.0f32 - 1.0f32) { panic("integer overflow"); }
+        res = as_i32(conv i64 (conv u32 (x)));
+    }
+    else if op == 0xaau8 {
+        let x: f64 = bitcast f64 (a);
+        if x != x { panic("invalid conversion to integer"); }
+        if x >= 2147483648.0 { panic("integer overflow"); }
+        if x <= (0.0 - 2147483649.0) { panic("integer overflow"); }
+        res = conv i64 (conv i32 (x));
+    }
+    else if op == 0xabu8 {
+        let x: f64 = bitcast f64 (a);
+        if x != x { panic("invalid conversion to integer"); }
+        if x >= 4294967296.0 { panic("integer overflow"); }
+        if x <= (0.0 - 1.0) { panic("integer overflow"); }
+        res = as_i32(conv i64 (conv u32 (x)));
+    }
+    else if op == 0xaeu8 {
+        let x: f32 = bitcast f32 (conv u32 (a & 0xffffffffi64));
+        if x != x { panic("invalid conversion to integer"); }
+        if x >= 9223372036854775808.0f32 { panic("integer overflow"); }
+        if x < (0.0f32 - 9223372036854775808.0f32) { panic("integer overflow"); }
+        res = conv i64 (x);
+    }
+    else if op == 0xafu8 {
+        let x: f32 = bitcast f32 (conv u32 (a & 0xffffffffi64));
+        if x != x { panic("invalid conversion to integer"); }
+        if x >= 18446744073709551616.0f32 { panic("integer overflow"); }
+        if x <= (0.0f32 - 1.0f32) { panic("integer overflow"); }
+        wrapping { res = conv i64 (conv u64 (x)); }
+    }
+    else if op == 0xb0u8 {
+        let x: f64 = bitcast f64 (a);
+        if x != x { panic("invalid conversion to integer"); }
+        if x >= 9223372036854775808.0 { panic("integer overflow"); }
+        if x < (0.0 - 9223372036854775808.0) { panic("integer overflow"); }
+        res = conv i64 (x);
+    }
+    else if op == 0xb1u8 {
+        let x: f64 = bitcast f64 (a);
+        if x != x { panic("invalid conversion to integer"); }
+        if x >= 18446744073709551616.0 { panic("integer overflow"); }
+        if x <= (0.0 - 1.0) { panic("integer overflow"); }
+        wrapping { res = conv i64 (conv u64 (x)); }
+    }
+    else if op == 0xb2u8 { res = conv i64 (bitcast u32 (conv f32 (conv i32 (a)))); }
+    else if op == 0xb3u8 { res = conv i64 (bitcast u32 (conv f32 (conv u32 (a & 0xffffffffi64)))); }
+    else if op == 0xb4u8 { res = conv i64 (bitcast u32 (conv f32 (a))); }
+    else if op == 0xb5u8 { let mut uv: u64 = 0u64; wrapping { uv = conv u64 a; } res = conv i64 (bitcast u32 (conv f32 (uv))); }
+    else if op == 0xb6u8 { res = conv i64 (bitcast u32 (conv f32 (bitcast f64 (a)))); }
+    else if op == 0xb7u8 { res = bitcast i64 (conv f64 (conv i32 (a))); }
+    else if op == 0xb8u8 { res = bitcast i64 (conv f64 (conv u32 (a & 0xffffffffi64))); }
+    else if op == 0xb9u8 { res = bitcast i64 (conv f64 (a)); }
+    else if op == 0xbau8 { let mut uv: u64 = 0u64; wrapping { uv = conv u64 a; } res = bitcast i64 (conv f64 (uv)); }
+    else if op == 0xbbu8 { res = bitcast i64 (conv f64 (bitcast f32 (conv u32 (a & 0xffffffffi64)))); }
+    else if op == 0xbcu8 { res = as_i32(a & 0xffffffffi64); }
+    else if op == 0xbdu8 { res = a; }
+    else if op == 0xbeu8 { res = a & 0xffffffffi64; }
+    else { res = a; }
+    return res;
+}
+
+// Binary float dispatch: IEEE comparisons (push i32 0/1), `+ - * /`, WASM
+// min/max, and copysign, for both widths. Operands are reinterpreted from their
+// slot bits; the result rides back as bits (f32 zero-extended into the low word).
+fn eval_fbinop(op: u8, a: i64, b: i64) -> i64 {
+    let mut res: i64 = 0i64;
+    if op >= 0x5bu8 && op <= 0x60u8 {
+        let fa: f32 = bitcast f32 (conv u32 (a & 0xffffffffi64));
+        let fb: f32 = bitcast f32 (conv u32 (b & 0xffffffffi64));
+        if op == 0x5bu8 { if fa == fb { res = 1i64; } }
+        else if op == 0x5cu8 { if fa != fb { res = 1i64; } }
+        else if op == 0x5du8 { if fa < fb { res = 1i64; } }
+        else if op == 0x5eu8 { if fa > fb { res = 1i64; } }
+        else if op == 0x5fu8 { if fa <= fb { res = 1i64; } }
+        else { if fa >= fb { res = 1i64; } }
+    } else if op >= 0x61u8 && op <= 0x66u8 {
+        let fa: f64 = bitcast f64 (a);
+        let fb: f64 = bitcast f64 (b);
+        if op == 0x61u8 { if fa == fb { res = 1i64; } }
+        else if op == 0x62u8 { if fa != fb { res = 1i64; } }
+        else if op == 0x63u8 { if fa < fb { res = 1i64; } }
+        else if op == 0x64u8 { if fa > fb { res = 1i64; } }
+        else if op == 0x65u8 { if fa <= fb { res = 1i64; } }
+        else { if fa >= fb { res = 1i64; } }
+    } else if op >= 0x92u8 && op <= 0x98u8 {
+        let fa: f32 = bitcast f32 (conv u32 (a & 0xffffffffi64));
+        let fb: f32 = bitcast f32 (conv u32 (b & 0xffffffffi64));
+        let mut fr: f32 = 0.0f32;
+        if op == 0x92u8 { fr = fa + fb; }
+        else if op == 0x93u8 { fr = fa - fb; }
+        else if op == 0x94u8 { fr = fa * fb; }
+        else if op == 0x95u8 { fr = fa / fb; }
+        else if op == 0x96u8 { fr = fmin32(fa, fb); }
+        else if op == 0x97u8 { fr = fmax32(fa, fb); }
+        else { fr = copysign32(fa, fb); }
+        res = conv i64 (bitcast u32 (fr));
+    } else {
+        let fa: f64 = bitcast f64 (a);
+        let fb: f64 = bitcast f64 (b);
+        let mut fr: f64 = 0.0;
+        if op == 0xa0u8 { fr = fa + fb; }
+        else if op == 0xa1u8 { fr = fa - fb; }
+        else if op == 0xa2u8 { fr = fa * fb; }
+        else if op == 0xa3u8 { fr = fa / fb; }
+        else if op == 0xa4u8 { fr = fmin64(fa, fb); }
+        else if op == 0xa5u8 { fr = fmax64(fa, fb); }
+        else { fr = copysign64(fa, fb); }
+        res = bitcast i64 (fr);
+    }
+    return res;
+}
+
 // Append the decimal text of an i32 (held sign-extended in an i64) to `hout`,
 // then a newline. Negating stays within i64 for the whole i32 range, so INT_MIN
 // prints without overflow.
@@ -1148,6 +1401,28 @@ fn exec(bytes: [u8], m: read Module, mem: write Vec[u8], hout: write Vec[u8]) al
             let v: i64 = read_i64(bytes, write r);
             f.stack[f.sp] = v;
             f.sp = f.sp + 1;
+        } else if op == 0x43u8 {
+            // f32.const: 4 raw little-endian bytes -> zero-extended 32-bit pattern.
+            let mut v: i64 = 0i64;
+            let mut k: usize = 0usize;
+            while k < 4usize {
+                let bb: i64 = conv i64 (read_byte(bytes, write r));
+                wrapping { v = v | (bb << conv i64 (k * 8usize)); }
+                k = k + 1usize;
+            }
+            f.stack[f.sp] = v;
+            f.sp = f.sp + 1;
+        } else if op == 0x44u8 {
+            // f64.const: 8 raw little-endian bytes -> the full 64-bit pattern.
+            let mut v: i64 = 0i64;
+            let mut k: usize = 0usize;
+            while k < 8usize {
+                let bb: i64 = conv i64 (read_byte(bytes, write r));
+                wrapping { v = v | (bb << conv i64 (k * 8usize)); }
+                k = k + 1usize;
+            }
+            f.stack[f.sp] = v;
+            f.sp = f.sp + 1;
         } else if op >= 0x28u8 && op <= 0x35u8 {
             // Load: memarg (align ignored); effective addr = popped i32 + offset.
             let algn: u32 = read_u32(bytes, write r);
@@ -1187,6 +1462,20 @@ fn exec(bytes: [u8], m: read Module, mem: write Vec[u8], hout: write Vec[u8]) al
             f.sp = f.sp - 1;
             let a: i64 = f.stack[f.sp];
             f.stack[f.sp] = eval_unop(op, a);
+            f.sp = f.sp + 1;
+        } else if (op >= 0x8bu8 && op <= 0x91u8) || (op >= 0x99u8 && op <= 0x9fu8) || (op >= 0xa8u8 && op <= 0xbfu8) {
+            // Float unary / conversion / reinterpret: pop one, push one.
+            f.sp = f.sp - 1;
+            let a: i64 = f.stack[f.sp];
+            f.stack[f.sp] = eval_funop(op, a);
+            f.sp = f.sp + 1;
+        } else if (op >= 0x5bu8 && op <= 0x66u8) || (op >= 0x92u8 && op <= 0x98u8) || (op >= 0xa0u8 && op <= 0xa6u8) {
+            // Float binary (compare / arithmetic / min-max / copysign): pop two, push one.
+            f.sp = f.sp - 1;
+            let b: i64 = f.stack[f.sp];
+            f.sp = f.sp - 1;
+            let a: i64 = f.stack[f.sp];
+            f.stack[f.sp] = eval_fbinop(op, a, b);
             f.sp = f.sp + 1;
         } else {
             // Binary numeric: pop b then a, push one result.
@@ -1276,7 +1565,7 @@ fn mem_store_bytes(mem: write Vec[u8], eaddr: usize, size: usize, val: i64) allo
 // little-endian, then sign- or zero-extend to the i32/i64 result representation.
 fn do_load(mem: read Vec[u8], op: u8, eaddr: usize) -> i64 {
     let mut size: usize = 4usize;
-    if op == 0x29u8 {
+    if op == 0x29u8 || op == 0x2bu8 {
         size = 8usize;
     } else if op == 0x2cu8 || op == 0x2du8 || op == 0x30u8 || op == 0x31u8 {
         size = 1usize;
@@ -1310,7 +1599,7 @@ fn do_load(mem: read Vec[u8], op: u8, eaddr: usize) -> i64 {
 // the low bytes little-endian.
 fn do_store(mem: write Vec[u8], op: u8, eaddr: usize, val: i64) alloc -> unit {
     let mut size: usize = 4usize;
-    if op == 0x37u8 {
+    if op == 0x37u8 || op == 0x39u8 {
         size = 8usize;
     } else if op == 0x3au8 || op == 0x3cu8 {
         size = 1usize;

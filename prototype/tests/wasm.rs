@@ -1675,3 +1675,503 @@ fn m4_print_str_out_of_bounds_traps() {
     assert_eq!(mir, FaultKind::Panic, "MIR OOB print_str traps");
     assert!(wasmi_run_print(&oob).is_err(), "wasmi host errors on OOB print_str");
 }
+// ===========================================================================
+// M5 — FLOATING POINT (f32/f64 ISA) + a wasmi differential gate over floats
+// ===========================================================================
+//
+// Floats ride the interpreter's i64 operand stack as their IEEE bit pattern
+// (f64 as its 64-bit `to_bits`, f32 zero-extended into the low word); the interp
+// reinterprets with `bitcast` at the boundary and does real IEEE math with
+// Candor `f32`/`f64` ops. The gate runs each module through the Candor interp AND
+// wasmi: NON-NaN float results are compared BIT-EXACT, NaN results by IS-NAN
+// (a computed NaN's sign is IEEE-unspecified — design 0016 §4/§9.3, and WASM's
+// canonical arithmetic NaN), and the trapping trunc conversions must trap in
+// BOTH. Every float module is ALSO run across the Candor engines (tree-walker /
+// MIR / Cranelift no-opt / -O2): bit-exact for non-NaN, is-nan for NaN.
+
+const F32: u8 = 0x7d;
+const F64: u8 = 0x7c;
+
+/// `f32.const x` — opcode + 4 raw little-endian bytes of the bit pattern.
+fn cf32(x: f32) -> Vec<u8> {
+    let mut b = vec![0x43u8];
+    b.extend_from_slice(&x.to_bits().to_le_bytes());
+    b
+}
+/// `f64.const x` — opcode + 8 raw little-endian bytes of the bit pattern.
+fn cf64(x: f64) -> Vec<u8> {
+    let mut b = vec![0x44u8];
+    b.extend_from_slice(&x.to_bits().to_le_bytes());
+    b
+}
+
+fn farith32(a: f32, b: f32, op: u8, result: u8) -> Vec<u8> {
+    let mut body = cf32(a);
+    body.extend(cf32(b));
+    body.push(op);
+    body.push(0x0b);
+    one_func(result, body, vec![])
+}
+fn farith64(a: f64, b: f64, op: u8, result: u8) -> Vec<u8> {
+    let mut body = cf64(a);
+    body.extend(cf64(b));
+    body.push(op);
+    body.push(0x0b);
+    one_func(result, body, vec![])
+}
+fn funary32(a: f32, op: u8, result: u8) -> Vec<u8> {
+    let mut body = cf32(a);
+    body.push(op);
+    body.push(0x0b);
+    one_func(result, body, vec![])
+}
+fn funary64(a: f64, op: u8, result: u8) -> Vec<u8> {
+    let mut body = cf64(a);
+    body.push(op);
+    body.push(0x0b);
+    one_func(result, body, vec![])
+}
+/// A unary op whose SOURCE is an i32/i64 const (int->float convert / reinterpret).
+fn conv_from_i32(a: i32, op: u8, result: u8) -> Vec<u8> {
+    let mut body = c32(a);
+    body.push(op);
+    body.push(0x0b);
+    one_func(result, body, vec![])
+}
+fn conv_from_i64(a: i64, op: u8, result: u8) -> Vec<u8> {
+    let mut body = c64(a);
+    body.push(op);
+    body.push(0x0b);
+    one_func(result, body, vec![])
+}
+
+/// The first result value out of wasmi (any type), or an Err on validation /
+/// instantiation / trap — the reference for the float differential.
+fn wasmi_run_val(bytes: &[u8]) -> Result<wasmi::Val, String> {
+    use wasmi::{Engine, Linker, Module, Store, Val};
+    let engine = Engine::default();
+    let module = Module::new(&engine, bytes).map_err(|e| format!("compile: {e}"))?;
+    let mut store = Store::new(&engine, ());
+    let linker = <Linker<()>>::new(&engine);
+    let instance =
+        linker.instantiate_and_start(&mut store, &module).map_err(|e| format!("instantiate: {e}"))?;
+    let func = instance.get_func(&store, "main").ok_or("no `main` export")?;
+    let nres = func.ty(&store).results().len();
+    let mut out = vec![Val::I32(0); nres];
+    func.call(&mut store, &[], &mut out).map_err(|e| format!("trap: {e}"))?;
+    out.into_iter().next().ok_or_else(|| "no result".to_string())
+}
+
+fn is_nan_bits(bits: i64, is_f32: bool) -> bool {
+    if is_f32 {
+        f32::from_bits(bits as u32).is_nan()
+    } else {
+        f64::from_bits(bits as u64).is_nan()
+    }
+}
+
+/// Run a float-returning module across all four Candor engines, NaN-aware:
+/// non-NaN results must be BIT-IDENTICAL, NaN results must all be NaN (the sign
+/// is IEEE-unspecified across a folding compiler vs. runtime). Returns the oracle
+/// bit pattern.
+fn run_float_all(src: &str, is_f32: bool, label: &str) -> i64 {
+    let o = match run_source_real(src) {
+        RunResult::Ok(r) => r.ret,
+        RunResult::Fault(f) => panic!("{label}: oracle faulted: {}", f.to_json()),
+        RunResult::CheckErrors(d) => {
+            panic!("{label}: check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>())
+        }
+        RunResult::ParseError(d) => panic!("{label}: parse error: {}", d.to_json()),
+    };
+    let onan = is_nan_bits(o, is_f32);
+    for (lbl, r) in [
+        ("mir", run_source_real_mir(src)),
+        ("native-noopt", run_source_real_native(src)),
+        ("native-opt", run_source_real_native_opt(src)),
+    ] {
+        let ret = match r {
+            MirRunResult::Ok(run) => run.ret,
+            MirRunResult::Fault(f) => panic!("{label} {lbl} faulted: {}", f.to_json()),
+            MirRunResult::Unsupported(m) => panic!("{label} {lbl} unsupported: {m}"),
+            MirRunResult::CheckErrors(d) => {
+                panic!("{label} {lbl} check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>())
+            }
+            MirRunResult::ParseError(d) => panic!("{label} {lbl} parse error: {}", d.to_json()),
+        };
+        if onan {
+            assert!(is_nan_bits(ret, is_f32), "{label} {lbl}: expected NaN, got {ret:#018x}");
+        } else {
+            assert_eq!(ret, o, "{label} {lbl} diverged from oracle ({ret:#018x} != {o:#018x})");
+        }
+    }
+    o
+}
+
+/// Differential for an f64-returning module: cross-engine + wasmi, NaN-aware.
+fn diff_f64(bytes: &[u8], label: &str) {
+    let c = run_ret_oracle(&program(bytes));
+    match wasmi_run_val(bytes) {
+        Ok(wasmi::Val::F64(w)) => {
+            let wb = w.to_bits();
+            if f64::from_bits(wb).is_nan() {
+                assert!(
+                    f64::from_bits(c as u64).is_nan(),
+                    "{label}: candor={c:#018x} is not NaN but wasmi is"
+                );
+            } else {
+                assert_eq!(c, wb as i64, "{label}: candor={c:#018x} != wasmi={:#018x}", wb as i64);
+            }
+        }
+        Ok(other) => panic!("{label}: wasmi returned non-f64 {other:?}"),
+        Err(e) => panic!("{label}: candor={c:#018x} but wasmi errored: {e}"),
+    }
+}
+
+/// Differential for an f32-returning module (bits carried zero-extended low-word).
+fn diff_f32(bytes: &[u8], label: &str) {
+    let c = run_ret_oracle(&program(bytes));
+    match wasmi_run_val(bytes) {
+        Ok(wasmi::Val::F32(w)) => {
+            let wb = w.to_bits();
+            let cb = c as u32;
+            if f32::from_bits(wb).is_nan() {
+                assert!(f32::from_bits(cb).is_nan(), "{label}: candor={cb:#010x} is not NaN but wasmi is");
+            } else {
+                assert_eq!(cb, wb, "{label}: candor={cb:#010x} != wasmi={wb:#010x}");
+            }
+        }
+        Ok(other) => panic!("{label}: wasmi returned non-f32 {other:?}"),
+        Err(e) => panic!("{label}: candor={c:#018x} but wasmi errored: {e}"),
+    }
+}
+
+/// Differential for an int-returning float op (comparisons, trapping trunc):
+/// cross-engine bit-exact AND equal to wasmi.
+fn diff_int(bytes: &[u8], label: &str) {
+    let c = run_ret_oracle(&program(bytes));
+    match wasmi_run(bytes) {
+        Ok(w) => assert_eq!(c, w, "{label}: candor={c} != wasmi={w}"),
+        Err(e) => panic!("{label}: candor returned {c} but wasmi errored: {e}"),
+    }
+}
+
+/// A module that must TRAP in every Candor engine AND error in wasmi.
+fn diff_trap(bytes: &[u8], label: &str) {
+    assert_eq!(run_fault_oracle(&program(bytes)), FaultKind::Panic, "{label}: candor should trap");
+    if let Ok(w) = wasmi_run_val(bytes) {
+        panic!("{label}: candor trapped but wasmi returned {w:?}");
+    }
+}
+
+// A spread of representative f64 / f32 values (finite, signed, fractional, zeros,
+// inf, NaN) to drive the differential over each op.
+const F64S: &[f64] = &[
+    0.0, -0.0, -2.5, 0.5, 1.234567, -7.25, f64::INFINITY, f64::NEG_INFINITY, f64::NAN,
+];
+const F32S: &[f32] = &[
+    0.0, -0.0, -2.5, 0.5, 1.234567, -7.25, f32::INFINITY, f32::NEG_INFINITY, f32::NAN,
+];
+
+// Compare coverage needs only the IEEE-distinct cases (signs, zeros, inf, NaN);
+// a smaller spread keeps the 6-op x 2-width comparison matrix quick.
+const CMP64: &[f64] = &[0.0, -0.0, -2.5, 1.234567, f64::INFINITY, f64::NAN];
+const CMP32: &[f32] = &[0.0, -0.0, -2.5, 1.234567, f32::INFINITY, f32::NAN];
+
+#[test]
+fn diff_f64_arithmetic() {
+    for (op, name) in [(0xa0u8, "add"), (0xa1, "sub"), (0xa2, "mul"), (0xa3, "div")] {
+        for &a in F64S {
+            for &b in F64S {
+                diff_f64(&farith64(a, b, op, F64), &format!("f64.{name}({a},{b})"));
+            }
+        }
+    }
+}
+
+#[test]
+fn diff_f32_arithmetic() {
+    for (op, name) in [(0x92u8, "add"), (0x93, "sub"), (0x94, "mul"), (0x95, "div")] {
+        for &a in F32S {
+            for &b in F32S {
+                diff_f32(&farith32(a, b, op, F32), &format!("f32.{name}({a},{b})"));
+            }
+        }
+    }
+}
+
+#[test]
+fn diff_float_min_max_copysign() {
+    for (op, name) in [(0xa4u8, "min"), (0xa5, "max"), (0xa6, "copysign")] {
+        for &a in F64S {
+            for &b in F64S {
+                diff_f64(&farith64(a, b, op, F64), &format!("f64.{name}({a},{b})"));
+            }
+        }
+    }
+    for (op, name) in [(0x96u8, "min"), (0x97, "max"), (0x98, "copysign")] {
+        for &a in F32S {
+            for &b in F32S {
+                diff_f32(&farith32(a, b, op, F32), &format!("f32.{name}({a},{b})"));
+            }
+        }
+    }
+}
+
+#[test]
+fn diff_float_abs_neg() {
+    for (op, name) in [(0x99u8, "abs"), (0x9a, "neg")] {
+        for &a in F64S {
+            diff_f64(&funary64(a, op, F64), &format!("f64.{name}({a})"));
+        }
+    }
+    for (op, name) in [(0x8bu8, "abs"), (0x8c, "neg")] {
+        for &a in F32S {
+            diff_f32(&funary32(a, op, F32), &format!("f32.{name}({a})"));
+        }
+    }
+}
+
+#[test]
+fn diff_float_rounding() {
+    // ceil / floor / trunc / nearest — implemented bit-exactly (conv/bitcast/cmp),
+    // over ties (.5), negatives, -0, large integral, inf, NaN.
+    let rvals64: &[f64] = &[
+        0.0, -0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 2.4, 2.6, -2.4, -2.6, 3.0, -3.0,
+        1e16, -1e16, f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 0.4999999999999999,
+    ];
+    for (op, name) in [(0x9bu8, "ceil"), (0x9c, "floor"), (0x9d, "trunc"), (0x9e, "nearest")] {
+        for &a in rvals64 {
+            diff_f64(&funary64(a, op, F64), &format!("f64.{name}({a})"));
+        }
+    }
+    let rvals32: &[f32] = &[
+        0.0, -0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 2.4, 2.6, -2.4, -2.6, 3.0, -3.0,
+        1e7, -1e7, f32::INFINITY, f32::NEG_INFINITY, f32::NAN, 0.49999997,
+    ];
+    for (op, name) in [(0x8du8, "ceil"), (0x8e, "floor"), (0x8f, "trunc"), (0x90, "nearest")] {
+        for &a in rvals32 {
+            diff_f32(&funary32(a, op, F32), &format!("f32.{name}({a})"));
+        }
+    }
+}
+
+#[test]
+fn diff_float_comparisons() {
+    // f64 compares (0x61..0x66) and f32 compares (0x5b..0x60) -> i32 0/1, incl NaN.
+    for (op, name) in [
+        (0x61u8, "eq"), (0x62, "ne"), (0x63, "lt"), (0x64, "gt"), (0x65, "le"), (0x66, "ge"),
+    ] {
+        for &a in CMP64 {
+            for &b in CMP64 {
+                diff_int(&farith64(a, b, op, I32), &format!("f64.{name}({a},{b})"));
+            }
+        }
+    }
+    for (op, name) in [
+        (0x5bu8, "eq"), (0x5c, "ne"), (0x5d, "lt"), (0x5e, "gt"), (0x5f, "le"), (0x60, "ge"),
+    ] {
+        for &a in CMP32 {
+            for &b in CMP32 {
+                diff_int(&farith32(a, b, op, I32), &format!("f32.{name}({a},{b})"));
+            }
+        }
+    }
+}
+
+#[test]
+fn diff_float_int_conversions() {
+    // int -> float (convert), signed and unsigned, over a spread of ints.
+    for a in [0i32, 1, -1, 42, -42, i32::MAX, i32::MIN, 1000000, -1000000] {
+        diff_f32(&conv_from_i32(a, 0xb2, F32), &format!("f32.convert_i32_s({a})"));
+        diff_f32(&conv_from_i32(a, 0xb3, F32), &format!("f32.convert_i32_u({a})"));
+        diff_f64(&conv_from_i32(a, 0xb7, F64), &format!("f64.convert_i32_s({a})"));
+        diff_f64(&conv_from_i32(a, 0xb8, F64), &format!("f64.convert_i32_u({a})"));
+    }
+    for a in [0i64, 1, -1, i64::MAX, i64::MIN, 9007199254740993, -9007199254740993] {
+        diff_f32(&conv_from_i64(a, 0xb4, F32), &format!("f32.convert_i64_s({a})"));
+        diff_f32(&conv_from_i64(a, 0xb5, F32), &format!("f32.convert_i64_u({a})"));
+        diff_f64(&conv_from_i64(a, 0xb9, F64), &format!("f64.convert_i64_s({a})"));
+        diff_f64(&conv_from_i64(a, 0xba, F64), &format!("f64.convert_i64_u({a})"));
+    }
+    // float -> int (TRAPPING trunc): in-range values must equal wasmi.
+    for a in [0.0f64, 0.9, -0.9, 1.5, -1.5, 42.7, -42.7, 2147483647.0, -2147483648.0] {
+        diff_int(&funary64(a, 0xaa, I32), &format!("i32.trunc_f64_s({a})"));
+        diff_int(&funary64(a, 0xb0, I64), &format!("i64.trunc_f64_s({a})"));
+    }
+    for a in [0.0f64, 0.9, 1.5, 42.7, 4000000000.0, 4294967295.0] {
+        diff_int(&funary64(a, 0xab, I32), &format!("i32.trunc_f64_u({a})"));
+    }
+    for a in [0.0f32, 0.9, -0.9, 1.5, -1.5, 42.7, -42.7] {
+        diff_int(&funary32(a, 0xa8, I32), &format!("i32.trunc_f32_s({a})"));
+        diff_int(&funary32(a, 0xae, I64), &format!("i64.trunc_f32_s({a})"));
+    }
+}
+
+
+#[test]
+fn diff_float_promote_demote_reinterpret() {
+    // promote f32->f64 (exact), demote f64->f32 (rounds).
+    for &a in F32S {
+        diff_f64(&funary32(a, 0xbb, F64), &format!("f64.promote_f32({a})"));
+    }
+    for &a in F64S {
+        diff_f32(&funary64(a, 0xb6, F32), &format!("f32.demote_f64({a})"));
+    }
+    // reinterpret: i32<->f32, i64<->f64 — pure bit reinterpretation.
+    for a in [0i32, 1, -1, 0x3f800000u32 as i32, i32::MIN, 0x7fc00000u32 as i32] {
+        diff_f32(&conv_from_i32(a, 0xbe, F32), &format!("f32.reinterpret_i32({a})"));
+    }
+    for a in [0i64, 1, -1, 0x3ff0000000000000i64, i64::MIN] {
+        diff_f64(&conv_from_i64(a, 0xbf, F64), &format!("f64.reinterpret_i64({a})"));
+    }
+    // f32 -> i32 bits, f64 -> i64 bits (result is an int).
+    for &a in F32S {
+        diff_int(&funary32(a, 0xbc, I32), &format!("i32.reinterpret_f32({a})"));
+    }
+    for &a in F64S {
+        diff_int(&funary64(a, 0xbd, I64), &format!("i64.reinterpret_f64({a})"));
+    }
+}
+
+#[test]
+fn diff_float_load_store() {
+    // f64 round-trip through linear memory (little-endian bytes <-> bit slot).
+    for &a in F64S {
+        let m = {
+            let mut body = c32(16);
+            body.extend(cf64(a));
+            body.extend(mop(0x39, 3, 0)); // f64.store
+            body.extend(c32(16));
+            body.extend(mop(0x2b, 3, 0)); // f64.load
+            body.push(0x0b);
+            wasm_mem_module(F64, 1, None, &[], vec![], body)
+        };
+        diff_f64(&m, &format!("f64.store/load({a})"));
+    }
+    for &a in F32S {
+        let m = {
+            let mut body = c32(16);
+            body.extend(cf32(a));
+            body.extend(mop(0x38, 2, 0)); // f32.store
+            body.extend(c32(16));
+            body.extend(mop(0x2a, 2, 0)); // f32.load
+            body.push(0x0b);
+            wasm_mem_module(F32, 1, None, &[], vec![], body)
+        };
+        diff_f32(&m, &format!("f32.store/load({a})"));
+    }
+}
+
+#[test]
+fn diff_float_trunc_traps() {
+    // Out-of-range and NaN float->int truncations trap in BOTH Candor and wasmi.
+    // i32.trunc_f64_s: 2^31 (just over max), and NaN.
+    diff_trap(&funary64(2147483648.0, 0xaa, I32), "i32.trunc_f64_s overflow");
+    diff_trap(&funary64(-2147483649.0, 0xaa, I32), "i32.trunc_f64_s underflow");
+    diff_trap(&funary64(f64::NAN, 0xaa, I32), "i32.trunc_f64_s NaN");
+    diff_trap(&funary64(f64::INFINITY, 0xaa, I32), "i32.trunc_f64_s inf");
+    // i32.trunc_f64_u: negative and 2^32.
+    diff_trap(&funary64(-1.0, 0xab, I32), "i32.trunc_f64_u negative");
+    diff_trap(&funary64(4294967296.0, 0xab, I32), "i32.trunc_f64_u overflow");
+    // i64.trunc_f64_s: 2^63 and NaN.
+    diff_trap(&funary64(9223372036854775808.0, 0xb0, I64), "i64.trunc_f64_s overflow");
+    diff_trap(&funary64(f64::NAN, 0xb0, I64), "i64.trunc_f64_s NaN");
+    // i64.trunc_f64_u: negative and 2^64.
+    diff_trap(&funary64(-1.0, 0xb1, I64), "i64.trunc_f64_u negative");
+    diff_trap(&funary64(18446744073709551616.0, 0xb1, I64), "i64.trunc_f64_u overflow");
+    // f32 sources.
+    diff_trap(&funary32(f32::NAN, 0xa8, I32), "i32.trunc_f32_s NaN");
+    diff_trap(&funary32(2147483648.0f32, 0xa8, I32), "i32.trunc_f32_s overflow");
+    diff_trap(&funary32(-1.0f32, 0xa9, I32), "i32.trunc_f32_u negative");
+    diff_trap(&funary32(f32::INFINITY, 0xaf, I64), "i64.trunc_f32_u inf");
+}
+
+#[test]
+fn diff_mixed_int_float() {
+    // Compute with f64 then convert to i32 and combine with ints: (3.0+4.0)=7.0,
+    // trunc to i32 = 7, * 100 = 700. Exercises the full float<->int boundary.
+    let m = {
+        let mut body = cf64(3.0);
+        body.extend(cf64(4.0));
+        body.push(0xa0); // f64.add -> 7.0
+        body.push(0xaa); // i32.trunc_f64_s -> 7
+        body.extend(c32(100));
+        body.push(0x6c); // i32.mul -> 700
+        body.push(0x0b);
+        one_func(I32, body, vec![])
+    };
+    diff_int(&m, "mixed f64->i32");
+    assert_eq!(run_ret_all(&program(&m)), 700);
+
+    // A dot-ish reduction: (1.5 * 2.0) + (0.5 * 0.5) = 3.25, demote to f32, return.
+    let m2 = {
+        let mut body = cf64(1.5);
+        body.extend(cf64(2.0));
+        body.push(0xa2); // mul -> 3.0
+        body.extend(cf64(0.5));
+        body.extend(cf64(0.5));
+        body.push(0xa2); // mul -> 0.25
+        body.push(0xa0); // add -> 3.25
+        body.push(0xb6); // f32.demote_f64 -> 3.25f32
+        body.push(0x0b);
+        one_func(F32, body, vec![])
+    };
+    diff_f32(&m2, "mixed f64 reduce -> f32");
+}
+
+#[test]
+fn float_cross_engine_agreement() {
+    // The large differential matrices above run on the oracle (like the M3 corpus);
+    // this asserts the interpreter is BYTE-IDENTICAL across all four Candor engines
+    // (tree-walker / MIR / Cranelift no-opt / -O2) over a representative float set —
+    // non-NaN bit-exact, NaN by is-nan (a computed NaN's sign is unspecified).
+    run_float_all(&program(&farith64(1.5, 2.25, 0xa0, F64)), false, "xe f64.add");
+    run_float_all(&program(&farith64(6.0, 4.0, 0xa3, F64)), false, "xe f64.div");
+    run_float_all(&program(&farith64(0.0, 0.0, 0xa3, F64)), false, "xe f64.div 0/0 -> NaN");
+    run_float_all(&program(&farith32(1.5f32, 2.25f32, 0x94, F32)), true, "xe f32.mul");
+    run_float_all(&program(&farith32(f32::NAN, 1.0, 0x92, F32)), true, "xe f32.add NaN");
+    // min/max with -0/+0 and NaN.
+    run_float_all(&program(&farith64(-0.0, 0.0, 0xa4, F64)), false, "xe f64.min(-0,+0)");
+    run_float_all(&program(&farith64(-0.0, 0.0, 0xa5, F64)), false, "xe f64.max(-0,+0)");
+    run_float_all(&program(&farith64(f64::NAN, 5.0, 0xa4, F64)), false, "xe f64.min NaN");
+    // abs/neg/copysign.
+    run_float_all(&program(&funary64(-3.5, 0x99, F64)), false, "xe f64.abs");
+    run_float_all(&program(&funary64(-0.0, 0x9a, F64)), false, "xe f64.neg(-0)");
+    run_float_all(&program(&farith32(2.5f32, -1.0f32, 0x98, F32)), true, "xe f32.copysign");
+    // rounding.
+    run_float_all(&program(&funary64(2.5, 0x9e, F64)), false, "xe f64.nearest(2.5)");
+    run_float_all(&program(&funary64(-0.5, 0x9b, F64)), false, "xe f64.ceil(-0.5)");
+    run_float_all(&program(&funary32(-2.5f32, 0x8e, F32)), true, "xe f32.floor");
+    // conversions + promote/demote + reinterpret.
+    run_float_all(&program(&conv_from_i64(-1, 0xba, F64)), false, "xe f64.convert_i64_u");
+    run_float_all(&program(&funary32(1.234567f32, 0xbb, F64)), false, "xe f64.promote_f32");
+    run_float_all(&program(&funary64(1.234567, 0xb6, F32)), true, "xe f32.demote_f64");
+    run_float_all(&program(&conv_from_i32(0x3f800000u32 as i32, 0xbe, F32)), true, "xe f32.reinterpret");
+    // load/store round-trip.
+    let ls = {
+        let mut body = c32(24);
+        body.extend(cf64(-7.25));
+        body.extend(mop(0x39, 3, 0));
+        body.extend(c32(24));
+        body.extend(mop(0x2b, 3, 0));
+        body.push(0x0b);
+        wasm_mem_module(F64, 1, None, &[], vec![], body)
+    };
+    run_float_all(&program(&ls), false, "xe f64.store/load");
+    // mixed f64 -> i32 (returns an int; the four engines must agree exactly).
+    let mixed = {
+        let mut body = cf64(3.0);
+        body.extend(cf64(4.0));
+        body.push(0xa0);
+        body.push(0xaa);
+        body.extend(c32(100));
+        body.push(0x6c);
+        body.push(0x0b);
+        one_func(I32, body, vec![])
+    };
+    assert_eq!(run_ret_all(&program(&mixed)), 700, "xe mixed f64->i32");
+    // Trapping trunc: all four engines trap identically.
+    assert_eq!(run_fault_all(&program(&funary64(f64::NAN, 0xaa, I32))), FaultKind::Panic);
+    assert_eq!(run_fault_all(&program(&funary64(2147483648.0, 0xaa, I32))), FaultKind::Panic);
+    assert_eq!(run_fault_all(&program(&funary32(-1.0f32, 0xa9, I32))), FaultKind::Panic);
+}

@@ -983,3 +983,27 @@ once you add the literal node). Key design/impl facts worth reusing:
   (LLVM) for f32↔f64. `mir/opt.rs` is DCE-only (type-agnostic) — nothing to do.
   New `tests/fixtures/run/floats_f32.cnr` auto-joins the aot/stage native corpus
   gates for free. Full nextest 808 green, clippy clean. (2026-07-14).
+
+- **WASM-interp differential over floats: run the big value matrices on the
+  tree-walker ORACLE only; keep cross-engine (all 4) to a small hand-picked set.**
+  The interp is a ~1400-line Candor program; running ONE module through the native
+  (Cranelift no-opt + -O2) engines recompiles the whole interp, so a full-matrix
+  test that called `run_ret_all` (4 engines) per module hit **1246 s** for the
+  `wasm` binary. The M3 corpus already established the split: large differential
+  matrices vs wasmi on the oracle; a separate compact `*_cross_engine_agreement`
+  test proves byte-identical across tree-walker/MIR/Cranelift. Float NaN needs
+  NaN-aware compare everywhere (non-NaN bit-exact, NaN by is-nan — a computed NaN's
+  sign is IEEE-unspecified across a folding compiler vs. runtime). Also trim compare
+  matrices (6 ops x 9x9 x 2 widths in one test = ~180 s of tree-walking). (2026-07-14)
+
+- **WASM float trunc TRAPS where Candor's `conv` SATURATES — range-check in the
+  float domain against exact representable bounds, don't trust `conv`.** WASM MVP
+  `i{N}.trunc_f*_s/u` trap on NaN/out-of-range; Candor `conv i{N} <float>` saturates
+  (0016 section 5). Derive bounds as powers of two so f32 representability is exact:
+  f64->i32_s traps iff `x >= 2^31 || x <= -(2^31+1)`; f32->i32_s iff `x >= 2^31 ||
+  x < -2^31` (f32 has no value between -2^31 and -2^31-1). All four rounding ops
+  are bit-exact without an intrinsic (trunc via in-range int round-trip + copysign;
+  nearest via the add/sub-2^52 magic under IEEE round-nearest-even); only `sqrt`
+  genuinely needs a `sqrt` intrinsic and is deferred. A bare int literal on the
+  bitcast side takes the float's same-width UNSIGNED int, and high-bit patterns
+  (e.g. `0x8000000000000000`) need an explicit `u64` suffix. (2026-07-14)
