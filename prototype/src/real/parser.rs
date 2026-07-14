@@ -1844,19 +1844,27 @@ impl RParser {
                 let sub = self.parse_opt_pattern_args()?;
                 PatKind::Variant { enum_name: "BoxResult".to_string(), variant, sub }
             }
-            RTok::Int { value, suffix } => {
-                self.bump();
-                PatKind::IntLit { value, negative: false, suffix }
-            }
-            RTok::Minus => {
-                // A negative integer-literal pattern (`-5`), mirroring the
-                // negative-literal fold in expressions (spec 02 §6.6).
-                self.bump();
-                if let RTok::Int { value, suffix } = self.peek().clone() {
-                    self.bump();
-                    PatKind::IntLit { value, negative: true, suffix }
-                } else {
-                    return Err(self.unexpected("an integer literal after `-`"));
+            RTok::Int { .. } | RTok::Minus => {
+                // An integer-literal pattern, or an integer-range pattern when a
+                // `..`/`..=` follows the first endpoint. A leading `-` folds onto
+                // the literal, mirroring expressions (spec 02 §6.6).
+                let (lo_value, lo_negative, lo_suffix) = self.parse_int_endpoint()?;
+                match self.peek() {
+                    RTok::DotDot | RTok::DotDotEq => {
+                        let inclusive = matches!(self.peek(), RTok::DotDotEq);
+                        self.bump();
+                        let (hi_value, hi_negative, hi_suffix) = self.parse_int_endpoint()?;
+                        PatKind::IntRange {
+                            lo_value,
+                            lo_negative,
+                            lo_suffix,
+                            hi_value,
+                            hi_negative,
+                            hi_suffix,
+                            inclusive,
+                        }
+                    }
+                    _ => PatKind::IntLit { value: lo_value, negative: lo_negative, suffix: lo_suffix },
                 }
             }
             RTok::Ident(name) if name == "_" => {
@@ -1878,6 +1886,18 @@ impl RParser {
             _ => return Err(self.unexpected("a pattern")),
         };
         Ok(Pattern { kind, span: self.span_from(lo) })
+    }
+
+    /// Parse one integer endpoint of a literal/range pattern: an optional `-`
+    /// sign folded onto an integer literal (spec 02 §6.6).
+    fn parse_int_endpoint(&mut self) -> PResult<(u64, bool, Option<crate::token::ScalarTy>)> {
+        let negative = self.eat(&RTok::Minus);
+        if let RTok::Int { value, suffix } = self.peek().clone() {
+            self.bump();
+            Ok((value, negative, suffix))
+        } else {
+            Err(self.unexpected("an integer literal"))
+        }
     }
 
     fn parse_opt_pattern_args(&mut self) -> PResult<Vec<Pattern>> {

@@ -87,6 +87,8 @@ pub enum RTok {
     Comma,
     Dot,
     DotStar, // `.*` postfix deref (spec 01 §5.4)
+    DotDot,   // `..` half-open range pattern
+    DotDotEq, // `..=` inclusive range pattern
     Semi,
     Colon,
     ColonColon,

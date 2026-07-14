@@ -783,6 +783,23 @@ impl Emitter {
                     self.push(scalar_kw(*sc));
                 }
             }
+            PatKind::IntRange { lo_value, lo_negative, lo_suffix, hi_value, hi_negative, hi_suffix, inclusive } => {
+                if *lo_negative {
+                    self.push("-");
+                }
+                self.push(&lo_value.to_string());
+                if let Some(sc) = lo_suffix {
+                    self.push(scalar_kw(*sc));
+                }
+                self.push(if *inclusive { "..=" } else { ".." });
+                if *hi_negative {
+                    self.push("-");
+                }
+                self.push(&hi_value.to_string());
+                if let Some(sc) = hi_suffix {
+                    self.push(scalar_kw(*sc));
+                }
+            }
         }
     }
 

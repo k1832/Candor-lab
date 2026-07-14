@@ -205,6 +205,13 @@ pub fn analyze_pattern(
                 pat.span,
             ));
         }
+        PatKind::IntRange { .. } => {
+            diags.push(Diag::error(
+                "E0606",
+                format!("integer-range pattern cannot match enum scrutinee `{ename}`"),
+                pat.span,
+            ));
+        }
     }
 }
 
@@ -242,6 +249,13 @@ fn bind_sub(
                 pat.span,
             ));
         }
+        PatKind::IntRange { .. } => {
+            diags.push(Diag::error(
+                "E0606",
+                "integer-range sub-patterns are not supported".to_string(),
+                pat.span,
+            ));
+        }
     }
 }
 
@@ -257,7 +271,7 @@ pub fn check_exhaustive(
         match &p.kind {
             PatKind::Wildcard | PatKind::Binding(_) => return None,
             PatKind::Variant { variant, .. } => covered.push(variant.clone()),
-            PatKind::IntLit { .. } => {}
+            PatKind::IntLit { .. } | PatKind::IntRange { .. } => {}
         }
     }
     let missing: Vec<String> = einfo

@@ -1066,3 +1066,26 @@ once you add the literal node). Key design/impl facts worth reusing:
   (`21 * sqrt(4.0) == 42`). In-process engine tests don't hit this (they carry the
   fault in a Result), so a passing `tests/sqrt.rs` can still fail the ELF corpus gate.
   834 nextest green, clippy clean. (sqrt intrinsic + WASM f*.sqrt, 2026-07-14).
+
+- **Integer RANGE match patterns extend the literal-pattern slice with an interval
+  model — reuse it for overlap.** `PatKind::IntRange { lo/hi value+negative+suffix,
+  inclusive }` (both `..=` inclusive and `..` half-open). Lexer needs a 3-char
+  lookahead for `..=`/`..`, placed BEFORE the `two`-char punct match; `a..b` never
+  collides with a float (`is_frac` requires a digit after the dot). Checker: model
+  each literal/range arm as an inclusive integer interval `[a,b]` (literal → [v,v],
+  `lo..=hi` → [lo,hi], `lo..hi` → [lo,hi-1]); overlap is `a1<=b2 && a2<=b1` — this
+  ONE test subsumes the old duplicate-literal check (E0602) and range/range,
+  literal-in-range, range-over-literal overlaps; adjacent `[0,9]`/`[10,20]` are NOT
+  overlap (no false positive). `lo>hi` (or `lo>=hi` half-open) → E0715. Exhaustiveness
+  rule unchanged: an int match still needs a `_`/binding catch-all (full-coverage
+  proof deferred). Lowering reuses existing MIR ops (two `Cmp` Ge/Le|Lt + two
+  `Branch` = bounds test), so BOTH native backends are untouched — the u8 four-engine
+  gate (Cranelift no-opt+opt) confirms unsigned compares are correct. New run/
+  fixtures auto-ride the aot/llvm corpus (dir-globbed), but the self-host CORPUS is an
+  EXPLICIT list — a range fixture there would need the self-hosted `.cnr` parser to
+  learn `..=`, so keep ranges out of the self-host corpus. 859 nextest green, clippy
+  clean. Deferred: char/string ranges, guards, open-ended `..hi`/`lo..`. Skipped the
+  WASM interp dispatch rewrite — it mixes range tests with OR-of-literals (`a||b`)
+  that ranges alone can't express, and touching the byte-identical run/wasm_interp.cnr
+  drift-guard copy is disproportionate; ranges now enable the contiguous-group part.
+  (integer range patterns, 2026-07-14).

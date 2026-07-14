@@ -583,6 +583,20 @@ pub enum PatKind {
         negative: bool,
         suffix: Option<ScalarTy>,
     },
+    /// An integer-range pattern (`0x28..=0x3e` inclusive, `0..10` half-open):
+    /// matches when an integer scrutinee lies in the range. Each endpoint reuses
+    /// the literal-value machinery (`value`/`negative`/`suffix`). Valid only over
+    /// an integer scrutinee; like literal patterns, a range-pattern match still
+    /// needs a `_`/binding catch-all to be exhaustive (checker-enforced).
+    IntRange {
+        lo_value: u64,
+        lo_negative: bool,
+        lo_suffix: Option<ScalarTy>,
+        hi_value: u64,
+        hi_negative: bool,
+        hi_suffix: Option<ScalarTy>,
+        inclusive: bool,
+    },
 }
 
 /// The signed value denoted by an integer-literal pattern's magnitude and sign.

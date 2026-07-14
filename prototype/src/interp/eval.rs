@@ -3330,6 +3330,11 @@ impl<'a> Interp<'a> {
             PatKind::IntLit { value, negative, .. } => {
                 crate::ast::int_pat_value(*value, *negative) == val
             }
+            PatKind::IntRange { lo_value, lo_negative, hi_value, hi_negative, inclusive, .. } => {
+                let lo = crate::ast::int_pat_value(*lo_value, *lo_negative);
+                let hi = crate::ast::int_pat_value(*hi_value, *hi_negative);
+                lo <= val && if *inclusive { val <= hi } else { val < hi }
+            }
             PatKind::Wildcard | PatKind::Binding(_) => true,
             PatKind::Variant { .. } => false,
         });
@@ -3404,13 +3409,13 @@ impl<'a> Interp<'a> {
                 }
                 Ok(())
             }
-            PatKind::IntLit { .. } => Ok(()),
+            PatKind::IntLit { .. } | PatKind::IntRange { .. } => Ok(()),
         }
     }
 
     fn bind_sub(&mut self, pat: &Pattern, pty: &Type, hold: Hold, sub_addr: u64, sv: &RVal, idx: usize) -> R<()> {
         let name = match &pat.kind {
-            PatKind::Wildcard | PatKind::IntLit { .. } => return Ok(()),
+            PatKind::Wildcard | PatKind::IntLit { .. } | PatKind::IntRange { .. } => return Ok(()),
             PatKind::Binding(n) => n.clone(),
             PatKind::Variant { .. } => {
                 return Err(self.fault(FaultKind::Panic, "nested patterns unsupported in prototype interpreter"));
@@ -3828,9 +3833,9 @@ fn pat_matches(pat: &Pattern, vname: &str) -> bool {
     match &pat.kind {
         PatKind::Wildcard | PatKind::Binding(_) => true,
         PatKind::Variant { variant, .. } => variant == vname,
-        // An integer-literal pattern never matches an enum tag (checker rejects
+        // Integer literal/range patterns never match an enum tag (checker rejects
         // this combination); listed for match completeness.
-        PatKind::IntLit { .. } => false,
+        PatKind::IntLit { .. } | PatKind::IntRange { .. } => false,
     }
 }
 

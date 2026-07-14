@@ -1,0 +1,33 @@
+// Integer-range `match` patterns (design 0001 §8.2, extended). Inclusive
+// (`..=`) and half-open (`..`) ranges mix freely with integer literals and the
+// required `_`/binding catch-all, over `u8` and `i64` scrutinees, in both the
+// value-producing (`return match`) and statement forms.
+
+fn opcode(op: u8) -> i64 {
+    return match op {
+        0x00u8 => 1,
+        0x28u8..=0x3eu8 => 2, // a contiguous opcode group, inclusive
+        0x41u8 => 3,
+        _ => 0,
+    };
+}
+
+fn classify(n: i64) -> i64 {
+    let mut r: i64 = 0;
+    match n {
+        0..10 => { r = 1; },   // half-open [0, 10)
+        10..=20 => { r = 2; }, // inclusive [10, 20]
+        v => { r = v; },
+    }
+    return r;
+}
+
+fn main() -> i64 {
+    // 0x00 -> 1, edges 0x28/0x3e -> 2, interior 0x30 -> 2, 0x41 -> 3, 0xff -> 0
+    let a: i64 = opcode(0x00u8) + opcode(0x28u8) + opcode(0x3eu8) + opcode(0x30u8)
+        + opcode(0x41u8) + opcode(0xffu8);
+    // = 1 + 2 + 2 + 2 + 3 + 0 = 10
+    let b: i64 = classify(5) + classify(9) + classify(10) + classify(20) + classify(100);
+    // 5,9 -> [0,10) -> 1; 10,20 -> [10,20] -> 2; 100 -> binding -> 100 = 106
+    return a + b; // 116
+}

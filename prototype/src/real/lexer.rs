@@ -103,6 +103,19 @@ impl<'a> RLexer<'a> {
             return self.lex_string(start, false);
         }
 
+        // Range operators (`..=` inclusive, `..` half-open). A `.` followed by
+        // `.` is never a float continuation (that needs a digit after the dot),
+        // so this classification is unambiguous.
+        if b == b'.' && self.peek2() == Some(b'.') {
+            let (kind, len) = if self.src.get(self.pos + 2).copied() == Some(b'=') {
+                (RTok::DotDotEq, 3)
+            } else {
+                (RTok::DotDot, 2)
+            };
+            self.pos += len;
+            return Ok(RToken { kind, span: Span::new(start, self.pos) });
+        }
+
         let two = (b, self.peek2());
         let (kind, len) = match two {
             // `.*` deref token: one char of lookahead, whitespace breaks the pair.

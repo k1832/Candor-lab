@@ -1218,6 +1218,7 @@ impl<'a> Lowerer<'a> {
                     test_open = false;
                 }
                 PatKind::IntLit { .. } => return unsupported("integer-literal pattern on enum scrutinee"),
+                PatKind::IntRange { .. } => return unsupported("integer-range pattern on enum scrutinee"),
                 PatKind::Variant { variant, .. } => {
                     let idx = einfo
                         .iter()
@@ -1292,6 +1293,40 @@ impl<'a> Lowerer<'a> {
                     let arm_bb = self.new_block();
                     let next_bb = self.new_block();
                     self.terminate(Terminator::Branch { cond: Operand::Local(cmp), then_bb: arm_bb, else_bb: next_bb });
+                    self.switch_to(arm_bb);
+                    self.lower_int_arm(arm, None, val, &scalar, dst)?;
+                    if self.reachable {
+                        self.terminate(Terminator::Goto(join));
+                    }
+                    self.switch_to(next_bb);
+                }
+                PatKind::IntRange { lo_value, lo_negative, hi_value, hi_negative, inclusive, .. } => {
+                    let lo = crate::ast::int_pat_value(*lo_value, *lo_negative);
+                    let hi = crate::ast::int_pat_value(*hi_value, *hi_negative);
+                    let ge_lo = self.emit_temp(
+                        Type::bool(),
+                        Rvalue::Cmp {
+                            op: BinOp::Ge,
+                            l: Operand::Local(val),
+                            r: Operand::Const(lo, sty),
+                        },
+                        self.cur_span,
+                    );
+                    let hi_bb = self.new_block();
+                    let arm_bb = self.new_block();
+                    let next_bb = self.new_block();
+                    self.terminate(Terminator::Branch { cond: Operand::Local(ge_lo), then_bb: hi_bb, else_bb: next_bb });
+                    self.switch_to(hi_bb);
+                    let le_hi = self.emit_temp(
+                        Type::bool(),
+                        Rvalue::Cmp {
+                            op: if *inclusive { BinOp::Le } else { BinOp::Lt },
+                            l: Operand::Local(val),
+                            r: Operand::Const(hi, sty),
+                        },
+                        self.cur_span,
+                    );
+                    self.terminate(Terminator::Branch { cond: Operand::Local(le_hi), then_bb: arm_bb, else_bb: next_bb });
                     self.switch_to(arm_bb);
                     self.lower_int_arm(arm, None, val, &scalar, dst)?;
                     if self.reachable {
@@ -1375,6 +1410,7 @@ impl<'a> Lowerer<'a> {
                     PatKind::Binding(n) => n.clone(),
                     PatKind::Variant { .. } => return unsupported("nested match patterns"),
                     PatKind::IntLit { .. } => return unsupported("integer-literal sub-pattern"),
+                    PatKind::IntRange { .. } => return unsupported("integer-range sub-pattern"),
                 };
                 let (pty, off) = self.lay().payload_offset(&payloads, i);
                 let mut src = splace.clone();

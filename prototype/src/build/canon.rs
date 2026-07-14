@@ -673,6 +673,19 @@ impl Printer {
                 self.push(&value.to_string());
                 self.suffix(suffix);
             }
+            PatKind::IntRange { lo_value, lo_negative, lo_suffix, hi_value, hi_negative, hi_suffix, inclusive } => {
+                if *lo_negative {
+                    self.push("-");
+                }
+                self.push(&lo_value.to_string());
+                self.suffix(lo_suffix);
+                self.push(if *inclusive { "..=" } else { ".." });
+                if *hi_negative {
+                    self.push("-");
+                }
+                self.push(&hi_value.to_string());
+                self.suffix(hi_suffix);
+            }
         }
     }
 }

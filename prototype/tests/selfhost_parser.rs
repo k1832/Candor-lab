@@ -408,6 +408,16 @@ impl R {
                     suf_code(*suffix)
                 ));
             }
+            PatKind::IntRange { lo_value, lo_negative, lo_suffix, hi_value, hi_negative, hi_suffix, inclusive } => {
+                self.w(&format!(
+                    "(prange {} {lo_value} {} {} {} {hi_value} {})",
+                    if *lo_negative { 1 } else { 0 },
+                    suf_code(*lo_suffix),
+                    if *inclusive { 1 } else { 0 },
+                    if *hi_negative { 1 } else { 0 },
+                    suf_code(*hi_suffix)
+                ));
+            }
         }
     }
 

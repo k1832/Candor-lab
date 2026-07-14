@@ -2502,55 +2502,50 @@ impl<'a> Checker<'a> {
         sc_place: &Option<Place>,
     ) -> Type {
         let sc_ty = Type::Scalar(sty);
-        let mut seen: Vec<i128> = Vec::new();
+        let mut seen: Vec<(i128, i128)> = Vec::new();
         let mut has_catchall = false;
         for arm in arms {
             match &arm.pattern.kind {
                 PatKind::IntLit { value, negative, suffix } => {
-                    if let Some(suf) = suffix {
-                        if *suf != sty {
-                            self.diags.push(Diag::error(
-                                "E0606",
-                                format!(
-                                    "literal pattern is `{}` but scrutinee is `{}`",
-                                    scalar_name(*suf),
-                                    scalar_name(sty)
-                                ),
-                                arm.pattern.span,
-                            ));
-                        }
+                    if let Some(v) =
+                        self.check_int_endpoint(*value, *negative, *suffix, sty, arm.pattern.span)
+                    {
+                        self.record_int_interval(&mut seen, v, v, arm.pattern.span);
                     }
-                    let v = int_pat_value(*value, *negative);
-                    let (min, max) = scalar_range(sty);
-                    if v < min || v > max {
-                        self.diags.push(
-                            Diag::error(
-                                "E0709",
-                                format!(
-                                    "integer literal `{}{}` is out of range for `{}`",
-                                    if *negative { "-" } else { "" },
-                                    value,
-                                    scalar_name(sty)
+                }
+                PatKind::IntRange {
+                    lo_value,
+                    lo_negative,
+                    lo_suffix,
+                    hi_value,
+                    hi_negative,
+                    hi_suffix,
+                    inclusive,
+                } => {
+                    let lo = self
+                        .check_int_endpoint(*lo_value, *lo_negative, *lo_suffix, sty, arm.pattern.span);
+                    let hi = self
+                        .check_int_endpoint(*hi_value, *hi_negative, *hi_suffix, sty, arm.pattern.span);
+                    if let (Some(lo), Some(hi)) = (lo, hi) {
+                        let valid = if *inclusive { lo <= hi } else { lo < hi };
+                        if !valid {
+                            self.diags.push(
+                                Diag::error(
+                                    "E0715",
+                                    format!(
+                                        "range pattern lower bound `{lo}` exceeds upper bound `{hi}`"
+                                    ),
+                                    arm.pattern.span,
+                                )
+                                .with_note(
+                                    "a range pattern requires `lo <= hi` for `..=` (or `lo < hi` for `..`)",
+                                    None,
                                 ),
-                                arm.pattern.span,
-                            )
-                            .with_note(
-                                "an over-range literal is rejected at compile time, never a runtime fault (spec 01 §3.3)",
-                                None,
-                            ),
-                        );
-                    } else if seen.contains(&v) {
-                        self.diags.push(Diag::error(
-                            "E0602",
-                            format!(
-                                "duplicate literal pattern `{}{}` — this arm is unreachable",
-                                if *negative { "-" } else { "" },
-                                value
-                            ),
-                            arm.pattern.span,
-                        ));
-                    } else {
-                        seen.push(v);
+                            );
+                        } else {
+                            let last = if *inclusive { hi } else { hi - 1 };
+                            self.record_int_interval(&mut seen, lo, last, arm.pattern.span);
+                        }
                     }
                 }
                 PatKind::Wildcard | PatKind::Binding(_) => has_catchall = true,
@@ -2629,6 +2624,72 @@ impl<'a> Checker<'a> {
         self.set_term(c0, Term::Switch(arm_bbs));
         self.cur_set(Some(join_bb));
         result
+    }
+
+    /// Type-check one integer endpoint of a literal/range pattern against the
+    /// scrutinee type: a present suffix must match it (E0606) and the value must
+    /// be in range (E0709). Returns the endpoint's signed value, or `None` when
+    /// out of range (so the caller skips overlap accounting for a dead value).
+    fn check_int_endpoint(
+        &mut self,
+        value: u64,
+        negative: bool,
+        suffix: Option<ScalarTy>,
+        sty: ScalarTy,
+        span: Span,
+    ) -> Option<i128> {
+        if let Some(suf) = suffix {
+            if suf != sty {
+                self.diags.push(Diag::error(
+                    "E0606",
+                    format!(
+                        "literal pattern is `{}` but scrutinee is `{}`",
+                        scalar_name(suf),
+                        scalar_name(sty)
+                    ),
+                    span,
+                ));
+            }
+        }
+        let v = int_pat_value(value, negative);
+        let (min, max) = scalar_range(sty);
+        if v < min || v > max {
+            self.diags.push(
+                Diag::error(
+                    "E0709",
+                    format!(
+                        "integer literal `{}{}` is out of range for `{}`",
+                        if negative { "-" } else { "" },
+                        value,
+                        scalar_name(sty)
+                    ),
+                    span,
+                )
+                .with_note(
+                    "an over-range literal is rejected at compile time, never a runtime fault (spec 01 §3.3)",
+                    None,
+                ),
+            );
+            None
+        } else {
+            Some(v)
+        }
+    }
+
+    /// Record the inclusive integer interval `[lo, hi]` an arm covers, emitting
+    /// E0602 when it overlaps a value an earlier arm already covers (a dead,
+    /// unreachable arm — this is the duplicate-literal check generalized to
+    /// ranges). Non-overlapping intervals are accumulated for later arms.
+    fn record_int_interval(&mut self, seen: &mut Vec<(i128, i128)>, lo: i128, hi: i128, span: Span) {
+        if seen.iter().any(|&(a, b)| lo <= b && a <= hi) {
+            self.diags.push(Diag::error(
+                "E0602",
+                "overlapping pattern — this arm is unreachable".to_string(),
+                span,
+            ));
+        } else {
+            seen.push((lo, hi));
+        }
     }
 
     fn check_loop(&mut self, body: &Block, span: Span) -> Type {
