@@ -4853,3 +4853,72 @@ float differential) + `--profile fast` (704 tests) + clippy clean. The WASM
 interpreter's remaining post-MVP gaps (for the next chain links): globals (import +
 defined `global.get`/`global.set`), tables + `call_indirect`, the `trunc_sat`
 (0xFC-prefixed saturating) conversions, and the full NaN-payload / signaling-NaN edges.
+
+## WASM-GTC — globals + tables/`call_indirect` land in the Candor-written WASM interpreter, closing the core MVP; gated == wasmi incl. trap-equivalence + byte-exact across the Candor engines (2026-07-14)
+
+CONTEXT. The WASM interpreter (`prototype/tests/fixtures/wasm/interp.cnr`, written IN
+Candor) ran M0-M5 (decode+eval, control flow, linear memory, host imports, the full
+float ISA). The two remaining CORE MVP features were GLOBALS and TABLES +
+`call_indirect` — the machinery a compiled language needs for function pointers /
+vtables / virtual dispatch. This slice adds both, keeping the non-recursive `exec`
+architecture, the `wrapping{}` iN semantics, the function INDEX SPACE (imports low),
+and the drift guards.
+
+PART A — GLOBALS. `decode_module` gains the **Global section (id 6)**: each global is
+a valtype + a mutability byte + a constant init expr (`i32/i64/f32/f64.const` or
+`global.get` of an earlier/imported global; `; end`). **Imported globals** (import
+kind 0x03) are decoded and occupy the LOW global indices — same index-space pattern as
+functions — so a defined global's index is shifted past them (MVP has no host global,
+so an imported global's runtime value defaults to 0 and its mutability byte is
+recorded). Globals hold their i32/i64/f32/f64 value as a bit pattern in an i64 slot
+(like the operand stack). `exec` carries a single `gvals: [64]i64` initialized from the
+module's decoded globals and SHARED across every activation (a callee's `global.set` is
+visible on return — globals are instance state, not per-frame). New opcodes:
+**`global.get` (0x23)** pushes `gvals[x]`; **`global.set` (0x24)** pops into `gvals[x]`
+(the module is assumed valid — wasmi rejects a set to an immutable global at
+validation — so no runtime mutability check is needed).
+
+PART B — TABLES + `call_indirect`. `decode_module` gains the **Table section (id 4)**
+(funcref elem type 0x70 + limits; one table in MVP) stored as a fixed `tbl: [256]i64`
+of function indices with -1 = null/uninitialized, plus `tbl_size` (the declared min),
+and the **Element section (id 9)** (active segments: table 0, a const offset, a vector
+of function indices) filling the table at instantiation. **`call_indirect` (0x11)**
+reads a TYPE index + a table index byte (0x00 in MVP), pops the i32 table slot, then
+applies the three spec TRAP conditions EXACTLY per spec BEFORE invoking: (1) slot
+`>= tbl_size` -> trap (OUT OF BOUNDS), (2) slot entry `< 0` -> trap (NULL /
+uninitialized), (3) the stored function's actual signature must MATCH the call site's
+declared type -> trap on mismatch (the indirect-call SAFETY property a compiled vtable
+relies on). The signature check is STRUCTURAL: each functype is folded at decode into a
+collision-free `type_key` (valtypes 0x7c..0x7f -> 1..4, a separator between params and
+results), stored per type and referenced per function (`ftype`); two types match iff
+their (params, results) valtype sequences match — exactly wasmi's dedup'd equality, no
+arity-only shortcut. On no trap the callee is invoked identically to `call` (0x10) —
+the two opcodes now share one `exec` branch that resolves `callee` (direct immediate vs
+table lookup) then runs the common host/defined dispatch, respecting the function index
+space.
+
+GATES. `prototype/tests/wasm.rs` extends the wasmi (1.1.0) differential (M6): globals —
+a mutable global a function increments and returns, an immutable read, an i64
+round-trip, two-globals set/get, all `== wasmi`, and an imported-global index-space test
+(a defined global at index 1 after an imported global at index 0) byte-exact across the
+four Candor engines; `call_indirect` — a mini vtable (index selects x+100 / x*2 / x-1)
+`== wasmi` and byte-exact across engines, plus the TRAP cases as trap-equivalence (OOB
+table index, NULL slot, and a SIGNATURE MISMATCH where the call site declares a
+`(i32,i32)->i32` against a stored `(i32)->i32` — a valid module that traps at RUNTIME in
+BOTH Candor and wasmi). Value modules run on all four Candor engines via `run_ret_all`
+(tree-walker / MIR / Cranelift no-opt / -O2). The drift guards stay in lock-step: the
+run/ corpus copy (`tests/fixtures/run/wasm_interp.cnr`) is byte-IDENTICAL to the
+canonical `interp.cnr`, and the file-run fixture (`tests/fixtures/wasm/run_wasm_file.cnr`)
+was regenerated to embed the updated interp verbatim.
+
+ALL tests green: `cargo nextest run` (full, incl. self-host corpus, the aot/llvm/stage_d
+native gates that compile the run/ corpus copy, freestanding, concurrency, and the WASM
+M0-M6 suite = 57 wasm tests) 840 passed; `--profile fast` 710 passed; clippy clean. The
+Candor compiler was NOT changed. The WASM interpreter now covers the CORE MVP — it can
+run genuinely compiled modules that dispatch through function pointers / vtables.
+DEFERRED (next chain links, reported precisely): `trunc_sat` (0xFC-prefixed saturating
+float->int) conversions; the full NaN-payload / signaling-NaN edges; reference-type / GC
+proposals, multi-table, and bulk-memory (`memory.copy`/`fill`, passive segments) — all
+non-MVP. Running real clang/rustc `.wasm` output additionally needs the WASI import
+surface those toolchains target (only a WASI-lite `print_i32`/`print_str` is wired), so
+the interpreter is MVP-complete but not yet a drop-in host for arbitrary compiled wasm.

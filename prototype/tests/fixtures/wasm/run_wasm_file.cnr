@@ -213,6 +213,19 @@ struct Module {
     data_off: [16]usize,
     data_start: [16]usize,
     data_len: [16]usize,
+    // Globals: imported globals take the low indices, defined globals follow;
+    // each holds its i32/i64/f32/f64 value as a bit pattern in an i64 slot, plus a
+    // decoded mutability flag. `type_key`/`ftype` back call_indirect's signature
+    // check; `tbl` is the funcref table (function index per slot, -1 = null).
+    type_key: [64]i64,
+    ftype: [64]usize,
+    nglobals: usize,
+    nglobalimports: usize,
+    gval: [64]i64,
+    gmut: [64]bool,
+    has_table: bool,
+    tbl_size: usize,
+    tbl: [256]i64,
 }
 
 // A blocktype's RESULT arity. MVP blocktypes are `0x40` (empty -> 0) or a single
@@ -245,8 +258,11 @@ fn skip_immediates(bytes: [u8], r: write Reader, op: u8) -> unit {
             let l: u32 = read_u32(bytes, r);
             k = k + 1u32;
         }
-    } else if op == 0x10u8 || op == 0x20u8 || op == 0x21u8 || op == 0x22u8 {
+    } else if op == 0x10u8 || op == 0x20u8 || op == 0x21u8 || op == 0x22u8 || op == 0x23u8 || op == 0x24u8 {
         let x: u32 = read_u32(bytes, r);
+    } else if op == 0x11u8 {
+        let ty: u32 = read_u32(bytes, r);
+        let tb: u8 = read_byte(bytes, r);
     } else if op == 0x41u8 || op == 0x42u8 {
         let v: i64 = read_i64(bytes, r);
     } else if op == 0x43u8 {
@@ -390,7 +406,6 @@ fn decode_module(bytes: [u8]) -> Module {
 
     let mut tnparams: [64]usize = [0usize; 64];
     let mut tnresults: [64]usize = [0usize; 64];
-    let mut ftype: [64]usize = [0usize; 64];
     let mut m: Module = Module {
         nfuncs: 0,
         nimports: 0usize,
@@ -409,6 +424,15 @@ fn decode_module(bytes: [u8]) -> Module {
         data_off: [0usize; 16],
         data_start: [0usize; 16],
         data_len: [0usize; 16],
+        type_key: [0i64; 64],
+        ftype: [0usize; 64],
+        nglobals: 0usize,
+        nglobalimports: 0usize,
+        gval: [0i64; 64],
+        gmut: [false; 64],
+        has_table: false,
+        tbl_size: 0usize,
+        tbl: [0i64 - 1i64; 256],
     };
 
     let total: usize = len(bytes);
@@ -422,20 +446,25 @@ fn decode_module(bytes: [u8]) -> Module {
             let mut t: u32 = 0u32;
             while t < ntypes {
                 expect_byte(bytes, write r, 0x60u8);
+                let mut key: i64 = 0i64;
                 let np: u32 = read_u32(bytes, write r);
                 let mut i: u32 = 0u32;
                 while i < np {
                     let vt: u8 = read_byte(bytes, write r);
+                    wrapping { key = key * 8i64 + ((conv i64 vt) - 0x7bi64); }
                     i = i + 1u32;
                 }
+                wrapping { key = key * 8i64 + 5i64; }
                 let nres: u32 = read_u32(bytes, write r);
                 let mut j: u32 = 0u32;
                 while j < nres {
                     let vt: u8 = read_byte(bytes, write r);
+                    wrapping { key = key * 8i64 + ((conv i64 vt) - 0x7bi64); }
                     j = j + 1u32;
                 }
                 tnparams[conv usize t] = conv usize np;
                 tnresults[conv usize t] = conv usize nres;
+                m.type_key[conv usize t] = key;
                 t = t + 1u32;
             }
         } else if id == 0x02u8 {
@@ -467,6 +496,7 @@ fn decode_module(bytes: [u8]) -> Module {
                 if ikind == 0x00u8 {
                     let ti: usize = conv usize (read_u32(bytes, write r));
                     let fx: usize = m.nimports;
+                    m.ftype[fx] = ti;
                     m.fnparams[fx] = tnparams[ti];
                     m.fnresults[fx] = tnresults[ti];
                     m.imp_host[fx] = resolve_host(slice_of(mbuf), mlen, slice_of(fbuf), flen);
@@ -489,8 +519,15 @@ fn decode_module(bytes: [u8]) -> Module {
                         m.mem_max = conv usize mmaxp;
                     }
                 } else {
+                    // Imported global: occupies a low global index (same index-
+                    // space pattern as functions). MVP has no host global, so its
+                    // runtime value defaults to 0; the mutability byte is recorded.
                     let gvt: u8 = read_byte(bytes, write r);
-                    let gmut: u8 = read_byte(bytes, write r);
+                    let gmutb: u8 = read_byte(bytes, write r);
+                    let gx: usize = m.nglobals;
+                    m.gmut[gx] = gmutb == 0x01u8;
+                    m.nglobals = m.nglobals + 1usize;
+                    m.nglobalimports = m.nglobalimports + 1usize;
                 }
                 ii = ii + 1u32;
             }
@@ -504,7 +541,7 @@ fn decode_module(bytes: [u8]) -> Module {
             while fi < nfns {
                 let ti: u32 = read_u32(bytes, write r);
                 let fx: usize = m.nimports + conv usize fi;
-                ftype[fx] = conv usize ti;
+                m.ftype[fx] = conv usize ti;
                 m.fnparams[fx] = tnparams[conv usize ti];
                 m.fnresults[fx] = tnresults[conv usize ti];
                 fi = fi + 1u32;
@@ -595,6 +632,88 @@ fn decode_module(bytes: [u8]) -> Module {
                 m.ndata = m.ndata + 1usize;
                 r.pos = r.pos + conv usize dlen;
                 sg = sg + 1u32;
+            }
+        } else if id == 0x04u8 {
+            // Table section: a funcref table (elem type 0x70 + limits). MVP has one
+            // table; entries begin null (-1) and are filled by the Element section.
+            let ntab: u32 = read_u32(bytes, write r);
+            let mut tt: u32 = 0u32;
+            while tt < ntab {
+                let et: u8 = read_byte(bytes, write r);
+                let tflags: u8 = read_byte(bytes, write r);
+                let tmin: u32 = read_u32(bytes, write r);
+                m.has_table = true;
+                m.tbl_size = conv usize tmin;
+                if (tflags & 0x01u8) != 0u8 {
+                    let tmax: u32 = read_u32(bytes, write r);
+                }
+                tt = tt + 1u32;
+            }
+        } else if id == 0x06u8 {
+            // Global section: each global is a valtype + mutability byte + a
+            // constant init expr (`<const>; end`). Defined globals follow the
+            // imported ones in index space; `global.get` in an init expr reads an
+            // earlier (imported) global's value.
+            let nglob: u32 = read_u32(bytes, write r);
+            let mut gg: u32 = 0u32;
+            while gg < nglob {
+                let gvtb: u8 = read_byte(bytes, write r);
+                let gmutb: u8 = read_byte(bytes, write r);
+                let iop: u8 = read_byte(bytes, write r);
+                let mut gv: i64 = 0i64;
+                if iop == 0x41u8 {
+                    gv = as_i32(read_i64(bytes, write r));
+                } else if iop == 0x42u8 {
+                    gv = read_i64(bytes, write r);
+                } else if iop == 0x43u8 {
+                    let mut k: usize = 0usize;
+                    while k < 4usize {
+                        let bb: i64 = conv i64 (read_byte(bytes, write r));
+                        wrapping { gv = gv | (bb << conv i64 (k * 8usize)); }
+                        k = k + 1usize;
+                    }
+                } else if iop == 0x44u8 {
+                    let mut k: usize = 0usize;
+                    while k < 8usize {
+                        let bb: i64 = conv i64 (read_byte(bytes, write r));
+                        wrapping { gv = gv | (bb << conv i64 (k * 8usize)); }
+                        k = k + 1usize;
+                    }
+                } else if iop == 0x23u8 {
+                    let gi: usize = conv usize (read_u32(bytes, write r));
+                    gv = m.gval[gi];
+                } else {
+                    panic("unimplemented: global init expr");
+                }
+                let endb: u8 = read_byte(bytes, write r);
+                if endb != 0x0bu8 {
+                    panic("malformed global init expr: expected end");
+                }
+                let gx: usize = m.nglobals;
+                m.gval[gx] = gv;
+                m.gmut[gx] = gmutb == 0x01u8;
+                m.nglobals = m.nglobals + 1usize;
+                gg = gg + 1u32;
+            }
+        } else if id == 0x09u8 {
+            // Element section: active segments (table 0, const offset, vec of func
+            // indices) fill the table at instantiation for indirect dispatch.
+            let neseg: u32 = read_u32(bytes, write r);
+            let mut es: u32 = 0u32;
+            while es < neseg {
+                let eflags: u32 = read_u32(bytes, write r);
+                if eflags != 0u32 {
+                    panic("unimplemented: non-active element segment");
+                }
+                let eoff: usize = read_const_offset(bytes, write r);
+                let nfn: u32 = read_u32(bytes, write r);
+                let mut ek: u32 = 0u32;
+                while ek < nfn {
+                    let fnix: usize = conv usize (read_u32(bytes, write r));
+                    m.tbl[eoff + conv usize ek] = conv i64 fnix;
+                    ek = ek + 1u32;
+                }
+                es = es + 1u32;
             }
         }
         r.pos = payload_end;
@@ -1237,6 +1356,9 @@ fn exec(bytes: [u8], m: read Module, mem: write Vec[u8], hout: write Vec[u8]) al
     let mut end: usize = m.fend[fidx];
     let mut nres: usize = m.fnresults[fidx];
     let mut locals: [32]i64 = [0i64; 32];
+    // Module-instance globals: initialized from the decoded globals and shared
+    // across all activations (a callee's `global.set` is visible after return).
+    let mut gvals: [64]i64 = m.gval;
     let mut f: Frame = Frame {
         stack: [0i64; 64],
         sp: 0,
@@ -1342,8 +1464,35 @@ fn exec(bytes: [u8], m: read Module, mem: write Vec[u8], hout: write Vec[u8]) al
             }
         } else if op == 0x0fu8 {
             func_return = true;
-        } else if op == 0x10u8 {
-            let callee: usize = conv usize (read_u32(bytes, write r));
+        } else if op == 0x10u8 || op == 0x11u8 {
+            let mut callee: usize = 0usize;
+            if op == 0x10u8 {
+                callee = conv usize (read_u32(bytes, write r));
+            } else {
+                // call_indirect: a TYPE index + a table index byte (0x00 in MVP).
+                // Pop the i32 table slot, then apply the three spec TRAP checks
+                // before invoking: (1) the slot is OUT OF BOUNDS of the table,
+                // (2) the slot is NULL (uninitialized), (3) the stored function's
+                // signature must MATCH the call site's declared type. The last is
+                // the WASM indirect-call safety property a compiled vtable relies
+                // on: dispatch through a function pointer of the wrong type traps.
+                let type_idx: usize = conv usize (read_u32(bytes, write r));
+                let tbl_byte: u8 = read_byte(bytes, write r);
+                f.sp = f.sp - 1usize;
+                let slot_val: i64 = f.stack[f.sp] & mask;
+                let slot: usize = conv usize slot_val;
+                if slot >= m.tbl_size {
+                    panic("undefined element");
+                }
+                let entry: i64 = m.tbl[slot];
+                if entry < 0i64 {
+                    panic("uninitialized element");
+                }
+                callee = conv usize entry;
+                if m.type_key[m.ftype[callee]] != m.type_key[type_idx] {
+                    panic("indirect call type mismatch");
+                }
+            }
             if callee < m.nimports {
                 // Host import (func index < K): pop the params, run the host
                 // effect, push no result (the WASI-lite print functions return
@@ -1393,6 +1542,17 @@ fn exec(bytes: [u8], m: read Module, mem: write Vec[u8], hout: write Vec[u8]) al
         } else if op == 0x22u8 {
             let x: usize = conv usize (read_u32(bytes, write r));
             locals[x] = f.stack[f.sp - 1];
+        } else if op == 0x23u8 {
+            let x: usize = conv usize (read_u32(bytes, write r));
+            f.stack[f.sp] = gvals[x];
+            f.sp = f.sp + 1;
+        } else if op == 0x24u8 {
+            // global.set: the module is assumed valid, so a set to an immutable
+            // global never occurs (wasmi rejects it at validation); no runtime
+            // mutability check is needed.
+            let x: usize = conv usize (read_u32(bytes, write r));
+            f.sp = f.sp - 1;
+            gvals[x] = f.stack[f.sp];
         } else if op == 0x41u8 {
             let v: i64 = read_i64(bytes, write r);
             f.stack[f.sp] = as_i32(v);

@@ -2232,3 +2232,291 @@ fn float_cross_engine_agreement() {
     assert_eq!(run_fault_all(&program(&funary64(2147483648.0, 0xaa, I32))), FaultKind::Panic);
     assert_eq!(run_fault_all(&program(&funary32(-1.0f32, 0xa9, I32))), FaultKind::Panic);
 }
+
+// ===========================================================================
+// M6 — GLOBALS + TABLES / call_indirect (function pointers / vtables)
+// ===========================================================================
+//
+// The two remaining core WASM MVP features that let the interpreter run
+// genuinely compiled modules (virtual dispatch through a function table):
+//   * GLOBALS: a Global section (mutable/immutable, constant init exprs), the
+//     global.get/global.set opcodes, and imported-global index-space handling.
+//   * TABLES + call_indirect: a funcref Table + an active Element segment, and
+//     indirect dispatch with the three spec TRAP conditions — an out-of-bounds
+//     table index, a null/uninitialized slot, and a SIGNATURE MISMATCH (the call
+//     site's declared type must match the stored function's actual type).
+// Same discipline as M4/M5: every module runs through the Candor interp AND the
+// wasmi reference (value + trap-equivalence), and each value module is also
+// asserted byte-exact across the four Candor engines (tree-walker / MIR /
+// Cranelift no-opt / -O2) via `run_ret_all`.
+
+/// A module with `globals` (valtype, mutable, init-const bytes) and an exported
+/// `main : () -> result`. Sections: Type(1) Function(3) Global(6) Export(7) Code(10).
+fn global_module(globals: &[(u8, bool, Vec<u8>)], result: u8, body: Vec<u8>) -> Vec<u8> {
+    let mut m = MAGIC.to_vec();
+    wasm_section(&mut m, 0x01, &wasm_vec(&[functype(&[], &[result])]));
+    wasm_section(&mut m, 0x03, &wasm_vec(&[vec![0x00]]));
+    let gvec = wasm_vec(
+        &globals
+            .iter()
+            .map(|(vt, mutable, init)| {
+                let mut g = vec![*vt, if *mutable { 0x01 } else { 0x00 }];
+                g.extend_from_slice(init);
+                g.push(0x0b); // end
+                g
+            })
+            .collect::<Vec<_>>(),
+    );
+    wasm_section(&mut m, 0x06, &gvec);
+    let exports = wasm_vec(&[{
+        let mut e = wasm_vec(&"main".bytes().map(|c| vec![c]).collect::<Vec<_>>());
+        e.push(0x00);
+        leb_u32(0, &mut e);
+        e
+    }]);
+    wasm_section(&mut m, 0x07, &exports);
+    wasm_section(&mut m, 0x0a, &wasm_vec(&[code_body(&[], &body)]));
+    m
+}
+
+#[test]
+fn m6_global_mutable_increment() {
+    // A mutable i32 global initialized to 41; main increments it and returns it.
+    let body = {
+        let mut b = vec![0x23, 0x00]; // global.get 0
+        b.extend(c32(1));
+        b.push(0x6a); // i32.add
+        b.extend([0x24, 0x00]); // global.set 0
+        b.extend([0x23, 0x00]); // global.get 0
+        b.push(0x0b);
+        b
+    };
+    let m = global_module(&[(I32, true, c32(41))], I32, body);
+    assert_eq!(run_ret_all(&program(&m)), 42);
+    assert_diff(&m, "global mutable increment");
+}
+
+#[test]
+fn m6_global_immutable_read() {
+    // Reading an immutable global returns its init value.
+    let m = global_module(&[(I32, false, c32(7))], I32, {
+        let mut b = vec![0x23, 0x00];
+        b.push(0x0b);
+        b
+    });
+    assert_eq!(run_ret_all(&program(&m)), 7);
+    assert_diff(&m, "immutable global read");
+}
+
+#[test]
+fn m6_global_i64_and_multiple() {
+    // i64 mutable global round-trip: init 2^32, add 5, store back, reload.
+    let body = {
+        let mut b = vec![0x23, 0x00];
+        b.extend(c64(5));
+        b.push(0x7c); // i64.add
+        b.extend([0x24, 0x00, 0x23, 0x00]);
+        b.push(0x0b);
+        b
+    };
+    let m = global_module(&[(I64, true, c64(0x1_0000_0000))], I64, body);
+    assert_eq!(run_ret_all(&program(&m)), 0x1_0000_0005);
+    assert_diff(&m, "global i64 roundtrip");
+
+    // Two globals: g0 mutable = 0, g1 immutable = 10; main sets g0 = g1*4, returns g0.
+    let body2 = {
+        let mut b = vec![0x23, 0x01]; // global.get 1 (=10)
+        b.extend(c32(4));
+        b.push(0x6c); // i32.mul -> 40
+        b.extend([0x24, 0x00]); // global.set 0
+        b.extend([0x23, 0x00]); // global.get 0
+        b.push(0x0b);
+        b
+    };
+    let m2 = global_module(&[(I32, true, c32(0)), (I32, false, c32(10))], I32, body2);
+    assert_eq!(run_ret_all(&program(&m2)), 40);
+    assert_diff(&m2, "two globals set/get");
+}
+
+#[test]
+fn m6_imported_global_index_space() {
+    // A module that IMPORTS a global (env.base : i32) occupying global index 0,
+    // then DEFINES a mutable global at index 1. `main` reads/writes the DEFINED
+    // global (index 1) — proving imported globals are decoded past and shift the
+    // defined-global index space (like functions). Run across the Candor engines
+    // (no host global is needed, since main never reads the import).
+    let mut m = MAGIC.to_vec();
+    wasm_section(&mut m, 0x01, &wasm_vec(&[functype(&[], &[I32])]));
+    // Import env.base, global desc = kind 0x03 + valtype i32 + mutability 0.
+    wasm_section(&mut m, 0x02, &wasm_vec(&[import_entry("env", "base", &[0x03, I32, 0x00])]));
+    wasm_section(&mut m, 0x03, &wasm_vec(&[vec![0x00]]));
+    // Defined global at index 1 (the imported global is index 0): mutable i32 = 5.
+    let gvec = wasm_vec(&[{
+        let mut g = vec![I32, 0x01];
+        g.extend(c32(5));
+        g.push(0x0b);
+        g
+    }]);
+    wasm_section(&mut m, 0x06, &gvec);
+    wasm_section(&mut m, 0x07, &wasm_vec(&[{
+        let mut e = wasm_vec(&"main".bytes().map(|c| vec![c]).collect::<Vec<_>>());
+        e.push(0x00);
+        leb_u32(0, &mut e);
+        e
+    }]));
+    // main: global.get 1; i32.const 3; i32.add; global.set 1; global.get 1; end -> 8.
+    let body = {
+        let mut b = vec![0x23, 0x01];
+        b.extend(c32(3));
+        b.push(0x6a);
+        b.extend([0x24, 0x01, 0x23, 0x01]);
+        b.push(0x0b);
+        b
+    };
+    wasm_section(&mut m, 0x0a, &wasm_vec(&[code_body(&[], &body)]));
+    assert_eq!(run_ret_all(&program(&m)), 8, "defined global (idx 1) after imported global (idx 0)");
+}
+
+/// A funcref-table "vtable" module: three `(i32)->i32` functions at table slots
+/// 0/1/2 (x+100, x*2, x-1), an exported `main : ()->i32` that pushes `x` then the
+/// `sel` table index and dispatches via call_indirect (type t0, table 0). The
+/// table's declared min is `table_min`; the element segment always fills slots
+/// 0..2, so a `table_min` above 3 leaves null slots for the null-trap case.
+fn vtable_module(table_min: u32, sel: i32, x: i32) -> Vec<u8> {
+    let mut m = MAGIC.to_vec();
+    // t0: (i32)->i32 (the table's function type); t1: ()->i32 (main).
+    wasm_section(&mut m, 0x01, &wasm_vec(&[functype(&[I32], &[I32]), functype(&[], &[I32])]));
+    // func 0,1,2 : t0; func 3 (main) : t1.
+    wasm_section(&mut m, 0x03, &wasm_vec(&[vec![0x00], vec![0x00], vec![0x00], vec![0x01]]));
+    // Table: funcref (0x70), flags 0, min = table_min.
+    let mut tbl = vec![0x70u8, 0x00u8];
+    leb_u32(table_min, &mut tbl);
+    wasm_section(&mut m, 0x04, &wasm_vec(&[tbl]));
+    // Export main -> func 3.
+    wasm_section(&mut m, 0x07, &wasm_vec(&[{
+        let mut e = wasm_vec(&"main".bytes().map(|c| vec![c]).collect::<Vec<_>>());
+        e.push(0x00);
+        leb_u32(3, &mut e);
+        e
+    }]));
+    // Element: active, table 0, offset i32.const 0; end, funcs [0,1,2].
+    let mut elem = Vec::new();
+    leb_u32(1, &mut elem); // 1 segment
+    elem.push(0x00); // flags (active, table 0)
+    elem.push(0x41);
+    leb_i32(0, &mut elem);
+    elem.push(0x0b); // offset expr
+    elem.extend(wasm_vec(&[vec![0x00], vec![0x01], vec![0x02]]));
+    wasm_section(&mut m, 0x09, &elem);
+    // Bodies: A(x)=x+100, B(x)=x*2, C(x)=x-1, main = call_indirect t0 over [x, sel].
+    let fa = {
+        let mut b = vec![0x20, 0x00];
+        b.extend(c32(100));
+        b.push(0x6a);
+        b.push(0x0b);
+        b
+    };
+    let fb = {
+        let mut b = vec![0x20, 0x00];
+        b.extend(c32(2));
+        b.push(0x6c);
+        b.push(0x0b);
+        b
+    };
+    let fc = {
+        let mut b = vec![0x20, 0x00];
+        b.extend(c32(1));
+        b.push(0x6b);
+        b.push(0x0b);
+        b
+    };
+    let main = {
+        let mut b = c32(x);
+        b.extend(c32(sel));
+        b.extend([0x11, 0x00, 0x00]); // call_indirect type 0, table 0
+        b.push(0x0b);
+        b
+    };
+    wasm_section(
+        &mut m,
+        0x0a,
+        &wasm_vec(&[code_body(&[], &fa), code_body(&[], &fb), code_body(&[], &fc), code_body(&[], &main)]),
+    );
+    m
+}
+
+/// A module whose call_indirect declares a type (t2 = (i32,i32)->i32) that does
+/// NOT match the stored table entry's actual type (t0 = (i32)->i32). The module
+/// is well-typed at the call site (so it compiles), but dispatching through it
+/// traps at runtime on the dynamic signature check — the core indirect-call
+/// safety property.
+fn indirect_mismatch_module() -> Vec<u8> {
+    let mut m = MAGIC.to_vec();
+    // t0: (i32)->i32 (stored func); t1: ()->i32 (main); t2: (i32,i32)->i32 (call site).
+    wasm_section(
+        &mut m,
+        0x01,
+        &wasm_vec(&[functype(&[I32], &[I32]), functype(&[], &[I32]), functype(&[I32, I32], &[I32])]),
+    );
+    // func 0 : t0; func 1 (main) : t1.
+    wasm_section(&mut m, 0x03, &wasm_vec(&[vec![0x00], vec![0x01]]));
+    let mut tbl = vec![0x70u8, 0x00u8];
+    leb_u32(1, &mut tbl);
+    wasm_section(&mut m, 0x04, &wasm_vec(&[tbl]));
+    wasm_section(&mut m, 0x07, &wasm_vec(&[{
+        let mut e = wasm_vec(&"main".bytes().map(|c| vec![c]).collect::<Vec<_>>());
+        e.push(0x00);
+        leb_u32(1, &mut e);
+        e
+    }]));
+    // Element: slot 0 -> func 0 (type t0).
+    let mut elem = Vec::new();
+    leb_u32(1, &mut elem);
+    elem.push(0x00);
+    elem.push(0x41);
+    leb_i32(0, &mut elem);
+    elem.push(0x0b);
+    elem.extend(wasm_vec(&[vec![0x00]]));
+    wasm_section(&mut m, 0x09, &elem);
+    // func0 (t0): local.get 0; end. main (t1): push [1,2] (t2's params) + index 0,
+    // then call_indirect t2 — declared (i32,i32)->i32 vs the slot's (i32)->i32.
+    let f0 = {
+        let mut b = vec![0x20, 0x00];
+        b.push(0x0b);
+        b
+    };
+    let main = {
+        let mut b = c32(1);
+        b.extend(c32(2));
+        b.extend(c32(0));
+        b.extend([0x11, 0x02, 0x00]); // call_indirect type 2, table 0
+        b.push(0x0b);
+        b
+    };
+    wasm_section(&mut m, 0x0a, &wasm_vec(&[code_body(&[], &f0), code_body(&[], &main)]));
+    m
+}
+
+#[test]
+fn m6_call_indirect_dispatch() {
+    // A mini vtable: index 0 -> x+100, 1 -> x*2, 2 -> x-1. Selecting each entry
+    // runs the right function — the compiled-language virtual-dispatch pattern.
+    for (sel, x, expected) in
+        [(0i32, 5i32, 105i64), (1, 5, 10), (2, 5, 4), (0, -100, 0), (1, 21, 42), (2, 43, 42)]
+    {
+        let m = vtable_module(3, sel, x);
+        assert_eq!(run_ret_all(&program(&m)), expected, "vtable sel={sel} x={x}");
+        assert_diff(&m, &format!("call_indirect dispatch sel={sel} x={x}"));
+    }
+}
+
+#[test]
+fn m6_call_indirect_traps() {
+    // (1) OOB table index: table size 3, index 5 >= 3 traps in both.
+    assert_diff_trap(&vtable_module(3, 5, 1), "call_indirect OOB table index");
+    // (2) NULL slot: table size 6 with only slots 0..2 filled; index 5 is null.
+    assert_diff_trap(&vtable_module(6, 5, 1), "call_indirect null slot");
+    // (3) SIGNATURE MISMATCH: the call site's declared type differs from the stored
+    // function's actual signature -> a runtime trap in both (the core safety check).
+    assert_diff_trap(&indirect_mismatch_module(), "call_indirect signature mismatch");
+}
