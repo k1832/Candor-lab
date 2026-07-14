@@ -2331,8 +2331,7 @@ impl<'a> Checker<'a> {
                 return Type::Error;
             }
         };
-        let pats: Vec<&Pattern> = arms.iter().map(|a| &a.pattern).collect();
-        if let Some(d) = patterns::check_exhaustive(&pats, &einfo, &ename, span) {
+        if let Some(d) = patterns::check_exhaustive(arms, &einfo, &ename, span) {
             self.diags.push(d);
         }
         // Record the concrete enum instance behind each arm's pattern so that
@@ -2367,6 +2366,7 @@ impl<'a> Checker<'a> {
                     for b in &binds {
                         self.add_local(&b.name, b.ty.clone(), b.movable);
                     }
+                    self.check_arm_guard(arm);
                     ty = join_types(ty, self.check_expr(&arm.body, Use::Value));
                     self.pop_scope();
                 }
@@ -2476,6 +2476,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            self.check_arm_guard(arm);
             let bt = self.check_expr(&arm.body, Use::Value);
             self.pop_scope();
             if let Some(cur) = self.cur_get() {
@@ -2486,6 +2487,16 @@ impl<'a> Checker<'a> {
         self.set_term(c0, Term::Switch(arm_bbs));
         self.cur_set(Some(join_bb));
         result
+    }
+
+    /// Type-check a match arm's optional `if EXPR` guard: the guard must type as
+    /// `bool` and is evaluated with the arm's pattern bindings in scope (design
+    /// 0001 §8.2, extended). Called with the arm's scope already pushed.
+    fn check_arm_guard(&mut self, arm: &MatchArm) {
+        if let Some(guard) = &arm.guard {
+            let gt = self.check_expr(guard, Use::Value);
+            self.expect_bool(&gt, guard.span, "a match guard");
+        }
     }
 
     /// Type-check an integer-scrutinee `match` (design 0001 §8.2, extended for
@@ -2510,7 +2521,7 @@ impl<'a> Checker<'a> {
                     if let Some(v) =
                         self.check_int_endpoint(*value, *negative, *suffix, sty, arm.pattern.span)
                     {
-                        self.record_int_interval(&mut seen, v, v, arm.pattern.span);
+                        self.record_int_interval(&mut seen, v, v, arm.pattern.span, arm.guard.is_some());
                     }
                 }
                 PatKind::IntRange {
@@ -2544,11 +2555,17 @@ impl<'a> Checker<'a> {
                             );
                         } else {
                             let last = if *inclusive { hi } else { hi - 1 };
-                            self.record_int_interval(&mut seen, lo, last, arm.pattern.span);
+                            self.record_int_interval(&mut seen, lo, last, arm.pattern.span, arm.guard.is_some());
                         }
                     }
                 }
-                PatKind::Wildcard | PatKind::Binding(_) => has_catchall = true,
+                // A guarded catch-all may not fire, so it does NOT make the match
+                // exhaustive (design 0001 §8.2, extended).
+                PatKind::Wildcard | PatKind::Binding(_) => {
+                    if arm.guard.is_none() {
+                        has_catchall = true;
+                    }
+                }
                 PatKind::Variant { .. } => {
                     self.diags.push(Diag::error(
                         "E0606",
@@ -2587,6 +2604,7 @@ impl<'a> Checker<'a> {
                     if let PatKind::Binding(name) = &arm.pattern.kind {
                         self.add_local(name, sc_ty.clone(), true);
                     }
+                    self.check_arm_guard(arm);
                     ty = join_types(ty, self.check_expr(&arm.body, Use::Value));
                     self.pop_scope();
                 }
@@ -2614,6 +2632,7 @@ impl<'a> Checker<'a> {
                     arm.pattern.span,
                 );
             }
+            self.check_arm_guard(arm);
             let bt = self.check_expr(&arm.body, Use::Value);
             self.pop_scope();
             if let Some(cur) = self.cur_get() {
@@ -2680,14 +2699,18 @@ impl<'a> Checker<'a> {
     /// E0602 when it overlaps a value an earlier arm already covers (a dead,
     /// unreachable arm — this is the duplicate-literal check generalized to
     /// ranges). Non-overlapping intervals are accumulated for later arms.
-    fn record_int_interval(&mut self, seen: &mut Vec<(i128, i128)>, lo: i128, hi: i128, span: Span) {
+    fn record_int_interval(&mut self, seen: &mut Vec<(i128, i128)>, lo: i128, hi: i128, span: Span, guarded: bool) {
+        // `seen` accumulates only the intervals of UNGUARDED arms: a guarded arm's
+        // guard may fail at runtime, so it neither shadows a later arm nor is
+        // shadowed retroactively (design 0001 §8.2, extended). An arm is still
+        // flagged unreachable when an earlier UNGUARDED arm already covers it.
         if seen.iter().any(|&(a, b)| lo <= b && a <= hi) {
             self.diags.push(Diag::error(
                 "E0602",
                 "overlapping pattern — this arm is unreachable".to_string(),
                 span,
             ));
-        } else {
+        } else if !guarded {
             seen.push((lo, hi));
         }
     }

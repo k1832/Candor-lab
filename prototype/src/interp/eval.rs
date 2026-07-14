@@ -3294,23 +3294,44 @@ impl<'a> Interp<'a> {
             .ok_or_else(|| self.fault(FaultKind::Panic, "match on non-enum"))?;
         let tag = self.read_u64(enum_addr)? as usize;
         let (vname, payloads) = einfo[tag].clone();
-        let arm = match arms.iter().find(|a| pat_matches(&a.pattern, &vname)) {
-            Some(a) => a,
-            None => return Err(self.fault(FaultKind::Panic, "no matching arm")),
-        };
-        self.push_scope();
-        self.bind_pattern(&arm.pattern, hold, enum_addr, &payloads, &sv)?;
-        let body_res = self.eval_value(&arm.body, expected);
-        match body_res {
-            Ok(rv) => {
-                let out = self.materialize(rv)?;
-                self.drop_scope()?;
-                Ok(out)
+        // Try each arm in order: its pattern must match the tag, and — if the arm
+        // is guarded — the guard must evaluate true. A matching pattern whose
+        // guard is FALSE falls through to test the following arms (design 0001
+        // §8.2, extended): the guard failing must not skip a later matching arm.
+        for arm in arms {
+            if !pat_matches(&arm.pattern, &vname) {
+                continue;
             }
-            Err(Ctl::Fault(f)) => Err(Ctl::Fault(f)),
-            Err(ctl) => {
+            self.push_scope();
+            self.bind_pattern(&arm.pattern, hold, enum_addr, &payloads, &sv)?;
+            if !self.eval_arm_guard(arm)? {
                 self.drop_scope()?;
-                Err(ctl)
+                continue;
+            }
+            return match self.eval_value(&arm.body, expected) {
+                Ok(rv) => {
+                    let out = self.materialize(rv)?;
+                    self.drop_scope()?;
+                    Ok(out)
+                }
+                Err(Ctl::Fault(f)) => Err(Ctl::Fault(f)),
+                Err(ctl) => {
+                    self.drop_scope()?;
+                    Err(ctl)
+                }
+            };
+        }
+        Err(self.fault(FaultKind::Panic, "no matching arm"))
+    }
+
+    /// Evaluate a match arm's optional guard with its bindings in scope. Returns
+    /// `true` when the arm has no guard or the guard is true (design 0001 §8.2).
+    fn eval_arm_guard(&mut self, arm: &MatchArm) -> R<bool> {
+        match &arm.guard {
+            None => Ok(true),
+            Some(guard) => {
+                let gv = self.eval_value(guard, Some(&Type::bool()))?;
+                Ok(self.read_bytes(gv.addr, 1, true)?[0] != 0)
             }
         }
     }
@@ -3326,43 +3347,51 @@ impl<'a> Interp<'a> {
         sty: ScalarTy,
     ) -> R<RVal> {
         let val = self.read_int(sv.addr, sty)?;
-        let arm = arms.iter().find(|a| match &a.pattern.kind {
-            PatKind::IntLit { value, negative, .. } => {
-                crate::ast::int_pat_value(*value, *negative) == val
+        // Try each arm in order: its pattern must match the value, and — if the
+        // arm is guarded — the guard must evaluate true. A matching pattern with a
+        // FALSE guard falls through to the following arms (design 0001 §8.2).
+        for arm in arms {
+            let matches = match &arm.pattern.kind {
+                PatKind::IntLit { value, negative, .. } => {
+                    crate::ast::int_pat_value(*value, *negative) == val
+                }
+                PatKind::IntRange { lo_value, lo_negative, hi_value, hi_negative, inclusive, .. } => {
+                    let lo = crate::ast::int_pat_value(*lo_value, *lo_negative);
+                    let hi = crate::ast::int_pat_value(*hi_value, *hi_negative);
+                    lo <= val && if *inclusive { val <= hi } else { val < hi }
+                }
+                PatKind::Wildcard | PatKind::Binding(_) => true,
+                PatKind::Variant { .. } => false,
+            };
+            if !matches {
+                continue;
             }
-            PatKind::IntRange { lo_value, lo_negative, hi_value, hi_negative, inclusive, .. } => {
-                let lo = crate::ast::int_pat_value(*lo_value, *lo_negative);
-                let hi = crate::ast::int_pat_value(*hi_value, *hi_negative);
-                lo <= val && if *inclusive { val <= hi } else { val < hi }
+            self.push_scope();
+            if let PatKind::Binding(name) = &arm.pattern.kind {
+                let size = self.size_of(&sv.ty).max(1);
+                let align = self.align_of(&sv.ty).max(1);
+                let a = self.mem.stack_alloc(size, align);
+                self.move_bytes(a, sv.addr, size)?;
+                self.add_local(name, a, sv.ty.clone(), MoveMask::default(), true);
             }
-            PatKind::Wildcard | PatKind::Binding(_) => true,
-            PatKind::Variant { .. } => false,
-        });
-        let arm = match arm {
-            Some(a) => a,
-            None => return Err(self.fault(FaultKind::Panic, "no matching arm")),
-        };
-        self.push_scope();
-        if let PatKind::Binding(name) = &arm.pattern.kind {
-            let size = self.size_of(&sv.ty).max(1);
-            let align = self.align_of(&sv.ty).max(1);
-            let a = self.mem.stack_alloc(size, align);
-            self.move_bytes(a, sv.addr, size)?;
-            self.add_local(name, a, sv.ty.clone(), MoveMask::default(), true);
-        }
-        let body_res = self.eval_value(&arm.body, expected);
-        match body_res {
-            Ok(rv) => {
-                let out = self.materialize(rv)?;
+            if !self.eval_arm_guard(arm)? {
                 self.drop_scope()?;
-                Ok(out)
+                continue;
             }
-            Err(Ctl::Fault(f)) => Err(Ctl::Fault(f)),
-            Err(ctl) => {
-                self.drop_scope()?;
-                Err(ctl)
-            }
+            return match self.eval_value(&arm.body, expected) {
+                Ok(rv) => {
+                    let out = self.materialize(rv)?;
+                    self.drop_scope()?;
+                    Ok(out)
+                }
+                Err(Ctl::Fault(f)) => Err(Ctl::Fault(f)),
+                Err(ctl) => {
+                    self.drop_scope()?;
+                    Err(ctl)
+                }
+            };
         }
+        Err(self.fault(FaultKind::Panic, "no matching arm"))
     }
 
     fn peel_scrutinee(&mut self, ty: Type, addr: u64) -> R<(Hold, u64, Type)> {

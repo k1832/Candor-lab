@@ -1191,6 +1191,10 @@ impl Fmt<'_> {
                     self.blank_if_gap(arm.span.start);
                     self.indent_str();
                     self.emit_pattern(&arm.pattern);
+                    if let Some(guard) = &arm.guard {
+                        self.push(" if ");
+                        self.emit_head(guard);
+                    }
                     self.push(" => ");
                     let body = strip_paren(&arm.body);
                     if is_block_like(&body.kind) {

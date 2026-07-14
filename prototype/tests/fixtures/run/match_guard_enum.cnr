@@ -1,0 +1,22 @@
+// Guarded enum `match` arms with payload bindings (design 0001 §8.2, extended).
+// A guard-false `Some` falls through to the unguarded `Some(v)`; the payload
+// binding is in scope in BOTH the guard and the body.
+
+enum Opt { Some(i64), None }
+
+fn describe(o: Opt) -> i64 {
+    return match o {
+        Opt::Some(v) if v > 10 => v * 2,  // large: doubled
+        Opt::Some(v) => v,                // small: passed through (guard fell through)
+        Opt::None => 0,
+    };
+}
+
+fn main() -> i64 {
+    // Some(20) -> guard true -> 40; Some(5) -> guard false -> falls to Some(v) -> 5;
+    // None -> 0
+    let a: i64 = describe(Opt::Some(20i64));
+    let b: i64 = describe(Opt::Some(5i64));
+    let c: i64 = describe(Opt::None);
+    return a + b + c; // 45
+}

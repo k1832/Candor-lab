@@ -1142,11 +1142,13 @@ impl RParser {
         more_stmts.extend(body.stmts);
         let more_arm = MatchArm {
             pattern: variant_pat("IterStep", "More", vec![pat, binding_pat(&rest, sp)], sp),
+            guard: None,
             body: block_expr(more_stmts, sp),
             span: sp,
         };
         let done_arm = MatchArm {
             pattern: variant_pat("IterStep", "Done", Vec::new(), sp),
+            guard: None,
             body: block_expr(vec![break_stmt(sp)], sp),
             span: sp,
         };
@@ -1176,11 +1178,13 @@ impl RParser {
         some_stmts.extend(body.stmts);
         let some_arm = MatchArm {
             pattern: variant_pat("Opt", "Some", vec![pat], sp),
+            guard: None,
             body: block_expr(some_stmts, sp),
             span: sp,
         };
         let none_arm = MatchArm {
             pattern: variant_pat("Opt", "None", Vec::new(), sp),
+            guard: None,
             body: block_expr(vec![break_stmt(sp)], sp),
             span: sp,
         };
@@ -1819,13 +1823,21 @@ impl RParser {
         while !self.at(&RTok::RBrace) && !self.at(&RTok::Eof) {
             let alo = self.cur_start();
             let pattern = self.parse_pattern()?;
+            // An optional `if EXPR` guard (design 0001 §8.2, extended). Parsed in
+            // no-struct context (like an `if`/`while` condition): a struct literal
+            // in a guard needs parentheses, keeping the `{` unambiguous.
+            let guard = if self.eat_kw(RKw::If) {
+                Some(self.parse_expr_no_struct()?)
+            } else {
+                None
+            };
             self.expect(&RTok::FatArrow, "`=>`")?;
             let body = if self.at_block_like_start() {
                 self.parse_block_like_expr()?
             } else {
                 self.parse_expr()?
             };
-            arms.push(MatchArm { pattern, body, span: self.span_from(alo) });
+            arms.push(MatchArm { pattern, guard, body, span: self.span_from(alo) });
             // Optional arm separator (permissive: also allowed after a non-block
             // arm; the arm-boundary rule makes the comma optional after a block).
             self.eat(&RTok::Comma);

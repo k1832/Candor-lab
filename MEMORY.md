@@ -1089,3 +1089,27 @@ once you add the literal node). Key design/impl facts worth reusing:
   that ranges alone can't express, and touching the byte-identical run/wasm_interp.cnr
   drift-guard copy is disproportionate; ranges now enable the contiguous-group part.
   (integer range patterns, 2026-07-14).
+
+- **Match GUARDS (`pattern if EXPR =>`) complete the pattern set; the load-bearing
+  invariant is "a guarded arm is non-covering".** Parser: an optional `if EXPR`
+  between a pattern and `=>`, parsed in no-struct context (like an `if`/`while`
+  head), stored as `MatchArm.guard: Option<Expr>` — applies to EVERY pattern kind.
+  Checker: the guard types as `bool` (E0703 via `expect_bool`), checked with the
+  arm's pattern bindings in scope. Exhaustiveness MUST skip guarded arms (the guard
+  can be false at runtime): `check_exhaustive` `continue`s on `guard.is_some()`, and
+  the int-match `has_catchall` only sets for an UNGUARDED `_`/binding — so a match
+  whose only covering/catch-all arm is guarded is non-exhaustive (E0601). Overlap
+  (E0602): a guarded arm's interval is NOT pushed into `seen` (it neither shadows a
+  later arm nor is retroactively shadowed), but it is STILL checked against `seen`,
+  so an earlier UNGUARDED arm still flags a later overlapping one. Lowering (interp +
+  MIR): after a pattern matches, evaluate the guard; TRUE runs the body, FALSE falls
+  through to re-test the NEXT arm against the same scrutinee — the guard failing must
+  not skip a later matching arm. In MIR this is one extra conditional `Branch` to
+  body-vs-next_bb plus a guard-false edge that drops the arm's bindings
+  (`emit_scope_drops_no_pop`, no pop — the body path still pops normally) then
+  `Goto`s the next arm's test; a guarded `_`/binding default is NO LONGER terminal
+  (keep `test_open` true, thread a `next_bb`). Reuses existing branch ops, so all
+  four native backends (Cranelift no-opt/opt, LLVM -O2, wasm) are UNTOUCHED and the
+  dir-globbed run/ fixtures auto-ride the aot/llvm corpus. Gate: two same-pattern
+  guarded arms (first false, second fires) proves fall-through-and-retry. 871 nextest
+  green (full, incl. self-host) + clippy clean. (match guards, 2026-07-14).

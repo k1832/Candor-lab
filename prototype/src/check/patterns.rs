@@ -261,14 +261,19 @@ fn bind_sub(
 
 /// Exhaustiveness (design 0001 §8.2). Returns a diagnostic if not exhaustive.
 pub fn check_exhaustive(
-    patterns: &[&Pattern],
+    arms: &[crate::ast::MatchArm],
     einfo: &EnumTy,
     enum_name: &str,
     span: Span,
 ) -> Option<Diag> {
     let mut covered: Vec<String> = Vec::new();
-    for p in patterns {
-        match &p.kind {
+    for arm in arms {
+        // A guarded arm may not fire (its guard can be false at runtime), so it
+        // does NOT contribute to exhaustiveness (design 0001 §8.2, extended).
+        if arm.guard.is_some() {
+            continue;
+        }
+        match &arm.pattern.kind {
             PatKind::Wildcard | PatKind::Binding(_) => return None,
             PatKind::Variant { variant, .. } => covered.push(variant.clone()),
             PatKind::IntLit { .. } | PatKind::IntRange { .. } => {}

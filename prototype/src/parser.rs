@@ -1174,6 +1174,7 @@ impl Parser {
             let body = self.parse_expr()?;
             arms.push(MatchArm {
                 pattern,
+                guard: None,
                 body,
                 span: self.span_from(alo),
             });

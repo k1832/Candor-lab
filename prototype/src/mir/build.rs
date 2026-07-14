@@ -324,6 +324,24 @@ impl<'a> Lowerer<'a> {
             self.emit_drop(id);
         }
     }
+    /// Emit drops for the innermost scope's owned locals WITHOUT popping it — used
+    /// on a guarded arm's guard-false edge, where the arm's bindings die as
+    /// control falls through to the next arm but the scope is still owned by the
+    /// body path (which pops it normally).
+    fn emit_scope_drops_no_pop(&mut self) {
+        let ids: Vec<LocalId> = self
+            .scopes
+            .last()
+            .unwrap()
+            .locals
+            .iter()
+            .rev()
+            .map(|(_, id, _)| *id)
+            .collect();
+        for id in ids {
+            self.emit_drop(id);
+        }
+    }
 
     /// Emit a `Drop` for a needs-drop local, pruned by the static move mask: skip
     /// entirely if the whole value is moved; otherwise carry the moved sub-paths
@@ -1210,12 +1228,25 @@ impl<'a> Lowerer<'a> {
             }
             match &arm.pattern.kind {
                 PatKind::Wildcard | PatKind::Binding(_) => {
-                    // Default arm (exhaustive tail): unconditional.
-                    self.lower_match_arm(arm, &splace, &einfo, None, dst, hold, scrut_path.as_ref())?;
-                    if self.reachable {
-                        self.terminate(Terminator::Goto(join));
+                    if arm.guard.is_some() {
+                        // A guarded catch-all is NOT a terminal default: on a false
+                        // guard control falls through to a later arm, so the match
+                        // stays open (an unguarded catch-all follows — required by
+                        // exhaustiveness).
+                        let next_bb = self.new_block();
+                        self.lower_match_arm(arm, &splace, &einfo, None, dst, hold, scrut_path.as_ref(), Some(next_bb))?;
+                        if self.reachable {
+                            self.terminate(Terminator::Goto(join));
+                        }
+                        self.switch_to(next_bb);
+                    } else {
+                        // Default arm (exhaustive tail): unconditional.
+                        self.lower_match_arm(arm, &splace, &einfo, None, dst, hold, scrut_path.as_ref(), None)?;
+                        if self.reachable {
+                            self.terminate(Terminator::Goto(join));
+                        }
+                        test_open = false;
                     }
-                    test_open = false;
                 }
                 PatKind::IntLit { .. } => return unsupported("integer-literal pattern on enum scrutinee"),
                 PatKind::IntRange { .. } => return unsupported("integer-range pattern on enum scrutinee"),
@@ -1237,7 +1268,7 @@ impl<'a> Lowerer<'a> {
                     let next_bb = self.new_block();
                     self.terminate(Terminator::Branch { cond: Operand::Local(cmp), then_bb: arm_bb, else_bb: next_bb });
                     self.switch_to(arm_bb);
-                    self.lower_match_arm(arm, &splace, &einfo, Some(idx), dst, hold, scrut_path.as_ref())?;
+                    self.lower_match_arm(arm, &splace, &einfo, Some(idx), dst, hold, scrut_path.as_ref(), Some(next_bb))?;
                     if self.reachable {
                         self.terminate(Terminator::Goto(join));
                     }
@@ -1294,7 +1325,7 @@ impl<'a> Lowerer<'a> {
                     let next_bb = self.new_block();
                     self.terminate(Terminator::Branch { cond: Operand::Local(cmp), then_bb: arm_bb, else_bb: next_bb });
                     self.switch_to(arm_bb);
-                    self.lower_int_arm(arm, None, val, &scalar, dst)?;
+                    self.lower_int_arm(arm, None, val, &scalar, dst, Some(next_bb))?;
                     if self.reachable {
                         self.terminate(Terminator::Goto(join));
                     }
@@ -1328,25 +1359,43 @@ impl<'a> Lowerer<'a> {
                     );
                     self.terminate(Terminator::Branch { cond: Operand::Local(le_hi), then_bb: arm_bb, else_bb: next_bb });
                     self.switch_to(arm_bb);
-                    self.lower_int_arm(arm, None, val, &scalar, dst)?;
+                    self.lower_int_arm(arm, None, val, &scalar, dst, Some(next_bb))?;
                     if self.reachable {
                         self.terminate(Terminator::Goto(join));
                     }
                     self.switch_to(next_bb);
                 }
                 PatKind::Wildcard => {
-                    self.lower_int_arm(arm, None, val, &scalar, dst)?;
-                    if self.reachable {
-                        self.terminate(Terminator::Goto(join));
+                    if arm.guard.is_some() {
+                        let next_bb = self.new_block();
+                        self.lower_int_arm(arm, None, val, &scalar, dst, Some(next_bb))?;
+                        if self.reachable {
+                            self.terminate(Terminator::Goto(join));
+                        }
+                        self.switch_to(next_bb);
+                    } else {
+                        self.lower_int_arm(arm, None, val, &scalar, dst, None)?;
+                        if self.reachable {
+                            self.terminate(Terminator::Goto(join));
+                        }
+                        test_open = false;
                     }
-                    test_open = false;
                 }
                 PatKind::Binding(name) => {
-                    self.lower_int_arm(arm, Some(name.clone()), val, &scalar, dst)?;
-                    if self.reachable {
-                        self.terminate(Terminator::Goto(join));
+                    if arm.guard.is_some() {
+                        let next_bb = self.new_block();
+                        self.lower_int_arm(arm, Some(name.clone()), val, &scalar, dst, Some(next_bb))?;
+                        if self.reachable {
+                            self.terminate(Terminator::Goto(join));
+                        }
+                        self.switch_to(next_bb);
+                    } else {
+                        self.lower_int_arm(arm, Some(name.clone()), val, &scalar, dst, None)?;
+                        if self.reachable {
+                            self.terminate(Terminator::Goto(join));
+                        }
+                        test_open = false;
                     }
-                    test_open = false;
                 }
                 PatKind::Variant { .. } => return unsupported("variant pattern on integer scrutinee"),
             }
@@ -1369,6 +1418,7 @@ impl<'a> Lowerer<'a> {
         val: LocalId,
         scalar: &Type,
         dst: Option<(&Place, &Type)>,
+        next_bb: Option<BlockId>,
     ) -> LR<()> {
         self.push_scope();
         if let Some(name) = bind_name {
@@ -1379,6 +1429,33 @@ impl<'a> Lowerer<'a> {
                 false,
             );
             self.bind(&name, local, scalar.clone());
+        }
+        self.finish_arm(arm, dst, next_bb)
+    }
+
+    /// Lower a match arm's optional guard, its body, and pop the arm scope. Called
+    /// with the arm's bindings already in scope. When the arm is guarded, the
+    /// guard lowers to a conditional `Branch` (reusing existing MIR ops, no backend
+    /// change): guard-true runs the body; guard-false drops the arm's bindings and
+    /// falls through to `next_bb`, the next arm's test (design 0001 §8.2, extended).
+    fn finish_arm(
+        &mut self,
+        arm: &MatchArm,
+        dst: Option<(&Place, &Type)>,
+        next_bb: Option<BlockId>,
+    ) -> LR<()> {
+        if let Some(guard) = &arm.guard {
+            let next = next_bb.expect("a guarded arm must have a fall-through target");
+            let (cond, _) = self.lower_value(guard, Some(&Type::bool()))?;
+            let body_bb = self.new_block();
+            let gfalse_bb = self.new_block();
+            self.terminate(Terminator::Branch { cond, then_bb: body_bb, else_bb: gfalse_bb });
+            // Guard-false edge: the arm's bindings die here; fall through to test
+            // the next arm against the same scrutinee.
+            self.switch_to(gfalse_bb);
+            self.emit_scope_drops_no_pop();
+            self.terminate(Terminator::Goto(next));
+            self.switch_to(body_bb);
         }
         match dst {
             Some((d, ty)) => self.lower_into(&arm.body, d, ty)?,
@@ -1400,6 +1477,7 @@ impl<'a> Lowerer<'a> {
         dst: Option<(&Place, &Type)>,
         hold: Hold,
         scrut_path: Option<&(LocalId, Vec<String>)>,
+        next_bb: Option<BlockId>,
     ) -> LR<()> {
         self.push_scope();
         if let (PatKind::Variant { sub, .. }, Some(idx)) = (&arm.pattern.kind, idx) {
@@ -1462,14 +1540,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
-        match dst {
-            Some((d, ty)) => self.lower_into(&arm.body, d, ty)?,
-            None => {
-                self.lower_value(&arm.body, None)?;
-            }
-        }
-        self.pop_scope_with_drops();
-        Ok(())
+        self.finish_arm(arm, dst, next_bb)
     }
 
     /// Lower `inner?` (spec 02 §6.5): on the `ok` variant, unwrap the payload — a

@@ -429,6 +429,11 @@ pub struct FieldInit {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MatchArm {
     pub pattern: Pattern,
+    /// An optional `if EXPR` guard between the pattern and `=>` (design 0001
+    /// §8.2, extended). The arm fires only when the pattern matches AND the guard
+    /// evaluates true; a guarded arm does not contribute to exhaustiveness and
+    /// does not shadow later arms (its guard may fail at runtime).
+    pub guard: Option<Expr>,
     pub body: Expr,
     pub span: Span,
 }

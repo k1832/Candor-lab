@@ -1,0 +1,33 @@
+// Guarded integer `match` arms (design 0001 §8.2, extended). A guard is an
+// `if EXPR` between a pattern and `=>`; the arm fires only when the pattern
+// matches AND the guard is true. A guard that is FALSE falls through to test the
+// later arms — including a same-pattern guarded arm and the required unguarded
+// catch-all.
+
+fn classify(n: i64) -> i64 {
+    return match n {
+        x if x < 0 => 1,      // guarded binding
+        0 => 2,               // unguarded literal
+        x if x > 100 => 3,    // guarded binding; false falls through to `_`
+        _ => 4,
+    };
+}
+
+// Two guarded arms with the SAME literal pattern: the first guard fails and the
+// second fires (proves fall-through-and-retry against the same scrutinee).
+fn pick(n: i64) -> i64 {
+    return match n {
+        7 if n > 10 => 100,   // 7 is never > 10: guard always false here
+        7 if n == 7 => 200,   // fires for scrutinee 7
+        _ => 0,
+    };
+}
+
+fn main() -> i64 {
+    // -5 -> 1, 0 -> 2, 500 -> 3 (>100), 50 -> 4 (falls through)
+    let a: i64 = classify(0i64 - 5i64) + classify(0) + classify(500) + classify(50);
+    // = 1 + 2 + 3 + 4 = 10
+    let b: i64 = pick(7) + pick(3);
+    // 7 -> 200 (first guard false, second true); 3 -> 0 = 200
+    return a + b; // 210
+}
