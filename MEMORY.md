@@ -694,3 +694,49 @@ One lesson per entry, one-line summary first.
   asserts the VALUE 42 (+ 10+20, 1000+(-500), i32 wrap, malformed-magic Panic) on
   oracle·MIR·native-noopt·native-opt. Keep the run/ copy byte-identical to the
   canonical (a drift-guard test). (WASM M0, 2026-07-14).
+
+- **WASM interpreter M1 (multi-function decode + locals/frames + full i32/i64
+  numeric + `call`/recursion + structured control) — the load-bearing lesson is
+  that a RECURSIVE eval loop overflows the tree-walking oracle's HOST stack at
+  shallow WASM depth (fib(10) SIGABRTs), so `call` must run on an EXPLICIT
+  activation stack.** Built on M0 (`tests/fixtures/wasm/interp.cnr` + `tests/wasm.rs`):
+  section walk now collects Type arities, Function type-indices, the Export
+  section ("main" entry), and Code bodies (byte range + summed local count) into
+  a fixed-capacity `Module`; frames hold params-then-zeroed-locals in a `[32]i64`;
+  full numeric via `eval_unop`/`eval_binop` leaf helpers (clz/ctz/popcount
+  hand-rolled over `u64` shifts; div/rem trap on zero and signed INT_MIN/-1;
+  unsigned ops mask to width for i32, `wrapping { conv u64 }` for i64);
+  structured control via a per-frame label stack (`do_branch`: loop target →
+  jump to start + keep label; block/if target → `scan_forward_exits` past the
+  matching `end` + pop; blocktype arities via single-byte `read_blocktype`; `if`
+  uses `skip_to_else_or_end`). Facts that bit, in priority order: (1) HOST-STACK:
+  a plain recursive `eval_call` runs fine on the CLI (main thread, 8 MB) up to
+  fib(20) on tree/mir/native, but SIGABRTs in `cargo nextest` at fib(10) on the
+  ORACLE — nextest test threads have a smaller stack and the tree-walker's
+  per-Candor-call host frame is heavy, so WASM-recursion-depth × that frame
+  overflows. Cranelift NO-OPT also gave `eval_call` a huge frame (the ~90-branch
+  numeric chain), overflowing native ~fib(15) even after shrinking arrays.
+  Definitive fix = an explicit activation stack: a non-recursive `exec` driver
+  keeps the working frame in locals and snapshots callers into a `[256]Act`
+  array on `call`, restoring on return — HOST recursion is O(1), so fib(20) runs
+  on every engine. Factoring numeric dispatch into leaf helpers helped but was
+  NOT sufficient; the explicit stack is what mattered. (2) `conv u64`/`conv i64`
+  across the sign boundary is CHECKED — `conv u64 (negative i64)` faults
+  `conv_loss`; every signed↔unsigned reinterpret must sit inside `wrapping { }`.
+  (3) A struct with array fields that you assign around (snapshot into / restore
+  out of an array slot) must be a `copy struct` — moving a non-copy value out of
+  `saved[fp]` or `f = s.frame` is E0310/E0301; `copy struct Frame`/`copy struct
+  Act` (all-scalar/array-of-copy fields) makes assignment copy. (4) Structured
+  forward branches need one immediate-aware skipper (`skip_immediates`) so a
+  `block/loop/if` forward scan never mistakes an operand byte for an opcode; the
+  scan counts `end`s at depth 0 to resolve a forward branch out of N enclosing
+  blocks, and `br` to a `loop` jumps backward to a recorded start_pos.
+  (5) blocktype kept single-byte (0x40 / valtype) — multi-byte type-index
+  blocktypes are rejected, fine for hand-encoded MVP modules. Gate: fib(10)==55
+  (+0,1,7,15), sum(10)==55 (loop+br_if), div_s/div_u/rem/shr_s/shr_u/rotl/clz/
+  popcnt/unsigned-compare/i64 ops each vs known values, br_table target+default,
+  and divide-by-zero/INT_MIN÷-1 → Panic, all byte-exact on oracle·MIR·native-
+  noopt·native-opt (encoder asserted byte-equal to hand-listed fib/sum spec).
+  732 nextest green (incl. selfhost gates over the enlarged interp.cnr + the
+  AOT/stage_d corpus copy), clippy clean. M2 next: linear memory load/store +
+  bounds trap over a `Vec[u8]`. (WASM M1, 2026-07-14).
