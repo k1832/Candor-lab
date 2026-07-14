@@ -143,8 +143,13 @@ pub enum Rvalue {
     },
     /// Comparison (`== != < <= > >=`) producing a `bool`. Never faults.
     Cmp { op: BinOp, l: Operand, r: Operand },
-    /// `conv T (e)` integer conversion (design 0001 §8.1). `fault` is the
-    /// conv-loss edge — `Some` iff `regime == Checked` (INV-CHECK).
+    /// `conv T (e)` scalar conversion (design 0001 §8.1; 0016 for float). `to` is
+    /// the target; the source type is recovered from `v`'s operand type. `fault` is
+    /// the conv-loss edge — `Some` iff `regime == Checked` and `to` is an integer
+    /// (INV-CHECK). An int→`f64` conversion (`to == f64`) never faults and carries
+    /// no edge; a `f64`→int conversion saturates (design 0016 §5) so its edge — the
+    /// same shape as an int→int conv's, kept uniform for the invariant — is inert
+    /// (never taken).
     Conv {
         to: ScalarTy,
         regime: Regime,
@@ -389,17 +394,28 @@ pub fn check_invariants(f: &MirFn) {
             // its fault edge explicitly.
             if let StatementKind::Assign(_, rv) = &s.kind {
                 match rv {
-                    Rvalue::Bin { op, regime, fault, .. } if *regime == Regime::Checked && bin_is_fallible(*op) => {
+                    // Float ops are IEEE and regime-exempt — they never fault, so
+                    // they carry no edge even in the checked regime (design 0016).
+                    Rvalue::Bin { op, regime, ty, fault, .. }
+                        if *regime == Regime::Checked && bin_is_fallible(*op) && ty.is_integer() =>
+                    {
                         assert!(
                             fault.is_some(),
                             "INV-CHECK: checked {op:?} in {}#bb{bi} lacks its fault edge",
                             f.name
                         );
                     }
-                    Rvalue::Un { op: UnOp::Neg, regime, fault, .. } if *regime == Regime::Checked => {
+                    Rvalue::Un { op: UnOp::Neg, regime, ty, fault, .. }
+                        if *regime == Regime::Checked && ty.is_integer() =>
+                    {
                         assert!(fault.is_some(), "INV-CHECK: checked neg in {} lacks its fault edge", f.name);
                     }
-                    Rvalue::Conv { regime, fault, .. } if *regime == Regime::Checked => {
+                    // A checked conv to an INTEGER target carries its (conv-loss)
+                    // edge — inert for an f64 source (saturating; design 0016). An
+                    // int->f64 conv (`to == f64`) is regime-exempt and carries none.
+                    Rvalue::Conv { to, regime, fault, .. }
+                        if *regime == Regime::Checked && to.is_integer() =>
+                    {
                         assert!(fault.is_some(), "INV-CHECK: checked conv in {} lacks its fault edge", f.name);
                     }
                     _ => {}

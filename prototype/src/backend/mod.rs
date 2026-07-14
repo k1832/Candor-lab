@@ -117,8 +117,12 @@ pub fn run(prog: &MirProgram, items: &Items, consts: &HashMap<String, u64>, opti
             return Err(Fault::new(kind, Span::new(s, e), fault_msg(kind)));
         }
     }
+    // `main` reports its 64-bit return word for `i64` or `f64` (the f64 word is
+    // its IEEE bit pattern; design 0016).
     let ret_i64 = match prog.get("main").map(|f| &f.locals[0].ty) {
-        Some(crate::types::Type::Scalar(crate::token::ScalarTy::I64)) => ret,
+        Some(crate::types::Type::Scalar(
+            crate::token::ScalarTy::I64 | crate::token::ScalarTy::F64,
+        )) => ret,
         _ => 0,
     };
     Ok(Run { ret: ret_i64, trace: std::mem::take(&mut rt.trace) })

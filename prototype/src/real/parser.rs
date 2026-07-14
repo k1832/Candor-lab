@@ -1497,6 +1497,10 @@ impl RParser {
                 self.bump();
                 ExprKind::IntLit { value, suffix }
             }
+            RTok::Float { bits } => {
+                self.bump();
+                ExprKind::FloatLit { bits }
+            }
             RTok::Str(s) => {
                 self.bump();
                 ExprKind::StrLit(s)
@@ -1968,6 +1972,7 @@ fn describe(k: &RTok) -> String {
         RTok::Eof => "end of input".to_string(),
         RTok::Ident(s) => format!("identifier `{s}`"),
         RTok::Int { .. } => "an integer literal".to_string(),
+        RTok::Float { .. } => "a float literal".to_string(),
         RTok::Str(_) => "a string literal".to_string(),
         other => format!("`{other:?}`"),
     }

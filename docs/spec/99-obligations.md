@@ -4566,3 +4566,51 @@ uses the `arena_get`-shaped place reborrow `return read self.slot;` instead — 
 accessor design 0015 §4.1 names. The Vec-wired `count`/`get_ref` from the original discharge
 (commit 3176fb7) remains tree-walker-only (method-call collection ops don't lower to MIR); the user
 impl is the cross-engine path.
+
+## FLOATS-S1 — `f64` (IEEE-754 binary64) landed end-to-end across ALL FIVE engines, bit-identical (2026-07-14)
+
+CONTEXT. Candor had NO floating point. This slice adds ONE scalar type, `f64`, per a new design
+note (`docs/design/0016-floats.md`). Decisions pinned there: (1) **f64 first** (f32 deferred);
+(2) **IEEE semantics, regime-EXEMPT** — `+ - * /` and unary `-` never fault (overflow → ±inf,
+`x/0.0` → ±inf/NaN), and a `wrapping{}`/`saturating{}` block does NOT change float behaviour (0006
+§2.4's fault machinery is integer-only — confirmed reading); (3) **literal grammar** — a numeric
+literal is `f64` iff it has a `.` (digit on BOTH sides: `0.5` yes, `.5`/`5.` no) or an exponent
+(`1e10`, `1.0e-5`); always the concrete type `f64` (no flexible float-lit, no suffix); over-range
+magnitude → ±inf; (4) **NaN/inf** flow through; IEEE comparisons (NaN != NaN true, all ordered/`==`
+with NaN false); (5) **conversions** — `conv f64 <int>` rounds (exact `|x|<2^53`), `conv i{N} <f64>`
+truncates toward zero, **saturating** (NaN→0, out-of-range clamps; Rust `as` = Cranelift
+`fcvt_to_*int_sat` = LLVM `llvm.fpto*i.sat`), never faults, regime-exempt.
+
+IMPLEMENTATION. Every layer: real lexer (float tokens), `token::ScalarTy::F64` + `is_integer`
+(now excludes f64) / `is_float`, `ast::ExprKind::FloatLit{bits}`, checker (`unify_arith` for
+`+-*/`+ordered-cmp accepting f64, Neg on f64, numeric `conv`, `%`/mixed-int-float REJECTED), both
+interpreters, MIR (`build`/`interp`/`serial`/`opt`; float `Bin`/`Un`/`Cmp` carry `ScalarTy::F64` and
+NO fault edge — INV-CHECK relaxed to skip float ops / int→f64 conv), and BOTH native backends
+(Cranelift `fadd/fsub/fmul/fdiv/fcmp/fneg` + `fcvt_from_{s,u}int`/`fcvt_to_*int_sat` via `bitcast`;
+LLVM `fadd`/…/`fneg`/`fcmp`/`sitofp`/`uitofp`/`fptosi.sat`/`fptoui.sat` via `bitcast`).
+
+VALUE REPR. An `f64` is carried as its `to_bits()` 64-bit pattern (zero-extended) in the shared
+i128/i64 "register" model and 8 bytes in flat memory (byte-identical to the IEEE encoding). Each
+float op bit-casts to a native `double`, computes with real IEEE arithmetic, and bit-casts back —
+nothing in load/store/call-ABI changes. `ty_range(f64)` is unsigned-64 so no path sign-extends the
+pattern. The Conv wire format is UNCHANGED (source type recovered from the operand, not a new field)
+— self-host lowering parity preserved. `main` returning `f64` reports its 64-bit word (its bits);
+`trace(f64)` observes the bit pattern (the one channel all five engines share).
+
+TWO TRAPS. (1) The Conv wire needed NO new field: adding a `from: ScalarTy` broke the self-host
+lowerer's byte-exact MIR (it emits the old `(conv <to> …)`); recover the source scalar from the
+operand instead. A checked `f64`→int conv keeps an INERT ConvLoss edge (never taken — saturating)
+so INV-CHECK stays uniform. (2) A computed **NaN's sign bit is IEEE-UNSPECIFIED**: LLVM `-O2`
+constant-folds `0.0/0.0` to `+NaN` (0x7FF8…) while x86 runtime `divsd` yields `-NaN` (0xFFF8…). So
+the gate asserts finite/inf results and conversions to EXACT bits across all five engines, but NaN
+by BEHAVIOUR (comparison outcomes) only.
+
+GATES. `cargo nextest` full green; `--profile fast` green; clippy clean. New `tests/floats.rs`
+(16 tests: exact-bits arithmetic/precedence/rounding, ordered comparisons, ±inf exact bits, NaN
+behaviour, int↔f64 conv incl. saturation + round-trip, a Newton's-sqrt + dot-product loop, and 4
+negative checks) asserts BIT-IDENTICAL across tree-walker / MIR / Cranelift no-opt / Cranelift -O2 /
+LLVM -O2 (`f64::to_bits`). A new `tests/fixtures/run/floats.cnr` auto-joins the aot/stage_b native
+corpus. Existing integer arithmetic / regime / conv tests unperturbed (f64 excluded from
+`is_integer`, so no int typing/regime path changed). NEXT: f32; `fmt_f64` float FORMATTING (a
+separate slice); WASM float opcodes (now unblocked); math functions (`sqrt`/`sin`/…); the full
+NaN-payload / signaling-NaN edge cases; a flexible float-literal type.

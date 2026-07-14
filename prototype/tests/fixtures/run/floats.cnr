@@ -1,0 +1,46 @@
+// Floating-point (`f64`) corpus fixture (design 0016). Exercises f64 `+ - * /`,
+// unary neg, ordered comparison, and int<->f64 `conv` in loops — Newton's-method
+// sqrt and a dot product/average — so every engine (tree-walker, MIR, Cranelift
+// no-opt/opt, LLVM) must agree bit-for-bit on the traced results. IEEE-754 is
+// deterministic, so the traced bit patterns are identical across all engines.
+// (No NaN here: a computed NaN's sign bit is IEEE-unspecified and can differ
+// between a constant-folding compiler and runtime hardware — see tests/floats.rs,
+// which gates NaN by behaviour instead.)
+
+fn main() -> i64 {
+    // Newton's method for sqrt(2) = 1.4142135623730951.
+    let mut x: f64 = 1.0;
+    let two: f64 = 2.0;
+    let half: f64 = 0.5;
+    let mut i: i64 = 0;
+    while i < 8 {
+        x = half * (x + two / x);
+        i = i + 1;
+    }
+    trace(x);
+
+    // Dot product of [1,2,3] . [4,5,6] = 4 + 10 + 18 = 32.0.
+    let mut dot: f64 = 0.0;
+    let mut a: f64 = 1.0;
+    let mut b: f64 = 4.0;
+    let mut j: i64 = 0;
+    while j < 3 {
+        dot = dot + a * b;
+        a = a + 1.0;
+        b = b + 1.0;
+        j = j + 1;
+    }
+    trace(dot);
+
+    // Average via an int->f64 conv of the count: 32.0 / 3.0.
+    let avg: f64 = dot / conv f64 (j);
+    trace(avg);
+
+    // Ordered comparison + unary neg drive the sentinel.
+    let neg: f64 = -x;
+    if neg < x {
+        // f64 -> i64 truncation toward zero: floor(sqrt(2)) = 1.
+        return conv i64 (x);
+    }
+    return 0;
+}

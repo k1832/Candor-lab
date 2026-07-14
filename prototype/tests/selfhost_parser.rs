@@ -41,7 +41,7 @@ fn suf_code(s: Option<ScalarTy>) -> u32 {
         Some(ScalarTy::U32) => 8,
         Some(ScalarTy::U64) => 9,
         Some(ScalarTy::Usize) => 10,
-        Some(ScalarTy::Bool) | Some(ScalarTy::Unit) => unreachable!("not a suffix"),
+        Some(ScalarTy::Bool) | Some(ScalarTy::Unit) | Some(ScalarTy::F64) => unreachable!("not a suffix"),
     }
 }
 
@@ -59,6 +59,7 @@ fn scalar_name(sc: ScalarTy) -> &'static str {
         ScalarTy::Usize => "usize",
         ScalarTy::Bool => "bool",
         ScalarTy::Unit => "unit",
+        ScalarTy::F64 => "f64",
     }
 }
 

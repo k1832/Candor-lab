@@ -23,12 +23,33 @@ pub enum ScalarTy {
     Usize,
     Bool,
     Unit,
+    /// IEEE-754 binary64 (design 0016). NOT an integer, so not a valid literal
+    /// suffix, and exempt from the arithmetic regime system.
+    F64,
 }
 
 impl ScalarTy {
     /// Is this a signed/unsigned integer type (thus a valid literal suffix)?
+    /// `f64` is a scalar but not an integer (design 0016).
     pub fn is_integer(self) -> bool {
-        !matches!(self, ScalarTy::Bool | ScalarTy::Unit)
+        matches!(
+            self,
+            ScalarTy::I8
+                | ScalarTy::I16
+                | ScalarTy::I32
+                | ScalarTy::I64
+                | ScalarTy::Isize
+                | ScalarTy::U8
+                | ScalarTy::U16
+                | ScalarTy::U32
+                | ScalarTy::U64
+                | ScalarTy::Usize
+        )
+    }
+
+    /// Is this the floating-point type (design 0016)?
+    pub fn is_float(self) -> bool {
+        matches!(self, ScalarTy::F64)
     }
 }
 
@@ -155,6 +176,7 @@ pub fn scalar_from_str(s: &str) -> Option<ScalarTy> {
         "u32" => ScalarTy::U32,
         "u64" => ScalarTy::U64,
         "usize" => ScalarTy::Usize,
+        "f64" => ScalarTy::F64,
         "bool" => ScalarTy::Bool,
         "unit" => ScalarTy::Unit,
         _ => return None,

@@ -422,6 +422,10 @@ impl Printer {
                 self.push(&value.to_string());
                 self.suffix(suffix);
             }
+            ExprKind::FloatLit { bits } => {
+                self.push("f");
+                self.push(&bits.to_string());
+            }
             ExprKind::StrLit(s) => {
                 self.push("\"");
                 self.push(s);

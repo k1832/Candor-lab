@@ -32,7 +32,7 @@
 
 use std::collections::HashMap;
 
-use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
     types, AbiParam, Block, BlockArg, FuncRef, InstBuilder, MemFlags, Signature, TrapCode,
     UserFuncName, Value,
@@ -106,6 +106,8 @@ fn ty_range(sty: ScalarTy) -> (i128, i128, u32, bool) {
         ScalarTy::U16 => (16, false),
         ScalarTy::U32 => (32, false),
         ScalarTy::U64 | ScalarTy::Usize => (64, false),
+        // `f64` bit pattern: unsigned so it is never sign-extended (design 0016).
+        ScalarTy::F64 => (64, false),
         _ => (64, true),
     };
     let (min, max) = if signed {
@@ -386,9 +388,11 @@ pub(super) fn define_entry<M: Module>(
         sig
     };
     ctx.func.name = UserFuncName::user(0, entry_id.as_u32());
+    // `main` reports its 64-bit return WORD when it returns `i64` or `f64` (the
+    // f64 word is its IEEE bit pattern; design 0016).
     let main_is_i64 = matches!(
         prog.get("main").map(|f| &f.locals[0].ty),
-        Some(Type::Scalar(ScalarTy::I64))
+        Some(Type::Scalar(ScalarTy::I64)) | Some(Type::Scalar(ScalarTy::F64))
     );
     {
         let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
@@ -744,6 +748,14 @@ impl<M: Module> Cg<'_, '_, M> {
         let t = self.b.ins().ireduce(types::I64, v);
         self.canon(t, sty)
     }
+    /// Reinterpret an i64 register (an f64 bit pattern) as a native `f64` (design 0016).
+    fn as_f64(&mut self, bits: Value) -> Value {
+        self.b.ins().bitcast(types::F64, MemFlags::new(), bits)
+    }
+    /// Reinterpret a native `f64` back to its i64 bit pattern (design 0016).
+    fn f64_bits(&mut self, f: Value) -> Value {
+        self.b.ins().bitcast(types::I64, MemFlags::new(), f)
+    }
 
     fn load_scalar(&mut self, candor: Value, sty: ScalarTy) -> Value {
         let (_, _, bits, signed) = ty_range(sty);
@@ -924,6 +936,23 @@ impl<M: Module> Cg<'_, '_, M> {
                 let rsty = self.operand_sty(r, mf);
                 let lv = self.eval_operand(l, mf);
                 let rv = self.eval_operand(r, mf);
+                if lsty == ScalarTy::F64 || rsty == ScalarTy::F64 {
+                    // IEEE compare: `NotEqual` is unordered-or-not-equal (NaN != NaN
+                    // is true); the others are ordered (any NaN yields false).
+                    let fa = self.as_f64(lv);
+                    let fb = self.as_f64(rv);
+                    let cc = match op {
+                        BinOp::Eq => FloatCC::Equal,
+                        BinOp::Ne => FloatCC::NotEqual,
+                        BinOp::Lt => FloatCC::LessThan,
+                        BinOp::Le => FloatCC::LessThanOrEqual,
+                        BinOp::Gt => FloatCC::GreaterThan,
+                        BinOp::Ge => FloatCC::GreaterThanOrEqual,
+                        _ => unreachable!("non-comparison in Cmp"),
+                    };
+                    let c = self.b.ins().fcmp(cc, fa, fb);
+                    return self.b.ins().uextend(types::I64, c);
+                }
                 let l128 = self.ext128(lv, lsty);
                 let r128 = self.ext128(rv, rsty);
                 let cc = match op {
@@ -953,6 +982,11 @@ impl<M: Module> Cg<'_, '_, M> {
                         let n = self.b.ins().bnot(x);
                         self.canon(n, *ty)
                     }
+                    UnOp::Neg if *ty == ScalarTy::F64 => {
+                        let f = self.as_f64(x);
+                        let n = self.b.ins().fneg(f);
+                        self.f64_bits(n)
+                    }
                     UnOp::Neg => {
                         let x128 = self.ext128(x, *ty);
                         let zero = self.iconst128(0);
@@ -964,6 +998,9 @@ impl<M: Module> Cg<'_, '_, M> {
             Rvalue::Conv { to, regime, v, fault } => {
                 let sty = self.operand_sty(v, mf);
                 let x = self.eval_operand(v, mf);
+                if *to == ScalarTy::F64 || sty == ScalarTy::F64 {
+                    return self.eval_float_conv(sty, *to, x);
+                }
                 let x128 = self.ext128(x, sty);
                 self.range_or_fit(x128, *to, *regime, fault.as_ref())
             }
@@ -1036,10 +1073,59 @@ impl<M: Module> Cg<'_, '_, M> {
         }
     }
 
+    /// int<->f64 conversion (design 0016 §5): int->f64 rounds; f64->int truncates
+    /// toward zero, saturating (`fcvt_to_*int_sat` — NaN->0, out-of-range clamps).
+    /// `x` is the i64 register value (an int, or an f64 bit pattern).
+    fn eval_float_conv(&mut self, from: ScalarTy, to: ScalarTy, x: Value) -> Value {
+        if from == ScalarTy::F64 && to == ScalarTy::F64 {
+            return x;
+        }
+        if to == ScalarTy::F64 {
+            // int -> f64: the register already holds the canonical sign/zero-extended
+            // value, so pick the matching signedness.
+            let (_, _, _, signed) = ty_range(from);
+            let f = if signed {
+                self.b.ins().fcvt_from_sint(types::F64, x)
+            } else {
+                self.b.ins().fcvt_from_uint(types::F64, x)
+            };
+            return self.f64_bits(f);
+        }
+        // f64 -> int: saturate to the exact target width, then canonicalize to i64.
+        let (_, _, bits, signed) = ty_range(to);
+        let f = self.as_f64(x);
+        let it = int_ty(crate::interp::layout::Layout::scalar_size(to));
+        let narrow = if signed {
+            self.b.ins().fcvt_to_sint_sat(it, f)
+        } else {
+            self.b.ins().fcvt_to_uint_sat(it, f)
+        };
+        if bits >= 64 {
+            narrow
+        } else if signed {
+            self.b.ins().sextend(types::I64, narrow)
+        } else {
+            self.b.ins().uextend(types::I64, narrow)
+        }
+    }
+
     fn eval_bin(&mut self, op: BinOp, regime: Regime, ty: ScalarTy, l: &Operand, r: &Operand, span: Span, fault: Option<&FaultEdge>, mf: &MirFn) -> Value {
         use BinOp::*;
         let lv = self.eval_operand(l, mf);
         let rv = self.eval_operand(r, mf);
+        if ty == ScalarTy::F64 {
+            // IEEE-754 arithmetic: bit-cast, native op, bit-cast back. Never faults.
+            let fa = self.as_f64(lv);
+            let fb = self.as_f64(rv);
+            let res = match op {
+                Add => self.b.ins().fadd(fa, fb),
+                Sub => self.b.ins().fsub(fa, fb),
+                Mul => self.b.ins().fmul(fa, fb),
+                Div => self.b.ins().fdiv(fa, fb),
+                _ => unreachable!("only + - * / reach f64 Bin"),
+            };
+            return self.f64_bits(res);
+        }
         let (_, _, bits, signed) = ty_range(ty);
         match op {
             Add | Sub | Mul => {

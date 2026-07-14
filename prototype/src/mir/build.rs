@@ -492,8 +492,7 @@ impl<'a> Lowerer<'a> {
 
     fn concretize(&self, ty: &Type) -> ScalarTy {
         match ty {
-            Type::Scalar(s) if s.is_integer() => *s,
-            Type::Scalar(ScalarTy::Bool) => ScalarTy::Bool,
+            Type::Scalar(s) => *s,
             _ => ScalarTy::I64,
         }
     }
@@ -723,6 +722,11 @@ impl<'a> Lowerer<'a> {
                 let sty = self.int_type(suffix, expected);
                 Ok((Operand::Const(-(*value as i128), sty), Type::Scalar(sty)))
             }
+            ExprKind::FloatLit { bits } => Ok((
+                // The f64 bit pattern is carried (zero-extended) in the const slot.
+                Operand::Const(*bits as i128, ScalarTy::F64),
+                Type::Scalar(ScalarTy::F64),
+            )),
             ExprKind::BoolLit(b) => Ok((Operand::Const(*b as i128, ScalarTy::Bool), Type::bool())),
             ExprKind::Ident(name) => {
                 if let Some((id, ty)) = self.lookup(name) {
@@ -1613,9 +1617,10 @@ impl<'a> Lowerer<'a> {
                 let sty = self.concretize(&vty);
                 // Neg can overflow (e.g. negating INT_MIN) in the checked regime;
                 // BitNot never faults.
-                let fault = if op == UnOp::Neg && self.regime == Regime::Checked {
+                let fault = if op == UnOp::Neg && self.regime == Regime::Checked && sty.is_integer() {
                     Some(FaultEdge { kind: FaultKind::Overflow, span: self.cur_span })
                 } else {
+                    // f64 negate is IEEE and never faults (design 0016).
                     None
                 };
                 let id = self.emit_temp(Type::Scalar(sty), Rvalue::Un { op, regime: self.regime, ty: sty, v, fault }, self.cur_span);
@@ -1646,7 +1651,7 @@ impl<'a> Lowerer<'a> {
                 let (r, _) = self.lower_value(rhs, rexp.as_ref())?;
                 // Mirror the oracle: arithmetic and shift ops reset cur_span to the
                 // whole-op span before the fault check; bitwise ops do not.
-                let fallible = matches!(op, Add | Sub | Mul | Div | Rem | Shl | Shr);
+                let fallible = matches!(op, Add | Sub | Mul | Div | Rem | Shl | Shr) && sty.is_integer();
                 if fallible {
                     self.cur_span = span;
                 }
@@ -1688,13 +1693,20 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_conv(&mut self, ty: &Ty, expr: &Expr) -> LR<(Operand, Type)> {
-        let (v, _) = self.lower_value(expr, None)?;
+        let (v, vty) = self.lower_value(expr, None)?;
+        let from = self.concretize(&vty);
         let to = match self.resolve_ty(ty)? {
             Type::Scalar(s) => s,
             _ => return unsupported("non-scalar conversion target"),
         };
-        // Oracle delivers conv-loss at the operand's trailing span (== cur_span).
-        let fault = if self.regime == Regime::Checked {
+        // An int<->f64 conversion is IEEE and regime-exempt — never faults
+        // (design 0016 §5). An integer->integer conv delivers conv-loss at the
+        // operand's trailing span (== cur_span) in the checked regime.
+        // An int->f64 conv (`to == f64`) never faults. Every other checked conv to
+        // an integer target carries a ConvLoss edge — for an f64 source (float->int)
+        // it is inert (saturating; design 0016 §5), kept only for INV-CHECK uniformity.
+        let _ = from;
+        let fault = if self.regime == Regime::Checked && to.is_integer() {
             Some(FaultEdge { kind: FaultKind::ConvLoss, span: self.cur_span })
         } else {
             None
@@ -1854,7 +1866,14 @@ impl<'a> Lowerer<'a> {
             // Word/unit-producing builtin intrinsics (aggregate ones flow through
             // `lower_into`). `trace` is the observable (INV-OBS-ORDER).
             if name == "trace" {
-                let (v, _) = self.lower_value(&args[0], Some(&Type::Scalar(ScalarTy::I64)))?;
+                // Observe the arg at its own width so an `f64` traces its bit pattern
+                // and a float arithmetic arg is computed with IEEE, not int, ops.
+                let exp = if matches!(self.static_ty(&args[0]), Some(Type::Scalar(ScalarTy::F64))) {
+                    ScalarTy::F64
+                } else {
+                    ScalarTy::I64
+                };
+                let (v, _) = self.lower_value(&args[0], Some(&Type::Scalar(exp)))?;
                 self.emit(StatementKind::Trace(v), span, true);
                 return Ok(self.unit());
             }

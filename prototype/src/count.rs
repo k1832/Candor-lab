@@ -292,6 +292,7 @@ impl Counter {
             ExprKind::Spawn(c) => self.expr(c),
             ExprKind::IntLit { .. }
             | ExprKind::NegIntLit { .. }
+            | ExprKind::FloatLit { .. }
             | ExprKind::StrLit(_)
             | ExprKind::BytesLit(_)
             | ExprKind::BoolLit(_)

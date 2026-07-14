@@ -31,7 +31,8 @@ impl<'a> Layout<'a> {
             ScalarTy::I64
             | ScalarTy::U64
             | ScalarTy::Isize
-            | ScalarTy::Usize => 8,
+            | ScalarTy::Usize
+            | ScalarTy::F64 => 8,
         }
     }
 

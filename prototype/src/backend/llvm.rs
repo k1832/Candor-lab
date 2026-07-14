@@ -96,6 +96,8 @@ fn ty_range(sty: ScalarTy) -> (i128, i128, u32, bool) {
         ScalarTy::U16 => (16, false),
         ScalarTy::U32 => (32, false),
         ScalarTy::U64 | ScalarTy::Usize => (64, false),
+        // `f64` bit pattern: unsigned so it is never sign-extended (design 0016).
+        ScalarTy::F64 => (64, false),
         _ => (64, true),
     };
     let (min, max) = if signed {
@@ -289,9 +291,10 @@ fn emit_entry(
     statics: &HashMap<String, u64>,
     strings: &HashMap<String, u64>,
 ) {
+    // `main` reports its 64-bit return WORD for `i64` or `f64` (design 0016).
     let main_is_i64 = matches!(
         prog.get("main").map(|f| &f.locals[0].ty),
-        Some(Type::Scalar(ScalarTy::I64))
+        Some(Type::Scalar(ScalarTy::I64)) | Some(Type::Scalar(ScalarTy::F64))
     );
     out.push_str("define i64 @candor_entry() {\nentry:\n");
     let mut n = 0usize;
@@ -548,6 +551,19 @@ impl<'a> FnEmit<'a> {
             self.line(&format!("store i{bits} {tr}, ptr {p}"));
         }
     }
+    /// Reinterpret an i64 register (an f64 bit pattern) as a native `double` (0016).
+    fn as_f64(&mut self, bits: &str) -> String {
+        let d = self.t();
+        self.line(&format!("{d} = bitcast i64 {bits} to double"));
+        d
+    }
+    /// Reinterpret a native `double` back to its i64 bit pattern (design 0016).
+    fn f64_bits(&mut self, d: &str) -> String {
+        let b = self.t();
+        self.line(&format!("{b} = bitcast double {d} to i64"));
+        b
+    }
+
     /// Byte-copy `len` bytes src -> dst within the flat model (mirrors lower::call_copy).
     fn rt_copy(&mut self, dst: &str, src: &str, len: u64) {
         if len == 0 {
@@ -813,6 +829,26 @@ impl<'a> FnEmit<'a> {
                 let rsty = self.operand_sty(r);
                 let lv = self.operand(l);
                 let rv = self.operand(r);
+                if lsty == ScalarTy::F64 || rsty == ScalarTy::F64 {
+                    // IEEE compare: ordered predicates (`oeq`/`olt`/…) are false on a
+                    // NaN operand; `une` (unordered-or-not-equal) makes NaN != NaN true.
+                    let fa = self.as_f64(&lv);
+                    let fb = self.as_f64(&rv);
+                    let cc = match op {
+                        BinOp::Eq => "oeq",
+                        BinOp::Ne => "une",
+                        BinOp::Lt => "olt",
+                        BinOp::Le => "ole",
+                        BinOp::Gt => "ogt",
+                        BinOp::Ge => "oge",
+                        _ => return Err(format!("non-comparison {op:?} in Cmp")),
+                    };
+                    let c = self.t();
+                    self.line(&format!("{c} = fcmp {cc} double {fa}, {fb}"));
+                    let r = self.t();
+                    self.line(&format!("{r} = zext i1 {c} to i64"));
+                    return Ok(r);
+                }
                 let l128 = self.ext128(&lv, lsty);
                 let r128 = self.ext128(&rv, rsty);
                 let cc = match op {
@@ -848,6 +884,12 @@ impl<'a> FnEmit<'a> {
                         self.line(&format!("{n} = xor i64 {x}, -1"));
                         Ok(self.canon(&n, *ty))
                     }
+                    UnOp::Neg if *ty == ScalarTy::F64 => {
+                        let f = self.as_f64(&x);
+                        let n = self.t();
+                        self.line(&format!("{n} = fneg double {f}"));
+                        Ok(self.f64_bits(&n))
+                    }
                     UnOp::Neg => {
                         let x128 = self.ext128(&x, *ty);
                         let neg = self.t();
@@ -859,6 +901,9 @@ impl<'a> FnEmit<'a> {
             Rvalue::Conv { to, regime, v, fault } => {
                 let sty = self.operand_sty(v);
                 let x = self.operand(v);
+                if *to == ScalarTy::F64 || sty == ScalarTy::F64 {
+                    return self.eval_float_conv(sty, *to, &x);
+                }
                 let x128 = self.ext128(&x, sty);
                 self.range_or_fit(&x128, *to, *regime, fault.as_ref())
             }
@@ -922,6 +967,38 @@ impl<'a> FnEmit<'a> {
         }
     }
 
+    /// int<->f64 conversion (design 0016 §5). int->f64: `sitofp`/`uitofp` (rounds).
+    /// f64->int: `llvm.fpto{s,u}i.sat` to the target width (truncate toward zero,
+    /// saturating; NaN->0), then extend to the canonical i64.
+    fn eval_float_conv(&mut self, from: ScalarTy, to: ScalarTy, x: &str) -> Result<String, String> {
+        if from == ScalarTy::F64 && to == ScalarTy::F64 {
+            return Ok(x.to_string());
+        }
+        if to == ScalarTy::F64 {
+            let (_, _, _, signed) = ty_range(from);
+            let opn = if signed { "sitofp" } else { "uitofp" };
+            let d = self.t();
+            self.line(&format!("{d} = {opn} i64 {x} to double"));
+            return Ok(self.f64_bits(&d));
+        }
+        // f64 -> int.
+        let (_, _, bits, signed) = ty_range(to);
+        let f = self.as_f64(x);
+        let intr = if signed { "fptosi" } else { "fptoui" };
+        let narrow = self.t();
+        self.line(&format!(
+            "{narrow} = call i{bits} @llvm.{intr}.sat.i{bits}.f64(double {f})"
+        ));
+        if bits >= 64 {
+            Ok(narrow)
+        } else {
+            let ex = self.t();
+            let e = if signed { "sext" } else { "zext" };
+            self.line(&format!("{ex} = {e} i{bits} {narrow} to i64"));
+            Ok(ex)
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn eval_bin(
         &mut self,
@@ -936,6 +1013,21 @@ impl<'a> FnEmit<'a> {
         use BinOp::*;
         let lv = self.operand(l);
         let rv = self.operand(r);
+        if ty == ScalarTy::F64 {
+            // IEEE-754 arithmetic: bit-cast, native op, bit-cast back. Never faults.
+            let fa = self.as_f64(&lv);
+            let fb = self.as_f64(&rv);
+            let opn = match op {
+                Add => "fadd",
+                Sub => "fsub",
+                Mul => "fmul",
+                Div => "fdiv",
+                _ => return Err(format!("only + - * / reach f64 Bin, got {op:?}")),
+            };
+            let r = self.t();
+            self.line(&format!("{r} = {opn} double {fa}, {fb}"));
+            return Ok(self.f64_bits(&r));
+        }
         let (min, max, bits, signed) = ty_range(ty);
         match op {
             Add | Sub | Mul => match regime {

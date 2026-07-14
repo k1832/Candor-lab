@@ -93,6 +93,7 @@ impl<'a> Checker<'a> {
                     None => Type::IntLit,
                 }
             }
+            ExprKind::FloatLit { .. } => Type::Scalar(ScalarTy::F64),
             ExprKind::Try(inner) => self.check_try(inner, e.span),
             ExprKind::GenericVal { name, ty_args } => self.check_generic_val(name, ty_args, e.span),
             ExprKind::StrLit(_) => Type::Str,
@@ -495,7 +496,11 @@ impl<'a> Checker<'a> {
         let t = self.check_expr(expr, Use::Value);
         match op {
             UnOp::Neg => {
-                self.expect_integer(&t, expr.span);
+                // Unary minus applies to any numeric operand: integer or `f64`
+                // (design 0016; IEEE negate never faults).
+                if !matches!(t, Type::Error | Type::Scalar(ScalarTy::F64)) {
+                    self.expect_integer(&t, expr.span);
+                }
                 t
             }
             UnOp::Not => {
@@ -517,16 +522,18 @@ impl<'a> Checker<'a> {
         let l = self.check_expr(lhs, Use::Value);
         let r = self.check_expr(rhs, Use::Value);
         match op {
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
-                self.unify_int(&l, &r, span)
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                self.unify_arith(&l, &r, span)
             }
+            // `%` is integer-only; floats have no `Rem` (design 0016 §2).
+            BinOp::Rem => self.unify_int(&l, &r, span),
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 // `str` ordering is byte-lexicographic (design 0013 §3); otherwise
-                // ordering requires integer operands.
+                // ordering requires numeric (integer or `f64`) operands.
                 if matches!(l, Type::Str) && matches!(r, Type::Str) {
                     // ok: byte-lexicographic compare
                 } else {
-                    self.unify_int(&l, &r, span);
+                    self.unify_arith(&l, &r, span);
                 }
                 Type::bool()
             }
@@ -566,6 +573,33 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Unify the operand types of `+ - * /` and ordered comparison: integer OR
+    /// `f64` (design 0016). No implicit int<->float promotion — a mixed pair is an
+    /// error. Floats are exempt from the regime system (IEEE always).
+    fn unify_arith(&mut self, l: &Type, r: &Type, span: Span) -> Type {
+        if matches!(l, Type::Error) || matches!(r, Type::Error) {
+            return Type::Error;
+        }
+        let l_f = matches!(l, Type::Scalar(ScalarTy::F64));
+        let r_f = matches!(r, Type::Scalar(ScalarTy::F64));
+        if l_f || r_f {
+            if l_f && r_f {
+                return Type::Scalar(ScalarTy::F64);
+            }
+            self.diags.push(Diag::error(
+                "E0703",
+                format!(
+                    "arithmetic requires operands of the same type, found `{}` and `{}` (no implicit int<->float conversion — use `conv`)",
+                    l.display(),
+                    r.display()
+                ),
+                span,
+            ));
+            return Type::Error;
+        }
+        self.unify_int(l, r, span)
+    }
+
     fn unify_int(&mut self, l: &Type, r: &Type, span: Span) -> Type {
         if matches!(l, Type::Error) || matches!(r, Type::Error) {
             return Type::Error;
@@ -600,21 +634,22 @@ impl<'a> Checker<'a> {
     fn check_conv(&mut self, ty: &Ty, expr: &Expr, span: Span) -> Type {
         let src = self.check_expr(expr, Use::Value);
         let target = self.resolve_ty(ty);
-        if !matches!(src, Type::Error) && !src.is_integer() {
+        let is_num = |t: &Type| t.is_integer() || matches!(t, Type::Scalar(ScalarTy::F64));
+        if !matches!(src, Type::Error) && !is_num(&src) {
             self.diags.push(
                 Diag::error(
                     "E0701",
-                    format!("`conv` operand must be an integer, found `{}`", src.display()),
+                    format!("`conv` operand must be a number, found `{}`", src.display()),
                     span,
                 )
-                .with_note("`conv` converts between integer types only (§8.1)", None),
+                .with_note("`conv` converts between numeric (integer / `f64`) types (§8.1; 0016 §5)", None),
             );
         }
-        if !matches!(target, Type::Error) && !target.is_integer() {
+        if !matches!(target, Type::Error) && !is_num(&target) {
             self.diags.push(
                 Diag::error(
                     "E0701",
-                    format!("`conv` target must be an integer type, found `{}`", target.display()),
+                    format!("`conv` target must be a numeric type, found `{}`", target.display()),
                     span,
                 )
                 .with_note("pointer retyping uses `cast_ptr`/`addr_to_ptr` (§4.2)", None),
@@ -626,7 +661,7 @@ impl<'a> Checker<'a> {
         // the regime folds it instead, so we skip the check there.
         if self.is_real() && !self.in_regime() {
             if let (Some(v), Type::Scalar(ts)) = (const_int(expr), &target) {
-                if !scalar_fits(v, *ts) {
+                if ts.is_integer() && !scalar_fits(v, *ts) {
                     self.diags.push(
                         Diag::error(
                             "E0710",
@@ -2056,8 +2091,12 @@ impl<'a> Checker<'a> {
             // Prototype observability intrinsic (Stage 4): appends an i64 to the
             // interpreter's trace log so drop-order tests can observe destruction.
             "trace" => {
+                // `trace` observes a 64-bit word: an integer value, or an `f64`'s
+                // IEEE bit pattern (the cross-engine observable channel; design 0016).
                 let t = self.arg0(args, span, "trace");
-                self.expect_integer(&t, span);
+                if !matches!(t, Type::Error | Type::Scalar(ScalarTy::F64)) {
+                    self.expect_integer(&t, span);
+                }
                 Type::unit()
             }
             _ => return None,
@@ -2573,7 +2612,8 @@ fn scalar_range(s: ScalarTy) -> (i128, i128) {
         ScalarTy::U16 => (0, u16::MAX as i128),
         ScalarTy::U32 => (0, u32::MAX as i128),
         ScalarTy::U64 | ScalarTy::Usize => (0, u64::MAX as i128),
-        ScalarTy::Bool | ScalarTy::Unit => (0, 0),
+        // `f64` never reaches an integer-literal fit check; a null range.
+        ScalarTy::Bool | ScalarTy::Unit | ScalarTy::F64 => (0, 0),
     }
 }
 

@@ -198,6 +198,21 @@ impl<'a> RLexer<'a> {
                     break;
                 }
             }
+            // Float continuation (design 0016): a `.` with a digit on BOTH sides,
+            // or an exponent (`e`/`E`). A `.` not followed by a digit is NOT part
+            // of the number (e.g. `5.field`, `1.` is rejected below via the
+            // digit-on-both-sides rule — `.` alone leaves an integer here).
+            let is_frac = self.peek() == Some(b'.')
+                && self.peek2().map(|c| c.is_ascii_digit()).unwrap_or(false);
+            let is_exp = matches!(self.peek(), Some(b'e') | Some(b'E'))
+                && match self.peek2() {
+                    Some(c) if c.is_ascii_digit() => true,
+                    Some(b'+') | Some(b'-') => true,
+                    _ => false,
+                };
+            if is_frac || is_exp {
+                return self.finish_float(start);
+            }
         }
         let digits_end = self.pos;
         let digit_slice = if radix == 16 {
@@ -235,6 +250,55 @@ impl<'a> RLexer<'a> {
             }
         }
         Ok(RToken { kind: RTok::Int { value, suffix }, span: Span::new(start, self.pos) })
+    }
+
+    /// Finish lexing a float literal (design 0016). `start` is the literal start;
+    /// the cursor sits just past the integer part, at a `.`+digit or an exponent.
+    /// Consumes the fractional digits and/or exponent, then parses the whole span
+    /// as `f64` (Rust's `str::parse`, so an over-range magnitude yields `±inf`).
+    fn finish_float(&mut self, start: usize) -> Result<RToken, Diag> {
+        if self.peek() == Some(b'.') {
+            self.pos += 1; // `.`
+            while let Some(b) = self.peek() {
+                if b.is_ascii_digit() {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        if matches!(self.peek(), Some(b'e') | Some(b'E')) {
+            self.pos += 1; // `e`/`E`
+            if matches!(self.peek(), Some(b'+') | Some(b'-')) {
+                self.pos += 1;
+            }
+            let exp_start = self.pos;
+            while let Some(b) = self.peek() {
+                if b.is_ascii_digit() {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+            if self.pos == exp_start {
+                return Err(Diag::error("L0008", "float exponent has no digits", Span::new(start, self.pos)));
+            }
+        }
+        // A trailing identifier is a (rejected) suffix — float literals take none.
+        if let Some(b) = self.peek() {
+            if is_ident_start(b) {
+                return Err(Diag::error(
+                    "L0005",
+                    "a float literal takes no type suffix (design 0016)",
+                    Span::new(start, self.pos + 1),
+                ));
+            }
+        }
+        let text = std::str::from_utf8(&self.src[start..self.pos]).expect("ascii float");
+        let value: f64 = text
+            .parse()
+            .map_err(|_| Diag::error("L0009", "malformed float literal", Span::new(start, self.pos)))?;
+        Ok(RToken { kind: RTok::Float { bits: value.to_bits() }, span: Span::new(start, self.pos) })
     }
 
     fn lex_string(&mut self, start: usize, is_bytes: bool) -> Result<RToken, Diag> {

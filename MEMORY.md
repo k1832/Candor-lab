@@ -875,3 +875,39 @@ One lesson per entry, one-line summary first.
   "memory" so wasmi's host can reach it (the Candor interp reads mem directly and does
   not care). Post-MVP remaining: f32/f64 floats (needs a language float prerequisite),
   a JIT-to-LLVM. (WASM M4, 2026-07-14).
+
+## Adding a new scalar type (e.g. `f64`) — the full cross-engine checklist + traps
+Adding `f64` (design 0016) touched ~18 files across every layer. The mechanical
+spine: add the `ScalarTy` variant, then let `cargo build` enumerate every
+non-exhaustive match (scalar_name/scalar_size/scalar_kw in serial+emit, scalar_range,
+the four `ty_range` copies in eval/mir-interp/lower/llvm, and ~15 `ExprKind` matches
+once you add the literal node). Key design/impl facts worth reusing:
+- **Value repr: carry the f64 as its `to_bits()` pattern in the existing i128/i64
+  "register" model + 8 bytes in flat memory** — every engine already stores scalars
+  this way, so loads/stores/call-ABI need ZERO change. Only the float OPS bit-cast in
+  (Cranelift `bitcast`, LLVM `bitcast i64→double`), compute native IEEE, bit-cast out.
+  Make `ty_range(f64)` UNSIGNED-64 so no read_int sign-extends the pattern.
+- **`is_integer()` must EXCLUDE the new type** — it gates arithmetic typing, `expect_integer`,
+  literal-suffix validity, and the regime/overflow machinery. Floats being non-integer is
+  what keeps them regime-exempt AND out of every integer path (no int test perturbed).
+- **Observe f64 bits across all five engines via `trace`, not the return value.** The
+  LLVM/AOT gate runs a separate PROCESS whose exit code is 8 bits; the reliable shared
+  channel is θ (the printed trace). `trace(f64)` emits the bit pattern as i64. But `trace`
+  forces `expected=i64` on its arg, which would force INT math on a float arith arg —
+  probe the arg's static type and pass `expected=f64` (both build.rs and eval.rs).
+- **TRAP: a computed NaN's SIGN BIT is IEEE-unspecified.** LLVM `-O2` constant-folds
+  `0.0/0.0` to `+NaN` (0x7FF8…) while x86 runtime `divsd` yields `-NaN` (0xFFF8…). Gate
+  finite/inf/conv results to EXACT bits, but gate NaN by BEHAVIOUR (comparison outcomes).
+  The four in-process engines agree on the NaN bits (all runtime); only the folding LLVM
+  process differs.
+- **TRAP: do NOT widen a serialized MIR Rvalue's field set casually.** Adding `from: ScalarTy`
+  to `Rvalue::Conv`'s WIRE broke the self-host lowerer's byte-exact MIR (it emits the old
+  `(conv <to> …)`). Recover the source scalar from the OPERAND (`operand_sty(v)`) instead.
+  For INV-CHECK uniformity, a checked f64→int conv keeps an INERT ConvLoss edge (saturating
+  never takes it) rather than fault=None (which the invariant, lacking the source type,
+  can't distinguish from a missing edge on an int→int conv).
+- **f64→int must saturate to the EXACT target width** (`fcvt_to_*int_sat(I8/I16/I32/I64)` /
+  `llvm.fpto*i.sat.iN`), then sign/zero-extend to the i64 register — saturating to i64 first
+  then narrowing would wrap (300.0→u8 must be 255, not 44). Matches Rust `as`.
+- Newton's-method sqrt(n) converges to ONE ULP short of the correctly-rounded library `sqrt`
+  — assert loop results against the reproduced loop in host Rust, not against `f64::sqrt`.
