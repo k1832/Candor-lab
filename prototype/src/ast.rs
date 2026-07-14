@@ -568,4 +568,22 @@ pub enum PatKind {
         variant: String,
         sub: Vec<Pattern>,
     },
+    /// An integer-literal pattern (`0x41`, `42u8`, `-5`): matches when an integer
+    /// scrutinee equals this value. `negative` denotes the `-<lit>` fold. Valid
+    /// only over an integer scrutinee; a literal-pattern match needs a `_`/binding
+    /// catch-all to be exhaustive (checker-enforced).
+    IntLit {
+        value: u64,
+        negative: bool,
+        suffix: Option<ScalarTy>,
+    },
+}
+
+/// The signed value denoted by an integer-literal pattern's magnitude and sign.
+pub fn int_pat_value(value: u64, negative: bool) -> i128 {
+    if negative {
+        -(value as i128)
+    } else {
+        value as i128
+    }
 }

@@ -1169,6 +1169,14 @@ impl<'a> Lowerer<'a> {
         dst: Option<(&Place, &Type)>,
     ) -> LR<()> {
         let (mut splace, sty) = self.lower_scrutinee(scrutinee)?;
+        // An integer scrutinee takes the literal-pattern path: a compare-and-branch
+        // chain over existing MIR ops (design 0001 §8.2, extended). No enum tag.
+        if let Type::Scalar(s) = &sty {
+            if s.is_integer() {
+                let s = *s;
+                return self.lower_int_match(&splace, s, arms, dst);
+            }
+        }
         // The borrow mode of the scrutinee decides how non-copy payloads bind
         // (design 0001 §4.1, mirroring the oracle's `Hold`): an owned scrutinee
         // *moves* its payload out (and is pruned from its own drop); a borrowed
@@ -1207,6 +1215,7 @@ impl<'a> Lowerer<'a> {
                     }
                     test_open = false;
                 }
+                PatKind::IntLit { .. } => return unsupported("integer-literal pattern on enum scrutinee"),
                 PatKind::Variant { variant, .. } => {
                     let idx = einfo
                         .iter()
@@ -1242,6 +1251,108 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
+    /// Lower an integer-scrutinee `match` to a compare-and-branch chain (design
+    /// 0001 §8.2, extended). The scrutinee is loaded once; each literal arm tests
+    /// `scrutinee == literal`; the `_`/binding arm is the fall-through. This uses
+    /// only existing MIR ops (integer `Cmp` + conditional `Branch`), so the native
+    /// backends need no change.
+    fn lower_int_match(
+        &mut self,
+        splace: &Place,
+        sty: ScalarTy,
+        arms: &[MatchArm],
+        dst: Option<(&Place, &Type)>,
+    ) -> LR<()> {
+        let scalar = Type::Scalar(sty);
+        let val = self.emit_temp(
+            scalar.clone(),
+            Rvalue::Load { place: splace.clone(), ty: scalar.clone() },
+            self.cur_span,
+        );
+        let join = self.new_block();
+        let mut test_open = true;
+        for arm in arms {
+            if !test_open {
+                break;
+            }
+            match &arm.pattern.kind {
+                PatKind::IntLit { value, negative, .. } => {
+                    let konst = crate::ast::int_pat_value(*value, *negative);
+                    let cmp = self.emit_temp(
+                        Type::bool(),
+                        Rvalue::Cmp {
+                            op: BinOp::Eq,
+                            l: Operand::Local(val),
+                            r: Operand::Const(konst, sty),
+                        },
+                        self.cur_span,
+                    );
+                    let arm_bb = self.new_block();
+                    let next_bb = self.new_block();
+                    self.terminate(Terminator::Branch { cond: Operand::Local(cmp), then_bb: arm_bb, else_bb: next_bb });
+                    self.switch_to(arm_bb);
+                    self.lower_int_arm(arm, None, val, &scalar, dst)?;
+                    if self.reachable {
+                        self.terminate(Terminator::Goto(join));
+                    }
+                    self.switch_to(next_bb);
+                }
+                PatKind::Wildcard => {
+                    self.lower_int_arm(arm, None, val, &scalar, dst)?;
+                    if self.reachable {
+                        self.terminate(Terminator::Goto(join));
+                    }
+                    test_open = false;
+                }
+                PatKind::Binding(name) => {
+                    self.lower_int_arm(arm, Some(name.clone()), val, &scalar, dst)?;
+                    if self.reachable {
+                        self.terminate(Terminator::Goto(join));
+                    }
+                    test_open = false;
+                }
+                PatKind::Variant { .. } => return unsupported("variant pattern on integer scrutinee"),
+            }
+        }
+        if test_open {
+            // Non-exhaustive fall-through — unreachable for a checked program (the
+            // checker requires a catch-all), but mirror the "no matching arm" panic.
+            self.terminate(Terminator::Fault(FaultEdge { kind: FaultKind::Panic, span: self.cur_span }));
+        }
+        self.switch_to(join);
+        Ok(())
+    }
+
+    /// Lower one arm of an integer `match`. A binding arm binds the whole (Copy)
+    /// integer value into a fresh local from the already-loaded scrutinee temp.
+    fn lower_int_arm(
+        &mut self,
+        arm: &MatchArm,
+        bind_name: Option<String>,
+        val: LocalId,
+        scalar: &Type,
+        dst: Option<(&Place, &Type)>,
+    ) -> LR<()> {
+        self.push_scope();
+        if let Some(name) = bind_name {
+            let local = self.new_local(scalar.clone(), Some(name.clone()));
+            self.emit(
+                StatementKind::Store(Place::local(local), Rvalue::Load { place: Place::local(val), ty: scalar.clone() }),
+                self.cur_span,
+                false,
+            );
+            self.bind(&name, local, scalar.clone());
+        }
+        match dst {
+            Some((d, ty)) => self.lower_into(&arm.body, d, ty)?,
+            None => {
+                self.lower_value(&arm.body, None)?;
+            }
+        }
+        self.pop_scope_with_drops();
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn lower_match_arm(
         &mut self,
@@ -1261,6 +1372,7 @@ impl<'a> Lowerer<'a> {
                     PatKind::Wildcard => continue,
                     PatKind::Binding(n) => n.clone(),
                     PatKind::Variant { .. } => return unsupported("nested match patterns"),
+                    PatKind::IntLit { .. } => return unsupported("integer-literal sub-pattern"),
                 };
                 let (pty, off) = self.lay().payload_offset(&payloads, i);
                 let mut src = splace.clone();

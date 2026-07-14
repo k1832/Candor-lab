@@ -198,6 +198,13 @@ pub fn analyze_pattern(
                 bind_sub(sp, pty, hold, items, diags, out);
             }
         }
+        PatKind::IntLit { .. } => {
+            diags.push(Diag::error(
+                "E0606",
+                format!("integer-literal pattern cannot match enum scrutinee `{ename}`"),
+                pat.span,
+            ));
+        }
     }
 }
 
@@ -228,6 +235,13 @@ fn bind_sub(
                 analyze_pattern(pat, &einfo, &ename, h, items, diags, out);
             }
         }
+        PatKind::IntLit { .. } => {
+            diags.push(Diag::error(
+                "E0606",
+                "integer-literal sub-patterns are not supported".to_string(),
+                pat.span,
+            ));
+        }
     }
 }
 
@@ -243,6 +257,7 @@ pub fn check_exhaustive(
         match &p.kind {
             PatKind::Wildcard | PatKind::Binding(_) => return None,
             PatKind::Variant { variant, .. } => covered.push(variant.clone()),
+            PatKind::IntLit { .. } => {}
         }
     }
     let missing: Vec<String> = einfo

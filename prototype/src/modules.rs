@@ -963,6 +963,7 @@ impl<'a> Rewriter<'a> {
                     self.rewrite_pattern(s, locals);
                 }
             }
+            PatKind::IntLit { .. } => {}
         }
     }
 }

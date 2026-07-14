@@ -1273,6 +1273,15 @@ impl Fmt<'_> {
                     self.push(")");
                 }
             }
+            PatKind::IntLit { value, negative, suffix } => {
+                if *negative {
+                    self.push("-");
+                }
+                self.push(&value.to_string());
+                if let Some(sc) = suffix {
+                    self.push(scalar_kw(*sc));
+                }
+            }
         }
     }
 

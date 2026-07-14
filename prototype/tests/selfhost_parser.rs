@@ -400,6 +400,13 @@ impl R {
                 }
                 self.w(")");
             }
+            PatKind::IntLit { value, negative, suffix } => {
+                self.w(&format!(
+                    "(pint {} {value} {})",
+                    if *negative { 1 } else { 0 },
+                    suf_code(*suffix)
+                ));
+            }
         }
     }
 

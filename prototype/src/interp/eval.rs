@@ -3157,6 +3157,11 @@ impl<'a> Interp<'a> {
     // ---- match ----
     fn eval_match(&mut self, scrut: &Expr, arms: &[MatchArm], expected: Option<&Type>) -> R<RVal> {
         let sv = self.eval_value(scrut, None)?;
+        if let Type::Scalar(s) = sv.ty {
+            if s.is_integer() {
+                return self.eval_int_match(arms, expected, sv, s);
+            }
+        }
         let (hold, enum_addr, enum_ty) = self.peel_scrutinee(sv.ty.clone(), sv.addr)?;
         let einfo = self
             .lay()
@@ -3170,6 +3175,51 @@ impl<'a> Interp<'a> {
         };
         self.push_scope();
         self.bind_pattern(&arm.pattern, hold, enum_addr, &payloads, &sv)?;
+        let body_res = self.eval_value(&arm.body, expected);
+        match body_res {
+            Ok(rv) => {
+                let out = self.materialize(rv)?;
+                self.drop_scope()?;
+                Ok(out)
+            }
+            Err(Ctl::Fault(f)) => Err(Ctl::Fault(f)),
+            Err(ctl) => {
+                self.drop_scope()?;
+                Err(ctl)
+            }
+        }
+    }
+
+    /// Evaluate an integer-scrutinee `match`: read the scalar once, then pick the
+    /// first arm whose literal equals it (or the `_`/binding catch-all). A binding
+    /// arm binds the whole (Copy) integer value.
+    fn eval_int_match(
+        &mut self,
+        arms: &[MatchArm],
+        expected: Option<&Type>,
+        sv: RVal,
+        sty: ScalarTy,
+    ) -> R<RVal> {
+        let val = self.read_int(sv.addr, sty)?;
+        let arm = arms.iter().find(|a| match &a.pattern.kind {
+            PatKind::IntLit { value, negative, .. } => {
+                crate::ast::int_pat_value(*value, *negative) == val
+            }
+            PatKind::Wildcard | PatKind::Binding(_) => true,
+            PatKind::Variant { .. } => false,
+        });
+        let arm = match arm {
+            Some(a) => a,
+            None => return Err(self.fault(FaultKind::Panic, "no matching arm")),
+        };
+        self.push_scope();
+        if let PatKind::Binding(name) = &arm.pattern.kind {
+            let size = self.size_of(&sv.ty).max(1);
+            let align = self.align_of(&sv.ty).max(1);
+            let a = self.mem.stack_alloc(size, align);
+            self.move_bytes(a, sv.addr, size)?;
+            self.add_local(name, a, sv.ty.clone(), MoveMask::default(), true);
+        }
         let body_res = self.eval_value(&arm.body, expected);
         match body_res {
             Ok(rv) => {
@@ -3229,12 +3279,13 @@ impl<'a> Interp<'a> {
                 }
                 Ok(())
             }
+            PatKind::IntLit { .. } => Ok(()),
         }
     }
 
     fn bind_sub(&mut self, pat: &Pattern, pty: &Type, hold: Hold, sub_addr: u64, sv: &RVal, idx: usize) -> R<()> {
         let name = match &pat.kind {
-            PatKind::Wildcard => return Ok(()),
+            PatKind::Wildcard | PatKind::IntLit { .. } => return Ok(()),
             PatKind::Binding(n) => n.clone(),
             PatKind::Variant { .. } => {
                 return Err(self.fault(FaultKind::Panic, "nested patterns unsupported in prototype interpreter"));
@@ -3652,6 +3703,9 @@ fn pat_matches(pat: &Pattern, vname: &str) -> bool {
     match &pat.kind {
         PatKind::Wildcard | PatKind::Binding(_) => true,
         PatKind::Variant { variant, .. } => variant == vname,
+        // An integer-literal pattern never matches an enum tag (checker rejects
+        // this combination); listed for match completeness.
+        PatKind::IntLit { .. } => false,
     }
 }
 

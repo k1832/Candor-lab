@@ -927,3 +927,28 @@ once you add the literal node). Key design/impl facts worth reusing:
   `conv usize (local)`. Cross-engine byte gate can't use the MIR-only `String`, so
   a String-free twin (`tests/fixtures/run/fmt_f64_trace.cnr`) traces the ASCII
   bytes and the corpus gates prove all five engines agree. (2026-07-14).
+
+- **Integer-literal `match` patterns: the shared `PatKind` enum forces
+  completeness edits in ~13 sites, and integer exhaustiveness is a HARD
+  catch-all requirement (not variant enumeration).** Added `PatKind::IntLit
+  { value, negative, suffix }` (`prototype/src/ast.rs`, with `int_pat_value`
+  helper). An integer match can never enumerate 2^N values, so exhaustiveness is
+  redefined: an integer-scrutinee match is exhaustive IFF it has a `_`/binding
+  arm, else `E0601` — required for soundness (an unmatched value is UB). The
+  checker (`check/expr.rs check_int_match`) dispatches off the `None` arm of
+  `resolve_enum` when the scrutinee is `Type::Scalar(is_integer)`; it also does
+  coherence (`E0606`: int pattern on enum scrutinee / variant pattern on int
+  scrutinee / suffix mismatch), range-check (`E0709`) and duplicate-literal
+  (`E0602`, a dead arm) checks. Lowering is a compare-and-branch chain reusing
+  existing MIR ops (`Cmp Eq` + `Branch`), so BOTH native backends (Cranelift
+  no-opt/opt, LLVM) needed ZERO change — confirmed by the auto-discovered
+  `run/` corpus gates. The trap: a new `PatKind` variant breaks every exhaustive
+  `match &pat.kind` — build/canon, real/emit+fmt, modules (rewrite_pattern),
+  interp (eval_match + pat_matches + bind_pattern + bind_sub), mir/build (both
+  the enum arm dispatch AND the sub-pattern match), AND the `tests/`
+  selfhost_parser S-expr renderer. Let the compiler find them (2 rounds of
+  `cargo build`), don't grep-and-guess. Skipped rewriting the WASM interp's
+  opcode dispatch: its `if/else-if` chains mix ranges (`op >= 0x28 && op <=
+  0x3e`) and OR-combined tests that literal-only match can't express, and the
+  run/ copy must stay byte-identical to the drift-guard source — disproportionate
+  risk for no functional gain. (2026-07-14).

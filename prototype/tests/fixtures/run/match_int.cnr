@@ -1,0 +1,31 @@
+// Integer-literal `match` patterns (design 0001 §8.2, extended). Two integer
+// scrutinees — a `u8` opcode-byte dispatch and an `i64` value classification —
+// exercised in both the value-producing (`return match`) and statement forms,
+// each with the required `_`/binding catch-all.
+
+fn opcode(op: u8) -> i64 {
+    return match op {
+        0x41u8 => 1,
+        0x6au8 => 2,
+        0x6bu8 => 3,
+        _ => 0,
+    };
+}
+
+fn classify(n: i64) -> i64 {
+    let mut r: i64 = 0;
+    match n {
+        0 => { r = 0; },
+        10 => { r = 100; },
+        v => { r = v; },
+    }
+    return r;
+}
+
+fn main() -> i64 {
+    // 1 + 2 + 3 + 0 (wildcard) = 6
+    let a: i64 = opcode(0x41u8) + opcode(0x6au8) + opcode(0x6bu8) + opcode(0xffu8);
+    // 0 + 100 + 7 (binding) = 107
+    let b: i64 = classify(0) + classify(10) + classify(7);
+    return a + b;
+}

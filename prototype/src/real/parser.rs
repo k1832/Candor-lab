@@ -1822,6 +1822,21 @@ impl RParser {
                 let sub = self.parse_opt_pattern_args()?;
                 PatKind::Variant { enum_name: "BoxResult".to_string(), variant, sub }
             }
+            RTok::Int { value, suffix } => {
+                self.bump();
+                PatKind::IntLit { value, negative: false, suffix }
+            }
+            RTok::Minus => {
+                // A negative integer-literal pattern (`-5`), mirroring the
+                // negative-literal fold in expressions (spec 02 §6.6).
+                self.bump();
+                if let RTok::Int { value, suffix } = self.peek().clone() {
+                    self.bump();
+                    PatKind::IntLit { value, negative: true, suffix }
+                } else {
+                    return Err(self.unexpected("an integer literal after `-`"));
+                }
+            }
             RTok::Ident(name) if name == "_" => {
                 self.bump();
                 PatKind::Wildcard

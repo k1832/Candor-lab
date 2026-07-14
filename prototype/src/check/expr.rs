@@ -2215,6 +2215,14 @@ impl<'a> Checker<'a> {
         let (hold, einfo, ename) = match resolved {
             Some(x) => x,
             None => {
+                // An integer scrutinee takes the literal-pattern path (design
+                // 0001 §8.2 extended): literal arms compare-and-branch, and a
+                // `_`/binding catch-all is required for exhaustiveness.
+                if let Type::Scalar(s) = sc_ty {
+                    if s.is_integer() {
+                        return self.check_int_match(scrut, arms, span, s, &sc_place);
+                    }
+                }
                 if !matches!(sc_ty, Type::Error) {
                     self.diags.push(Diag::error(
                         "E0603",
@@ -2372,6 +2380,149 @@ impl<'a> Checker<'a> {
                         self.record_binding_loan(&li.place, li.kind, bd.span, &bd.name);
                     }
                 }
+            }
+            let bt = self.check_expr(&arm.body, Use::Value);
+            self.pop_scope();
+            if let Some(cur) = self.cur_get() {
+                self.set_term(cur, Term::Goto(join_bb));
+            }
+            result = join_types(result, bt);
+        }
+        self.set_term(c0, Term::Switch(arm_bbs));
+        self.cur_set(Some(join_bb));
+        result
+    }
+
+    /// Type-check an integer-scrutinee `match` (design 0001 §8.2, extended for
+    /// integer-literal patterns). Each literal is typed against the scrutinee's
+    /// integer type; the match is exhaustive only with a `_`/binding catch-all
+    /// (integer literals can never enumerate the type); a repeated literal is a
+    /// dead arm. Lowers to a compare-and-branch chain (no new MIR construct).
+    fn check_int_match(
+        &mut self,
+        scrut: &Expr,
+        arms: &[MatchArm],
+        span: Span,
+        sty: ScalarTy,
+        sc_place: &Option<Place>,
+    ) -> Type {
+        let sc_ty = Type::Scalar(sty);
+        let mut seen: Vec<i128> = Vec::new();
+        let mut has_catchall = false;
+        for arm in arms {
+            match &arm.pattern.kind {
+                PatKind::IntLit { value, negative, suffix } => {
+                    if let Some(suf) = suffix {
+                        if *suf != sty {
+                            self.diags.push(Diag::error(
+                                "E0606",
+                                format!(
+                                    "literal pattern is `{}` but scrutinee is `{}`",
+                                    scalar_name(*suf),
+                                    scalar_name(sty)
+                                ),
+                                arm.pattern.span,
+                            ));
+                        }
+                    }
+                    let v = int_pat_value(*value, *negative);
+                    let (min, max) = scalar_range(sty);
+                    if v < min || v > max {
+                        self.diags.push(
+                            Diag::error(
+                                "E0709",
+                                format!(
+                                    "integer literal `{}{}` is out of range for `{}`",
+                                    if *negative { "-" } else { "" },
+                                    value,
+                                    scalar_name(sty)
+                                ),
+                                arm.pattern.span,
+                            )
+                            .with_note(
+                                "an over-range literal is rejected at compile time, never a runtime fault (spec 01 §3.3)",
+                                None,
+                            ),
+                        );
+                    } else if seen.contains(&v) {
+                        self.diags.push(Diag::error(
+                            "E0602",
+                            format!(
+                                "duplicate literal pattern `{}{}` — this arm is unreachable",
+                                if *negative { "-" } else { "" },
+                                value
+                            ),
+                            arm.pattern.span,
+                        ));
+                    } else {
+                        seen.push(v);
+                    }
+                }
+                PatKind::Wildcard | PatKind::Binding(_) => has_catchall = true,
+                PatKind::Variant { .. } => {
+                    self.diags.push(Diag::error(
+                        "E0606",
+                        format!(
+                            "variant pattern cannot match integer scrutinee `{}`",
+                            scalar_name(sty)
+                        ),
+                        arm.pattern.span,
+                    ));
+                }
+            }
+        }
+        if !has_catchall {
+            self.diags.push(
+                Diag::error(
+                    "E0601",
+                    "non-exhaustive match: an integer match must have a `_` wildcard arm".to_string(),
+                    span,
+                )
+                .with_note(
+                    "integer literals can never enumerate the whole type; add a `_` catch-all",
+                    None,
+                ),
+            );
+        }
+
+        // The scrutinee is read once at the match head.
+        self.emit_place_action(sc_place, Use::ReadOnly, &sc_ty, scrut.span);
+
+        let c0 = match self.cur_get() {
+            Some(b) => b,
+            None => {
+                let mut ty = Type::Never;
+                for arm in arms {
+                    self.push_scope();
+                    if let PatKind::Binding(name) = &arm.pattern.kind {
+                        self.add_local(name, sc_ty.clone(), true);
+                    }
+                    ty = join_types(ty, self.check_expr(&arm.body, Use::Value));
+                    self.pop_scope();
+                }
+                return ty;
+            }
+        };
+
+        let join_bb = self.new_block();
+        self.set_join_span(join_bb, span);
+        let mut arm_bbs = Vec::new();
+        let mut result = Type::Never;
+        for arm in arms {
+            let b = self.new_block();
+            arm_bbs.push(b);
+            self.cur_set(Some(b));
+            self.push_scope();
+            // A binding arm binds the whole (Copy) integer value: a fresh local,
+            // initialized from the scrutinee read.
+            if let PatKind::Binding(name) = &arm.pattern.kind {
+                self.add_local(name, sc_ty.clone(), true);
+                self.emit(&Some(Place::local(name.clone())), Access::Decl, arm.pattern.span);
+                self.emit(
+                    &Some(Place::local(name.clone())),
+                    Access::Assign { needs_drop: false, box_paths: Vec::new() },
+                    arm.pattern.span,
+                );
             }
             let bt = self.check_expr(&arm.body, Use::Value);
             self.pop_scope();

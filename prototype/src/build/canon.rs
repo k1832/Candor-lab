@@ -657,6 +657,13 @@ impl Printer {
                 }
                 self.push(")");
             }
+            PatKind::IntLit { value, negative, suffix } => {
+                if *negative {
+                    self.push("-");
+                }
+                self.push(&value.to_string());
+                self.suffix(suffix);
+            }
         }
     }
 }
