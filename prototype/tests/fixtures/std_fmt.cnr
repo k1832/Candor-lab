@@ -89,6 +89,121 @@ fn fmt_i64(a: read Alloc, n: i64) alloc -> String {
     return s;
 }
 
+
+// Build the powers of ten 10^0 .. 10^40 by repeated multiplication. Each product
+// is a single IEEE `f64` multiply, so the table is bit-identical on every engine
+// (design 0016) and matches the correctly-rounded decimal literals through 10^22
+// (staying within ~1 ULP beyond, which the covered range below tolerates).
+fn pow10_table() -> [41]f64 {
+    let mut t: [41]f64 = [1.0; 41];
+    let mut i: usize = 1;
+    while i < 41 { t[i] = t[i - 1] * 10.0; i = i + 1; }
+    return t;
+}
+
+// Render an `f64` to a decimal `String` — the float analog of `fmt_i64`.
+//
+// FORMAT (a defined, documented format — NOT shortest-round-trip / Ryū, which
+// is deferred):
+//   - `NaN` -> "NaN"; `+inf` -> "inf"; `-inf` -> "-inf"; `0.0` and `-0.0` -> "0"
+//     (the sign of zero is dropped); finite negatives carry a leading '-'.
+//   - Finite non-zero values render in FIXED-POINT decimal (never scientific) with
+//     up to 15 significant digits and trailing zeros stripped: `1.5` -> "1.5",
+//     `10.0` -> "10", `0.1` -> "0.1", `6.022e23` -> "602200000000000000000000".
+//
+// ROUND-TRIP GUARANTEE: for every `f64` that is the nearest value to a decimal of
+// at most 15 significant digits with magnitude in [1e-15, 1e39), the produced
+// string parses back (Rust `f64::from_str`) to the identical `f64` bits. Values
+// that need 16–17 significant digits (an unrounded `sqrt(2)`, `0.1 + 0.2`, ...) do
+// NOT round-trip: a 17th correct digit requires an integer past `f64`'s exact
+// 2^53 range, unreachable with `f64`-only arithmetic (no bitcast / bignum in this
+// slice). Magnitudes outside the covered range are best-effort (a scientific-
+// notation extension is deferred), never a fault.
+//
+// ALGORITHM: normalize |x| to a decimal exponent `e` (10^e <= |x| < 10^(e+1)) by
+// comparison against the power table, then form the 15-digit significand `m` with
+// ONE scaled multiply-or-divide (`|x| * 10^(14-e)` or `|x| / 10^(e-14)`), whose
+// result is < 10^15 < 2^53 and so an exact integer after rounding. A digit-by-digit
+// float loop is avoided: its repeated `*10` accumulates rounding error, whereas the
+// single scaled op holds the error near one ULP — enough for the 15-digit guarantee.
+fn fmt_f64(a: read Alloc, x: f64) alloc -> String {
+    let mut s: String = string_new(a);
+    if x != x { append(write s, "NaN"); return s; }
+    let neg: bool = x < 0.0;
+    let mut av: f64 = x;
+    if neg { av = -x; }
+    if av == 0.0 { push(write s, 48); return s; }
+    let inf: f64 = 1.0 / 0.0;
+    if av == inf {
+        if neg { push(write s, 45); }
+        append(write s, "inf");
+        return s;
+    }
+    let p: [41]f64 = pow10_table();
+    let mut e: i32 = 0;
+    if av >= 1.0 {
+        let mut hi: i32 = e + 1;
+        while e < 38 && p[conv usize (hi)] <= av { e = e + 1; hi = e + 1; }
+    } else {
+        let mut j: i32 = 0;
+        while j < 15 && av * p[conv usize (j)] < 1.0 { j = j + 1; }
+        e = 0 - j;
+    }
+    let mut m0: f64 = 0.0;
+    if e >= 14 {
+        let lo: i32 = e - 14;
+        m0 = av / p[conv usize (lo)];
+    } else {
+        let hi: i32 = 14 - e;
+        m0 = av * p[conv usize (hi)];
+    }
+    let mut m: i64 = conv i64 (m0 + 0.5);
+    if m >= 1000000000000000 { m = m / 10; e = e + 1; }
+    while m % 10 == 0 && m != 0 { m = m / 10; }
+    // Emit `m`'s decimal digits low-first into a fixed buffer, then place them with
+    // the point according to `e` (leading-digit power): trailing integer zeros for
+    // e >= k-1, an embedded point for 0 <= e < k-1, else a leading "0.00..".
+    let mut digits: [20]i64 = [0i64; 20];
+    let mut count: i32 = 0;
+    let mut mm: i64 = m;
+    let mut more: bool = true;
+    while more {
+        digits[conv usize (count)] = 48 + mm % 10;
+        count = count + 1;
+        mm = mm / 10;
+        more = mm != 0;
+    }
+    if neg { push(write s, 45); }
+    let k: i32 = count;
+    if e >= k - 1 {
+        let mut idx: i32 = k;
+        while idx > 0 { idx = idx - 1; push(write s, digits[conv usize (idx)]); }
+        let mut z: i32 = e - (k - 1);
+        while z > 0 { push(write s, 48); z = z - 1; }
+    } else {
+        if e >= 0 {
+            let mut ll: i32 = 0;
+            while ll < k {
+                if ll == e + 1 { push(write s, 46); }
+                let di: i32 = k - 1 - ll;
+                push(write s, digits[conv usize (di)]);
+                ll = ll + 1;
+            }
+        } else {
+            push(write s, 48); push(write s, 46);
+            let mut z: i32 = 0 - e - 1;
+            while z > 0 { push(write s, 48); z = z - 1; }
+            let mut ll: i32 = 0;
+            while ll < k {
+                let di: i32 = k - 1 - ll;
+                push(write s, digits[conv usize (di)]);
+                ll = ll + 1;
+            }
+        }
+    }
+    return s;
+}
+
 // `Show` is Candor's value-rendering convention — the Display analog. An ordinary
 // design-0009 interface: one method rendering the receiver into a freshly-built
 // owning `String`. It is `alloc` (building a String allocates) and threads the
@@ -104,6 +219,15 @@ struct ShowInt { val: i64 }
 impl Show for ShowInt {
     fn to_string(read self, a: Alloc) alloc -> String {
         return fmt_i64(read a, self.val);
+    }
+}
+
+
+// A `Show` witness over an `f64`, delegating to `fmt_f64` (parallels `ShowInt`).
+struct ShowFloat { val: f64 }
+impl Show for ShowFloat {
+    fn to_string(read self, a: Alloc) alloc -> String {
+        return fmt_f64(read a, self.val);
     }
 }
 

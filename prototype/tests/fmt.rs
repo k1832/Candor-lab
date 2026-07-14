@@ -153,3 +153,107 @@ fn show_through_generic_fn_bound() {
         1
     );
 }
+
+// ---- fmt_f64: decimal rendering of an f64 (design 0016 float formatting) -------
+
+// Build `fmt_f64(al, <lit>)` and compare its `as_str` view against `expect`.
+fn fmt_f64_eq(lit: &str, expect: &str) -> i64 {
+    run_ret(&format!(
+        "let s: String = fmt_f64(read al, {lit}); if as_str(read s) == \"{expect}\" {{ return 1; }} return 0;"
+    ))
+}
+
+// Reconstruct the exact string `fmt_f64` produces for `lit` by tracing its bytes.
+fn fmt_f64_str(lit: &str) -> String {
+    let bytes = run_trace(&format!(
+        "let s: String = fmt_f64(read al, {lit}); let v: str = as_str(read s); \
+         let mut i: usize = 0; while i < len(v) {{ trace(conv i64 v[i]); i = i + 1; }} return 0;"
+    ));
+    bytes.iter().map(|&b| b as u8 as char).collect()
+}
+
+#[test]
+fn fmt_f64_known_values() {
+    // Byte-exact strings for the documented format (fixed-point, <=15 sig digits,
+    // trailing zeros stripped; specials NaN/inf/-inf/0).
+    for (lit, expect) in [
+        ("1.5", "1.5"),
+        ("-2.25", "-2.25"),
+        ("0.0", "0"),
+        ("10.0", "10"),
+        ("3.14159", "3.14159"),
+        ("100.5", "100.5"),
+        ("0.1", "0.1"),
+        ("-0.001", "-0.001"),
+        ("-3.5", "-3.5"),
+        ("42.0", "42"),
+        ("1e10", "10000000000"),
+        ("1e-7", "0.0000001"),
+        ("123456.789012345", "123456.789012345"),
+        ("6.022e23", "602200000000000000000000"),
+        ("1.0 / 0.0", "inf"),
+        ("(-1.0) / 0.0", "-inf"),
+        ("0.0 / 0.0", "NaN"),
+        // -0.0 collapses to "0" (the sign of zero is dropped, documented).
+        ("-0.0", "0"),
+    ] {
+        assert_eq!(fmt_f64_eq(lit, expect), 1, "fmt_f64({lit}) should be {expect:?}");
+    }
+}
+
+#[test]
+fn fmt_f64_round_trips_covered_range() {
+    // The correctness anti-cheat: format via the Candor fmt_f64, parse the string
+    // back with Rust `f64::from_str`, and assert identical bits. Covers the
+    // documented guaranteed domain: <=15 significant digits, magnitude in
+    // [1e-15, 1e39) -- small, large, fractional, negative, both exponent ends.
+    let lits = [
+        "1.5", "-2.25", "0.0", "10.0", "3.14159", "100.5", "0.1", "-0.001",
+        "1e10", "1e-7", "123456.789012345", "6.022e23", "0.5", "0.25", "-7.125",
+        "42.0", "1000000.0", "0.000123", "2.5e-14", "9.87e30",
+        "999999999999999.0", "-3.5", "5e38", "5e-15", "-0.0009765625",
+    ];
+    for lit in lits {
+        // Parse the same literal in Rust for the expected bits (both use IEEE
+        // round-to-nearest, so Candor and Rust agree on the literal's f64).
+        let expected: f64 = lit.replace(' ', "").parse().expect("test literal parses");
+        let s = fmt_f64_str(lit);
+        let parsed: f64 = s.parse().unwrap_or_else(|e| panic!("fmt_f64({lit}) = {s:?} did not parse: {e}"));
+        assert_eq!(
+            parsed.to_bits(),
+            expected.to_bits(),
+            "fmt_f64({lit}) = {s:?} parsed to {parsed} (bits differ from {expected})"
+        );
+    }
+}
+
+#[test]
+fn fmt_f64_high_precision_values_are_documented_15_digits() {
+    // The documented LIMIT: values needing 16-17 significant digits (a 17th correct
+    // digit is beyond f64's exact 2^53 integer range with f64-only arithmetic) are
+    // rendered to 15 significant digits and therefore do NOT round-trip. Pinning
+    // the exact output keeps this behaviour honest and observed, not hand-waved.
+    assert_eq!(fmt_f64_str("2.0 / 3.0"), "0.666666666666667");
+    // 0.666666666666667 parses to a DIFFERENT f64 than the true 2.0/3.0.
+    let two_thirds = 2.0f64 / 3.0f64;
+    let parsed: f64 = "0.666666666666667".parse().unwrap();
+    assert_ne!(parsed.to_bits(), two_thirds.to_bits());
+}
+
+#[test]
+fn show_float_renders_via_fmt_f64() {
+    // `ShowFloat` witness delegates to `fmt_f64` (parallels `ShowInt`).
+    assert_eq!(
+        run_ret("let x: ShowFloat = ShowFloat { val: 1.5 }; let s: String = x.to_string(al); if as_str(read s) == \"1.5\" { return 1; } return 0;"),
+        1
+    );
+}
+
+#[test]
+fn show_float_composes_through_bound() {
+    // `impl[T: Show] Show for Opt[T]` renders "Some(<f64>)" through the T: Show bound.
+    assert_eq!(
+        run_ret("let x: Opt[ShowFloat] = Opt::Some(ShowFloat { val: -2.25 }); let s: String = x.to_string(al); if as_str(read s) == \"Some(-2.25)\" { return 1; } return 0;"),
+        1
+    );
+}

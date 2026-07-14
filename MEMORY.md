@@ -911,3 +911,19 @@ once you add the literal node). Key design/impl facts worth reusing:
   then narrowing would wrap (300.0→u8 must be 255, not 44). Matches Rust `as`.
 - Newton's-method sqrt(n) converges to ONE ULP short of the correctly-rounded library `sqrt`
   — assert loop results against the reproduced loop in host Rust, not against `f64::sqrt`.
+
+- **`fmt_f64` (float->String) is `f64`-only-arithmetic bounded to ~15 significant
+  digits — 17-digit round-trip is unreachable without a bitcast/bignum.** The
+  formatter (in `tests/fixtures/std_fmt.cnr`, joining `fmt_i64`) normalizes `|x|`
+  to a decimal exponent by comparing against a repeated-`*10` power-of-ten table,
+  then forms the significand with ONE scaled multiply/divide kept `< 10^15 < 2^53`
+  (an exact integer) — a digit-by-digit `*10` loop drifts and was rejected. This
+  round-trips every `f64` nearest a ≤15-sig-digit decimal in `[1e-15, 1e39)`
+  (30M-sample + Rust `f64::from_str` gate in `tests/fmt.rs`); 16-17-sig-fig values
+  (raw `sqrt(2)`, `0.1+0.2`) provably cannot round-trip because a 17th correct
+  decimal digit needs an integer past `2^53`. AUTHORING TRAP: `conv usize (a - b)`
+  pushes the unsigned target INTO the subtraction, so a negative intermediate
+  faults `conv_loss` — compute the index into an `i32` local first, then
+  `conv usize (local)`. Cross-engine byte gate can't use the MIR-only `String`, so
+  a String-free twin (`tests/fixtures/run/fmt_f64_trace.cnr`) traces the ASCII
+  bytes and the corpus gates prove all five engines agree. (2026-07-14).

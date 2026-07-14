@@ -1,0 +1,114 @@
+// Cross-engine BYTE gate for `fmt_f64` (design 0016 float formatting; see the
+// `String` formatter in tests/fixtures/std_fmt.cnr). That formatter builds a
+// native `String` (a MIR-interp-only CollectionOp), which the AOT/native/LLVM
+// gates exclude, so it cannot itself run on those engines. This fixture instead
+// reproduces the formatter's algorithm using only f64 arithmetic + `conv` + a
+// fixed digit buffer, and TRACES the produced ASCII bytes. Because IEEE-754 f64
+// is deterministic on the shared target, every engine (tree-walker, MIR, Cranelift
+// no-opt/opt, LLVM -O2) must emit byte-identical trace output. Newline (10)
+// separates the values; the decoded lines are, in order:
+//   1.5  -2.25  0  10  3.14159  100.5  0.1  -0.001  10000000000  0.0000001
+//   123456.789012345  602200000000000000000000  inf  -inf  NaN
+// (No f64 NaN/inf bit pattern is ever traced — only integer ASCII codes — so the
+// engines agree despite an IEEE-unspecified NaN sign; see tests/floats.rs.)
+
+fn pow10_table() -> [41]f64 {
+    let mut t: [41]f64 = [1.0; 41];
+    let mut i: usize = 1;
+    while i < 41 { t[i] = t[i - 1] * 10.0; i = i + 1; }
+    return t;
+}
+
+// Trace the exact ASCII bytes `fmt_f64` would push for `x` (same algorithm).
+fn trace_fmt(x: f64) -> unit {
+    if x != x { trace(78); trace(97); trace(78); return; }
+    let neg: bool = x < 0.0;
+    let mut av: f64 = x;
+    if neg { av = -x; }
+    if av == 0.0 { trace(48); return; }
+    let inf: f64 = 1.0 / 0.0;
+    if av == inf {
+        if neg { trace(45); }
+        trace(105); trace(110); trace(102);
+        return;
+    }
+    let p: [41]f64 = pow10_table();
+    let mut e: i32 = 0;
+    if av >= 1.0 {
+        let mut hi: i32 = e + 1;
+        while e < 38 && p[conv usize (hi)] <= av { e = e + 1; hi = e + 1; }
+    } else {
+        let mut j: i32 = 0;
+        while j < 15 && av * p[conv usize (j)] < 1.0 { j = j + 1; }
+        e = 0 - j;
+    }
+    let mut m0: f64 = 0.0;
+    if e >= 14 {
+        let lo: i32 = e - 14;
+        m0 = av / p[conv usize (lo)];
+    } else {
+        let hi: i32 = 14 - e;
+        m0 = av * p[conv usize (hi)];
+    }
+    let mut m: i64 = conv i64 (m0 + 0.5);
+    if m >= 1000000000000000 { m = m / 10; e = e + 1; }
+    while m % 10 == 0 && m != 0 { m = m / 10; }
+    let mut digits: [20]i64 = [0i64; 20];
+    let mut count: i32 = 0;
+    let mut mm: i64 = m;
+    let mut more: bool = true;
+    while more {
+        digits[conv usize (count)] = 48 + mm % 10;
+        count = count + 1;
+        mm = mm / 10;
+        more = mm != 0;
+    }
+    if neg { trace(45); }
+    let k: i32 = count;
+    if e >= k - 1 {
+        let mut idx: i32 = k;
+        while idx > 0 { idx = idx - 1; trace(digits[conv usize (idx)]); }
+        let mut z: i32 = e - (k - 1);
+        while z > 0 { trace(48); z = z - 1; }
+    } else {
+        if e >= 0 {
+            let mut ll: i32 = 0;
+            while ll < k {
+                if ll == e + 1 { trace(46); }
+                let di: i32 = k - 1 - ll;
+                trace(digits[conv usize (di)]);
+                ll = ll + 1;
+            }
+        } else {
+            trace(48); trace(46);
+            let mut z: i32 = 0 - e - 1;
+            while z > 0 { trace(48); z = z - 1; }
+            let mut ll: i32 = 0;
+            while ll < k {
+                let di: i32 = k - 1 - ll;
+                trace(digits[conv usize (di)]);
+                ll = ll + 1;
+            }
+        }
+    }
+    return;
+}
+
+fn main() -> i64 {
+    trace_fmt(1.5);              trace(10);
+    trace_fmt(-2.25);            trace(10);
+    trace_fmt(0.0);             trace(10);
+    trace_fmt(10.0);            trace(10);
+    trace_fmt(3.14159);         trace(10);
+    trace_fmt(100.5);           trace(10);
+    trace_fmt(0.1);             trace(10);
+    trace_fmt(-0.001);          trace(10);
+    trace_fmt(1e10);            trace(10);
+    trace_fmt(1e-7);            trace(10);
+    trace_fmt(123456.789012345); trace(10);
+    trace_fmt(6.022e23);        trace(10);
+    trace_fmt(1.0 / 0.0);       trace(10);
+    trace_fmt(-1.0 / 0.0);      trace(10);
+    trace_fmt(0.0 / 0.0);       trace(10);
+    return 0;
+}

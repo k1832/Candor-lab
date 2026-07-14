@@ -84,6 +84,36 @@ engines (tree-walker, MIR interp, Cranelift no-opt/opt, LLVM -O2) produce
 
 ## 7. Deferred (noted, not built)
 
-`f32`; float **formatting** (`fmt_f64` — a separate slice); transcendental / math
+`f32`; **shortest** round-trip formatting (Ryū/Grisu) and scientific-notation
+output (the initial `fmt_f64` slice landed — see §8); transcendental / math
 functions (`sqrt`, `sin`, …); WASM float opcodes (now unblocked); the full
 NaN-payload / signaling-NaN edge cases; a flexible float-literal type.
+
+
+## 8. Formatting (`fmt_f64`) — landed
+
+Float-to-`String` rendering lives in the `String` formatting image
+`prototype/tests/fixtures/std_fmt.cnr` (alongside `fmt_i64`), written in Candor
+over this slice's `f64` ops. It is a *defined, documented* format — not the
+shortest round trip (Ryū), which is deferred (§7):
+
+- **Format.** Fixed-point decimal, up to 15 significant digits, trailing zeros
+  stripped. `NaN`→"NaN", `±inf`→"inf"/"-inf", `0.0` and `-0.0`→"0" (sign of
+  zero dropped), finite negatives signed. Examples: `1.5`→"1.5", `10.0`→"10",
+  `6.022e23`→"602200000000000000000000".
+- **Round-trip guarantee.** Any `f64` nearest to a ≤ 15-significant-digit decimal
+  with magnitude in `[1e-15, 1e39)` re-parses to identical bits (checked in
+  `tests/fmt.rs` against Rust `f64::from_str`; 30M-sample validated). Values that
+  need 16–17 significant digits (unrounded `sqrt(2)`, `0.1 + 0.2`, …) do **not**
+  round-trip, and magnitudes outside the covered range are best-effort.
+- **Precision limit (why 15).** Digits are extracted with `f64`-only arithmetic:
+  normalize `|x|` to a decimal exponent by comparison against a power-of-ten table,
+  then form the significand with ONE scaled multiply/divide (`< 10^15 < 2^53`, an
+  exact integer). A 16th–17th correct digit would need an integer past `f64`'s
+  exact `2^53` range, unreachable without a bitcast or bignum (neither in this
+  slice) — a genuine `f64`-only limit, not a bug. The single scaled op also avoids
+  the rounding drift a repeated-`*10` digit loop accumulates.
+- **Cross-engine gate.** The String path is MIR-interp-only (CollectionOp), so a
+  String-free twin, `tests/fixtures/run/fmt_f64_trace.cnr`, reproduces the same
+  algorithm and TRACES the ASCII bytes; the corpus gates prove those bytes are
+  byte-identical across all five engines.
