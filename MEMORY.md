@@ -1007,3 +1007,28 @@ once you add the literal node). Key design/impl facts worth reusing:
   genuinely needs a `sqrt` intrinsic and is deferred. A bare int literal on the
   bitcast side takes the float's same-width UNSIGNED int, and high-bit patterns
   (e.g. `0x8000000000000000`) need an explicit `u64` suffix. (2026-07-14)
+
+- **A `sqrt` intrinsic is a builtin CALL (not an ExprKind) + a dedicated
+  `Rvalue::Sqrt`, and both backends have a NATIVE sqrt — so the AST-level files
+  `bitcast` needed are untouched.** Adding correctly-rounded `sqrt(x)` (overloaded
+  by arg type: `f32->f32`, `f64->f64`; total/non-faulting — negative -> NaN, not a
+  fault; `sqrt(-0.0) == -0.0`) touched exactly the MIR-level layers a unary float op
+  flows through: `check/expr.rs` (`check_builtin` arm, returns the arg's float type),
+  both interps (tree-walker `eval_builtin` + `mir/interp.rs`, via a `float_sqrt`
+  helper over Rust's correctly-rounded `f{32,64}::sqrt`), `mir/build.rs` (`is_builtin`
+  + `lower_builtin_value` + `builtin_static_ret`), `mir/{mod,serial,opt}.rs`
+  (variant + wire + pure/non-faulting DCE), and both backends (Cranelift `sqrt`
+  instruction / LLVM `@llvm.sqrt.f64`/`.f32` intrinsic — declare the two intrinsics,
+  confirm in the emitted `.ll`). Because `sqrt(x)` is a `Call`, the AST/front-end
+  files (lexer/parser/ast/count/canon/real/modules/generics) that `bitcast`'s ExprKind
+  forced are NOT involved — a builtin CALL is strictly cheaper to add than a keyword.
+  IEEE sqrt is correctly-rounded + deterministic, so finite results are bit-exact
+  across all five engines AND vs wasmi (unlike arithmetic NaN sign) — a Newton
+  approximation would be 1 ULP off (the reason WASM `f*.sqrt` was deferred; now
+  closed: 0x91/0x9f bitcast the slot, call `sqrt`, bitcast back). THE TRAP that cost a
+  corpus-gate round: a `tests/fixtures/run/*.cnr` fixture must NOT RETURN 2 — the
+  real-ELF aot/llvm gates signal a FAULT with process exit code 2, so a normal
+  `return 2` is misread as "no kind in fault JSON"; return a non-2 sentinel
+  (`21 * sqrt(4.0) == 42`). In-process engine tests don't hit this (they carry the
+  fault in a Result), so a passing `tests/sqrt.rs` can still fail the ELF corpus gate.
+  834 nextest green, clippy clean. (sqrt intrinsic + WASM f*.sqrt, 2026-07-14).

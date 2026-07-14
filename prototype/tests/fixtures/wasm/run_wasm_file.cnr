@@ -1024,9 +1024,9 @@ fn fmax32(a: f32, b: f32) -> f32 {
 // float->int truncations (WASM MVP: trap on NaN / out of range — checked in the
 // float domain against the exact representable bounds, since Candor's `conv`
 // SATURATES rather than trapping), int->float conversions, promote/demote, and
-// reinterpret (a same-slot width re-canonicalization). `sqrt` is DEFERRED: it
-// needs a correctly-rounded Candor `sqrt` intrinsic (a Newton iteration is not
-// bit-identical to hardware), so it traps here rather than shipping a wrong answer.
+// reinterpret (a same-slot width re-canonicalization). `sqrt` uses the Candor
+// `sqrt` intrinsic (correctly-rounded IEEE, bit-exact vs hardware/wasmi): a
+// negative operand yields NaN and sqrt(-0.0) = -0.0 — a total, non-faulting op.
 fn eval_funop(op: u8, a: i64) -> i64 {
     let mut res: i64 = 0i64;
     if op == 0x8bu8 { res = a & 0x7fffffffi64; }
@@ -1035,14 +1035,14 @@ fn eval_funop(op: u8, a: i64) -> i64 {
     else if op == 0x8eu8 { res = conv i64 (bitcast u32 (ffloor32(bitcast f32 (conv u32 (a & 0xffffffffi64))))); }
     else if op == 0x8fu8 { res = conv i64 (bitcast u32 (ftrunc32(bitcast f32 (conv u32 (a & 0xffffffffi64))))); }
     else if op == 0x90u8 { res = conv i64 (bitcast u32 (fnearest32(bitcast f32 (conv u32 (a & 0xffffffffi64))))); }
-    else if op == 0x91u8 { panic("unimplemented: f32.sqrt needs a Candor sqrt intrinsic"); }
+    else if op == 0x91u8 { res = conv i64 (bitcast u32 (sqrt(bitcast f32 (conv u32 (a & 0xffffffffi64))))); }
     else if op == 0x99u8 { res = a & 0x7fffffffffffffffi64; }
     else if op == 0x9au8 { let mut m: i64 = 0i64; wrapping { m = 1i64 << 63i64; } res = a ^ m; }
     else if op == 0x9bu8 { res = bitcast i64 (fceil64(bitcast f64 (a))); }
     else if op == 0x9cu8 { res = bitcast i64 (ffloor64(bitcast f64 (a))); }
     else if op == 0x9du8 { res = bitcast i64 (ftrunc64(bitcast f64 (a))); }
     else if op == 0x9eu8 { res = bitcast i64 (fnearest64(bitcast f64 (a))); }
-    else if op == 0x9fu8 { panic("unimplemented: f64.sqrt needs a Candor sqrt intrinsic"); }
+    else if op == 0x9fu8 { res = bitcast i64 (sqrt(bitcast f64 (a))); }
     else if op == 0xa8u8 {
         let x: f32 = bitcast f32 (conv u32 (a & 0xffffffffi64));
         if x != x { panic("invalid conversion to integer"); }

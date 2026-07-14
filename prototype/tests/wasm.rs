@@ -1956,6 +1956,57 @@ fn diff_float_rounding() {
 }
 
 #[test]
+fn diff_float_sqrt() {
+    // f64.sqrt (0x9f) / f32.sqrt (0x91) — correctly-rounded IEEE sqrt, now backed
+    // by the Candor `sqrt` intrinsic (M4 deferral closed). Every result must match
+    // wasmi BIT-EXACT for non-NaN (sqrt is correctly-rounded), and NaN by is-nan
+    // (sqrt of a negative -> NaN). Covers perfect squares, non-squares (irrational
+    // roots — the case a Newton approximation gets 1 ULP wrong), zeros, inf, and
+    // the NaN-producing negatives.
+    let sq64: &[f64] = &[
+        4.0, 2.0, 16.0, 1e100, 0.25, 1.234567, 0.0, -0.0, -2.5, -7.25,
+        f64::INFINITY, f64::NEG_INFINITY, f64::NAN,
+    ];
+    for &a in sq64 {
+        diff_f64(&funary64(a, 0x9f, F64), &format!("f64.sqrt({a})"));
+    }
+    let sq32: &[f32] = &[
+        4.0, 2.0, 16.0, 1e30, 0.25, 1.234567, 0.0, -0.0, -2.5, -7.25,
+        f32::INFINITY, f32::NEG_INFINITY, f32::NAN,
+    ];
+    for &a in sq32 {
+        diff_f32(&funary32(a, 0x91, F32), &format!("f32.sqrt({a})"));
+    }
+}
+
+/// A vector-length module `sqrt(x*x + y*y)` (f64): the canonical sqrt use — mul,
+/// add, then f64.sqrt (0x9f).
+fn vlen64(x: f64, y: f64) -> Vec<u8> {
+    let mut body = cf64(x);
+    body.extend(cf64(x));
+    body.push(0xa2); // f64.mul
+    body.extend(cf64(y));
+    body.extend(cf64(y));
+    body.push(0xa2); // f64.mul
+    body.push(0xa0); // f64.add
+    body.push(0x9f); // f64.sqrt
+    body.push(0x0b);
+    one_func(F64, body, vec![])
+}
+
+#[test]
+fn diff_vector_length() {
+    // hypot: sqrt(3^2 + 4^2) = 5, sqrt(5^2 + 12^2) = 13 (exact), plus a
+    // non-integral length — all bit-exact vs wasmi, and cross-engine.
+    for &(x, y) in &[(3.0f64, 4.0f64), (5.0, 12.0), (1.5, 2.5), (0.0, 0.0)] {
+        diff_f64(&vlen64(x, y), &format!("vlen({x},{y})"));
+    }
+    // One cross-engine check (all four Candor engines) — the differential matrix
+    // above runs on the oracle+wasmi only, per the established float split.
+    assert_eq!(run_float_all(&program(&vlen64(3.0, 4.0)), false, "xe vlen(3,4)"), 5.0f64.to_bits() as i64);
+}
+
+#[test]
 fn diff_float_comparisons() {
     // f64 compares (0x61..0x66) and f32 compares (0x5b..0x60) -> i32 0/1, incl NaN.
     for (op, name) in [
@@ -2142,6 +2193,12 @@ fn float_cross_engine_agreement() {
     run_float_all(&program(&funary64(2.5, 0x9e, F64)), false, "xe f64.nearest(2.5)");
     run_float_all(&program(&funary64(-0.5, 0x9b, F64)), false, "xe f64.ceil(-0.5)");
     run_float_all(&program(&funary32(-2.5f32, 0x8e, F32)), true, "xe f32.floor");
+    // sqrt (correctly-rounded, native intrinsic) — a non-square (irrational) root,
+    // a negative (-> NaN), and -0 (-> -0).
+    run_float_all(&program(&funary64(2.0, 0x9f, F64)), false, "xe f64.sqrt(2)");
+    run_float_all(&program(&funary64(-1.0, 0x9f, F64)), false, "xe f64.sqrt(-1) -> NaN");
+    run_float_all(&program(&funary64(-0.0, 0x9f, F64)), false, "xe f64.sqrt(-0)");
+    run_float_all(&program(&funary32(2.0f32, 0x91, F32)), true, "xe f32.sqrt(2)");
     // conversions + promote/demote + reinterpret.
     run_float_all(&program(&conv_from_i64(-1, 0xba, F64)), false, "xe f64.convert_i64_u");
     run_float_all(&program(&funary32(1.234567f32, 0xbb, F64)), false, "xe f64.promote_f32");

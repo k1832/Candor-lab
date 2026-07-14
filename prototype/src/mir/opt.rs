@@ -176,8 +176,9 @@ fn is_pure_nonfaulting(rv: &Rvalue) -> bool {
         | Rvalue::PtrArith { .. }
         | Rvalue::StaticAddr(_)
         | Rvalue::StrAddr(_)
-        // bitcast is a pure, total bit reinterpretation -- never faults.
-        | Rvalue::Bitcast { .. } => true,
+        // bitcast and sqrt are pure, total ops -- never fault.
+        | Rvalue::Bitcast { .. }
+        | Rvalue::Sqrt { .. } => true,
         // not/bitnot never fault (fault is always None); neg is fault-capable.
         Rvalue::Un { op: UnOp::Not | UnOp::BitNot, .. } => true,
         // A ref/load is pure and non-faulting only when its place has no
@@ -237,7 +238,7 @@ fn rvalue_uses(rv: &Rvalue, live: &mut HashSet<LocalId>) {
             op_use(l, live);
             op_use(r, live);
         }
-        Rvalue::Un { v, .. } | Rvalue::Conv { v, .. } | Rvalue::Bitcast { v, .. } => op_use(v, live),
+        Rvalue::Un { v, .. } | Rvalue::Conv { v, .. } | Rvalue::Bitcast { v, .. } | Rvalue::Sqrt { v, .. } => op_use(v, live),
         Rvalue::Ref(p) | Rvalue::Load { place: p, .. } => place_use(p, live),
         Rvalue::Call { args, .. } => args.iter().for_each(|a| op_use(a, live)),
         Rvalue::CallIndirect { func, args } => {

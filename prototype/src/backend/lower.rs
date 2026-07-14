@@ -1027,6 +1027,15 @@ impl<M: Module> Cg<'_, '_, M> {
                 let x = self.eval_operand(v, mf);
                 self.canon(x, *to)
             }
+            Rvalue::Sqrt { ty, v } => {
+                // Native IEEE square root via Cranelift's `sqrt` instruction (design
+                // 0016 §11): reinterpret the operand's bit pattern as a float, take
+                // the native sqrt, reinterpret back. Total -- never faults.
+                let x = self.eval_operand(v, mf);
+                let f = self.as_float(*ty, x);
+                let s = self.b.ins().sqrt(f);
+                self.float_bits(*ty, s)
+            }
             Rvalue::Call { func, args } => {
                 // A foreign `extern` call (design 0011 §5) has no MIR FuncId; it is
                 // lowered to a call on the imported C symbol with C-ABI marshalling.

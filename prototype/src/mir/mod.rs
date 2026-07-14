@@ -161,6 +161,12 @@ pub enum Rvalue {
     /// converted). Total -- never faults, so it carries NO fault edge (falls through
     /// INV-CHECK like a float op) and is regime-independent.
     Bitcast { to: ScalarTy, v: Operand },
+    /// `sqrt(x)` — the correctly-rounded IEEE square root of a float (`f32`/`f64`),
+    /// emitted natively by both backends (Cranelift `sqrt` / `llvm.sqrt`). A total,
+    /// non-faulting unary float->float op: `sqrt` of a negative is NaN (not a
+    /// fault) and `sqrt(-0.0) == -0.0`. Carries NO fault edge and is
+    /// regime-independent, like a float arithmetic op. `ty` is the float width.
+    Sqrt { ty: ScalarTy, v: Operand },
     /// A borrow / `addr_of`: the *address* of a place (a `u64` pointer value).
     Ref(Place),
     /// Read a scalar (or pointer-width) value out of a projected place.

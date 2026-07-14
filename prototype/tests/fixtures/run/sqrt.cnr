@@ -1,0 +1,19 @@
+// Correctly-rounded IEEE `sqrt` intrinsic (design 0016 §11) over `f64`. IEEE sqrt
+// is correctly-rounded and deterministic, so every engine (tree-walker, MIR,
+// Cranelift no-opt/opt, LLVM -O2) must agree bit-for-bit. A negative argument
+// yields NaN, whose SIGN is IEEE-unspecified across a constant-folding compiler
+// vs runtime hardware, so the negative case is observed by IS-NAN behaviour, not
+// bits. `sqrt(-0.0) == -0.0` and `sqrt(0.0) == 0.0` are IEEE-exact (traced raw).
+fn main() -> i64 {
+    let a: f64 = 4.0;     let ra: f64 = sqrt(a);     trace(ra);
+    let b: f64 = 2.0;     let rb: f64 = sqrt(b);     trace(rb);
+    let z: f64 = 0.0;     let rz: f64 = sqrt(z);     trace(rz);
+    let nz: f64 = -0.0;   let rnz: f64 = sqrt(nz);   trace(rnz);
+    let big: f64 = 1e100; let rbig: f64 = sqrt(big); trace(rbig);
+    let neg: f64 = -1.0;  let rneg: f64 = sqrt(neg);
+    if rneg != rneg { trace(1); } else { trace(0); }
+    let rt: f64 = sqrt(b) * sqrt(b); trace(rt);
+    // Return a sentinel != 2 (exit code 2 is the fault signal in the real-ELF
+    // corpus gates): sqrt(4.0) == 2.0, so 21 * 2 = 42.
+    return conv i64 (ra) * 21;
+}

@@ -571,6 +571,11 @@ impl<'a> Engine<'a> {
                 let x = self.eval_operand(v, mf, frame)?;
                 Ok(fit_bits(x, *to))
             }
+            Rvalue::Sqrt { ty, v } => {
+                // Correctly-rounded IEEE square root (design 0016 §11); never faults.
+                let x = self.eval_operand(v, mf, frame)?;
+                Ok(float_sqrt(*ty, x as u64) as i128)
+            }
             Rvalue::Call { func, args } => {
                 let mut vals = Vec::with_capacity(args.len());
                 for a in args {
@@ -1396,6 +1401,13 @@ fn float_cmp(op: BinOp, sty: ScalarTy, l: u64, r: u64) -> bool {
 }
 
 /// IEEE negate (sign flip) over a float scalar's raw bits (design 0016).
+fn float_sqrt(sty: ScalarTy, bits: u64) -> u64 {
+    if sty == ScalarTy::F32 {
+        f32::from_bits(bits as u32).sqrt().to_bits() as u64
+    } else {
+        f64::from_bits(bits).sqrt().to_bits()
+    }
+}
 fn float_neg(sty: ScalarTy, bits: u64) -> u64 {
     if sty == ScalarTy::F32 {
         (-f32::from_bits(bits as u32)).to_bits() as u64

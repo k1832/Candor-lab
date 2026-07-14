@@ -643,6 +643,7 @@ fn rvalue_to(rv: &Rvalue) -> Sexp {
             fault_opt_to(fault),
         ]),
         Rvalue::Bitcast { to, v } => l(vec![a("bitcast"), a(scalar_kw(*to)), operand_to(v)]),
+        Rvalue::Sqrt { ty, v } => l(vec![a("sqrt"), a(scalar_kw(*ty)), operand_to(v)]),
         Rvalue::Ref(place) => l(vec![a("ref"), place_to(place)]),
         Rvalue::Load { place, ty } => l(vec![a("load"), place_to(place), ty_to(ty)]),
         Rvalue::Call { func, args } => l(vec![a("call"), s(func), args_to(args)]),
@@ -690,6 +691,10 @@ fn rvalue_from(sx: &Sexp) -> Result<Rvalue, String> {
         },
         "bitcast" => Rvalue::Bitcast {
             to: scalar_from(arg(args, 0)?.as_atom()?)?,
+            v: operand_from(arg(args, 1)?)?,
+        },
+        "sqrt" => Rvalue::Sqrt {
+            ty: scalar_from(arg(args, 0)?.as_atom()?)?,
             v: operand_from(arg(args, 1)?)?,
         },
         "ref" => Rvalue::Ref(place_from(arg(args, 0)?)?),

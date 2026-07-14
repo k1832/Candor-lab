@@ -2288,6 +2288,8 @@ impl<'a> Lowerer<'a> {
             "ptr_offset" => self.static_ty(args.first()?)?,
             "is_null" => Type::bool(),
             "ptr_to_addr" => Type::usize(),
+            // `sqrt(x)` returns the argument's float type (design 0016 §11).
+            "sqrt" => self.static_ty(args.first()?)?,
             "addr_of" | "addr_of_mut" => Type::RawPtr(Box::new(self.static_ty(args.first()?)?)),
             "subslice" => match self.static_ty(args.first()?)? {
                 t @ (Type::Slice(_) | Type::SliceMut(_)) => t,
@@ -2487,6 +2489,18 @@ impl<'a> Lowerer<'a> {
                 );
                 self.mark_moved(&args[0]);
                 Ok((Operand::Local(dst), inner))
+            }
+            "sqrt" => {
+                // Native IEEE square root (design 0016 §11): a total, non-faulting
+                // unary float->float op emitted as `Rvalue::Sqrt`.
+                let (v, vty) = self.lower_value(&args[0], None)?;
+                let sty = match vty {
+                    Type::Scalar(s) if s.is_float() => s,
+                    _ => return unsupported("sqrt of a non-float"),
+                };
+                let rty = Type::Scalar(sty);
+                let id = self.emit_temp(rty.clone(), Rvalue::Sqrt { ty: sty, v }, span);
+                Ok((Operand::Local(id), rty))
             }
             _ => unsupported(format!("builtin `{name}` in value position")),
         }
@@ -2972,7 +2986,7 @@ fn is_builtin(name: &str) -> bool {
         name,
         "box" | "unbox" | "ptr_read" | "ptr_write" | "ptr_offset" | "addr_of" | "addr_of_mut"
             | "is_null" | "ptr_to_addr" | "slice_of" | "slice_of_mut" | "subslice" | "as_bytes"
-            | "str_from_unchecked" | "str_from" | "substr" | "len"
+            | "str_from_unchecked" | "str_from" | "substr" | "len" | "sqrt"
     )
 }
 

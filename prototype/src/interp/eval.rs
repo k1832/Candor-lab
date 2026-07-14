@@ -1049,6 +1049,18 @@ fn float_neg(sty: ScalarTy, bits: u64) -> u64 {
     }
 }
 
+/// The correctly-rounded IEEE square root of a float given by its bit pattern
+/// (design 0016 §11). Total: `sqrt(negative)` is NaN, `sqrt(-0.0) == -0.0`. Rust's
+/// `f32::sqrt`/`f64::sqrt` are correctly rounded, matching the native backends and
+/// WASM's `f*.sqrt`.
+fn float_sqrt(sty: ScalarTy, bits: u64) -> u64 {
+    if sty == ScalarTy::F32 {
+        f32::from_bits(bits as u32).sqrt().to_bits() as u64
+    } else {
+        f64::from_bits(bits).sqrt().to_bits()
+    }
+}
+
 /// A numeric `conv` where the source and/or target is a float (design 0016 §5):
 /// int->float rounds; `f64`->`f32` rounds (narrowing, may -> `±inf`); `f32`->`f64`
 /// is exact (widening); float->int truncates toward zero, saturating (NaN -> 0).
@@ -1737,6 +1749,9 @@ impl<'a> Interp<'a> {
             "ptr_offset" => self.expr_static_ty(args.first()?)?,
             "is_null" => Type::bool(),
             "ptr_to_addr" => Type::usize(),
+            // `sqrt(x)` returns the argument's float type (design 0016 §11), so a
+            // `trace(sqrt(x))` observes it at the right width.
+            "sqrt" => self.expr_static_ty(args.first()?)?,
             "addr_of" | "addr_of_mut" => {
                 Type::RawPtr(Box::new(self.expr_static_ty(args.first()?)?))
             }
@@ -2178,6 +2193,14 @@ impl<'a> Interp<'a> {
                 let a = self.mem.stack_alloc(1, 1);
                 self.write_bytes(a, &[0u8])?;
                 RVal { ty: Type::bool(), addr: a, origin: Origin::None }
+            }
+            "sqrt" => {
+                // Correctly-rounded IEEE square root (design 0016 §11); never faults.
+                let v = self.eval_value(&args[0], None)?;
+                let sty = self.concretize(&v.ty);
+                let bits = self.read_float_bits(v.addr, sty)?;
+                let a = self.alloc_float(sty, float_sqrt(sty, bits))?;
+                RVal { ty: Type::Scalar(sty), addr: a, origin: Origin::None }
             }
             "trace" => {
                 // Observe the arg at its own width: an `f64` traces its bit pattern,

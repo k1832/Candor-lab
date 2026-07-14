@@ -1813,6 +1813,20 @@ impl<'a> Checker<'a> {
                 self.arg0(args, span, "is_null");
                 Type::bool()
             }
+            "sqrt" => {
+                // `sqrt(x)` — correctly-rounded IEEE square root (design 0016 §11),
+                // overloaded by the argument type (`f32 -> f32`, `f64 -> f64`). A
+                // total, non-faulting op: `sqrt` of a negative is NaN, not a fault.
+                let t = self.arg0(args, span, "sqrt");
+                match t {
+                    Type::Scalar(s) if s.is_float() => Type::Scalar(s),
+                    Type::Error => Type::Error,
+                    other => {
+                        self.mismatch(span, "sqrt", "a float (f32 or f64)", &other);
+                        Type::Error
+                    }
+                }
+            }
             "ptr_to_addr" => {
                 self.require_unsafe(span, "ptr_to_addr");
                 self.arg0(args, span, "ptr_to_addr");

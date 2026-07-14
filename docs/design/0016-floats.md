@@ -88,7 +88,7 @@ engines (tree-walker, MIR interp, Cranelift no-opt/opt, LLVM -O2) produce
 
 **shortest** round-trip formatting (Ryū/Grisu) and scientific-notation
 output (the initial `fmt_f64` slice landed — see §8); transcendental / math
-functions (`sqrt`, `sin`, …); WASM float opcodes (now unblocked); the full
+functions beyond `sqrt` (`sin`, `cos`, `exp`, …; `sqrt` landed — see §11); the full
 NaN-payload / signaling-NaN edge cases; a flexible float-literal type.
 
 
@@ -269,3 +269,59 @@ f64 and f32; the exact-NaN-payload round trip; regime-independence (a bitcast in
 `wrapping {}`); and the `E0714` rejections (different-width, both-integer, both-float).
 The 64-bit `trace` channel widens a 32-bit result with `conv i64 (bitcast u32 (..))`
 so the widening zero-extends, matching host `f32::to_bits()` (a `u32`).
+
+
+## 11. `sqrt` — the correctly-rounded square-root intrinsic — landed
+
+Square root is the one float op that CANNOT be expressed bit-exactly in Candor
+source: a Newton/Heron iteration converges to one ULP short of the correctly-rounded
+IEEE result (see the `tests/floats.rs` note and the WASM float slice, where
+`f*.sqrt` was deferred for exactly this reason). It therefore ships as a compiler
+intrinsic that lowers to each backend's NATIVE square root, so every engine is
+bit-identical to hardware and to IEEE.
+
+### 11.1 Spelling — a builtin function `sqrt(x)`, overloaded by argument type
+
+`sqrt` is spelled as an ordinary call `sqrt(x)` (a compiler-known builtin, like
+`len`/`is_null`; no new keyword), OVERLOADED by the argument's float type: `f32 ->
+f32` and `f64 -> f64`. A single name (not `sqrt_f32`/`sqrt_f64`) is possible because
+the checker already resolves builtins by argument type — the `check_builtin` `"sqrt"`
+arm reads the argument's scalar type and returns the same type, rejecting a
+non-float argument. It shadows a same-named user function, exactly as the other
+builtins do.
+
+### 11.2 Semantics — total, non-faulting, correctly-rounded
+
+`sqrt` is a pure, TOTAL unary float->float op. It NEVER faults: `sqrt` of a negative
+is NaN (IEEE, not a fault), `sqrt(-0.0) == -0.0`, `sqrt(0.0) == 0.0`, `sqrt(+inf) ==
++inf`, `sqrt(NaN)` is NaN. Being non-faulting it carries no fault edge and is
+regime-independent (like a float arithmetic op — §2). IEEE square root is
+correctly-rounded and deterministic, so — unlike an arithmetic-generated NaN whose
+sign is unspecified — a FINITE `sqrt` result is bit-identical across a
+constant-folding compiler and runtime hardware.
+
+### 11.3 Implementation — a new MIR op, NATIVE sqrt in both backends
+
+A dedicated `Rvalue::Sqrt { ty, v }` (parallel to `Bitcast`), threaded through the
+same layers a unary float op touches: lexer/parser unchanged (it is a call);
+`check/expr.rs` (`check_builtin`), both interpreters (tree-walker `eval_builtin` +
+`mir/interp.rs`, via a `float_sqrt` helper over `f{32,64}::sqrt` — Rust's are
+correctly-rounded), `mir/build.rs` (`is_builtin` + `lower_builtin_value`),
+`mir/serial.rs` (wire round-trip), `mir/opt.rs` (pure & non-faulting, so DCE-eligible
+when dead). Both native backends emit the NATIVE square root — Cranelift's `sqrt`
+instruction (`sqrtsd`/`sqrtss`) and LLVM's `@llvm.sqrt.f64`/`@llvm.sqrt.f32`
+intrinsic — NOT a software approximation: the register's bit pattern is reinterpreted
+as a float, the native sqrt is taken, and the result is reinterpreted back.
+
+### 11.4 Cross-engine gate
+
+`tests/sqrt.rs` + `tests/fixtures/run/{sqrt,sqrt_f32}.cnr` assert BIT-IDENTICAL
+results across all five engines (tree-walker / MIR / Cranelift no-opt / -O2 / LLVM
+-O2) for f32 and f64: known values (`sqrt(4.0) == 2.0`, `sqrt(2.0)` to its exact
+bits, `sqrt(0.0) == 0.0`, `sqrt(-0.0) == -0.0`, `sqrt(1e100)`), a round-trip
+`sqrt(x) * sqrt(x)`, and a negative argument yielding NaN — gated by IS-NAN
+behaviour (the NaN sign is IEEE-unspecified across a folding compiler vs. runtime),
+proving it is a value, not a fault. The intrinsic also closes the WASM interpreter's
+`f32.sqrt` (0x91) / `f64.sqrt` (0x9f) deferral: those opcodes now bitcast the operand
+slot to the float, call `sqrt`, and bitcast back, gated BIT-EXACT vs `wasmi` in
+`tests/wasm.rs` (`diff_float_sqrt`, `diff_vector_length` — a `sqrt(x*x + y*y)` length).

@@ -1,0 +1,16 @@
+// Correctly-rounded IEEE `sqrt` intrinsic (design 0016 §11) over `f32` — the f32
+// twin of `sqrt.cnr`. Bit-exact across all engines (IEEE sqrt is deterministic);
+// the negative -> NaN case is observed by IS-NAN behaviour (NaN sign unspecified).
+fn main() -> i64 {
+    let a: f32 = 4.0f32;   let ra: f32 = sqrt(a);     trace(ra);
+    let b: f32 = 2.0f32;   let rb: f32 = sqrt(b);     trace(rb);
+    let z: f32 = 0.0f32;   let rz: f32 = sqrt(z);     trace(rz);
+    let nz: f32 = -0.0f32; let rnz: f32 = sqrt(nz);   trace(rnz);
+    let big: f32 = 1e30f32; let rbig: f32 = sqrt(big); trace(rbig);
+    let neg: f32 = -1.0f32; let rneg: f32 = sqrt(neg);
+    if rneg != rneg { trace(1); } else { trace(0); }
+    let rt: f32 = sqrt(b) * sqrt(b); trace(rt);
+    // Return a sentinel != 2 (exit code 2 is the fault signal in the real-ELF
+    // corpus gates): sqrt(4.0) == 2.0, so 21 * 2 = 42.
+    return conv i64 (ra) * 21;
+}

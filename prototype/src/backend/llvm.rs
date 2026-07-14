@@ -208,6 +208,10 @@ pub fn emit_ll(
     out.push_str("declare void @rt_fault(i32, i32, i32) #0\n");
     out.push_str("declare i64 @rt_stack_alloc(i64, i64)\n");
     out.push_str("declare void @rt_copy(i64, i64, i64)\n");
+    // Correctly-rounded IEEE square root (design 0016 §11): the native LLVM
+    // intrinsic, emitted for the Candor `sqrt` builtin / WASM `f*.sqrt`.
+    out.push_str("declare double @llvm.sqrt.f64(double)\n");
+    out.push_str("declare float @llvm.sqrt.f32(float)\n");
     out.push_str("declare i64 @rt_mmio_load(i64, i64)\n");
     out.push_str("declare void @rt_mmio_store(i64, i64, i64)\n");
     // Structured-concurrency Stage 2 (design 0012): the raw-pthread scope/spawn
@@ -949,6 +953,18 @@ impl<'a> FnEmit<'a> {
                 // 64) -- NOT an `fpto*`/`*tofp`. Never faults.
                 let x = self.operand(v);
                 Ok(self.canon(&x, *to))
+            }
+            Rvalue::Sqrt { ty, v } => {
+                // Native IEEE square root via the `llvm.sqrt` intrinsic (design 0016
+                // §11): bitcast the operand's pattern to a float, call the intrinsic,
+                // bitcast back. Total -- never faults.
+                let ll = Self::float_llty(*ty);
+                let suf = if *ty == ScalarTy::F32 { "f32" } else { "f64" };
+                let x = self.operand(v);
+                let f = self.as_float(*ty, &x);
+                let s = self.t();
+                self.line(&format!("{s} = call {ll} @llvm.sqrt.{suf}({ll} {f})"));
+                Ok(self.float_bits(*ty, &s))
             }
             Rvalue::Call { func, args } => {
                 // A boundary `extern` call (design 0011 §5) targets an imported C

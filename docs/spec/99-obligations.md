@@ -4797,3 +4797,59 @@ wasm_interp.cnr` stays byte-identical to the canonical `interp.cnr` (drift guard
 + `--profile fast` green; clippy clean. NEXT: a Candor `sqrt` (and broader math)
 INTRINSIC to unblock `f*.sqrt`; then trunc_sat; the full NaN-payload / signaling-NaN
 edges.
+
+
+## SQRT — a correctly-rounded `sqrt` intrinsic + `f32.sqrt`/`f64.sqrt` wired into the WASM interp (2026-07-14)
+
+CONTEXT. Candor had f32/f64 arithmetic but NO square root; a Newton/Heron iteration
+converges one ULP short of correctly-rounded IEEE sqrt, so the WASM float slice
+DEFERRED `f32.sqrt` (0x91) / `f64.sqrt` (0x9f) — the interp TRAPPED rather than ship a
+non-bit-exact op. This slice adds a `sqrt` intrinsic that lowers to each backend's
+NATIVE square root (bit-identical to hardware/IEEE, deterministic — unlike an
+arithmetic NaN's sign) and closes that deferral.
+
+PART A — the intrinsic. SURFACE: a compiler-known builtin `sqrt(x)` (an ordinary
+call, no new keyword — like `len`/`is_null`), OVERLOADED by the argument's float type
+(`f32 -> f32`, `f64 -> f64`); a single name works because the checker resolves
+builtins by argument type. It is a pure, TOTAL, non-faulting unary float->float op:
+`sqrt` of a negative is NaN (IEEE, NOT a fault), `sqrt(-0.0) == -0.0`, `sqrt(0.0) ==
+0.0`, `sqrt(+inf) == +inf`; being non-faulting it is regime-independent and carries no
+fault edge (design 0016 §11). IMPLEMENTATION: a dedicated `Rvalue::Sqrt { ty, v }`
+(parallel to `Bitcast`), threaded through checker (`check/expr.rs check_builtin`), both
+interpreters (tree-walker `eval_builtin` + `mir/interp.rs`, via a `float_sqrt` helper
+over Rust's correctly-rounded `f{32,64}::sqrt`), `mir/build.rs` (`is_builtin` +
+`lower_builtin_value` + `builtin_static_ret`), `mir/serial.rs` (wire round-trip),
+`mir/opt.rs` (pure & non-faulting -> DCE-eligible when dead). Both native backends emit
+the NATIVE sqrt — Cranelift's `sqrt` instruction (`sqrtsd`/`sqrtss`) and LLVM's
+`@llvm.sqrt.f64`/`@llvm.sqrt.f32` intrinsic (confirmed in the emitted `.ll`), NOT a
+software approximation: reinterpret the register bit pattern as a float, take native
+sqrt, reinterpret back. The front-end (lexer/parser/AST) is UNTOUCHED — `sqrt` is a
+Call, not an ExprKind, so the AST-level files that `bitcast` needed are not involved.
+GATE: `tests/sqrt.rs` + `tests/fixtures/run/{sqrt,sqrt_f32}.cnr` (auto-enlisted in the
+aot/stage_d/llvm corpus gates) assert BIT-IDENTICAL results across all five engines
+(tree-walker / MIR / Cranelift no-opt / -O2 / LLVM -O2) for f32 AND f64: known values
+(`sqrt(4.0) == 2.0`, `sqrt(2.0)` to exact bits, `sqrt(0.0)`, `sqrt(-0.0) == -0.0`,
+`sqrt(1e100)`), a round-trip `sqrt(x)*sqrt(x)`, and a negative -> NaN gated by IS-NAN
+behaviour (NaN sign IEEE-unspecified across a folding compiler vs runtime) proving it
+is a VALUE not a fault. (A corpus fixture must not RETURN 2 — exit code 2 is the
+real-ELF fault signal — so the fixtures return `21 * sqrt(4.0) == 42`.)
+
+PART B — WASM `f32.sqrt`/`f64.sqrt` wired in. In `tests/fixtures/wasm/interp.cnr`
+`eval_funop`, the deferred-trap for 0x91/0x9f is replaced with: bitcast the operand
+slot to the float, call the Candor `sqrt` intrinsic, bitcast back (mirroring the
+existing ceil/floor rounding ops). The drift-guard copies stay in lock-step — the run/
+corpus copy (`tests/fixtures/run/wasm_interp.cnr`) is byte-IDENTICAL, and the file-run
+fixture (`tests/fixtures/wasm/run_wasm_file.cnr`) embeds the same reusable interp
+verbatim. GATE: `tests/wasm.rs` extends the wasmi (1.1.0) differential to sqrt modules
+— `diff_float_sqrt` runs f32.sqrt/f64.sqrt over perfect squares, irrational roots
+(the case Newton gets wrong), zeros, inf, and NaN-producing negatives, asserting
+Candor-interp == wasmi BIT-EXACT for non-NaN and NaN by IS-NAN; `diff_vector_length`
+gates a `sqrt(x*x + y*y)` length (hypot 3,4 -> 5; 5,12 -> 13) vs wasmi; and
+`float_cross_engine_agreement` adds sqrt to the small all-four-engine set.
+
+ALL existing tests green: `cargo nextest run` (full, incl. self-host corpus, the
+aot/llvm/stage_d native gates, freestanding, concurrency, the WASM M0-M4 suite + the
+float differential) + `--profile fast` (704 tests) + clippy clean. The WASM
+interpreter's remaining post-MVP gaps (for the next chain links): globals (import +
+defined `global.get`/`global.set`), tables + `call_indirect`, the `trunc_sat`
+(0xFC-prefixed saturating) conversions, and the full NaN-payload / signaling-NaN edges.
