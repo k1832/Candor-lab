@@ -1407,6 +1407,28 @@ impl RParser {
                 let operand = self.parse_prefix()?;
                 ExprKind::Conv { ty, expr: Box::new(operand) }
             }
+            RTok::Kw(RKw::Bitcast) => {
+                self.bump();
+                // `bitcast ScalarKw Prefix` — same-width float<->int bit reinterpret
+                // (design 0016 §10), mirroring `conv`'s paren-free surface.
+                let tlo = self.cur_start();
+                let sc = match self.peek().clone() {
+                    RTok::Scalar(sc) => {
+                        self.bump();
+                        sc
+                    }
+                    _ => {
+                        return Err(Diag::error(
+                            "P0007",
+                            "`bitcast` target must be a scalar type keyword",
+                            self.cur_span(),
+                        ))
+                    }
+                };
+                let ty = Ty { kind: TyKind::Scalar(sc), span: self.span_from(tlo) };
+                let operand = self.parse_prefix()?;
+                ExprKind::Bitcast { ty, expr: Box::new(operand) }
+            }
             _ => return self.parse_prop(),
         };
         Ok(Expr { kind, span: self.span_from(lo) })

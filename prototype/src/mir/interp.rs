@@ -564,6 +564,13 @@ impl<'a> Engine<'a> {
                 }
                 convert(x, *to, *regime, fault.as_ref())
             }
+            Rvalue::Bitcast { to, v } => {
+                // Pure bit reinterpretation (design 0016 section 10): re-fit the
+                // operand's identical bits into the target width/signedness. Same
+                // width (checker), so no value changes; never faults.
+                let x = self.eval_operand(v, mf, frame)?;
+                Ok(fit_bits(x, *to))
+            }
             Rvalue::Call { func, args } => {
                 let mut vals = Vec::with_capacity(args.len());
                 for a in args {

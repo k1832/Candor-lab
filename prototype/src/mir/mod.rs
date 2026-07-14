@@ -156,6 +156,11 @@ pub enum Rvalue {
         v: Operand,
         fault: Option<FaultEdge>,
     },
+    /// `bitcast T (e)` same-width bit reinterpretation (design 0016 section 10). `to`
+    /// is the target scalar; the operand's IDENTICAL bits are reinterpreted (never
+    /// converted). Total -- never faults, so it carries NO fault edge (falls through
+    /// INV-CHECK like a float op) and is regime-independent.
+    Bitcast { to: ScalarTy, v: Operand },
     /// A borrow / `addr_of`: the *address* of a place (a `u64` pointer value).
     Ref(Place),
     /// Read a scalar (or pointer-width) value out of a projected place.

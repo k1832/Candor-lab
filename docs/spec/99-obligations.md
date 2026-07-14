@@ -4668,3 +4668,69 @@ MIR / Cranelift no-opt / Cranelift -O2 / LLVM -O2 via `f32::to_bits`. New
 `tests/fixtures/run/floats_f32.cnr` auto-joins the aot/stage native corpus. NEXT: **WASM float
 opcodes** (`f32` + `f64` loads/stores/arith — now that both float types exist); math functions
 (`sqrt`/…); the full NaN-payload / signaling-NaN edge cases; a flexible float-literal type.
+
+## FLOATS-S3 — `bitcast` (same-width float<->int BIT reinterpretation) landed end-to-end, bit-identical across ALL FIVE engines (2026-07-14)
+
+CONTEXT. `conv` (FLOATS-S1/S2) converts the numeric VALUE (`conv i64 (1.0)` == `1`).
+This slice adds `bitcast`, which reinterprets the identical BITS as a same-width type
+(`bitcast i64 (1.0)` == `0x3FF0000000000000`). It unblocks the WASM float opcodes
+(their interp holds floats as `i64` stack bits and must reinterpret them to do
+arithmetic) and is generally useful (float hashing/serialization, WASM `reinterpret`).
+Design pinned in `docs/design/0016-floats.md` §10.
+
+DECISIONS. (1) **Spelling — a `bitcast <ty>` keyword**, uniform with `conv`: prototype
+grammar `bitcast T ( e )`, real/surface grammar the paren-free `bitcast ScalarKw
+<operand>` (exactly as `conv`). Chosen over intrinsic fns — one parse slot / precedence
+/ emit path, no per-type builtin family. (2) **Semantics — same-BYTE-WIDTH float<->int
+only.** Exactly one side a float, the other an integer of the same byte width: f64<->
+{i64,u64,isize,usize}, f32<->{i32,u32}. REJECTED at check time (`E0714`): different
+width (f64<->i32), both-integer (i64<->u64 — that is `wrapping{conv}`), both-float
+(f64<->f32), non-scalar/bool/unit. (3) **Total + regime-independent.** Bitcast NEVER
+faults (no fault edge) and a bitcast inside `wrapping{}`/`saturating{}` is unchanged —
+a pure reinterpret has no overflow notion. (4) A bare `{integer}` on the int side takes
+the float's same-width UNSIGNED int so its full pattern survives (a high-bit pattern
+like `0xFFF8…` needs an explicit `u64` suffix; a suffix-less literal is `i64`-range-
+checked).
+
+IMPLEMENTATION. Every layer as a sibling of `conv` but a distinct, simpler op:
+`ast::ExprKind::Bitcast{ty,expr}`, real+prototype lexer keyword (`bitcast`), both
+parsers, checker `check_bitcast` (§10.2 pair rule, new code E0714), both interpreters
+(`eval_bitcast` / MIR arm), and a **NEW MIR rvalue `Bitcast{to,v}`** (build/interp/
+serial/opt) — NOT a `conv` "reinterpret" mode: `conv` carries `regime`+a `fault` edge
+(INV-CHECK) a total bitcast would only null out, whereas `Bitcast` carries neither and
+falls through INV-CHECK like a float op. Wire form `(bitcast <to> <operand>)` is
+ADDITIVE — existing `conv` MIR + self-host lowering parity untouched. Both backends:
+Cranelift `canon`, LLVM `canon` (a NO-OP at 64 bits, `ireduce`/`trunc`+`sext`/`zext`
+at 32) — the raw register-level reinterpret, pointedly NOT `fcvt`/`fpto*i`/`*tofp`.
+
+VALUE REPR. Floats are already carried as their `to_bits()` pattern in the shared
+i128/i64 register and byte-identically in flat memory (S1/S2 §6/§9.3), so a bitcast
+changes NO bits — it only re-canonicalizes the operand's held pattern to the target
+width/signedness (`fit_bits(x,to)` in the interps; `canon` in both backends). Nothing
+in load/store/call-ABI changes.
+
+NaN. Bitcast is the case a SPECIFIC NaN payload survives exactly: no arithmetic
+canonicalizes it, so `bitcast i64 (bitcast f64 (0x7FF8000000000001))` reproduces
+`0x7FF8000000000001` bit-for-bit on all five engines — asserted by EXACT bits (vs.
+computed NaN, gated by behaviour in tests/floats.rs).
+
+TWO TRAPS. (1) The tree-walker `trace(x)` reads a NON-float arg at I64 (8-byte) width,
+so tracing a bare `i32` result faults `bad_pointer` (reads past its 4-byte slot) — a
+PRE-EXISTING trace behaviour (plain/`conv`/`bitcast` i32 all fault identically). The
+gate widens 32-bit results with `conv i64 (bitcast u32 (..))`; bitcasting to the
+UNSIGNED u32 makes the widening zero-extend, matching host `f32::to_bits()` (a u32) —
+`bitcast i32` would sign-extend and diverge. (2) The real array-type syntax is `[N]T`
+(not `[T; N]`) and `wrapping{}` is a STATEMENT block (the reinterpret goes inside as
+`bits = bitcast i64 (x);`, not `let b = wrapping { bitcast .. }`).
+
+GATES. `cargo nextest` full green (incl. all f64/f32, integer arithmetic/regime, self-
+host lexer/parser/lower/interp, native aot/stage/llvm, and wasm gates); `--profile
+fast` green; clippy clean. New `tests/bitcast.rs` (9 tests): f64<->i64 + f32<->i32
+round trips over a spread; known encodings (0x3FF0.../0x4000... for f64, 0x3F800000 for
+f32); the EXACT-NaN-payload round trip; regime-independence (bitcast in `wrapping{}`);
+and E0714 rejections (different-width, both-integer, both-float) — BIT-IDENTICAL across
+tree-walker / MIR / Cranelift no-opt / Cranelift -O2 / LLVM -O2. New
+`tests/fixtures/run/bitcast.cnr` auto-joins the aot/stage native corpus. Existing conv
+value-conversion semantics UNCHANGED. NEXT: **WASM float opcodes** (now unblocked — the
+interp can reinterpret its i64-held stack bits as f32/f64); math functions
+(`sqrt`/…); the full NaN-payload / signaling-NaN edge cases; a flexible float-lit type.

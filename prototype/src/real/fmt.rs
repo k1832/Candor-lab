@@ -878,7 +878,7 @@ impl Fmt<'_> {
     fn expr_bp(&self, e: &Expr) -> u32 {
         match &e.kind {
             ExprKind::Binary { op, .. } => bin_bp(*op),
-            ExprKind::Unary { .. } | ExprKind::Conv { .. } => BP_PREFIX,
+            ExprKind::Unary { .. } | ExprKind::Conv { .. } | ExprKind::Bitcast { .. } => BP_PREFIX,
             ExprKind::Prefix { op, expr } => match op {
                 PrefixOp::Deref => BP_POSTFIX,
                 PrefixOp::Clone => BP_PREFIX,
@@ -964,6 +964,12 @@ impl Fmt<'_> {
             }
             ExprKind::Conv { ty, expr } => {
                 self.push("conv ");
+                self.emit_type(ty);
+                self.push(" ");
+                self.emit_expr(expr, BP_PREFIX, false);
+            }
+            ExprKind::Bitcast { ty, expr } => {
+                self.push("bitcast ");
                 self.emit_type(ty);
                 self.push(" ");
                 self.emit_expr(expr, BP_PREFIX, false);

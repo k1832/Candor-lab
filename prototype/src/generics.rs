@@ -1348,6 +1348,10 @@ impl<'a> Monomorphizer<'a> {
                 *ty = self.rewrite_ty(ty, map);
                 self.rewrite_expr(expr, map);
             }
+            ExprKind::Bitcast { ty, expr } => {
+                *ty = self.rewrite_ty(ty, map);
+                self.rewrite_expr(expr, map);
+            }
             ExprKind::CastPtr { ty, arg } | ExprKind::AddrToPtr { ty, arg } => {
                 *ty = self.rewrite_ty(ty, map);
                 self.rewrite_expr(arg, map);

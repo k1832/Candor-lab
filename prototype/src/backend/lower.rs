@@ -1019,6 +1019,14 @@ impl<M: Module> Cg<'_, '_, M> {
                 let x128 = self.ext128(x, sty);
                 self.range_or_fit(x128, *to, *regime, fault.as_ref())
             }
+            Rvalue::Bitcast { to, v } => {
+                // Pure bit reinterpretation in the i64-register model (design 0016
+                // section 10): the register already holds the operand's bit pattern,
+                // so we only re-canonicalize to the target width/signedness (a no-op
+                // at 64 bits, ireduce+extend at 32) -- NOT an `fcvt`. Never faults.
+                let x = self.eval_operand(v, mf);
+                self.canon(x, *to)
+            }
             Rvalue::Call { func, args } => {
                 // A foreign `extern` call (design 0011 §5) has no MIR FuncId; it is
                 // lowered to a call on the imported C symbol with C-ABI marshalling.

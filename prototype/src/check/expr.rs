@@ -102,6 +102,7 @@ impl<'a> Checker<'a> {
             ExprKind::Unary { op, expr } => self.check_unary(*op, expr),
             ExprKind::Binary { op, lhs, rhs } => self.check_binary(*op, lhs, rhs, e.span),
             ExprKind::Conv { ty, expr } => self.check_conv(ty, expr, e.span),
+            ExprKind::Bitcast { ty, expr } => self.check_bitcast(ty, expr, e.span),
             ExprKind::Call { callee, args } => self.check_call(callee, args, e.span),
             ExprKind::StructLit { name, fields } => self.check_struct_lit(name, fields, e.span),
             ExprKind::EnumCtor {
@@ -687,6 +688,79 @@ impl<'a> Checker<'a> {
             }
         }
         target
+    }
+
+    /// Type a `bitcast T (e)` -- same-width bit reinterpretation (design 0016 section
+    /// 10). LEGAL: exactly one side a float, the other an integer of the SAME byte
+    /// width (f64<->{i64,u64,isize,usize}, f32<->{i32,u32}). A bare `{integer}` on the
+    /// int side is width-flexible (concretized to the float's same-width unsigned int
+    /// at lowering). Bitcast is total -- it reinterprets bits, never faulting, and is
+    /// regime-independent. The result type is `T`.
+    fn check_bitcast(&mut self, ty: &Ty, expr: &Expr, span: Span) -> Type {
+        use crate::interp::layout::Layout;
+        let src = self.check_expr(expr, Use::Value);
+        let target = self.resolve_ty(ty);
+        if matches!(src, Type::Error) || matches!(target, Type::Error) {
+            return target;
+        }
+        let legal = match &target {
+            Type::Scalar(ts) if ts.is_float() => match &src {
+                Type::IntLit => {
+                    self.check_bitcast_lit_fits(expr, *ts, span);
+                    true
+                }
+                Type::Scalar(s) if s.is_integer() => {
+                    Layout::scalar_size(*s) == Layout::scalar_size(*ts)
+                }
+                _ => false,
+            },
+            Type::Scalar(ts) if ts.is_integer() => {
+                matches!(&src, Type::Scalar(s)
+                    if s.is_float() && Layout::scalar_size(*s) == Layout::scalar_size(*ts))
+            }
+            _ => false,
+        };
+        if !legal {
+            self.diags.push(
+                Diag::error(
+                    "E0714",
+                    format!(
+                        "illegal `bitcast`: `{}` and `{}` are not a same-width float<->integer pair",
+                        src.display(),
+                        target.display()
+                    ),
+                    span,
+                )
+                .with_note(
+                    "`bitcast` reinterprets the identical bits, so the two types must be the same byte width and exactly one a float — legal: f64<->{i64,u64,isize,usize}, f32<->{i32,u32} (design 0016 §10)",
+                    None,
+                ),
+            );
+        }
+        target
+    }
+
+    /// A bare `{integer}` literal on the int side of a `bitcast` to `float_ty` must
+    /// fit that float's same-width UNSIGNED integer, so its full bit pattern is
+    /// representable (a high-bit pattern needs an explicit `u64`/`u32` suffix).
+    fn check_bitcast_lit_fits(&mut self, expr: &Expr, float_ty: ScalarTy, span: Span) {
+        use crate::interp::layout::Layout;
+        let uint = if float_ty == ScalarTy::F64 { ScalarTy::U64 } else { ScalarTy::U32 };
+        if let Some(v) = const_int(expr) {
+            if !scalar_fits(v, uint) {
+                self.diags.push(Diag::error(
+                    "E0714",
+                    format!(
+                        "integer literal `{}` does not fit the {}-byte bit pattern of `{}` (add a `{}` suffix for a high-bit pattern)",
+                        v,
+                        Layout::scalar_size(float_ty),
+                        scalar_name(float_ty),
+                        scalar_name(uint),
+                    ),
+                    span,
+                ));
+            }
+        }
     }
 
     // ----- struct / enum construction -------------------------------------

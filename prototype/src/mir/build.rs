@@ -759,6 +759,7 @@ impl<'a> Lowerer<'a> {
             ExprKind::Unary { op, expr } => self.lower_unary(*op, expr, expected, e.span),
             ExprKind::Binary { op, lhs, rhs } => self.lower_binary(*op, lhs, rhs, expected, e.span),
             ExprKind::Conv { ty, expr } => self.lower_conv(ty, expr),
+            ExprKind::Bitcast { ty, expr } => self.lower_bitcast(ty, expr),
             ExprKind::Call { callee, args } => self.lower_call(callee, args, e.span),
             ExprKind::Block(b) => {
                 self.lower_block(b)?;
@@ -1143,6 +1144,7 @@ impl<'a> Lowerer<'a> {
                 Some(Type::Array(Box::new(elem), ArrayLen::Lit(els.len() as u64)))
             }
             ExprKind::Conv { ty, .. } => self.resolve_ty(ty).ok(),
+            ExprKind::Bitcast { ty, .. } => self.resolve_ty(ty).ok(),
             ExprKind::Call { callee, args } => match &callee.kind {
                 ExprKind::Ident(n) if self.items.fns.contains_key(n.as_str()) => {
                     Some(self.items.fns[n.as_str()].ret.clone())
@@ -1824,6 +1826,25 @@ impl<'a> Lowerer<'a> {
             None
         };
         let id = self.emit_temp(Type::Scalar(to), Rvalue::Conv { to, regime: self.regime, v, fault }, self.cur_span);
+        Ok((Operand::Local(id), Type::Scalar(to)))
+    }
+
+    /// Lower `bitcast T (e)` -- same-width bit reinterpretation (design 0016 section
+    /// 10). Emits a `Rvalue::Bitcast` (no regime, NO fault edge: bitcast is total).
+    /// A bare `{integer}` operand takes the float's same-width unsigned int so its
+    /// full bit pattern survives (mirrors the tree-walker / checker).
+    fn lower_bitcast(&mut self, ty: &Ty, expr: &Expr) -> LR<(Operand, Type)> {
+        let to = match self.resolve_ty(ty)? {
+            Type::Scalar(s) => s,
+            _ => return unsupported("non-scalar bitcast target"),
+        };
+        let expected = if to.is_float() {
+            Some(Type::Scalar(if to == ScalarTy::F64 { ScalarTy::U64 } else { ScalarTy::U32 }))
+        } else {
+            None
+        };
+        let (v, _vty) = self.lower_value(expr, expected.as_ref())?;
+        let id = self.emit_temp(Type::Scalar(to), Rvalue::Bitcast { to, v }, self.cur_span);
         Ok((Operand::Local(id), Type::Scalar(to)))
     }
 

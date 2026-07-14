@@ -789,6 +789,7 @@ impl<'a> Interp<'a> {
             ExprKind::Unary { op, expr } => self.eval_unary(*op, expr, expected),
             ExprKind::Binary { op, lhs, rhs } => self.eval_binary(*op, lhs, rhs, expected, e.span),
             ExprKind::Conv { ty, expr } => self.eval_conv(ty, expr),
+            ExprKind::Bitcast { ty, expr } => self.eval_bitcast(ty, expr),
             ExprKind::Prefix { op: PrefixOp::Read, expr } => self.eval_borrow(expr, false),
             ExprKind::Prefix { op: PrefixOp::Write, expr } => self.eval_borrow(expr, true),
             ExprKind::Prefix { op: PrefixOp::Clone, expr } => self.eval_clone(expr),
@@ -1427,6 +1428,32 @@ impl<'a> Interp<'a> {
             }
         };
         let a = self.mem.stack_alloc(Layout::scalar_size(tsty).max(1), Layout::scalar_size(tsty).max(1));
+        self.write_int(a, out, tsty)?;
+        Ok(RVal { ty: Type::Scalar(tsty), addr: a, origin: Origin::None })
+    }
+
+    /// Evaluate `bitcast T (e)` -- same-width bit reinterpretation (design 0016
+    /// section 10). Reads the operand's raw bit pattern and re-fits it into `T`'s
+    /// width/signedness; the bits are identical (same width, checker-guaranteed), so
+    /// no value changes. Total -- never faults, regime-independent.
+    fn eval_bitcast(&mut self, ty: &Ty, expr: &Expr) -> R<RVal> {
+        let tsty = match self.resolve_ty(ty) {
+            Type::Scalar(s) => s,
+            _ => ScalarTy::I64,
+        };
+        // A bare `{integer}` operand takes the float's same-width unsigned int so its
+        // full pattern survives (mirrors the checker / MIR lowering).
+        let expected = if tsty.is_float() {
+            Some(Type::Scalar(if tsty == ScalarTy::F64 { ScalarTy::U64 } else { ScalarTy::U32 }))
+        } else {
+            None
+        };
+        let src = self.eval_value(expr, expected.as_ref())?;
+        let ssty = self.concretize(&src.ty);
+        let raw = self.read_int(src.addr, ssty)?;
+        let out = self.fit_bits(raw, tsty);
+        let size = Layout::scalar_size(tsty).max(1);
+        let a = self.mem.stack_alloc(size, size);
         self.write_int(a, out, tsty)?;
         Ok(RVal { ty: Type::Scalar(tsty), addr: a, origin: Origin::None })
     }

@@ -735,6 +735,17 @@ impl Parser {
                     expr: Box::new(inner),
                 }
             }
+            TokKind::Kw(Kw::Bitcast) => {
+                self.bump();
+                let ty = self.parse_type()?;
+                self.expect(&TokKind::LParen, "`(`")?;
+                let inner = self.parse_delimited_expr()?;
+                self.expect(&TokKind::RParen, "`)`")?;
+                ExprKind::Bitcast {
+                    ty,
+                    expr: Box::new(inner),
+                }
+            }
             _ => return self.parse_postfix(),
         };
         Ok(Expr {

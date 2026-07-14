@@ -330,6 +330,7 @@ impl Counter {
                 self.expr(index);
             }
             ExprKind::Conv { expr, .. } => self.expr(expr),
+            ExprKind::Bitcast { expr, .. } => self.expr(expr),
             ExprKind::ArrayLit(v) => {
                 for x in v {
                     self.expr(x);

@@ -466,6 +466,12 @@ pub enum ExprKind {
     /// `conv T (e)` — the only integer conversion form (design 0001 §8.1).
     Conv { ty: Ty, expr: Box<Expr> },
 
+    /// `bitcast T (e)` — same-width bit reinterpretation between a float and an
+    /// integer scalar (design 0016 §10). Unlike `conv` (which converts the numeric
+    /// VALUE), bitcast reinterprets the identical bits as `T`; it never changes the
+    /// bits, never faults, and is regime-independent.
+    Bitcast { ty: Ty, expr: Box<Expr> },
+
     ArrayLit(Vec<Expr>),
     ArrayRepeat { value: Box<Expr>, size: Box<Expr> },
     StructLit { name: String, fields: Vec<FieldInit> },

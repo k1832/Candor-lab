@@ -642,6 +642,7 @@ fn rvalue_to(rv: &Rvalue) -> Sexp {
             operand_to(v),
             fault_opt_to(fault),
         ]),
+        Rvalue::Bitcast { to, v } => l(vec![a("bitcast"), a(scalar_kw(*to)), operand_to(v)]),
         Rvalue::Ref(place) => l(vec![a("ref"), place_to(place)]),
         Rvalue::Load { place, ty } => l(vec![a("load"), place_to(place), ty_to(ty)]),
         Rvalue::Call { func, args } => l(vec![a("call"), s(func), args_to(args)]),
@@ -686,6 +687,10 @@ fn rvalue_from(sx: &Sexp) -> Result<Rvalue, String> {
             regime: regime_from(arg(args, 1)?.as_atom()?)?,
             v: operand_from(arg(args, 2)?)?,
             fault: fault_opt_from(arg(args, 3)?)?,
+        },
+        "bitcast" => Rvalue::Bitcast {
+            to: scalar_from(arg(args, 0)?.as_atom()?)?,
+            v: operand_from(arg(args, 1)?)?,
         },
         "ref" => Rvalue::Ref(place_from(arg(args, 0)?)?),
         "load" => Rvalue::Load { place: place_from(arg(args, 0)?)?, ty: ty_from(arg(args, 1)?)? },

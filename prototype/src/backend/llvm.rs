@@ -942,6 +942,14 @@ impl<'a> FnEmit<'a> {
                 let x128 = self.ext128(&x, sty);
                 self.range_or_fit(&x128, *to, *regime, fault.as_ref())
             }
+            Rvalue::Bitcast { to, v } => {
+                // Pure bit reinterpretation in the i64-register model (design 0016
+                // section 10): re-canonicalize the operand's held bit pattern to the
+                // target width/signedness (`trunc`+`sext`/`zext` at 32 bits, no-op at
+                // 64) -- NOT an `fpto*`/`*tofp`. Never faults.
+                let x = self.operand(v);
+                Ok(self.canon(&x, *to))
+            }
             Rvalue::Call { func, args } => {
                 // A boundary `extern` call (design 0011 §5) targets an imported C
                 // symbol with C-ABI marshalling, not a `cnf_` body.

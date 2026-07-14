@@ -832,6 +832,7 @@ impl<'a> Rewriter<'a> {
                 self.rewrite_expr(index, locals);
             }
             ExprKind::Conv { ty, expr: e }
+            | ExprKind::Bitcast { ty, expr: e }
             | ExprKind::CastPtr { ty, arg: e }
             | ExprKind::AddrToPtr { ty, arg: e } => {
                 self.rewrite_ty(ty);

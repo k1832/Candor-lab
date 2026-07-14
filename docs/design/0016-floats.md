@@ -188,3 +188,84 @@ produce **bit-identical** results, asserted via `f32::to_bits` in
 `tests/floats_f32.rs` and the `tests/fixtures/run/floats_f32.cnr` native corpus
 fixture. NaN keeps the §4 caveat: a computed NaN's sign is IEEE-unspecified across
 engines, so NaN is gated by behaviour, not exact bits.
+
+
+## 10. `bitcast` — same-width float<->int BIT reinterpretation — landed
+
+`conv` (§5, §9.2) converts the numeric **value** (`conv i64 (1.0)` == `1`). `bitcast`
+reinterprets the identical **bits** as a same-width type (`bitcast i64 (1.0)` ==
+`0x3FF0000000000000`). It is the prerequisite for the WASM float opcodes (whose
+interpreter holds floats as `i64` stack bits and must reinterpret them to do
+arithmetic) and is generally useful (float hashing/serialization, WASM's own
+`reinterpret` ops).
+
+### 10.1 Spelling — a `bitcast <ty>` keyword, parallel to `conv`
+
+`bitcast T (e)` is a prefix operator keyword, uniform with `conv T (e)`: the prototype
+grammar takes `bitcast T ( e )` (parenthesized operand), the real/surface grammar the
+paren-free `bitcast ScalarKw <prefix-operand>` (exactly as `conv`). Chosen over
+intrinsic functions (`f64_to_bits`/…) because a keyword mirrors `conv` one-for-one —
+same parse slot, same precedence (prefix), same emit/format — and needs no per-type
+family of builtins.
+
+### 10.2 Semantics — same-BYTE-WIDTH float<->int only; total; regime-independent
+
+- **Legal pairs.** Exactly one side a float, the other an integer of the **same byte
+  width**: `f64 <-> {i64, u64, isize, usize}` (8 bytes), `f32 <-> {i32, u32}` (4
+  bytes). The rule is byte-width equality with one float side (so `isize`/`usize`, both
+  8 bytes, pair with `f64`) — the principled generalization of "f64<->i64, f32<->i32".
+- **Rejected at check time** (`E0714`): a different-width bitcast (`f64 <-> i32`), a
+  both-integer bitcast (`i64 <-> u64` — that is `wrapping { conv }`, §6 / obligations
+  U64<->I64), a both-float bitcast (`f64 <-> f32` — also different width), and a
+  float<->bool/unit or non-scalar target.
+- **No value change.** `bitcast i64 (1.0)` == `0x3FF0000000000000`; `bitcast f64
+  (0x4000000000000000)` == `2.0`; `bitcast i32 (1.0f32)` == `0x3F800000`.
+- **Total.** Bitcast NEVER faults (unlike `conv`'s checked-overflow / the inert
+  saturating float->int edge). It carries no fault edge.
+- **Regime-independent.** Like a float op (§2), a bitcast inside a
+  `wrapping`/`saturating` block is unchanged — it is a pure reinterpret with no
+  overflow notion, so the regime system has nothing to act on. Documented and gated.
+- **A bare `{integer}` on the int side** (e.g. `bitcast f64 (0x4000000000000000)`) is
+  width-flexible: it takes the float's same-width UNSIGNED integer (`u64`/`u32`) so its
+  full bit pattern is preserved (a high-bit pattern such as `0xFFF8…` needs an explicit
+  `u64` suffix, since a suffix-less literal is range-checked against `i64`).
+
+### 10.3 NaN payload — preserved EXACTLY
+
+Bitcast is precisely where a **specific** NaN bit-pattern survives: there is no
+arithmetic to canonicalize the payload/sign, so `bitcast i64 (bitcast f64
+(0x7FF8000000000001))` reproduces `0x7FF8000000000001` bit-for-bit on every engine.
+This is the case bitcast uniquely handles — a *computed* NaN's sign is
+IEEE-unspecified across a constant-folding compiler vs. runtime hardware (§4, §6), so
+`tests/floats.rs` gates computed NaN by behaviour; `tests/bitcast.rs` gates a
+reinterpreted NaN by EXACT bits.
+
+### 10.4 Implementation — a new MIR op, native `bitcast`/re-canonicalize (NOT `fcvt`)
+
+Threaded through every layer as a sibling of `conv`, but as a distinct, simpler op:
+`ast::ExprKind::Bitcast { ty, expr }`, checker `check_bitcast` (the §10.2 pair rule),
+both interpreters, and a **new** MIR rvalue `Bitcast { to, v }`. A new op (not a
+`conv` "reinterpret" mode) is cleaner because `conv` carries `regime` + a `fault`
+edge (INV-CHECK) that a total, regime-free bitcast would only have to null out;
+`Bitcast` carries neither and falls through INV-CHECK like a float op. Its wire form
+is `(bitcast <to-scalar> <operand>)` — additive, so existing `conv` MIR and self-host
+lowering parity are untouched.
+
+Because floats are already carried as their `to_bits()` pattern in the shared
+`i128`/`i64` register and byte-identically in flat memory (§6, §9.3), a bitcast changes
+no bits: it only **re-canonicalizes** the operand's held pattern to the target's
+width/signedness. The interpreters use `fit_bits(x, to)`; both backends use the
+existing `canon` (a **no-op at 64 bits**, `ireduce`/`trunc` + `sext`/`zext` at 32) —
+which IS the raw register-level reinterpret, and pointedly NOT an `fcvt` /
+`fpto*i` / `*tofp` (those would change the value). Nothing in load/store/call-ABI
+changes.
+
+### 10.5 Cross-engine gate
+
+`tests/bitcast.rs` + `tests/fixtures/run/bitcast.cnr` assert BIT-IDENTICAL results
+across all five engines (tree-walker / MIR / Cranelift no-opt / Cranelift -O2 / LLVM
+-O2): f64<->i64 and f32<->i32 round trips over a spread; the known encodings above for
+f64 and f32; the exact-NaN-payload round trip; regime-independence (a bitcast inside
+`wrapping {}`); and the `E0714` rejections (different-width, both-integer, both-float).
+The 64-bit `trace` channel widens a 32-bit result with `conv i64 (bitcast u32 (..))`
+so the widening zero-extends, matching host `f32::to_bits()` (a `u32`).

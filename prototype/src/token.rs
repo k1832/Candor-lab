@@ -107,6 +107,7 @@ pub enum Kw {
     Deref,
     Clone,
     Conv,
+    Bitcast,
     // bracketed-type-arg intrinsics
     CastPtr,
     AddrToPtr,
@@ -231,6 +232,7 @@ pub fn keyword_from_str(s: &str) -> Option<Kw> {
         "deref" => Kw::Deref,
         "clone" => Kw::Clone,
         "conv" => Kw::Conv,
+        "bitcast" => Kw::Bitcast,
         "cast_ptr" => Kw::CastPtr,
         "addr_to_ptr" => Kw::AddrToPtr,
         "ptr_null" => Kw::PtrNull,

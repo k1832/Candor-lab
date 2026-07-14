@@ -51,6 +51,7 @@ pub enum RKw {
     Wrapping,
     Saturating,
     Conv,
+    Bitcast,
     Clone,
     // bracketed-type-arg / call intrinsics
     CastPtr,
@@ -164,6 +165,7 @@ pub fn real_keyword_from_str(s: &str) -> Option<RKw> {
         "wrapping" => RKw::Wrapping,
         "saturating" => RKw::Saturating,
         "conv" => RKw::Conv,
+        "bitcast" => RKw::Bitcast,
         "clone" => RKw::Clone,
         "cast_ptr" => RKw::CastPtr,
         "addr_to_ptr" => RKw::AddrToPtr,

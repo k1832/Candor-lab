@@ -486,6 +486,12 @@ impl Printer {
                 self.push(" ");
                 self.expr(expr);
             }
+            ExprKind::Bitcast { ty, expr } => {
+                self.push("bitcast ");
+                self.ty(ty);
+                self.push(" ");
+                self.expr(expr);
+            }
             ExprKind::ArrayLit(v) => {
                 self.push("[");
                 for e in v {
