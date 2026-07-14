@@ -135,31 +135,32 @@ cd prototype && cargo nextest run
 
 The CLI runs a Candor program on the interpreter (`run`), or compiles it to a real
 native executable (`compile`). Build it once: `cd prototype && cargo build --bin candor`.
+**All commands below are verified working** (from the repo root).
 
 ```
 CANDOR=prototype/target/debug/candor
+WASM=prototype/tests/fixtures/wasm/interp.cnr
 
-# (a) run the WASM interpreter on the interpreter — the embedded module computes 40+2
-$CANDOR run prototype/tests/fixtures/wasm/interp.cnr ; echo "exit = $?"   # -> 42
+# (a) run the WASM interpreter on the tree-walker — its embedded module computes 40+2
+$CANDOR run $WASM                            # prints 42
 
 # (b) COMPILE the WASM interpreter to a native x86-64 executable and run THAT
-$CANDOR compile prototype/tests/fixtures/wasm/interp.cnr -o /tmp/wasmvm
-/tmp/wasmvm ; echo "exit = $?"                                            # -> 42
+$CANDOR compile $WASM -o /tmp/wasmvm && /tmp/wasmvm ; echo "exit = $?"   # -> 42
 #   ^ a real native binary, produced by Candor, that IS a WebAssembly interpreter
 
-# (c) Candor checks its own source (self-hosting front end)
-$CANDOR check prototype/selfhost/checker/checker.cnr
+# (b′) THE showpiece: compile it FREESTANDING — a static, NO-libc native binary
+$CANDOR compile $WASM -o /tmp/wasmvm_fs --freestanding && /tmp/wasmvm_fs ; echo "exit = $?"
+ldd /tmp/wasmvm_fs                           # -> "not a dynamic executable"
+#   ^ a no-runtime, no-libc native WebAssembly interpreter, written in Candor
 
-# (d) audit the I/O trust boundary — machine-readable list of every extern + effect
+# (c) Candor checks its own compiler source (whole self-host module tree, via tests)
+cd prototype && cargo nextest run -E 'binary(/selfhost/)' ; cd ..
+#   (a single self-host module can't be `candor check`ed alone — it `use`s the others;
+#    the self-host tests load the module tree and verify byte-exact vs the Rust oracle.)
+
+# (d) audit the I/O trust boundary — machine-readable JSON of every extern + its effect
 $CANDOR audit prototype/tests/fixtures/std_io
-
-# (e) a freestanding native binary with NO libc (ldd says "not a dynamic executable")
-$CANDOR compile <a corpus program> -o /tmp/prog --freestanding && ldd /tmp/prog
 ```
-
-> The commands in §6 are documented from the CLI surface; run them yourself, or ask
-> and they can be verified live and this section corrected to the exact working form
-> (e.g. which fixture is the cleanest `--freestanding` demo).
 
 ---
 
