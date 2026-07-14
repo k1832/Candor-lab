@@ -840,3 +840,38 @@ One lesson per entry, one-line summary first.
   + fast profiles), clippy clean, run/ copy byte-identical. WASM MVP capstone done;
   post-MVP options: host imports / a WASI-lite print, f32/f64 floats (needs the
   language float prerequisite), a JIT-to-LLVM. (WASM M3, 2026-07-14).
+
+- **WASM M4 — host imports + a WASI-lite `print` (real output through the I/O
+  boundary). Three load-bearing lessons.** (1) THE FUNCTION INDEX SPACE: imported
+  functions occupy the LOWEST func indices, so `K` func-imports shift every defined
+  function to index `K + j`. The decode fix: the Import section (id 2) records each
+  func import at index `nimports` (its type arities into the SAME per-function
+  arrays), and the Function (id 3) + Code (id 10) sections store defined metadata at
+  `nimports + i`. `call N` then routes `N < K` to a host handler and `N >= K` to a
+  defined body with NO other change (the export entry index already lives in the
+  full space). Only func imports bump `K`; table/memory/global imports decode-and-
+  skip without consuming a func index. Gated by ONE module that imports print_str
+  (0) + print_i32 (1) and defines helper (2) + main (3), where main calls import 0,
+  then defined helper 2, which calls import 1 — every index-space case at once.
+  (2) WHERE THE HOST LAYER LIVES (the drift-guard forces this): the pure `interp.cnr`
+  reusable section CANNOT hold the std::io boundary — `tests/wasm.rs` compiles it
+  standalone on every engine incl. native, so an `extern sys_write` would be an
+  unresolved-symbol link error even if never called. So the host dispatch BUFFERS
+  into a threaded `Vec[u8]` inside the pure exec (`host_call` → `print_i32` decimal /
+  `print_str` copies LINEAR MEMORY, bounds-checked → TRAP on OOB), and the boundary
+  fixture (`run_wasm_file.cnr`) FLUSHES the buffer to real stdout via `write_all`
+  after the run. Buffering-then-flushing yields byte-identical captured stdout while
+  keeping the reusable decode+exec extern-free and byte-identical across interp.cnr /
+  its run/ copy / the file fixture. (3) `out` IS A CANDOR KEYWORD — name the host
+  buffer `hout` (a `write Vec[u8]` param re-borrows as `write hout.*`, not `write
+  hout`). The file main juggles THREE disjoint free-list windows: run_module's linear
+  memory [16,24) MiB, the file bytes [32,40), the host-output buffer [48,56) (256 MiB
+  arena, so all fit). The gate asserts captured stdout == expected on the tree-walker
+  + MIR shims AND on real-libc AOT + clang-O2 binaries ("hello, wasm\n42\n"), an OOB
+  print_str TRAPS on both interp engines, and — the print path IS wasmi-differential
+  — a wasmi `Linker` with the SAME `env.print_i32`/`print_str` host funcs over a
+  captured `Store<Vec<u8>>` buffer (print_str reads the EXPORTED memory, Errs on OOB)
+  produces output byte-equal to Candor's. Modules that use print_str must EXPORT
+  "memory" so wasmi's host can reach it (the Candor interp reads mem directly and does
+  not care). Post-MVP remaining: f32/f64 floats (needs a language float prerequisite),
+  a JIT-to-LLVM. (WASM M4, 2026-07-14).

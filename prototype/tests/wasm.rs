@@ -81,7 +81,7 @@ fn program(bytes: &[u8]) -> String {
         lits.push_str(&format!("0x{byte:02x}u8"));
     }
     format!(
-        "{}\nfn main() alloc -> i64 {{\n    let data: [{}]u8 = [{}];\n    return run_module(slice_of(data));\n}}\n",
+        "{}\nfn main() alloc -> i64 {{\n    let data: [{}]u8 = [{}];\n    let mut st: FreeList = with_window(33554432usize, 8388608usize);\n    let a: Alloc = mk_alloc(write st);\n    let mut hout: Vec[u8] = vec_new(read a);\n    return run_module(slice_of(data), write hout);\n}}\n",
         interp_fns(),
         bytes.len(),
         lits,
@@ -1261,4 +1261,417 @@ fn diff_traps_are_equivalent() {
     // unreachable.
     let unreachable = one_func(I32, vec![0x00, 0x0b], vec![]);
     assert_diff_trap(&unreachable, "unreachable");
+}
+
+// ===========================================================================
+// M4 — HOST IMPORTS + a WASI-lite `print` (real output through the I/O boundary)
+// ===========================================================================
+//
+// Imported functions occupy the LOWEST function indices, so a module importing K
+// functions addresses its defined bodies at [K, K+n). The encoder below builds
+// real `.wasm` with an Import section (id 2) and calls that mix host imports
+// (`call N`, N < K) with defined functions (`call N`, N >= K). The interpreter
+// resolves an import's (module, field) name to a host handler: `env.print_i32`
+// writes the argument's decimal + newline; `env.print_str(ptr,len)` copies `len`
+// bytes of LINEAR MEMORY out through std::io `write_all`. The gate asserts the
+// CAPTURED STDOUT equals the expected bytes on the interp engines (foreign_io
+// shims) and, via wasmi host imports over a captured buffer, that Candor's
+// captured output == wasmi's captured output for the print modules.
+
+/// A functype `(params) -> (results)`.
+fn functype(params: &[u8], results: &[u8]) -> Vec<u8> {
+    let mut t = vec![0x60];
+    t.extend(wasm_vec(&params.iter().map(|v| vec![*v]).collect::<Vec<_>>()));
+    t.extend(wasm_vec(&results.iter().map(|v| vec![*v]).collect::<Vec<_>>()));
+    t
+}
+
+/// One import entry: module name, field name, then the descriptor bytes.
+fn import_entry(module: &str, field: &str, desc: &[u8]) -> Vec<u8> {
+    let mut e = wasm_vec(&module.bytes().map(|c| vec![c]).collect::<Vec<_>>());
+    e.extend(wasm_vec(&field.bytes().map(|c| vec![c]).collect::<Vec<_>>()));
+    e.extend_from_slice(desc);
+    e
+}
+
+/// One code body: local declarations + instruction bytes, size-prefixed.
+fn code_body(locals: &[(u32, u8)], body: &[u8]) -> Vec<u8> {
+    let mut bd = wasm_vec(
+        &locals
+            .iter()
+            .map(|(c, v)| {
+                let mut b = Vec::new();
+                leb_u32(*c, &mut b);
+                b.push(*v);
+                b
+            })
+            .collect::<Vec<_>>(),
+    );
+    bd.extend_from_slice(body);
+    let mut c = Vec::new();
+    leb_u32(bd.len() as u32, &mut c);
+    c.extend_from_slice(&bd);
+    c
+}
+
+/// An active data segment `(offset, bytes)` in Data(11) form.
+fn data_seg(off: u32, bytes: &[u8]) -> Vec<u8> {
+    let mut d = vec![0x00u8, 0x41u8];
+    leb_i32(off as i32, &mut d);
+    d.push(0x0b);
+    leb_u32(bytes.len() as u32, &mut d);
+    d.extend_from_slice(bytes);
+    d
+}
+
+const MAGIC: [u8; 8] = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+
+/// The main M4 gate module: imports BOTH `env.print_str` (funcidx 0) and
+/// `env.print_i32` (funcidx 1), defines a `helper` (funcidx 2) and `main`
+/// (funcidx 3). `main` calls the print_str IMPORT (`call 0`), then the DEFINED
+/// helper (`call 2`), which in turn calls the print_i32 IMPORT (`call 1`). This
+/// exercises every index-space case in one module. Expected stdout:
+/// `"hello, wasm\n42\n"`.
+fn print_mixed_module() -> Vec<u8> {
+    let mut m = MAGIC.to_vec();
+    let types = wasm_vec(&[
+        functype(&[I32, I32], &[]), // t0: print_str
+        functype(&[I32], &[]),      // t1: print_i32
+        functype(&[], &[]),         // t2: helper / main
+    ]);
+    wasm_section(&mut m, 0x01, &types);
+    let imports = wasm_vec(&[
+        import_entry("env", "print_str", &[0x00, 0x00]),
+        import_entry("env", "print_i32", &[0x00, 0x01]),
+    ]);
+    wasm_section(&mut m, 0x02, &imports);
+    wasm_section(&mut m, 0x03, &wasm_vec(&[vec![0x02], vec![0x02]])); // helper, main : t2
+    wasm_section(&mut m, 0x05, &[0x01, 0x00, 0x01]); // 1 memory, min 1 page
+    // Export "main" -> func 3, "memory" -> mem 0 (wasmi's host reads the export).
+    let exports = wasm_vec(&[
+        {
+            let mut e = wasm_vec(&"main".bytes().map(|c| vec![c]).collect::<Vec<_>>());
+            e.push(0x00);
+            leb_u32(3, &mut e);
+            e
+        },
+        {
+            let mut e = wasm_vec(&"memory".bytes().map(|c| vec![c]).collect::<Vec<_>>());
+            e.push(0x02);
+            leb_u32(0, &mut e);
+            e
+        },
+    ]);
+    wasm_section(&mut m, 0x07, &exports);
+    let helper = {
+        let mut b = c32(42);
+        b.extend([0x10, 0x01, 0x0b]); // call 1 (print_i32 import); end
+        b
+    };
+    let main = {
+        let mut b = c32(0); // ptr
+        b.extend(c32(12)); // len of "hello, wasm\n"
+        b.extend([0x10, 0x00]); // call 0 (print_str import)
+        b.extend([0x10, 0x02]); // call 2 (defined helper)
+        b.push(0x0b); // end
+        b
+    };
+    wasm_section(&mut m, 0x0a, &wasm_vec(&[code_body(&[], &helper), code_body(&[], &main)]));
+    wasm_section(&mut m, 0x0b, &wasm_vec(&[data_seg(0, b"hello, wasm\n")]));
+    m
+}
+
+/// `env.print_i32`-only module (funcidx 0 = import, funcidx 1 = main). `main`
+/// prints 42, then -7, then 0 — decimal formatting incl. sign and zero.
+/// Expected stdout: `"42\n-7\n0\n"`.
+fn print_i32_module() -> Vec<u8> {
+    let mut m = MAGIC.to_vec();
+    let types = wasm_vec(&[functype(&[I32], &[]), functype(&[], &[])]);
+    wasm_section(&mut m, 0x01, &types);
+    wasm_section(&mut m, 0x02, &wasm_vec(&[import_entry("env", "print_i32", &[0x00, 0x00])]));
+    wasm_section(&mut m, 0x03, &wasm_vec(&[vec![0x01]])); // main : t1
+    let exports = wasm_vec(&[{
+        let mut e = wasm_vec(&"main".bytes().map(|c| vec![c]).collect::<Vec<_>>());
+        e.push(0x00);
+        leb_u32(1, &mut e);
+        e
+    }]);
+    wasm_section(&mut m, 0x07, &exports);
+    let main = {
+        let mut b = c32(42);
+        b.extend([0x10, 0x00]); // call 0 (print_i32)
+        b.extend(c32(-7));
+        b.extend([0x10, 0x00]);
+        b.extend(c32(0));
+        b.extend([0x10, 0x00]);
+        b.push(0x0b);
+        b
+    };
+    wasm_section(&mut m, 0x0a, &wasm_vec(&[code_body(&[], &main)]));
+    m
+}
+
+/// `env.print_str`-only module. `main` writes `msg` from `ptr` (a data segment).
+/// With `ptr`/`len` in bounds it prints the string; the OOB variant traps.
+fn print_str_module(ptr: i32, len: i32, msg: &[u8]) -> Vec<u8> {
+    let mut m = MAGIC.to_vec();
+    let types = wasm_vec(&[functype(&[I32, I32], &[]), functype(&[], &[])]);
+    wasm_section(&mut m, 0x01, &types);
+    wasm_section(&mut m, 0x02, &wasm_vec(&[import_entry("env", "print_str", &[0x00, 0x00])]));
+    wasm_section(&mut m, 0x03, &wasm_vec(&[vec![0x01]])); // main : t1
+    wasm_section(&mut m, 0x05, &[0x01, 0x00, 0x01]); // 1 memory, min 1 page
+    let exports = wasm_vec(&[
+        {
+            let mut e = wasm_vec(&"main".bytes().map(|c| vec![c]).collect::<Vec<_>>());
+            e.push(0x00);
+            leb_u32(1, &mut e);
+            e
+        },
+        {
+            let mut e = wasm_vec(&"memory".bytes().map(|c| vec![c]).collect::<Vec<_>>());
+            e.push(0x02);
+            leb_u32(0, &mut e);
+            e
+        },
+    ]);
+    wasm_section(&mut m, 0x07, &exports);
+    let main = {
+        let mut b = c32(ptr);
+        b.extend(c32(len));
+        b.extend([0x10, 0x00]); // call 0 (print_str)
+        b.push(0x0b);
+        b
+    };
+    wasm_section(&mut m, 0x0a, &wasm_vec(&[code_body(&[], &main)]));
+    wasm_section(&mut m, 0x0b, &wasm_vec(&[data_seg(0, msg)]));
+    m
+}
+
+/// Run the file-run fixture with `mod.wasm` = `bytes`, capturing STDOUT on the
+/// tree-walker AND the MIR engine (foreign_io shims). Returns
+/// (tw_ret, tw_stdout, mir_ret, mir_stdout).
+fn run_wasm_file_stdout(bytes: &[u8], tag: &str) -> (i64, Vec<u8>, i64, Vec<u8>) {
+    let dir =
+        std::env::temp_dir().join(format!("candor-wasm-print-{}-{}", tag, std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("mod.wasm"), bytes).unwrap();
+
+    foreign_io::reset();
+    foreign_io::set_root(&dir);
+    foreign_io::register_std_io();
+    let tw = match run_source_real(FILE_RUN_SRC) {
+        RunResult::Ok(r) => r.ret,
+        RunResult::Fault(f) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: tree-walker faulted: {}", f.to_json());
+        }
+        RunResult::CheckErrors(d) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>());
+        }
+        RunResult::ParseError(d) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: parse error: {}", d.to_json());
+        }
+    };
+    let tw_out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+
+    foreign_io::reset();
+    foreign_io::set_root(&dir);
+    foreign_io::register_std_io();
+    let mir = match run_source_real_mir(FILE_RUN_SRC) {
+        MirRunResult::Ok(r) => r.ret,
+        MirRunResult::Fault(f) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: MIR faulted: {}", f.to_json());
+        }
+        MirRunResult::Unsupported(msg) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: MIR unsupported: {msg}");
+        }
+        MirRunResult::CheckErrors(d) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: MIR check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>());
+        }
+        MirRunResult::ParseError(d) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: MIR parse error: {}", d.to_json());
+        }
+    };
+    let mir_out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+
+    let _ = std::fs::remove_dir_all(&dir);
+    (tw, tw_out, mir, mir_out)
+}
+
+/// The file-run fixture must TRAP on `bytes` on both interp engines (used for the
+/// OOB `print_str`). Returns the two fault kinds.
+fn run_wasm_file_fault(bytes: &[u8], tag: &str) -> (FaultKind, FaultKind) {
+    let dir = std::env::temp_dir()
+        .join(format!("candor-wasm-print-oob-{}-{}", tag, std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("mod.wasm"), bytes).unwrap();
+
+    foreign_io::reset();
+    foreign_io::set_root(&dir);
+    foreign_io::register_std_io();
+    let tw = match run_source_real(FILE_RUN_SRC) {
+        RunResult::Fault(f) => f.kind,
+        RunResult::Ok(r) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: tree-walker expected a trap, got ret {}", r.ret);
+        }
+        RunResult::CheckErrors(d) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>());
+        }
+        RunResult::ParseError(d) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: parse error: {}", d.to_json());
+        }
+    };
+    foreign_io::unregister_std_io();
+
+    foreign_io::reset();
+    foreign_io::set_root(&dir);
+    foreign_io::register_std_io();
+    let mir = match run_source_real_mir(FILE_RUN_SRC) {
+        MirRunResult::Fault(f) => f.kind,
+        MirRunResult::Ok(r) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: MIR expected a trap, got ret {}", r.ret);
+        }
+        MirRunResult::Unsupported(msg) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: MIR unsupported: {msg}");
+        }
+        MirRunResult::CheckErrors(d) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: MIR check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>());
+        }
+        MirRunResult::ParseError(d) => {
+            foreign_io::unregister_std_io();
+            panic!("{tag}: MIR parse error: {}", d.to_json());
+        }
+    };
+    foreign_io::unregister_std_io();
+
+    let _ = std::fs::remove_dir_all(&dir);
+    (tw, mir)
+}
+
+/// Run `bytes` through wasmi with the SAME host imports registered against a
+/// captured buffer (`env.print_i32`/`env.print_str`), returning the captured
+/// output — the reference for the print-path differential. `print_str` reads the
+/// exported linear memory and traps (Err) on an out-of-range span.
+fn wasmi_run_print(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    use wasmi::{Caller, Engine, Error, Extern, Linker, Module, Store};
+    let engine = Engine::default();
+    let module = Module::new(&engine, bytes).map_err(|e| format!("compile: {e}"))?;
+    let mut store: Store<Vec<u8>> = Store::new(&engine, Vec::new());
+    let mut linker = <Linker<Vec<u8>>>::new(&engine);
+    linker
+        .func_wrap("env", "print_i32", |mut caller: Caller<'_, Vec<u8>>, x: i32| {
+            let mut s = format!("{x}\n").into_bytes();
+            caller.data_mut().append(&mut s);
+        })
+        .map_err(|e| format!("link print_i32: {e}"))?;
+    linker
+        .func_wrap(
+            "env",
+            "print_str",
+            |mut caller: Caller<'_, Vec<u8>>, ptr: i32, len: i32| -> Result<(), Error> {
+                let mem = match caller.get_export("memory") {
+                    Some(Extern::Memory(m)) => m,
+                    _ => return Err(Error::new("print_str: no memory export")),
+                };
+                let start = ptr as usize;
+                let end = start
+                    .checked_add(len as usize)
+                    .ok_or_else(|| Error::new("print_str: length overflow"))?;
+                let chunk = {
+                    let data = mem.data(&caller);
+                    if end > data.len() {
+                        return Err(Error::new("print_str: out of bounds"));
+                    }
+                    data[start..end].to_vec()
+                };
+                caller.data_mut().extend_from_slice(&chunk);
+                Ok(())
+            },
+        )
+        .map_err(|e| format!("link print_str: {e}"))?;
+    let instance =
+        linker.instantiate_and_start(&mut store, &module).map_err(|e| format!("instantiate: {e}"))?;
+    let func = instance.get_func(&store, "main").ok_or("no `main` export")?;
+    func.call(&mut store, &[], &mut []).map_err(|e| format!("trap: {e}"))?;
+    Ok(store.into_data())
+}
+
+#[test]
+fn m4_mixed_import_and_defined_calls_right_target() {
+    let _g = io_lock();
+    // ONE module that imports two host funcs (indices 0,1) and defines two bodies
+    // (indices 2,3): main (3) calls the print_str import (0), then the defined
+    // helper (2), which calls the print_i32 import (1). Getting the index space
+    // wrong would call the wrong target and change (or crash) the output.
+    let bytes = print_mixed_module();
+    let expected = b"hello, wasm\n42\n".to_vec();
+    let (tw, tw_out, mir, mir_out) = run_wasm_file_stdout(&bytes, "mixed");
+    assert_eq!(tw, 0, "main returns nothing -> 0");
+    assert_eq!(mir, 0);
+    assert_eq!(tw_out, expected, "tree-walker captured stdout");
+    assert_eq!(mir_out, expected, "MIR captured stdout");
+    // Differential: the SAME module through wasmi with the same host imports.
+    let w = wasmi_run_print(&bytes).expect("wasmi runs the mixed print module");
+    assert_eq!(w, expected, "wasmi captured stdout");
+    assert_eq!(tw_out, w, "candor-interp captured stdout == wasmi captured stdout");
+}
+
+#[test]
+fn m4_print_i32_decimal() {
+    let _g = io_lock();
+    let bytes = print_i32_module();
+    let expected = b"42\n-7\n0\n".to_vec();
+    let (_, tw_out, _, mir_out) = run_wasm_file_stdout(&bytes, "pi32");
+    assert_eq!(tw_out, expected, "tree-walker print_i32 decimal/sign/zero");
+    assert_eq!(mir_out, expected, "MIR print_i32");
+    let w = wasmi_run_print(&bytes).expect("wasmi runs print_i32 module");
+    assert_eq!(w, expected, "wasmi print_i32");
+    assert_eq!(tw_out, w, "candor == wasmi (print_i32)");
+}
+
+#[test]
+fn m4_print_str_reads_linear_memory() {
+    let _g = io_lock();
+    // print_str genuinely reads the string out of the Vec[u8] linear memory: the
+    // data segment places the bytes, and a sub-slice (offset 7, len 5) proves it
+    // reads the requested window, not a hardcoded string.
+    let full = print_str_module(0, 12, b"hello, wasm\n");
+    let (_, tw_out, _, mir_out) = run_wasm_file_stdout(&full, "pstr_full");
+    assert_eq!(tw_out, b"hello, wasm\n".to_vec());
+    assert_eq!(mir_out, b"hello, wasm\n".to_vec());
+    assert_eq!(wasmi_run_print(&full).unwrap(), b"hello, wasm\n".to_vec());
+    assert_eq!(tw_out, wasmi_run_print(&full).unwrap(), "candor == wasmi (print_str)");
+
+    let sub = print_str_module(7, 5, b"hello, wasm\n"); // "wasm\n"
+    let (_, tw_sub, _, mir_sub) = run_wasm_file_stdout(&sub, "pstr_sub");
+    assert_eq!(tw_sub, b"wasm\n".to_vec(), "reads the requested memory window");
+    assert_eq!(mir_sub, b"wasm\n".to_vec());
+    assert_eq!(wasmi_run_print(&sub).unwrap(), b"wasm\n".to_vec());
+    assert_eq!(tw_sub, wasmi_run_print(&sub).unwrap());
+}
+
+#[test]
+fn m4_print_str_out_of_bounds_traps() {
+    let _g = io_lock();
+    // ptr 65530 + len 12 = 65542 > 65536 (one page): print_str's bounds check
+    // TRAPS on both interp engines, and wasmi's host errors too.
+    let oob = print_str_module(65530, 12, b"hello, wasm\n");
+    let (tw, mir) = run_wasm_file_fault(&oob, "pstr_oob");
+    assert_eq!(tw, FaultKind::Panic, "tree-walker OOB print_str traps");
+    assert_eq!(mir, FaultKind::Panic, "MIR OOB print_str traps");
+    assert!(wasmi_run_print(&oob).is_err(), "wasmi host errors on OOB print_str");
 }

@@ -923,3 +923,52 @@ fn gate_llvm_native_wasm_file_off_disk() {
     assert_eq!(output.status.code(), Some(exp_ret as u8 as i32), "exit byte vs shim run");
     assert_eq!(exp_ret, 55, "fib(10) read off disk and executed");
 }
+
+#[test]
+fn gate_llvm_native_wasm_print_off_disk() {
+    assert!(clang_available(), "clang unavailable");
+    let _g = io_guard();
+    // M4 capstone (the LLVM -O2 path): the interpreter built by clang -O2 reads a
+    // module importing the WASI-lite host functions and runs it over real libc.
+    // The host `print_str` reads LINEAR MEMORY and `print_i32` formats decimal,
+    // both writing REAL bytes to stdout. Expected stdout: "hello, wasm\n42\n".
+    let cnr = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm/run_wasm_file.cnr");
+    let src = std::fs::read_to_string(&cnr).expect("read wasm file-run fixture");
+    let module =
+        std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm/print_hello.wasm"))
+            .expect("read print_hello.wasm");
+    let work = std::env::temp_dir().join(format!("candor-llvm-wasmprint-{}", std::process::id()));
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("mod.wasm"), &module).unwrap();
+
+    // Oracle: the shim-backed interpreter rooted at the work dir, capturing stdout.
+    candor_proto::foreign_io::reset();
+    candor_proto::foreign_io::set_root(&work);
+    candor_proto::foreign_io::register_std_io();
+    let exp_ret = match run_source_real(&src) {
+        RunResult::Ok(r) => r.ret,
+        _ => {
+            candor_proto::foreign_io::unregister_std_io();
+            panic!("shim-backed interpreter should run the wasm print demonstrator");
+        }
+    };
+    let exp_out = candor_proto::foreign_io::take_stdout();
+    candor_proto::foreign_io::unregister_std_io();
+
+    // Native: clang -O2 binary calling real libc, run with the work dir as cwd.
+    let srcpath = work.join("prog.cnr");
+    std::fs::write(&srcpath, &src).unwrap();
+    let out = std::env::temp_dir().join(format!("candor-llvm-wasmprint-bin-{}", std::process::id()));
+    candor_proto::compile_path_llvm(&srcpath, &out).expect("compile wasm print demonstrator via clang -O2");
+    let output = Command::new(&out)
+        .current_dir(&work)
+        .output()
+        .expect("run compiled wasm print binary");
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_dir_all(&work);
+
+    assert_eq!(output.status.code(), Some(exp_ret as u8 as i32), "exit byte vs shim run");
+    assert_eq!(output.stdout, exp_out, "native stdout == shim-captured stdout");
+    assert_eq!(output.stdout, b"hello, wasm\n42\n", "print_str (linear memory) + print_i32 bytes");
+    assert_eq!(exp_ret, 0, "main returns nothing -> 0");
+}

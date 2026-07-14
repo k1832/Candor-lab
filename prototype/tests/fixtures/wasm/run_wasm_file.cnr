@@ -197,6 +197,8 @@ fn expect_byte(bytes: [u8], r: write Reader, want: u8) -> unit {
 // interpreter allocation-free (runs identically on every engine).
 struct Module {
     nfuncs: usize,
+    nimports: usize,
+    imp_host: [16]usize,
     entry: usize,
     fstart: [64]usize,
     fend: [64]usize,
@@ -330,6 +332,40 @@ fn read_const_offset(bytes: [u8], r: write Reader) -> usize {
     return conv usize (v & 0xffffffffi64);
 }
 
+// Match a decoded import name (a `[u8]` view of `blen` bytes) against a literal.
+fn eq_name(buf: [u8], blen: usize, lit: [u8], litlen: usize) -> bool {
+    if blen != litlen {
+        return false;
+    }
+    let mut i: usize = 0usize;
+    while i < blen {
+        if buf[i] != lit[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+// Resolve an import's (module, field) name to a host-function id. The WASI-lite
+// set lives under module "env": `print_i32` -> 1, `print_str` -> 2. Anything else
+// resolves to 0 and TRAPS only if it is actually called.
+fn resolve_host(mn: [u8], mlen: usize, field: [u8], flen: usize) -> usize {
+    let env: [3]u8 = [0x65u8, 0x6eu8, 0x76u8];
+    if !eq_name(mn, mlen, slice_of(env), 3usize) {
+        return 0usize;
+    }
+    let pi: [9]u8 = [0x70u8, 0x72u8, 0x69u8, 0x6eu8, 0x74u8, 0x5fu8, 0x69u8, 0x33u8, 0x32u8];
+    if eq_name(field, flen, slice_of(pi), 9usize) {
+        return 1usize;
+    }
+    let ps: [9]u8 = [0x70u8, 0x72u8, 0x69u8, 0x6eu8, 0x74u8, 0x5fu8, 0x73u8, 0x74u8, 0x72u8];
+    if eq_name(field, flen, slice_of(ps), 9usize) {
+        return 2usize;
+    }
+    return 0usize;
+}
+
 // Walk the module: magic + version, then id-dispatched sections. Collects the
 // Type section arities, the Function section's type indices, the Export section
 // (to find the "main" entry), and the Code section's per-body range + local
@@ -351,6 +387,8 @@ fn decode_module(bytes: [u8]) -> Module {
     let mut ftype: [64]usize = [0usize; 64];
     let mut m: Module = Module {
         nfuncs: 0,
+        nimports: 0usize,
+        imp_host: [0usize; 16],
         entry: 0,
         fstart: [0usize; 64],
         fend: [0usize; 64],
@@ -394,16 +432,75 @@ fn decode_module(bytes: [u8]) -> Module {
                 tnresults[conv usize t] = conv usize nres;
                 t = t + 1u32;
             }
+        } else if id == 0x02u8 {
+            // Import section: imported functions occupy the LOWEST function
+            // indices, so a func import is recorded at index `nimports` (its type
+            // arities go into the same per-function arrays the defined bodies use,
+            // which the Function/Code sections then offset PAST the imports).
+            // Table/memory/global imports are decoded but do NOT consume a
+            // function index. `nimports` (K) is the shift applied to every defined
+            // function index.
+            let nimp: u32 = read_u32(bytes, write r);
+            let mut ii: u32 = 0u32;
+            while ii < nimp {
+                let mlen: usize = conv usize (read_u32(bytes, write r));
+                let mut mbuf: [32]u8 = [0u8; 32];
+                let mut ai: usize = 0usize;
+                while ai < mlen {
+                    mbuf[ai] = read_byte(bytes, write r);
+                    ai = ai + 1usize;
+                }
+                let flen: usize = conv usize (read_u32(bytes, write r));
+                let mut fbuf: [32]u8 = [0u8; 32];
+                let mut bj: usize = 0usize;
+                while bj < flen {
+                    fbuf[bj] = read_byte(bytes, write r);
+                    bj = bj + 1usize;
+                }
+                let ikind: u8 = read_byte(bytes, write r);
+                if ikind == 0x00u8 {
+                    let ti: usize = conv usize (read_u32(bytes, write r));
+                    let fx: usize = m.nimports;
+                    m.fnparams[fx] = tnparams[ti];
+                    m.fnresults[fx] = tnresults[ti];
+                    m.imp_host[fx] = resolve_host(slice_of(mbuf), mlen, slice_of(fbuf), flen);
+                    m.nimports = m.nimports + 1usize;
+                } else if ikind == 0x01u8 {
+                    let et: u8 = read_byte(bytes, write r);
+                    let tflags: u8 = read_byte(bytes, write r);
+                    let tmin: u32 = read_u32(bytes, write r);
+                    if (tflags & 0x01u8) != 0u8 {
+                        let tmax: u32 = read_u32(bytes, write r);
+                    }
+                } else if ikind == 0x02u8 {
+                    let mflags: u8 = read_byte(bytes, write r);
+                    let mminp: u32 = read_u32(bytes, write r);
+                    m.has_mem = true;
+                    m.mem_min = conv usize mminp;
+                    if (mflags & 0x01u8) != 0u8 {
+                        let mmaxp: u32 = read_u32(bytes, write r);
+                        m.has_max = true;
+                        m.mem_max = conv usize mmaxp;
+                    }
+                } else {
+                    let gvt: u8 = read_byte(bytes, write r);
+                    let gmut: u8 = read_byte(bytes, write r);
+                }
+                ii = ii + 1u32;
+            }
         } else if id == 0x03u8 {
-            // Function section: vec of type indices, one per function.
+            // Function section: vec of type indices for the DEFINED functions,
+            // addressed at indices [nimports, nimports + count) — the imports
+            // hold the lower indices.
             let nfns: u32 = read_u32(bytes, write r);
-            m.nfuncs = conv usize nfns;
+            m.nfuncs = m.nimports + conv usize nfns;
             let mut fi: u32 = 0u32;
             while fi < nfns {
                 let ti: u32 = read_u32(bytes, write r);
-                ftype[conv usize fi] = conv usize ti;
-                m.fnparams[conv usize fi] = tnparams[conv usize ti];
-                m.fnresults[conv usize fi] = tnresults[conv usize ti];
+                let fx: usize = m.nimports + conv usize fi;
+                ftype[fx] = conv usize ti;
+                m.fnparams[fx] = tnparams[conv usize ti];
+                m.fnresults[fx] = tnresults[conv usize ti];
                 fi = fi + 1u32;
             }
         } else if id == 0x07u8 {
@@ -452,9 +549,10 @@ fn decode_module(bytes: [u8]) -> Module {
                     nloc = nloc + conv usize cnt;
                     g = g + 1u32;
                 }
-                m.fstart[conv usize bi] = r.pos;
-                m.fend[conv usize bi] = body_end;
-                m.fnlocals[conv usize bi] = nloc;
+                let fx: usize = m.nimports + conv usize bi;
+                m.fstart[fx] = r.pos;
+                m.fend[fx] = body_end;
+                m.fnlocals[fx] = nloc;
                 bi = bi + 1u32;
                 r.pos = body_end;
             }
@@ -816,13 +914,69 @@ fn eval_binop(op: u8, a: i64, b: i64) -> i64 {
     return res;
 }
 
+// Append the decimal text of an i32 (held sign-extended in an i64) to `hout`,
+// then a newline. Negating stays within i64 for the whole i32 range, so INT_MIN
+// prints without overflow.
+fn emit_i32_dec(hout: write Vec[u8], v: i64) alloc -> unit {
+    if v < 0i64 {
+        push(write hout.*, 0x2du8);
+    }
+    let mut mag: i64 = v;
+    if v < 0i64 {
+        mag = 0i64 - v;
+    }
+    if mag == 0i64 {
+        push(write hout.*, 0x30u8);
+    } else {
+        let mut digits: [12]u8 = [0u8; 12];
+        let mut n: usize = 0usize;
+        while mag > 0i64 {
+            let d: u8 = conv u8 (mag % 10i64);
+            digits[n] = d + 0x30u8;
+            n = n + 1usize;
+            mag = mag / 10i64;
+        }
+        while n > 0usize {
+            n = n - 1usize;
+            push(write hout.*, digits[n]);
+        }
+    }
+    push(write hout.*, 0x0au8);
+}
+
+// Dispatch a resolved host import (WASI-lite): `print_i32` appends the argument's
+// decimal + newline; `print_str(ptr, len)` copies `len` bytes of LINEAR MEMORY at
+// `ptr` (bounds-checked — an out-of-range span TRAPS) to the host output buffer.
+// Output is BUFFERED in `hout`: the pure interpreter has no I/O boundary and
+// simply discards an empty buffer, while the std::io boundary runner flushes the
+// buffer to real stdout after the run.
+fn host_call(hid: usize, a0: i64, a1: i64, mem: read Vec[u8], hout: write Vec[u8]) alloc -> unit {
+    if hid == 1usize {
+        emit_i32_dec(write hout.*, a0);
+    } else if hid == 2usize {
+        let mask: i64 = 0xffffffffi64;
+        let ptr: usize = conv usize (a0 & mask);
+        let ln: usize = conv usize (a1 & mask);
+        if ptr + ln > len(read mem.*) {
+            panic("out of bounds memory access");
+        }
+        let mut k: usize = 0usize;
+        while k < ln {
+            push(write hout.*, get(read mem.*, ptr + k).*);
+            k = k + 1usize;
+        }
+    } else {
+        panic("unknown host import");
+    }
+}
+
 // Non-recursive interpreter driver. The WORKING state (frame `f`, reader `r`,
 // `locals`, and the current function's identity/bounds) is kept in locals; a
 // `call` snapshots it onto the explicit `saved` activation stack and switches
 // to the callee; function-return (an outermost `end`, `return`, or a branch to
 // the function body) pops the snapshot and pushes the callee's result. Host
 // recursion is O(1), so WASM call depth is bounded only by `saved`'s capacity.
-fn exec(bytes: [u8], m: read Module, mem: write Vec[u8]) alloc -> i64 {
+fn exec(bytes: [u8], m: read Module, mem: write Vec[u8], hout: write Vec[u8]) alloc -> i64 {
     let mut saved: [256]Act = [zero_act(); 256];
     let mut fp: usize = 0;
 
@@ -937,26 +1091,44 @@ fn exec(bytes: [u8], m: read Module, mem: write Vec[u8]) alloc -> i64 {
             func_return = true;
         } else if op == 0x10u8 {
             let callee: usize = conv usize (read_u32(bytes, write r));
-            let np2: usize = m.fnparams[callee];
-            let mut cargs: [32]i64 = [0i64; 32];
-            let mut j: usize = np2;
-            while j > 0usize {
-                j = j - 1usize;
-                f.sp = f.sp - 1usize;
-                cargs[j] = f.stack[f.sp];
+            if callee < m.nimports {
+                // Host import (func index < K): pop the params, run the host
+                // effect, push no result (the WASI-lite print functions return
+                // nothing). No activation is pushed — the non-recursive driver is
+                // untouched.
+                let nh: usize = m.fnparams[callee];
+                let mut hargs: [32]i64 = [0i64; 32];
+                let mut jh: usize = nh;
+                while jh > 0usize {
+                    jh = jh - 1usize;
+                    f.sp = f.sp - 1usize;
+                    hargs[jh] = f.stack[f.sp];
+                }
+                host_call(m.imp_host[callee], hargs[0], hargs[1], read mem.*, write hout.*);
+            } else {
+                // Defined function (func index >= K): its metadata lives at the
+                // same index (Function/Code stored it offset past the imports).
+                let np2: usize = m.fnparams[callee];
+                let mut cargs: [32]i64 = [0i64; 32];
+                let mut j: usize = np2;
+                while j > 0usize {
+                    j = j - 1usize;
+                    f.sp = f.sp - 1usize;
+                    cargs[j] = f.stack[f.sp];
+                }
+                if fp >= 256usize {
+                    panic("call stack exhausted");
+                }
+                saved[fp] = Act { fidx: fidx, end: end, nres: nres, pos: r.pos, locals: locals, frame: f };
+                fp = fp + 1;
+                fidx = callee;
+                end = m.fend[callee];
+                nres = m.fnresults[callee];
+                r.pos = m.fstart[callee];
+                locals = cargs;
+                f.sp = 0;
+                f.nlab = 0;
             }
-            if fp >= 256usize {
-                panic("call stack exhausted");
-            }
-            saved[fp] = Act { fidx: fidx, end: end, nres: nres, pos: r.pos, locals: locals, frame: f };
-            fp = fp + 1;
-            fidx = callee;
-            end = m.fend[callee];
-            nres = m.fnresults[callee];
-            r.pos = m.fstart[callee];
-            locals = cargs;
-            f.sp = 0;
-            f.nlab = 0;
         } else if op == 0x20u8 {
             let x: usize = conv usize (read_u32(bytes, write r));
             f.stack[f.sp] = locals[x];
@@ -1286,7 +1458,7 @@ fn mk_alloc(state: write FreeList) -> Alloc {
 // Instantiate + run: decode, build the linear memory over the free-list
 // allocator, size it to the declared minimum, copy each active data segment into
 // place (bounds-checked), then run the entry on the eval loop.
-fn run_module(bytes: [u8]) alloc -> i64 {
+fn run_module(bytes: [u8], hout: write Vec[u8]) alloc -> i64 {
     let m: Module = decode_module(bytes);
     let mut st: FreeList = with_window(16777216usize, 8388608usize);
     let a: Alloc = mk_alloc(write st);
@@ -1312,21 +1484,21 @@ fn run_module(bytes: [u8]) alloc -> i64 {
         }
         sg = sg + 1usize;
     }
-    return exec(bytes, read m, write mem);
+    return exec(bytes, read m, write mem, write hout.*);
 }
 
 
-// === M3 FILE-RUN: read a REAL `.wasm` module off disk, then decode + run it ===
+// === M3 FILE-RUN + M4 HOST PRINT: read a REAL `.wasm` off disk, run it, and
+// flush any host `print` output to real stdout ===
 //
 // Everything above the harness-split line of the canonical interpreter is
 // reproduced verbatim here (the byte-source-decoupled decode + non-recursive
-// exec + linear memory), preceded by the std::io POSIX boundary. This tail adds
-// the raw-bytes file reader and an entry that opens a fixed `mod.wasm`, reads its
-// exact bytes, and runs the module — proving the interpreter runs actual `.wasm`
-// files off disk, not just embedded byte arrays. The harness (tests/wasm.rs on
-// the interp engines via the foreign_io shims; tests/aot.rs + tests/llvm.rs on a
-// native binary over real libc) writes the encoded module to `mod.wasm` and
-// asserts the run.
+// exec + linear memory + the M4 import decode / host dispatch), preceded by the
+// std::io POSIX boundary. This tail adds the raw-bytes file reader and an entry
+// that opens a fixed `mod.wasm`, reads its exact bytes, runs the module, then
+// writes the buffered host output (WASI-lite `print_i32`/`print_str`) to stdout
+// via `write_all`. The host layer BUFFERS into a `Vec[u8]` inside the pure
+// interpreter (which has no I/O boundary); THIS boundary fixture owns the flush.
 
 interface From[E] { fn from(e: E) -> Self; }
 impl From[IoError] for IoError { fn from(e: IoError) -> Self { return e; } }
@@ -1351,10 +1523,10 @@ fn read_all_bytes(a: read Alloc, fd: i32) alloc -> VecIoResult {
     return VecIoResult::Ok(v);
 }
 
-// Bridge the read bytes to the decoder: `run_module` consumes a `[u8]` (the
-// interpreter architecture is unchanged), so copy the Vec into a fixed buffer and
-// hand it a bounded view. The corpus modules are well under this bound.
-fn run_wasm_bytes(v: read Vec[u8]) alloc -> i64 {
+// Bridge the read bytes to the decoder + run, threading the host-output buffer:
+// copy the Vec into a fixed buffer, hand `run_module` a bounded view, and let it
+// append any WASI-lite `print` output to `hout`.
+fn run_wasm_bytes(v: read Vec[u8], hout: write Vec[u8]) alloc -> i64 {
     let n: usize = len(read v.*);
     if n > 8192usize {
         panic("module too large for the file-run buffer");
@@ -1365,15 +1537,18 @@ fn run_wasm_bytes(v: read Vec[u8]) alloc -> i64 {
         arr[i] = get(read v.*, i).*;
         i = i + 1usize;
     }
-    return run_module(subslice(slice_of(arr), 0usize, n));
+    return run_module(subslice(slice_of(arr), 0usize, n), write hout.*);
 }
 
 fn main() alloc -> i64 {
-    // The Vec receiving the file bytes uses a window DISJOINT from the one
-    // `run_module` carves for the module's linear memory ([16 MiB, 24 MiB)) — the
-    // two free-list allocators must not overlap.
+    // Three DISJOINT free-list windows: `run_module` carves the module's linear
+    // memory from [16 MiB, 24 MiB); the file bytes land in [32 MiB, 40 MiB); the
+    // host-output buffer uses [48 MiB, 56 MiB). Overlap corrupts a free-chain.
     let mut st: FreeList = with_window(33554432usize, 8388608usize);
     let a: Alloc = mk_alloc(write st);
+    let mut st2: FreeList = with_window(50331648usize, 8388608usize);
+    let a2: Alloc = mk_alloc(write st2);
+    let mut hout: Vec[u8] = vec_new(read a2);
     let name: [9]u8 = [109u8, 111u8, 100u8, 46u8, 119u8, 97u8, 115u8, 109u8, 0u8]; // "mod.wasm\0"
     let fd: usize = match open_read(slice_of(name)) {
         IoResult::Ok(c) => c,
@@ -1384,5 +1559,20 @@ fn main() alloc -> i64 {
         VecIoResult::Err(e) => { return 0i64 - 2i64; },
     };
     let cr: IoResult = close(conv i32 fd);
-    return run_wasm_bytes(read v);
+    let ret: i64 = run_wasm_bytes(read v, write hout);
+    // Flush the buffered host output through the I/O boundary to real stdout.
+    let outlen: usize = len(read hout);
+    if outlen > 0usize {
+        if outlen > 4096usize {
+            panic("host output too large for the flush buffer");
+        }
+        let mut obuf: [4096]u8 = [0u8; 4096];
+        let mut k: usize = 0usize;
+        while k < outlen {
+            obuf[k] = get(read hout, k).*;
+            k = k + 1usize;
+        }
+        let w: IoResult = write_all(stdout(), subslice(slice_of(obuf), 0usize, outlen));
+    }
+    return ret;
 }
