@@ -740,3 +740,55 @@ One lesson per entry, one-line summary first.
   732 nextest green (incl. selfhost gates over the enlarged interp.cnr + the
   AOT/stage_d corpus copy), clippy clean. M2 next: linear memory load/store +
   bounds trap over a `Vec[u8]`. (WASM M1, 2026-07-14).
+
+- **WASM interpreter M2 (linear memory: memory/data section decode + load/store +
+  memory.size/grow over a native `Vec[u8]`) — the load-bearing fact is that the
+  Vec builtins take `self` by an EXPLICIT borrow expression, so forwarding a
+  BORROWED `Vec` PARAM to `get`/`set`/`push`/`len` needs a DEREF-reborrow
+  (`set(write mem.*, ..)`, `get(read mem.*, ..)`), not bare and not `write mem`.**
+  Built on M1: `decode_module` now also decodes the Memory section (id 5: flags +
+  min pages LEB, opt max) and Data section (id 11: active segments — flag 0,
+  `i32.const N; end` offset via `read_const_offset`, byte vector; stored as
+  (offset, byte-range) in fixed `[16]` arrays). `run_module` instantiates the
+  linear memory as a native `Vec[u8]` over the SAME free-list allocator that
+  `vec_native.cnr` uses (`with_window(16MB, 8MB)` + `mk_alloc`), pushes
+  `min_pages*65536` zero bytes, copies each active data segment in (bounds-checked
+  → panic/trap), then runs `exec(bytes, read m, write mem)`. Load/store leaf
+  helpers (`do_load`/`do_store`/`mem_load_bytes`/`mem_store_bytes`/`sign_extend`,
+  factored OUT of `exec` like the M1 numeric helpers to keep its frame small):
+  memarg = align LEB (ignored) + offset LEB; effective addr = `(popped_i32 &
+  0xffffffff) + offset` (unsigned usize); bounds check `eaddr + size > len(mem)` →
+  `panic("out of bounds memory access")` (FaultKind::Panic, engine-consistent);
+  little-endian assemble/disassemble in `wrapping{}`; sign-extend via
+  `(v<<(64-bits))>>(64-bits)`, zero-extend by leaving the raw; i32 results
+  re-normalized with `as_i32`. memory.size (0x3f) reads the reserved memidx byte
+  and pushes `len/65536`; memory.grow (0x40) pushes `delta*65536` zeros (respecting
+  a declared max), returns OLD pages or -1. Facts that bit, in priority order:
+  (1) BORROW-FORWARDING: `set`/`push`/`get`/`len` type-check arg0 as `Use::Value`
+  over an explicit `write v`/`read v` borrow, so an OWNER (`let mut`) passes
+  `write v`/`read v`, but a `write Vec[u8]` PARAM must forward a DEREF-reborrow
+  `write mem.*`/`read mem.*` — bare `set(mem,..)` MOVES the param (E0301), and
+  `set(write mem,..)` double-borrows (E0703 `borrow_mut borrow_mut`); this differs
+  from the M1 struct-param rule (bare reborrows) precisely because the Vec builtins
+  consume an explicit borrow arg. (2) Using a native `Vec[u8]` forces the whole run
+  path to carry the `alloc` effect (`run_module`/`exec`/`main` + the store/grow
+  helpers) and an allocator handle; zero-init is per-byte `push`, ~0.37s for one
+  64KiB page on the tree-walker (debug), acceptable at the test scale (min 1 page)
+  but O(page_bytes) — a bulk `Vec`-of-length constructor would remove that cost
+  (roadmap: no `vec_with_len`/repeat intrinsic exists today). (3) `conv u8`/`conv
+  usize` are CHECKED — mask the assembled byte to `& 0xffi64` and the address to
+  `& 0xffffffffi64` (nonneg) before converting, inside `wrapping{}` for the shifts.
+  (4) `skip_immediates` must learn the memory ops (0x28-0x3e: 2 LEBs; 0x3f/0x40:
+  1 reserved byte) or a structured-control forward-scan over a block containing a
+  load/store mistakes an operand for an opcode. Gate (byte-exact on
+  oracle·MIR·native-noopt·native-opt, + AOT/LLVM/stage_d over the corpus copy):
+  i32/i64 store→load round-trip, width+sign/zero (load8_s→-1/load8_u→255, 16-bit,
+  i64.load8_s→-1, i64.load32_s→-1), little-endian order (store 0x04030201 →
+  load8_u@0=1, @3=4), data-segment init (0xDEADBEEF placed + read back), OOB
+  load/store/data-segment → Panic, memory.size/grow (old-count return, size
+  reflects growth, new region reads zero, max-exceeded → -1); encoder asserted
+  byte-equal to a hand-listed memory.size module + a data-segment module. 739
+  nextest green (+7 M2 tests over M1's 732; full + fast profiles), clippy clean,
+  run/ copy byte-identical. M3 next: read a real `.wasm` off disk (read_into +
+  read_all_bytes) and gate output byte-exact vs a wasmtime/node reference over a
+  module corpus. (WASM M2, 2026-07-14).

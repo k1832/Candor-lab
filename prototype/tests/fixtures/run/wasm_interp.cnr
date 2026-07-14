@@ -97,6 +97,14 @@ struct Module {
     fnparams: [64]usize,
     fnresults: [64]usize,
     fnlocals: [64]usize,
+    has_mem: bool,
+    mem_min: usize,
+    mem_max: usize,
+    has_max: bool,
+    ndata: usize,
+    data_off: [16]usize,
+    data_start: [16]usize,
+    data_len: [16]usize,
 }
 
 // A blocktype's RESULT arity. MVP blocktypes are `0x40` (empty -> 0) or a single
@@ -133,6 +141,11 @@ fn skip_immediates(bytes: [u8], r: write Reader, op: u8) -> unit {
         let x: u32 = read_u32(bytes, r);
     } else if op == 0x41u8 || op == 0x42u8 {
         let v: i64 = read_i64(bytes, r);
+    } else if op >= 0x28u8 && op <= 0x3eu8 {
+        let algn: u32 = read_u32(bytes, r);
+        let offs: u32 = read_u32(bytes, r);
+    } else if op == 0x3fu8 || op == 0x40u8 {
+        let resv: u8 = read_byte(bytes, r);
     }
 }
 
@@ -196,6 +209,21 @@ fn scan_forward_exits(bytes: [u8], r: write Reader, exits: usize) -> unit {
     }
 }
 
+// Evaluate a data segment's constant offset init expr. MVP handles the single
+// `i32.const N; end` form (globals are unused by these modules).
+fn read_const_offset(bytes: [u8], r: write Reader) -> usize {
+    let op: u8 = read_byte(bytes, r);
+    if op != 0x41u8 {
+        panic("unimplemented: non-i32.const data offset expr");
+    }
+    let v: i64 = read_i64(bytes, r);
+    let endb: u8 = read_byte(bytes, r);
+    if endb != 0x0bu8 {
+        panic("malformed data offset expr: expected end");
+    }
+    return conv usize (v & 0xffffffffi64);
+}
+
 // Walk the module: magic + version, then id-dispatched sections. Collects the
 // Type section arities, the Function section's type indices, the Export section
 // (to find the "main" entry), and the Code section's per-body range + local
@@ -223,6 +251,14 @@ fn decode_module(bytes: [u8]) -> Module {
         fnparams: [0usize; 64],
         fnresults: [0usize; 64],
         fnlocals: [0usize; 64],
+        has_mem: false,
+        mem_min: 0usize,
+        mem_max: 0usize,
+        has_max: false,
+        ndata: 0usize,
+        data_off: [0usize; 16],
+        data_start: [0usize; 16],
+        data_len: [0usize; 16],
     };
 
     let total: usize = len(bytes);
@@ -315,6 +351,40 @@ fn decode_module(bytes: [u8]) -> Module {
                 m.fnlocals[conv usize bi] = nloc;
                 bi = bi + 1u32;
                 r.pos = body_end;
+            }
+        } else if id == 0x05u8 {
+            // Memory section: vec of memory types (flags + min pages, opt max).
+            let nmem: u32 = read_u32(bytes, write r);
+            let mut mm: u32 = 0u32;
+            while mm < nmem {
+                let flags: u8 = read_byte(bytes, write r);
+                let minp: u32 = read_u32(bytes, write r);
+                m.has_mem = true;
+                m.mem_min = conv usize minp;
+                if (flags & 0x01u8) != 0u8 {
+                    let maxp: u32 = read_u32(bytes, write r);
+                    m.has_max = true;
+                    m.mem_max = conv usize maxp;
+                }
+                mm = mm + 1u32;
+            }
+        } else if id == 0x0bu8 {
+            // Data section: active segments (memidx 0, const offset, byte vector).
+            let nseg: u32 = read_u32(bytes, write r);
+            let mut sg: u32 = 0u32;
+            while sg < nseg {
+                let dflags: u32 = read_u32(bytes, write r);
+                if dflags != 0u32 {
+                    panic("unimplemented: non-active data segment");
+                }
+                let off: usize = read_const_offset(bytes, write r);
+                let dlen: u32 = read_u32(bytes, write r);
+                m.data_off[m.ndata] = off;
+                m.data_start[m.ndata] = r.pos;
+                m.data_len[m.ndata] = conv usize dlen;
+                m.ndata = m.ndata + 1usize;
+                r.pos = r.pos + conv usize dlen;
+                sg = sg + 1u32;
             }
         }
         r.pos = payload_end;
@@ -646,7 +716,7 @@ fn eval_binop(op: u8, a: i64, b: i64) -> i64 {
 // to the callee; function-return (an outermost `end`, `return`, or a branch to
 // the function body) pops the snapshot and pushes the callee's result. Host
 // recursion is O(1), so WASM call depth is bounded only by `saved`'s capacity.
-fn exec(bytes: [u8], m: read Module) -> i64 {
+fn exec(bytes: [u8], m: read Module, mem: write Vec[u8]) alloc -> i64 {
     let mut saved: [256]Act = [zero_act(); 256];
     let mut fp: usize = 0;
 
@@ -800,6 +870,40 @@ fn exec(bytes: [u8], m: read Module) -> i64 {
             let v: i64 = read_i64(bytes, write r);
             f.stack[f.sp] = v;
             f.sp = f.sp + 1;
+        } else if op >= 0x28u8 && op <= 0x35u8 {
+            // Load: memarg (align ignored); effective addr = popped i32 + offset.
+            let algn: u32 = read_u32(bytes, write r);
+            let offs: u32 = read_u32(bytes, write r);
+            f.sp = f.sp - 1usize;
+            let base_addr: i64 = f.stack[f.sp] & mask;
+            let eaddr: usize = conv usize base_addr + conv usize offs;
+            f.stack[f.sp] = do_load(read mem.*, op, eaddr);
+            f.sp = f.sp + 1usize;
+        } else if op >= 0x36u8 && op <= 0x3eu8 {
+            // Store: pop value then address; write low bytes little-endian.
+            let algn: u32 = read_u32(bytes, write r);
+            let offs: u32 = read_u32(bytes, write r);
+            f.sp = f.sp - 1usize;
+            let sval: i64 = f.stack[f.sp];
+            f.sp = f.sp - 1usize;
+            let base_addr: i64 = f.stack[f.sp] & mask;
+            let eaddr: usize = conv usize base_addr + conv usize offs;
+            do_store(write mem.*, op, eaddr, sval);
+        } else if op == 0x3fu8 {
+            // memory.size: push the current size in pages (reserved memidx byte).
+            let resv: u8 = read_byte(bytes, write r);
+            let pages: i64 = conv i64 (len(read mem.*) / 65536usize);
+            f.stack[f.sp] = as_i32(pages);
+            f.sp = f.sp + 1usize;
+        } else if op == 0x40u8 {
+            // memory.grow: pop delta pages, grow by zero bytes; push old page count
+            // (or -1 on failure). Reserved memidx byte first.
+            let resv: u8 = read_byte(bytes, write r);
+            f.sp = f.sp - 1usize;
+            let delta: i64 = f.stack[f.sp] & mask;
+            let grown: i64 = do_grow(write mem.*, m.mem_max, m.has_max, conv usize delta);
+            f.stack[f.sp] = as_i32(grown);
+            f.sp = f.sp + 1usize;
         } else if op == 0x45u8 || op == 0x50u8 || op == 0x67u8 || op == 0x68u8 || op == 0x69u8 || op == 0x79u8 || op == 0x7au8 || op == 0x7bu8 || op == 0xa7u8 || op == 0xacu8 || op == 0xadu8 {
             // Unary numeric: pop one operand, push one result.
             f.sp = f.sp - 1;
@@ -845,9 +949,264 @@ fn exec(bytes: [u8], m: read Module) -> i64 {
     return retval;
 }
 
-fn run_module(bytes: [u8]) -> i64 {
+// ---- linear memory (M2): a growable native `Vec[u8]`, byte-addressed --------
+//
+// WebAssembly memory is little-endian, zero-initialized, sized in 64 KiB pages.
+// It is represented as a native `Vec[u8]` grown over an explicit free-list
+// allocator (below): `min_pages * 65536` zero bytes at instantiation, and
+// `memory.grow` pushes more. Loads/stores bounds-check `eaddr + size <= len` and
+// TRAP (panic) past the end. This keeps the interpreter honest end-to-end — the
+// decode+eval genuinely reads/writes the bytes.
+
+// Sign-extend the low `bits` of `v` to a full i64 (arithmetic-shift pair inside
+// `wrapping` so neither shift can fault).
+fn sign_extend(v: i64, bits: usize) -> i64 {
+    let sh: i64 = conv i64 (64usize - bits);
+    let mut res: i64 = 0i64;
+    wrapping { res = (v << sh) >> sh; }
+    return res;
+}
+
+// Assemble `size` little-endian bytes at `eaddr` into the low bits of an i64
+// (zero-extended); callers apply sign/zero extension per opcode.
+fn mem_load_bytes(mem: read Vec[u8], eaddr: usize, size: usize) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut k: usize = 0usize;
+    while k < size {
+        let b: i64 = conv i64 (get(read mem.*, eaddr + k).*);
+        let sh: i64 = conv i64 (k * 8usize);
+        wrapping { acc = acc | (b << sh); }
+        k = k + 1usize;
+    }
+    return acc;
+}
+
+// Write the low `size` bytes of `val` little-endian into memory at `eaddr`.
+fn mem_store_bytes(mem: write Vec[u8], eaddr: usize, size: usize, val: i64) alloc -> unit {
+    let mut k: usize = 0usize;
+    while k < size {
+        let sh: i64 = conv i64 (k * 8usize);
+        let mut byteval: i64 = 0i64;
+        wrapping { byteval = (val >> sh) & 0xffi64; }
+        let b: u8 = conv u8 byteval;
+        set(write mem.*, eaddr + k, b);
+        k = k + 1usize;
+    }
+}
+
+// Load per opcode: pick the access size, bounds-check (TRAP past the end), read
+// little-endian, then sign- or zero-extend to the i32/i64 result representation.
+fn do_load(mem: read Vec[u8], op: u8, eaddr: usize) -> i64 {
+    let mut size: usize = 4usize;
+    if op == 0x29u8 {
+        size = 8usize;
+    } else if op == 0x2cu8 || op == 0x2du8 || op == 0x30u8 || op == 0x31u8 {
+        size = 1usize;
+    } else if op == 0x2eu8 || op == 0x2fu8 || op == 0x32u8 || op == 0x33u8 {
+        size = 2usize;
+    } else {
+        size = 4usize;
+    }
+    if eaddr + size > len(read mem.*) {
+        panic("out of bounds memory access");
+    }
+    let raw: i64 = mem_load_bytes(read mem.*, eaddr, size);
+    let mut res: i64 = 0i64;
+    if op == 0x28u8 {
+        res = as_i32(raw);
+    } else if op == 0x29u8 {
+        res = raw;
+    } else if op == 0x2cu8 || op == 0x30u8 {
+        res = sign_extend(raw, 8usize);
+    } else if op == 0x2eu8 || op == 0x32u8 {
+        res = sign_extend(raw, 16usize);
+    } else if op == 0x34u8 {
+        res = sign_extend(raw, 32usize);
+    } else {
+        res = raw;
+    }
+    return res;
+}
+
+// Store per opcode: pick the access size, bounds-check (TRAP past the end), write
+// the low bytes little-endian.
+fn do_store(mem: write Vec[u8], op: u8, eaddr: usize, val: i64) alloc -> unit {
+    let mut size: usize = 4usize;
+    if op == 0x37u8 {
+        size = 8usize;
+    } else if op == 0x3au8 || op == 0x3cu8 {
+        size = 1usize;
+    } else if op == 0x3bu8 || op == 0x3du8 {
+        size = 2usize;
+    } else {
+        size = 4usize;
+    }
+    if eaddr + size > len(read mem.*) {
+        panic("out of bounds memory access");
+    }
+    mem_store_bytes(write mem.*, eaddr, size, val);
+}
+
+// memory.grow: append `delta` pages of zero bytes, respecting a declared max;
+// returns the OLD page count, or -1 on failure.
+fn do_grow(mem: write Vec[u8], mem_max: usize, has_max: bool, delta: usize) alloc -> i64 {
+    let old_bytes: usize = len(read mem.*);
+    let old_pages: usize = old_bytes / 65536usize;
+    let new_pages: usize = old_pages + delta;
+    if has_max {
+        if new_pages > mem_max {
+            return 0i64 - 1i64;
+        }
+    }
+    let add: usize = delta * 65536usize;
+    let mut k: usize = 0usize;
+    while k < add {
+        push(write mem.*, 0u8);
+        k = k + 1usize;
+    }
+    return conv i64 old_pages;
+}
+
+// ---- free-list allocator (backs the linear-memory `Vec[u8]`) ---------------
+
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+
+struct FreeList { next: usize, end: usize, head: rawptr u8 }
+struct FreeBlock { next: rawptr u8, size: usize }
+
+fn with_window(base: usize, size: usize) -> FreeList {
+    unsafe "the empty free list starts with a null head; no block is threaded yet" {
+        return FreeList { next: base, end: base + size, head: ptr_null[u8]() };
+    }
+}
+
+fn block_span(size: usize, align: usize) -> usize {
+    let mut need: usize = size;
+    if need < 16usize {
+        need = 16usize;
+    }
+    return (need + align - 1usize) / align * align;
+}
+
+fn freelist_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live FreeList whose [next, end) window and address-ordered free chain are reserved to this arena alone; every carved block stays inside [next, end) and is >= header-sized, and a split remainder (kept only when >= MIN_SPLIT) is written into the block's own tail" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let need: usize = block_span(size, align);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) {
+            let blk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if blk.size >= need {
+                if blk.size - need >= 32usize {
+                    let rem: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(cur) + need);
+                    ptr_write(cast_ptr[FreeBlock](rem), FreeBlock { next: blk.next, size: blk.size - need });
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: rem });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: rem, size: pblk.size });
+                    }
+                } else {
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: blk.next });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: blk.next, size: pblk.size });
+                    }
+                }
+                return cur;
+            }
+            prev = cur;
+            cur = blk.next;
+        }
+        let aligned: usize = (st.next + align - 1usize) / align * align;
+        if aligned + need > st.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: aligned + need, end: st.end, head: st.head });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+
+fn freelist_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    unsafe "the free list is kept ADDRESS-ORDERED; the freed block's own storage (>= header-sized, guaranteed by block_span in alloc) holds its FreeBlock header {next, size}, and a merge joins two blocks ONLY when their byte spans are exactly adjacent (addr + size == neighbour addr), so a merge can never overlap live memory nor bridge a gap" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let mut cap: usize = block_span(size, align);
+        let a: usize = ptr_to_addr(ptr);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) && ptr_to_addr(cur) < a {
+            let cblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            prev = cur;
+            cur = cblk.next;
+        }
+        let mut link: rawptr u8 = cur;
+        if !is_null(cur) {
+            let nblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if a + cap == ptr_to_addr(cur) {
+                cap = cap + nblk.size;
+                link = nblk.next;
+            }
+        }
+        if !is_null(prev) {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            if ptr_to_addr(prev) + pblk.size == a {
+                ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: link, size: pblk.size + cap });
+                return;
+            }
+        }
+        ptr_write(cast_ptr[FreeBlock](ptr), FreeBlock { next: link, size: cap });
+        if is_null(prev) {
+            ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: ptr });
+        } else {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: ptr, size: pblk.size });
+        }
+    }
+}
+
+static FREELIST_VT: AllocVtable = AllocVtable { alloc: freelist_alloc, free: freelist_free };
+
+fn mk_alloc(state: write FreeList) -> Alloc {
+    unsafe "ctx (the caller's FreeList local) and vt (the static FREELIST_VT) outlive every String this handle serves; the caller keeps the window and FREELIST_VT alive for the whole run and drops every String before the window dies" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(FREELIST_VT) };
+    }
+}
+
+// Instantiate + run: decode, build the linear memory over the free-list
+// allocator, size it to the declared minimum, copy each active data segment into
+// place (bounds-checked), then run the entry on the eval loop.
+fn run_module(bytes: [u8]) alloc -> i64 {
     let m: Module = decode_module(bytes);
-    return exec(bytes, read m);
+    let mut st: FreeList = with_window(16777216usize, 8388608usize);
+    let a: Alloc = mk_alloc(write st);
+    let mut mem: Vec[u8] = vec_new(read a);
+    let total: usize = m.mem_min * 65536usize;
+    let mut i: usize = 0usize;
+    while i < total {
+        push(write mem, 0u8);
+        i = i + 1usize;
+    }
+    let mut sg: usize = 0usize;
+    while sg < m.ndata {
+        let off: usize = m.data_off[sg];
+        let dlen: usize = m.data_len[sg];
+        let dstart: usize = m.data_start[sg];
+        if off + dlen > len(read mem) {
+            panic("data segment out of bounds");
+        }
+        let mut k: usize = 0usize;
+        while k < dlen {
+            set(write mem, off + k, bytes[dstart + k]);
+            k = k + 1usize;
+        }
+        sg = sg + 1usize;
+    }
+    return exec(bytes, read m, write mem);
 }
 
 // === HARNESS SPLIT: everything above is the reusable interpreter ===
@@ -856,7 +1215,7 @@ fn run_module(bytes: [u8]) -> i64 {
 // below keeps this file a standalone, corpus-runnable program: the M0 add
 // module (no Export section, so entry defaults to func 0) still yields 42.
 
-fn main() -> i64 {
+fn main() alloc -> i64 {
     let data: [30]u8 = [
         0x00u8, 0x61u8, 0x73u8, 0x6du8, 0x01u8, 0x00u8, 0x00u8, 0x00u8,
         0x01u8, 0x05u8, 0x01u8, 0x60u8, 0x00u8, 0x01u8, 0x7fu8,

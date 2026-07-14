@@ -81,7 +81,7 @@ fn program(bytes: &[u8]) -> String {
         lits.push_str(&format!("0x{byte:02x}u8"));
     }
     format!(
-        "{}\nfn main() -> i64 {{\n    let data: [{}]u8 = [{}];\n    return run_module(slice_of(data));\n}}\n",
+        "{}\nfn main() alloc -> i64 {{\n    let data: [{}]u8 = [{}];\n    return run_module(slice_of(data));\n}}\n",
         interp_fns(),
         bytes.len(),
         lits,
@@ -562,4 +562,299 @@ fn divide_by_zero_traps() {
     assert_eq!(run_fault_all(&program(&arith32(1, 0, 0x70))), FaultKind::Panic);
     // signed div overflow INT_MIN / -1 traps.
     assert_eq!(run_fault_all(&program(&arith32(i32::MIN, -1, 0x6d))), FaultKind::Panic);
+}
+
+// ---- M2 encoder: linear memory (memory/data sections, load/store) ----------
+//
+// Same discipline as M0/M1: an INDEPENDENT Rust encoder builds the real `.wasm`
+// bytes, two modules (memory.size + a data segment) are asserted byte-equal to a
+// hand-listed spec below, and every result is checked against a KNOWN value on
+// all four engines. The decode+eval genuinely reads/writes the `Vec[u8]` memory
+// little-endian and bounds-traps — nothing is hardcoded.
+
+/// A memarg (align, offset). `align` is the natural log2(size); semantics ignore
+/// it, but the encoder emits the canonical value so the byte anchor is meaningful.
+fn mop(op: u8, align: u32, offset: u32) -> Vec<u8> {
+    let mut b = vec![op];
+    leb_u32(align, &mut b);
+    leb_u32(offset, &mut b);
+    b
+}
+
+/// One exported `main : () -> result` over a memory of `min_pages` (opt `max`),
+/// with optional active data segments (each `(offset, bytes)`), given body/locals.
+/// Sections: Type(1) Function(3) Memory(5) Export(7) Code(10) Data(11).
+fn wasm_mem_module(
+    result: u8,
+    min_pages: u32,
+    max_pages: Option<u32>,
+    data: &[(u32, Vec<u8>)],
+    locals: Vec<(u32, u8)>,
+    body: Vec<u8>,
+) -> Vec<u8> {
+    let mut m: Vec<u8> = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+    // Type: 1 functype () -> (result).
+    wasm_section(&mut m, 0x01, &[0x01, 0x60, 0x00, 0x01, result]);
+    // Function: 1 func, type index 0.
+    wasm_section(&mut m, 0x03, &[0x01, 0x00]);
+    // Memory: 1 memory (flags + min pages [+ max pages]).
+    let mut mem = vec![0x01u8];
+    match max_pages {
+        Some(mx) => {
+            mem.push(0x01);
+            leb_u32(min_pages, &mut mem);
+            leb_u32(mx, &mut mem);
+        }
+        None => {
+            mem.push(0x00);
+            leb_u32(min_pages, &mut mem);
+        }
+    }
+    wasm_section(&mut m, 0x05, &mem);
+    // Export "main" -> func 0.
+    wasm_section(&mut m, 0x07, &[0x01, 0x04, 0x6d, 0x61, 0x69, 0x6e, 0x00, 0x00]);
+    // Code: one body (local decls + instructions).
+    let mut bd: Vec<u8> = Vec::new();
+    leb_u32(locals.len() as u32, &mut bd);
+    for (c, v) in &locals {
+        leb_u32(*c, &mut bd);
+        bd.push(*v);
+    }
+    bd.extend_from_slice(&body);
+    let mut code: Vec<u8> = Vec::new();
+    leb_u32(1, &mut code);
+    leb_u32(bd.len() as u32, &mut code);
+    code.extend_from_slice(&bd);
+    wasm_section(&mut m, 0x0a, &code);
+    // Data: active segments (flag 0, memidx 0, `i32.const off; end`, byte vector).
+    if !data.is_empty() {
+        let mut dv: Vec<u8> = Vec::new();
+        leb_u32(data.len() as u32, &mut dv);
+        for (off, bytes) in data {
+            dv.push(0x00);
+            dv.push(0x41);
+            leb_i32(*off as i32, &mut dv);
+            dv.push(0x0b);
+            leb_u32(bytes.len() as u32, &mut dv);
+            dv.extend_from_slice(bytes);
+        }
+        wasm_section(&mut m, 0x0b, &dv);
+    }
+    m
+}
+
+/// Store `val` (i32) at address 0, then load it back with `load_op` at `load_off`.
+fn store_then_load(store_op: u8, store_al: u32, load_op: u8, load_al: u32, load_off: u32, val: i32, result: u8) -> Vec<u8> {
+    let mut body = c32(0);
+    body.extend(c32(val));
+    body.extend(mop(store_op, store_al, 0));
+    body.extend(c32(0));
+    body.extend(mop(load_op, load_al, load_off));
+    body.push(0x0b);
+    wasm_mem_module(result, 1, None, &[], vec![], body)
+}
+
+// ---- M2 spec anchors: two hand-listed modules (encoder must reproduce) ------
+
+/// `memory.size` over a 2-page memory -> 2. Anchors the Memory(5) section decode.
+const MEMSIZE2_MODULE: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // \0asm, version 1
+    0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // Type: () -> (i32)
+    0x03, 0x02, 0x01, 0x00, // Function: func 0 : type 0
+    0x05, 0x03, 0x01, 0x00, 0x02, // Memory: 1 mem, flags 0, min 2 pages
+    0x07, 0x08, 0x01, 0x04, 0x6d, 0x61, 0x69, 0x6e, 0x00, 0x00, // Export "main" -> func 0
+    0x0a, 0x06, 0x01, 0x04, 0x00, 0x3f, 0x00, 0x0b, // Code: memory.size; end
+];
+
+/// A data segment `01 02 03 04` at offset 0, then `i32.load` at 0 -> 0x04030201
+/// (little-endian). Anchors both the Memory(5) and Data(11) section decode.
+const DATA_MODULE: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f,
+    0x03, 0x02, 0x01, 0x00,
+    0x05, 0x03, 0x01, 0x00, 0x01, // Memory: 1 page
+    0x07, 0x08, 0x01, 0x04, 0x6d, 0x61, 0x69, 0x6e, 0x00, 0x00,
+    0x0a, 0x09, 0x01, 0x07, 0x00, 0x41, 0x00, 0x28, 0x02, 0x00, 0x0b, // i32.const 0; i32.load; end
+    0x0b, 0x0a, 0x01, 0x00, 0x41, 0x00, 0x0b, 0x04, 0x01, 0x02, 0x03, 0x04, // Data: [1,2,3,4] @ 0
+];
+
+#[test]
+fn m2_encoder_matches_spec_bytes() {
+    let msize = {
+        let mut body = vec![0x3f, 0x00];
+        body.push(0x0b);
+        wasm_mem_module(I32, 2, None, &[], vec![], body)
+    };
+    assert_eq!(msize, MEMSIZE2_MODULE);
+
+    let dmod = {
+        let mut body = c32(0);
+        body.extend(mop(0x28, 2, 0));
+        body.push(0x0b);
+        wasm_mem_module(I32, 1, None, &[(0, vec![0x01, 0x02, 0x03, 0x04])], vec![], body)
+    };
+    assert_eq!(dmod, DATA_MODULE);
+}
+
+// ---- M2 gate: round-trip, width+sign/zero+endianness, data, OOB, grow -------
+
+#[test]
+fn store_load_roundtrip() {
+    // i32 round-trip: store a value, load it back.
+    let m = {
+        let mut body = c32(16);
+        body.extend(c32(0x12345678));
+        body.extend(mop(0x36, 2, 0)); // i32.store
+        body.extend(c32(16));
+        body.extend(mop(0x28, 2, 0)); // i32.load
+        body.push(0x0b);
+        wasm_mem_module(I32, 1, None, &[], vec![], body)
+    };
+    assert_eq!(run_ret_all(&program(&m)), 0x12345678);
+
+    // i64 round-trip through a full 8-byte access.
+    let m64 = {
+        let mut body = c32(32);
+        body.extend(c64(0x0102030405060708));
+        body.extend(mop(0x37, 3, 0)); // i64.store
+        body.extend(c32(32));
+        body.extend(mop(0x29, 3, 0)); // i64.load
+        body.push(0x0b);
+        wasm_mem_module(I64, 1, None, &[], vec![], body)
+    };
+    assert_eq!(run_ret_all(&program(&m64)), 0x0102030405060708);
+}
+
+#[test]
+fn load_width_sign_zero_extension() {
+    // Store byte 0xFF, then i32.load8_s -> -1, i32.load8_u -> 255.
+    assert_eq!(run_ret_all(&program(&store_then_load(0x3a, 0, 0x2c, 0, 0, 0xff, I32))), -1);
+    assert_eq!(run_ret_all(&program(&store_then_load(0x3a, 0, 0x2d, 0, 0, 0xff, I32))), 255);
+    // Store 0xFFFF, then i32.load16_s -> -1, i32.load16_u -> 65535.
+    assert_eq!(run_ret_all(&program(&store_then_load(0x3b, 1, 0x2e, 1, 0, 0xffff, I32))), -1);
+    assert_eq!(run_ret_all(&program(&store_then_load(0x3b, 1, 0x2f, 1, 0, 0xffff, I32))), 65535);
+    // i64 width forms: store byte 0xFF, i64.load8_s -> -1 (full 64-bit sign fill),
+    // i64.load8_u -> 255; i64.load32_s of 0xFFFFFFFF -> -1.
+    assert_eq!(run_ret_all(&program(&store_then_load(0x3c, 0, 0x30, 0, 0, 0xff, I64))), -1);
+    assert_eq!(run_ret_all(&program(&store_then_load(0x3c, 0, 0x31, 0, 0, 0xff, I64))), 255);
+    let m32s = {
+        let mut body = c32(0);
+        body.extend(c64(0xffffffff));
+        body.extend(mop(0x3e, 2, 0)); // i64.store32 (low 4 bytes = 0xffffffff)
+        body.extend(c32(0));
+        body.extend(mop(0x34, 2, 0)); // i64.load32_s
+        body.push(0x0b);
+        wasm_mem_module(I64, 1, None, &[], vec![], body)
+    };
+    assert_eq!(run_ret_all(&program(&m32s)), -1);
+}
+
+#[test]
+fn little_endian_byte_order() {
+    // Store 0x04030201 as i32 at 0; the LOW byte sits at offset 0.
+    assert_eq!(run_ret_all(&program(&store_then_load(0x36, 2, 0x2d, 0, 0, 0x04030201, I32))), 0x01);
+    // ... the byte at offset 3 is the HIGH byte 0x04.
+    assert_eq!(run_ret_all(&program(&store_then_load(0x36, 2, 0x2d, 0, 3, 0x04030201, I32))), 0x04);
+}
+
+#[test]
+fn data_segment_init() {
+    // A data segment places 0xEF 0xBE 0xAD 0xDE at offset 8; i32.load at 8 reads
+    // them little-endian as 0xDEADBEEF.
+    let m = {
+        let mut body = c32(8);
+        body.extend(mop(0x28, 2, 0)); // i32.load
+        body.push(0x0b);
+        wasm_mem_module(I32, 1, None, &[(8, vec![0xef, 0xbe, 0xad, 0xde])], vec![], body)
+    };
+    assert_eq!(run_ret_all(&program(&m)), 0xdeadbeefu32 as i32 as i64);
+    // A single byte from the segment via load8_u confirms placement/order.
+    let mb = {
+        let mut body = c32(8);
+        body.extend(mop(0x2d, 0, 2)); // i32.load8_u at offset 2 -> 0xad
+        body.push(0x0b);
+        wasm_mem_module(I32, 1, None, &[(8, vec![0xef, 0xbe, 0xad, 0xde])], vec![], body)
+    };
+    assert_eq!(run_ret_all(&program(&mb)), 0xad);
+}
+
+#[test]
+fn out_of_bounds_traps() {
+    // Load at address 65536 (one page) faults: 65536 + 4 > 65536.
+    let load_oob = {
+        let mut body = c32(65536);
+        body.extend(mop(0x28, 2, 0));
+        body.push(0x0b);
+        wasm_mem_module(I32, 1, None, &[], vec![], body)
+    };
+    assert_eq!(run_fault_all(&program(&load_oob)), FaultKind::Panic);
+    // Store past the end faults too: store an i32 at 65534 -> 65534 + 4 > 65536.
+    let store_oob = {
+        let mut body = c32(65534);
+        body.extend(c32(1));
+        body.extend(mop(0x36, 2, 0));
+        body.push(0x0b);
+        wasm_mem_module(I32, 1, None, &[], vec![], body)
+    };
+    assert_eq!(run_fault_all(&program(&store_oob)), FaultKind::Panic);
+    // An out-of-range active data segment is a module/instantiation trap.
+    let data_oob = wasm_mem_module(I32, 1, None, &[(65534, vec![0x01, 0x02, 0x03, 0x04])], vec![], {
+        let mut b = c32(0);
+        b.push(0x0b);
+        b
+    });
+    assert_eq!(run_fault_all(&program(&data_oob)), FaultKind::Panic);
+}
+
+#[test]
+fn memory_size_and_grow() {
+    // memory.size over 2 pages -> 2.
+    let size2 = {
+        let mut body = vec![0x3f, 0x00];
+        body.push(0x0b);
+        wasm_mem_module(I32, 2, None, &[], vec![], body)
+    };
+    assert_eq!(run_ret_all(&program(&size2)), 2);
+
+    // memory.grow by 3 returns the OLD page count (1).
+    let grow_old = {
+        let mut body = c32(3);
+        body.extend([0x40, 0x00]); // memory.grow
+        body.push(0x0b);
+        wasm_mem_module(I32, 1, None, &[], vec![], body)
+    };
+    assert_eq!(run_ret_all(&program(&grow_old)), 1);
+
+    // grow by 2, then memory.size (3), added -> 1 + 3 = 4.
+    let grow_then_size = {
+        let mut body = c32(2);
+        body.extend([0x40, 0x00]);
+        body.extend([0x3f, 0x00]);
+        body.push(0x6a); // i32.add
+        body.push(0x0b);
+        wasm_mem_module(I32, 1, None, &[], vec![], body)
+    };
+    assert_eq!(run_ret_all(&program(&grow_then_size)), 4);
+
+    // A load into the newly-grown region reads zero. Grow by 1, stash the old
+    // count in a local, then i32.load8_u at 70000 (in the new page) -> 0.
+    let grow_zero = {
+        let mut body = c32(1);
+        body.extend([0x40, 0x00]);
+        body.extend([0x21, 0x00]); // local.set 0 (discard old count)
+        body.extend(c32(70000));
+        body.extend(mop(0x2d, 0, 0)); // i32.load8_u
+        body.push(0x0b);
+        wasm_mem_module(I32, 1, None, &[], vec![(1, I32)], body)
+    };
+    assert_eq!(run_ret_all(&program(&grow_zero)), 0);
+
+    // grow beyond a declared max fails, pushing -1.
+    let grow_fail = {
+        let mut body = c32(5);
+        body.extend([0x40, 0x00]);
+        body.push(0x0b);
+        wasm_mem_module(I32, 1, Some(2), &[], vec![], body)
+    };
+    assert_eq!(run_ret_all(&program(&grow_fail)), -1);
 }
