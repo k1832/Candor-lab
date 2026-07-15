@@ -22,6 +22,7 @@ cranelift-jit = "=0.132.3"
 libc = "0.2"
 cranelift-object = "=0.132.3"
 cranelift-native = "=0.132.3"
+toml = "1"
 
 [[bench]]
 name = "p20"

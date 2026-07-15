@@ -15,6 +15,7 @@ pub mod foreign_io;
 pub mod generics;
 pub mod interp;
 pub mod lexer;
+pub mod manifest;
 pub mod mir;
 pub mod modules;
 pub mod parser;

@@ -9,6 +9,11 @@
 //!   candor count <file>   -- parse + check, then emit the frozen Bet 5
 //!                                  unit-table counts as JSON (exit 0), or a
 //!                                  parse-error JSON (exit 1).
+//!   candor manifest <dir_or_file>
+//!                               -- parse + validate a package manifest
+//!                                  (candor.toml; design 0017 §2) and print it
+//!                                  as JSON. Exit 0 on a valid manifest, 1 on a
+//!                                  manifest error or a manifest-less directory.
 //!   candor migrate <file.cn> [-o <out.cnr>]
 //!                               -- P15 migrator (design 0006 §5): parse the
 //!                                  throwaway `.cn` file and emit real (`.cnr`)
@@ -32,6 +37,7 @@ fn main() -> ExitCode {
         (Some("count"), Some(path)) => run_count(path),
         (Some("audit"), Some(path)) => run_audit(path),
         (Some("build"), Some(path)) => run_build(path),
+        (Some("manifest"), Some(path)) => run_manifest(path),
         (Some("compile"), Some(_)) => run_compile(&args[2..]),
         (Some("migrate"), Some(path)) => run_migrate(path, &args[3..]),
         (Some("fmt"), Some(path)) => run_fmt(path, &args[3..]),
@@ -52,7 +58,7 @@ fn main() -> ExitCode {
 
 /// The CLI usage text, shared by `--help` (stdout, exit 0) and the unknown-command
 /// error path (stderr, exit 2).
-const USAGE: &str = "usage: candor (parse|check|run|count|audit|build) <file>  |  run [--engine=mir] <file>  |  compile <file_or_dir> -o <prog> [--freestanding]  |  migrate <file.cn> [-o <out.cnr>]  |  fmt <file_or_dir.cnr> [--check|--stdout]  |  --version  |  --help   (.cnr = real syntax, .cn = throwaway)";
+const USAGE: &str = "usage: candor (parse|check|run|count|audit|build|manifest) <file>  |  run [--engine=mir] <file>  |  compile <file_or_dir> -o <prog> [--freestanding]  |  migrate <file.cn> [-o <out.cnr>]  |  fmt <file_or_dir.cnr> [--check|--stdout]  |  --version  |  --help   (.cnr = real syntax, .cn = throwaway)";
 
 /// True when the path names a real-syntax (`.cnr`) source file.
 fn is_real(path: &str) -> bool {
@@ -426,6 +432,39 @@ fn run_count(path: &str) -> ExitCode {
 
 /// `migrate <file.cn> [-o <out.cnr>]` — parse the throwaway front-end and emit
 /// real syntax to stdout (default) or to the `-o` file.
+/// `candor manifest <dir_or_file>` (design 0017 §2): parse + validate a package
+/// manifest and print it as JSON. A directory is read as `<dir>/candor.toml`
+/// (its absence prints a note and exits 1); a file path is parsed directly.
+fn run_manifest(path: &str) -> ExitCode {
+    let p = std::path::Path::new(path);
+    let parsed = if p.is_dir() {
+        match candor_proto::manifest::load_manifest(p) {
+            Ok(Some(m)) => Ok(m),
+            Ok(None) => {
+                eprintln!("error: no `candor.toml` in `{path}` (a manifest-less directory is the degenerate package)");
+                return ExitCode::FAILURE;
+            }
+            Err(e) => Err(e),
+        }
+    } else {
+        let src = match read(path) {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        candor_proto::manifest::parse_manifest(&src)
+    };
+    match parsed {
+        Ok(manifest) => {
+            println!("{}", serde_json::to_string_pretty(&manifest).expect("manifest is serializable"));
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            println!("{}", serde_json::to_string(&e).expect("manifest error is serializable"));
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn run_migrate(path: &str, rest: &[String]) -> ExitCode {
     let mut out: Option<&str> = None;
     let mut i = 0;

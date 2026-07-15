@@ -4936,3 +4936,39 @@ meets philosophy §7's success criterion, which the shipping tool does not yet m
 whole-graph trust aggregation. Relates to OBL-FFI and OBL-CONTRACT (the
 `assumed-proven` enumeration surface). Trust-delta *gating* on lock updates stays a
 first-1.0 need (0017 Open-Q1), not 0.x.
+
+## OBL-0017-MANIFEST — packaging slice 1: the `candor.toml` manifest parser + closed schema (2026-07-15)
+
+First code slice of design 0017 (packages). Lands the manifest **data model +
+parse + validate** only — no resolver, no lockfile, no multi-package build driver
+(later slices). `prototype/src/manifest.rs`: `Manifest`/`Package`/`Version`/`Lib`/
+`Bin`/`Dependency`/`Source` model 0017 §2's schema; `parse_manifest(text)` and
+`load_manifest(dir)` (the latter returns `Ok(None)` for a manifest-less directory —
+today's degenerate bare package, 0017 §1/§6, left unchanged). The `toml` crate
+(v1, serde-integrated) is a normal prototype dependency.
+
+- **Closed schema (0017 §2, load-bearing):** an unknown key is an *error*. The
+  top-level and `[package]`/`[[bin]]` stanzas deserialize with serde
+  `deny_unknown_fields`; the toml error names the offending/missing key precisely
+  (M0002).
+- **Validation:** name/alias identity charset (M0100/M0110/M0203 — lowercase-alnum
+  + `_`/`-`, leading letter), semver triple `major.minor.patch` (M0101), the one
+  legal `edition = "2026"` else "unknown edition" (M0102, 0017 §3), and dependency
+  sources (path non-empty; git requires a non-empty `rev`; M0200/M0202).
+- **Forward-compatible source (0017 §4):** a `[dependencies]` value is read as a
+  source-selecting inline table; the *kind* is chosen by which recognized key is
+  present, so a future `{ registry = … }` source slots in as a new branch without
+  disturbing existing manifests — and an unknown kind today is a precise
+  "unknown source kind" error (M0201), not silent acceptance.
+- **Wiring:** a `candor manifest <dir_or_file>` debug command parses + prints the
+  manifest as JSON; the parse API is exposed for tests.
+- **Gate:** `prototype/tests/manifest.rs` (18 tests) — a full valid manifest
+  (name/version/edition/freestanding + `[lib]` + two `[[bin]]` + path/git/aliased
+  deps) plus each rejection (unknown package key, unknown top-level table, bad
+  version, unknown edition, missing required field, git-without-rev, empty path,
+  unknown/registry source kind, ill-formed alias). Full `cargo nextest run` green
+  (892 tests), clippy clean.
+
+Next packaging slices: the `src/` module-root support (0008 §2.4 erratum) +
+cross-package resolver + `candor.lock` lockfile, then the multi-package build
+driver (0017 §6/§7).
