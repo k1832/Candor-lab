@@ -1125,3 +1125,16 @@ once you add the literal node). Key design/impl facts worth reusing:
   bodies don't cross-reference). Schema is additive: top-level fields stay the
   ROOT's local surface (single-package shape, goldens byte-unchanged); a `packages`
   array adds the per-package name/version/source attribution. (2026-07-15).
+
+- **Hermetic git-dependency tests: local repo + `CANDOR_CACHE_DIR` temp cache, and
+  prove cache-reuse by deleting the source.** `prototype/tests/packages.rs` fetches
+  a git dep from a `git init`'d temp repo (no network) with the cache redirected via
+  `CANDOR_CACHE_DIR`. To assert a second build reuses the content-addressed checkout
+  (no re-clone) *definitively*, delete BOTH the source repo and the mirror db
+  (`git-db/`) before the second build — success then can only come from the cached
+  `git-src/<url-hash>-<sha>/` checkout. `CANDOR_CACHE_DIR` is process-global, so a
+  `Mutex` serializes the git tests under the plain `cargo test` harness (a no-op
+  under nextest's process-per-test). Commits need a self-contained identity
+  (`-c user.name=… -c user.email=…`) or they fail with no global git config. The
+  checkout has its `.git` removed so it is plain read-only source that survives
+  mirror eviction. (2026-07-15).

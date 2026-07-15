@@ -313,3 +313,222 @@ fn codes_at(dir: &std::path::Path) -> Vec<String> {
         Err(d) => vec![d.code],
     }
 }
+
+// ---------------------------------------------------------------------------
+// Git dependency fetch (design 0017 §4/§6). Hermetic + offline: each test builds
+// a LOCAL git repo in a temp dir (no network), points `CANDOR_CACHE_DIR` at an
+// isolated temp cache, and depends on it via `{ git = <file url>, rev = <sha> }`.
+// If `git` cannot be spawned (a locked-down sandbox), the tests skip cleanly.
+// ---------------------------------------------------------------------------
+
+use std::process::Command;
+use std::sync::Mutex;
+
+// `CANDOR_CACHE_DIR` is process-global; serialize the git tests so a set_var in
+// one never races another (a no-op under nextest's process-per-test, a guard
+// under the plain `cargo test` harness).
+static GIT_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn git_available() -> bool {
+    Command::new("git").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// Run `git` in `repo` with a self-contained identity (so a commit succeeds even
+/// with no global git config), failing loudly on error.
+fn git(repo: &std::path::Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["-c", "user.name=candor-test", "-c", "user.email=test@candor.invalid", "-c", "commit.gpgsign=false"])
+        .args(args)
+        .output()
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Stage `fixture` as a fresh local git repo committed on branch `main`; return
+/// its (repo path, `file://` url, commit sha).
+fn init_git_repo(name: &str, fixture: &str) -> (PathBuf, String, String) {
+    let n = STAGE_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let repo = std::env::temp_dir().join(format!("candor_gitrepo_{}_{}_{}", std::process::id(), name, n));
+    let _ = std::fs::remove_dir_all(&repo);
+    copy_tree(&dir(fixture), &repo);
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "package"]);
+    let out = Command::new("git").arg("-C").arg(&repo).args(["rev-parse", "HEAD"]).output().expect("git rev-parse");
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let url = format!("file://{}", repo.display());
+    (repo, url, sha)
+}
+
+/// Create an `app` package whose single dependency `b` is the given git source.
+fn stage_git_app(cache: &std::path::Path, dep_toml: &str) -> PathBuf {
+    let n = STAGE_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let app = std::env::temp_dir().join(format!("candor_gitapp_{}_{}", std::process::id(), n));
+    let _ = std::fs::remove_dir_all(&app);
+    std::fs::create_dir_all(app.join("src")).unwrap();
+    std::fs::write(
+        app.join("candor.toml"),
+        format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\n{dep_toml}\n"),
+    )
+    .unwrap();
+    std::fs::write(app.join("src/main.cnr"), "use b::{value};\n\nfn main() -> i64 {\n    return value();\n}\n").unwrap();
+    let _ = cache; // cache root is passed via env by the caller.
+    app
+}
+
+fn fresh_cache() -> PathBuf {
+    let n = STAGE_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let cache = std::env::temp_dir().join(format!("candor_gitcache_{}_{}", std::process::id(), n));
+    let _ = std::fs::remove_dir_all(&cache);
+    cache
+}
+
+// ---- the milestone: `app` depends on `b` via git, fetches, builds+runs, and a
+// second build reuses the content-addressed cache (no re-clone) ---------------
+
+#[test]
+fn git_dependency_fetches_builds_reuses_cache_and_locks_sha() {
+    if !git_available() {
+        eprintln!("SKIP git_dependency_*: `git` is not spawnable in this sandbox");
+        return;
+    }
+    let _guard = GIT_ENV_LOCK.lock().unwrap();
+
+    let (repo, url, sha) = init_git_repo("b", "b");
+    let cache = fresh_cache();
+    std::env::set_var("CANDOR_CACHE_DIR", &cache);
+
+    let app = stage_git_app(&cache, &format!("b = {{ git = \"{url}\", rev = \"{sha}\" }}"));
+
+    // First build: fetches b into the temp cache and runs across every engine.
+    assert!(check_dir(&app).unwrap().is_empty(), "git app should check clean: {:?}", codes_at(&app));
+    assert_all_engines(&app, 123);
+
+    // The checkout landed in the content-addressed cache, keyed by url + sha.
+    let src_cache = cache.join("git-src");
+    let checkout = std::fs::read_dir(&src_cache)
+        .expect("git-src cache exists")
+        .filter_map(|e| e.ok())
+        .find(|e| e.file_name().to_string_lossy().ends_with(&sha))
+        .expect("a checkout keyed by the resolved sha");
+    assert!(checkout.path().join("candor.toml").is_file(), "checkout is a pristine package");
+    assert!(!checkout.path().join(".git").exists(), "checkout is plain read-only source (no .git)");
+
+    // candor.lock records b's git url + resolved sha + a content hash.
+    let lock = std::fs::read_to_string(app.join("candor.lock")).expect("candor.lock written");
+    assert!(lock.contains(&url), "lock records the git url:\n{lock}");
+    assert!(lock.contains(&sha), "lock records the resolved sha:\n{lock}");
+    assert!(lock.contains("content_hash"), "lock records a content hash:\n{lock}");
+
+    // Second build REUSES the cache: delete the source repo AND the mirror db, so
+    // only the content-addressed checkout remains. A successful build proves no
+    // re-clone/re-fetch happened.
+    std::fs::remove_dir_all(&repo).unwrap();
+    std::fs::remove_dir_all(cache.join("git-db")).unwrap();
+    match run_dir(&app) {
+        RunResult::Ok(r) => assert_eq!(r.ret, 123, "second build reuses the cached checkout"),
+        other => panic!("cache reuse build did not run: {}", describe(other)),
+    }
+
+    std::env::remove_var("CANDOR_CACHE_DIR");
+}
+
+// ---- a tag/branch dependency resolves to and locks the underlying commit sha --
+
+#[test]
+fn git_dependency_tag_resolves_to_locked_sha() {
+    if !git_available() {
+        eprintln!("SKIP git_dependency_*: `git` is not spawnable in this sandbox");
+        return;
+    }
+    let _guard = GIT_ENV_LOCK.lock().unwrap();
+
+    let (repo, url, sha) = init_git_repo("b", "b");
+    git(&repo, &["tag", "v1.0"]);
+    let cache = fresh_cache();
+    std::env::set_var("CANDOR_CACHE_DIR", &cache);
+
+    // The manifest writes the tag for convenience; resolution goes through the tag
+    // and the lock pins to the commit sha it points at (design 0017 §4).
+    let app = stage_git_app(&cache, &format!("b = {{ git = \"{url}\", rev = \"{sha}\", tag = \"v1.0\" }}"));
+    assert!(check_dir(&app).unwrap().is_empty(), "tag-pinned app checks clean: {:?}", codes_at(&app));
+    match run_dir(&app) {
+        RunResult::Ok(r) => assert_eq!(r.ret, 123),
+        other => panic!("tag-pinned app did not run: {}", describe(other)),
+    }
+    let lock = std::fs::read_to_string(app.join("candor.lock")).expect("candor.lock written");
+    assert!(lock.contains(&sha), "the tag resolved to the pinned commit sha in the lock:\n{lock}");
+
+    let _ = repo;
+    std::env::remove_var("CANDOR_CACHE_DIR");
+}
+
+// ---- a bad git source fails with a clear diagnostic, not a panic ------------
+
+#[test]
+fn git_dependency_bad_source_is_a_clean_error() {
+    if !git_available() {
+        eprintln!("SKIP git_dependency_*: `git` is not spawnable in this sandbox");
+        return;
+    }
+    let _guard = GIT_ENV_LOCK.lock().unwrap();
+
+    let cache = fresh_cache();
+    std::env::set_var("CANDOR_CACHE_DIR", &cache);
+    let missing = std::env::temp_dir().join(format!("candor_nope_{}", std::process::id()));
+    let app = stage_git_app(&cache, &format!("b = {{ git = \"file://{}\", rev = \"{}\" }}", missing.display(), "0".repeat(40)));
+    let cs = codes_at(&app);
+    assert!(cs.contains(&"E0932".to_string()), "want E0932 clone failure, got {cs:?}");
+
+    std::env::remove_var("CANDOR_CACHE_DIR");
+}
+
+// ---- whole-graph audit surfaces a git dependency's trust surface ------------
+
+#[test]
+fn git_dependency_audit_surfaces_trust_surface() {
+    if !git_available() {
+        eprintln!("SKIP git_dependency_*: `git` is not spawnable in this sandbox");
+        return;
+    }
+    let _guard = GIT_ENV_LOCK.lock().unwrap();
+
+    // `audit_c` is a dependency-free package with a `foreign` extern and an
+    // `unsafe` region — a self-contained trust surface to fetch over git.
+    let (_repo, url, sha) = init_git_repo("audit_c", "audit_c");
+    let cache = fresh_cache();
+    std::env::set_var("CANDOR_CACHE_DIR", &cache);
+
+    let n = STAGE_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let app = std::env::temp_dir().join(format!("candor_gitauditapp_{}_{}", std::process::id(), n));
+    let _ = std::fs::remove_dir_all(&app);
+    std::fs::create_dir_all(app.join("src")).unwrap();
+    std::fs::write(
+        app.join("candor.toml"),
+        format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\nc = {{ git = \"{url}\", rev = \"{sha}\" }}\n"),
+    )
+    .unwrap();
+    std::fs::write(app.join("src/main.cnr"), "fn main() -> i64 {\n    return 0;\n}\n").unwrap();
+
+    let got = candor_proto::audit::audit_path(&app).expect("git-dep graph audit succeeds");
+    let doc: serde_json::Value = serde_json::from_str(&got).expect("audit emits JSON");
+    let packages = doc["packages"].as_array().expect("packages array");
+    let c = packages
+        .iter()
+        .find(|p| p["package"] == "c")
+        .unwrap_or_else(|| panic!("git dep `c` enumerated:\n{got}"));
+    assert_eq!(c["source"]["kind"], "git", "c is attributed to its git source:\n{got}");
+    assert_eq!(c["source"]["url"], url, "git source url:\n{got}");
+    assert_eq!(c["source"]["rev"], sha, "git source pinned sha:\n{got}");
+    assert!(has_foreign_extern(c, "c_native_write"), "git dep's foreign extern surfaces:\n{got}");
+    assert!(has_unsafe_fn(c, "c::c_write"), "git dep's unsafe region surfaces:\n{got}");
+
+    std::env::remove_var("CANDOR_CACHE_DIR");
+}

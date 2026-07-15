@@ -5081,3 +5081,63 @@ to the audit walk (the lock is written inside `resolve()`, which must stay
 audit-free) and would perturb the lock's `PartialEq` reuse check; the required
 deliverable is the audit-command aggregation, which is independent and complete.
 A *gating* trust-delta diff on lock updates remains a first-1.0 need (0017 Open-Q1).
+
+## OBL-0017-GIT-FETCH — packaging slice: git dependencies are real — fetch into a content-addressed cache, build like a path dep (2026-07-15)
+
+Makes `{ git = "URL", rev = "<sha>" }` dependencies real (design 0017 §4/§6):
+the resolver **fetches** a git dependency into a toolchain-managed,
+content-addressed cache and then treats its checkout exactly like a path
+dependency — same transitive-load, unification, merge, build, and audit paths.
+Replaces the E0924 "not yet fetched" deferral (OBL-0017-RESOLVE). Reproducibility
+comes from the lock's pinned commit sha, never from checked-in copies.
+
+- **Fetch (`prototype/src/pkg_fetch.rs`).** Shells out to the system `git`. Cache
+  layout under a root that defaults to a per-user cache dir and is **overridable by
+  `CANDOR_CACHE_DIR`** (so tests use an isolated temp cache, never a real one):
+  `git-db/<url-hash>/` is a bare mirror of the url (for resolving refs);
+  `git-src/<url-hash>-<sha>/` is a **pristine checkout at the exact commit** with
+  its `.git` removed — plain read-only source that survives mirror eviction.
+  Content-addressed by (url, resolved sha): a bare full-sha `rev` whose checkout is
+  already cached returns with **no git invocation at all** (the reuse fast path); a
+  moving ref forces mirror consultation. Mirror clone and checkout are built in a
+  unique sibling temp dir then **atomically renamed** into place, so a partial
+  fetch is never observed and concurrent resolves cannot corrupt the cache.
+- **Tag/branch → sha (done, not deferred).** A `tag`/`branch` written in the
+  manifest is resolved against the mirror (`git rev-parse <ref>^{commit}`) to its
+  full commit sha; that resolved sha is what the lock records, so the build pins to
+  the commit even when the manifest names a moving ref (design 0017 §4).
+- **Integration (`prototype/src/resolve_pkg.rs`).** `resolve_source` returns the
+  package dir + its `ResolvedSource`; a git dep's checkout dir feeds the existing
+  BFS/unification/merge unchanged. Two deps at the same (url, sha) resolve to the
+  same content-addressed dir and unify to one build node; the same name via a
+  different sha/url is the existing E0923 hard conflict. Package identity/pkgid and
+  the `src/`-content hash use the fetched checkout (the F2 scheme, unchanged).
+- **Lockfile (§6).** A git package's record is `{ git = <url>, rev = <resolved
+  sha>, content_hash }`. On a second resolve the fast-path reuse yields the same
+  resolved sha + content hash, so a present lock is **reused verbatim**.
+- **Errors (not panics).** `git` unspawnable → E0931 (clear "is git installed?");
+  clone failure (bad/unreachable url) → E0932; a rev/tag/branch that resolves to no
+  commit → E0933; cache-dir/publish failure → E0934. Each is prefixed with the
+  offending dependency's local name.
+- **Whole-graph audit over a git dep.** Unchanged `audit.rs` — because git deps now
+  resolve, a git dependency's `foreign`/`unsafe` surface is enumerated and
+  attributed to it (name + version + **git source: url + resolved sha**) through the
+  reused resolver (review F1b / §8).
+- **Gate (`prototype/tests/packages.rs`, +4 tests, HERMETIC + offline).** Each test
+  builds a **local** git repo in a temp dir (no network) and points
+  `CANDOR_CACHE_DIR` at a temp cache; if `git` cannot be spawned the tests skip
+  cleanly with a reason. `app` → `b` via `{ git = file://…, rev = <sha> }` fetches
+  into the temp cache and builds+runs to **123 byte-exact across
+  tree-walker/MIR/native/AOT**; the checkout is a pristine `.git`-free package;
+  `candor.lock` records b's git url + resolved sha + content hash; a **second build
+  reuses the cache** — proven by deleting both the source repo and the mirror db,
+  after which the build still succeeds from the content-addressed checkout alone. A
+  `tag` dep resolves to and locks the underlying commit sha. A bad git url fails
+  E0932 (clean diagnostic). `candor audit` over a git-fetched dep enumerates its
+  `foreign` extern + `unsafe` region attributed to the git source. Full
+  `cargo nextest run` green incl. path-dep + self-host + native + wasm; clippy clean.
+
+**Deferred (reported):** trust-delta **gating** on lock updates (0017 Open-Q1,
+first-1.0) and the incremental `candor build` (Stage C) resolving deps — both
+unchanged by this slice. A moving-ref build does not re-fetch a present mirror
+(rev-pinned reproducibility; re-resolution is a manifest-change action, §6).

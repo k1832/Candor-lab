@@ -12,10 +12,11 @@
 //! (deduped, keyed by canonicalized directory); the same name via **different**
 //! sources is a hard conflict error (P4). The package graph must be acyclic (§8).
 //!
-//! **Scope:** path dependencies are resolved fully. A git dependency is a clean
-//! deferral — it errors rather than fetching (the content-addressed cache is a
-//! follow-up); the resolver is shaped so a git source slots in as a fetched
-//! directory without disturbing the path-dependency milestone.
+//! **Scope:** path and git dependencies are both resolved. A git dependency is
+//! fetched into a content-addressed cache ([`crate::pkg_fetch`]) keyed by its url
+//! and resolved commit sha, then treated exactly like a path dependency (its
+//! checkout feeds the same transitive-load + build path); the lockfile records
+//! the git url, the resolved sha, and the content hash (design 0017 §4/§6).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -54,10 +55,12 @@ pub struct ResolvedPackage {
 }
 
 /// A pinned dependency source (design 0017 §4/§6).
+#[derive(Clone)]
 pub enum ResolvedSource {
     /// A canonicalized local directory.
     Path(PathBuf),
-    /// A git source pinned to an exact commit (fetch is deferred; see module docs).
+    /// A git source pinned to an exact commit: its url and the resolved commit
+    /// sha the build is pinned to (fetched into the content-addressed cache).
     Git { url: String, rev: String },
 }
 
@@ -98,6 +101,8 @@ fn diag(code: &str, message: impl Into<String>) -> Diag {
 struct Node {
     dir: PathBuf,
     manifest: Manifest,
+    /// This node's pinned source (path directory, or fetched git checkout).
+    source: ResolvedSource,
     /// The dependency chain that first reached this node (package names), for the
     /// conflict / cycle diagnostics.
     via: Vec<String>,
@@ -121,7 +126,8 @@ pub fn resolve(root_dir: &Path) -> Result<Resolution, Diag> {
     let mut name_index: BTreeMap<String, usize> = BTreeMap::new();
 
     let root_name = root_manifest.package.name.clone();
-    push_node(&mut nodes, &mut dir_index, &mut name_index, root_dir.clone(), root_manifest, vec![root_name])?;
+    let root_source = ResolvedSource::Path(root_dir.clone());
+    push_node(&mut nodes, &mut dir_index, &mut name_index, root_dir.clone(), root_source, root_manifest, vec![root_name])?;
 
     // BFS: resolve each node's dependencies, creating or deduping nodes.
     let mut i = 0;
@@ -133,7 +139,7 @@ pub fn resolve(root_dir: &Path) -> Result<Resolution, Diag> {
         let mut deps: Vec<(String, usize)> = Vec::new();
         for dep in &dep_specs {
             let dep_name = dep.package.clone().unwrap_or_else(|| dep.local_name.clone());
-            let dep_dir = resolve_source_dir(&dir, dep)?;
+            let (dep_dir, dep_source) = resolve_source(&dir, dep)?;
             let mut child_via = via.clone();
             child_via.push(dep_name.clone());
             let idx = match dir_index.get(&dep_dir) {
@@ -169,7 +175,7 @@ pub fn resolve(root_dir: &Path) -> Result<Resolution, Diag> {
                             ));
                         }
                     }
-                    push_node(&mut nodes, &mut dir_index, &mut name_index, dep_dir.clone(), m, child_via)?
+                    push_node(&mut nodes, &mut dir_index, &mut name_index, dep_dir.clone(), dep_source, m, child_via)?
                 }
             };
             deps.push((dep.local_name.clone(), idx));
@@ -216,6 +222,7 @@ fn push_node(
     dir_index: &mut BTreeMap<PathBuf, usize>,
     name_index: &mut BTreeMap<String, usize>,
     dir: PathBuf,
+    source: ResolvedSource,
     manifest: Manifest,
     via: Vec<String>,
 ) -> Result<usize, Diag> {
@@ -228,7 +235,7 @@ fn push_node(
     let idx = nodes.len();
     dir_index.insert(dir.clone(), idx);
     name_index.insert(name, idx);
-    nodes.push(Node { dir, manifest, via, deps: Vec::new() });
+    nodes.push(Node { dir, manifest, source, via, deps: Vec::new() });
     Ok(idx)
 }
 
@@ -248,22 +255,33 @@ fn conflict_diag(name: &str, existing: &Node, new_dir: &Path, new_via: &[String]
     )
 }
 
-/// Resolve a dependency's package directory (design 0017 §4). Path deps are
-/// resolved relative to the depending manifest's directory and canonicalized;
-/// git deps are a clean deferral (they error rather than fetch).
-fn resolve_source_dir(from_dir: &Path, dep: &manifest::Dependency) -> Result<PathBuf, Diag> {
+/// Resolve a dependency to its package directory and pinned source (design 0017
+/// §4). A **path** dep is resolved relative to the depending manifest and
+/// canonicalized. A **git** dep is fetched into the content-addressed cache
+/// ([`crate::pkg_fetch`]); its checkout is then treated exactly like a path
+/// directory, and the resolved commit sha (recorded in the lock) pins the build.
+fn resolve_source(
+    from_dir: &Path,
+    dep: &manifest::Dependency,
+) -> Result<(PathBuf, ResolvedSource), Diag> {
     match &dep.source {
         Source::Path { path } => {
             let joined = from_dir.join(path);
-            canonicalize(&joined, &format!("dependency `{}`", dep.local_name))
+            let dir = canonicalize(&joined, &format!("dependency `{}`", dep.local_name))?;
+            Ok((dir.clone(), ResolvedSource::Path(dir)))
         }
-        Source::Git { url, rev, .. } => Err(diag(
-            "E0924",
-            format!(
-                "git dependency `{}` ({url} @ {rev}) is not yet fetched: git sources are deferred; use a path dependency (design 0017 §4)",
-                dep.local_name
-            ),
-        )),
+        Source::Git { url, rev, tag, branch } => {
+            let checkout = crate::pkg_fetch::fetch_git(url, rev, tag.as_deref(), branch.as_deref())
+                .map_err(|d| {
+                    Diag::error(
+                        &d.code,
+                        format!("git dependency `{}`: {}", dep.local_name, d.message),
+                        d.span,
+                    )
+                })?;
+            let source = ResolvedSource::Git { url: url.clone(), rev: checkout.resolved_rev };
+            Ok((checkout.dir, source))
+        }
     }
 }
 
@@ -289,7 +307,7 @@ fn root_entry_of(m: &Manifest) -> Option<Vec<String>> {
 fn resolved_package(node: &Node, is_root: bool) -> Result<ResolvedPackage, Diag> {
     let src_root = node.dir.join("src");
     let content_hash = hash_sources(&src_root)?;
-    let source = ResolvedSource::Path(node.dir.clone());
+    let source = node.source.clone();
     let pkgid = pkgid_of(&node.manifest.package.name, &node.dir);
     Ok(ResolvedPackage {
         pkgid,
