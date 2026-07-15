@@ -68,11 +68,32 @@
       "status": "propagates foreign (undischarged)"
     }
   ],
+  "unsafe_regions": [
+    {
+      "function": "main::safe_len",
+      "file": "main.cnr",
+      "justification": "c_len trust discharged: s is a live NUL-terminated view",
+      "span": {
+        "start": 299,
+        "end": 396
+      }
+    },
+    {
+      "function": "main::thin_raw",
+      "file": "main.cnr",
+      "justification": "re-exported raw: caller must not outlive p",
+      "span": {
+        "start": 453,
+        "end": 537
+      }
+    }
+  ],
   "summary": {
     "boundary_modules": 1,
     "externs": 2,
     "trust_predicates": 2,
     "undischarged_foreign_wrappers": 1,
-    "exports": 1
+    "exports": 1,
+    "unsafe_regions": 2
   }
 }

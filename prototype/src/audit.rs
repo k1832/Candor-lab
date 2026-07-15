@@ -1,9 +1,24 @@
-//! `candor audit <dir_or_file>` — the boundary-module audit surface
-//! (design 0011 §6; 0008 §4's `candor audit --boundaries`). A structural query
-//! over the boundary modules: their externs (full signature + `foreign` effect +
-//! every trust predicate, justification, and span), their exports, and the
-//! **effect reach** — which functions *discharge* `foreign` and which *propagate*
-//! it. P4-structured: machine-readable JSON from one walk.
+//! `candor audit <dir_or_file>` — the program's trusted-computing-base surface
+//! (design 0011 §6; 0008 §4's `candor audit --boundaries`; philosophy §7). A
+//! structural query, as machine-readable JSON from one walk (P4), over the three
+//! kinds of trust a reader inherits:
+//!
+//! - **boundary modules**: their externs (full signature + `foreign` effect +
+//!   every trust predicate, justification, and span), their exports, and the
+//!   **effect reach** — which functions *discharge* `foreign` and which
+//!   *propagate* it.
+//! - **unsafe regions**: every `unsafe "justification" { .. }` block in the whole
+//!   program (boundary or not), with its enclosing function, file, justification,
+//!   and span — the memory-safety trust a plain `unsafe` block (raw pointer
+//!   arithmetic, `cast_ptr`, ...) makes the reader inherit even when it never
+//!   touches the foreign boundary (philosophy §7; 0017 review F1b).
+//!
+//! The **assumed-proven** contracts of philosophy §7 are not a distinct language
+//! construct this edition (there is no `assumed-proven` annotation in the AST or
+//! checker). The assumed-proven surface *is* exactly the union enumerated above:
+//! the boundary `trust` clauses (every predicate is recorded-and-assumed, never
+//! evaluated — see `ast::TrustDecl`) plus the `unsafe` justifications. No section
+//! is invented for a construct that does not exist.
 
 use std::path::Path;
 
@@ -16,6 +31,7 @@ use crate::diag::Diag;
 pub struct AuditReport {
     pub boundary_modules: Vec<ModuleReport>,
     pub effect_reach: Vec<ReachEntry>,
+    pub unsafe_regions: Vec<UnsafeReport>,
     pub summary: Summary,
 }
 
@@ -64,6 +80,18 @@ pub struct ReachEntry {
     pub status: String,
 }
 
+/// One `unsafe "justification" { .. }` region (design 0001 §11.4; philosophy §7).
+/// Its `function` is the module-qualified enclosing definition, `span` covers the
+/// whole `unsafe` expression, and `justification` is the mandatory (P1) rationale
+/// string the author must supply.
+#[derive(Serialize)]
+pub struct UnsafeReport {
+    pub function: String,
+    pub file: String,
+    pub justification: String,
+    pub span: SpanRep,
+}
+
 #[derive(Serialize)]
 pub struct Summary {
     pub boundary_modules: usize,
@@ -71,6 +99,7 @@ pub struct Summary {
     pub trust_predicates: usize,
     pub undischarged_foreign_wrappers: usize,
     pub exports: usize,
+    pub unsafe_regions: usize,
 }
 
 #[derive(Serialize, Clone, Copy)]
@@ -90,6 +119,7 @@ impl From<crate::span::Span> for SpanRep {
 pub fn audit_path(path: &Path) -> Result<String, Diag> {
     let files = collect_files(path)?;
     let mut modules = Vec::new();
+    let mut unsafe_regions = Vec::new();
     let mut total_externs = 0usize;
     let mut total_preds = 0usize;
     let mut total_exports = 0usize;
@@ -98,6 +128,7 @@ pub fn audit_path(path: &Path) -> Result<String, Diag> {
         let src = std::fs::read_to_string(file)
             .map_err(|e| Diag::error("E0900", format!("cannot read `{}`: {e}", file.display()), crate::span::Span::point(0)))?;
         let (prog, boundary) = crate::real::parse_with_boundary(&src)?;
+        collect_unsafe_regions(&prog, module, display, &mut unsafe_regions);
         if !boundary {
             continue;
         }
@@ -161,15 +192,18 @@ pub fn audit_path(path: &Path) -> Result<String, Diag> {
     let (foreign_report, undischarged) = effect_reach(path)?;
     let boundary_count = modules.len();
 
+    let unsafe_count = unsafe_regions.len();
     Ok(serde_json::to_string_pretty(&AuditReport {
         boundary_modules: modules,
         effect_reach: foreign_report,
+        unsafe_regions,
         summary: Summary {
             boundary_modules: boundary_count,
             externs: total_externs,
             trust_predicates: total_preds,
             undischarged_foreign_wrappers: undischarged,
             exports: total_exports,
+            unsafe_regions: unsafe_count,
         },
     })
     .expect("AuditReport serializes"))
@@ -237,6 +271,158 @@ fn discover(dir: &Path, prefix: &[String], out: &mut Vec<(String, std::path::Pat
                 let display = format!("{}.cnr", mp.join("/"));
                 out.push((mp.join("::"), p, display));
             }
+        }
+    }
+}
+
+// ----- unsafe-region enumeration (philosophy §7; 0017 review F1b) ----------
+
+/// Walk every executable body in a parsed module — free functions, impl methods,
+/// struct `drop` hooks, and static initializers — recording each `unsafe` region.
+/// Enumerated for *every* module, boundary or not: an `unsafe` block need not
+/// touch the foreign surface at all (raw pointer arithmetic, `cast_ptr`, ...), so
+/// restricting to boundary files would hide exactly the memory-safety trust §7
+/// requires `candor audit` to surface.
+fn collect_unsafe_regions(prog: &Program, module: &str, file: &str, out: &mut Vec<UnsafeReport>) {
+    for item in &prog.items {
+        match item {
+            Item::Fn(f) => walk_block_unsafe(&f.body, &format!("{module}::{}", f.name), file, out),
+            Item::Impl(im) => {
+                let ty = ty_c(&im.target);
+                for m in &im.methods {
+                    walk_block_unsafe(&m.body, &format!("{module}::{ty}::{}", m.name), file, out);
+                }
+            }
+            Item::Struct(s) => {
+                if let Some(hook) = &s.drop_hook {
+                    walk_block_unsafe(hook, &format!("{module}::{}::drop", s.name), file, out);
+                }
+            }
+            Item::Static(st) => walk_expr_unsafe(&st.value, &format!("{module}::{}", st.name), file, out),
+            _ => {}
+        }
+    }
+}
+
+fn walk_block_unsafe(b: &Block, func: &str, file: &str, out: &mut Vec<UnsafeReport>) {
+    for st in &b.stmts {
+        match &st.kind {
+            StmtKind::Let { init: Some(e), .. } => walk_expr_unsafe(e, func, file, out),
+            StmtKind::Let { init: None, .. } => {}
+            StmtKind::Assign { target, value } => {
+                walk_expr_unsafe(target, func, file, out);
+                walk_expr_unsafe(value, func, file, out);
+            }
+            StmtKind::Expr(e) => walk_expr_unsafe(e, func, file, out),
+        }
+    }
+}
+
+/// Total recursive walk over an expression, mirroring the pipeline's own expr walk
+/// (`count::Counter::expr`), recording every `unsafe` region it finds. Exhaustive
+/// by construction — a new `ExprKind` breaks the build here rather than silently
+/// dropping a region from the trust surface.
+fn walk_expr_unsafe(e: &Expr, func: &str, file: &str, out: &mut Vec<UnsafeReport>) {
+    match &e.kind {
+        ExprKind::Unsafe { justification, body } => {
+            out.push(UnsafeReport {
+                function: func.to_string(),
+                file: file.to_string(),
+                justification: justification.clone(),
+                span: e.span.into(),
+            });
+            walk_block_unsafe(body, func, file, out);
+        }
+
+        ExprKind::For { .. } => unreachable!("`for` is desugared at parse (design 0009 §4.2)"),
+        ExprKind::Scope(b) => walk_block_unsafe(b, func, file, out),
+        ExprKind::Spawn(c) => walk_expr_unsafe(c, func, file, out),
+
+        ExprKind::IntLit { .. }
+        | ExprKind::NegIntLit { .. }
+        | ExprKind::FloatLit { .. }
+        | ExprKind::StrLit(_)
+        | ExprKind::BytesLit(_)
+        | ExprKind::BoolLit(_)
+        | ExprKind::Ident(_)
+        | ExprKind::GenericVal { .. }
+        | ExprKind::Result
+        | ExprKind::Break
+        | ExprKind::Continue
+        | ExprKind::PtrNull { .. }
+        | ExprKind::Offsetof { .. }
+        | ExprKind::Sizeof(_)
+        | ExprKind::Alignof(_) => {}
+
+        ExprKind::Prefix { expr, .. } | ExprKind::Unary { expr, .. } => walk_expr_unsafe(expr, func, file, out),
+        ExprKind::Binary { lhs, rhs, .. } => {
+            walk_expr_unsafe(lhs, func, file, out);
+            walk_expr_unsafe(rhs, func, file, out);
+        }
+        ExprKind::Call { callee, args } => {
+            walk_expr_unsafe(callee, func, file, out);
+            for a in args {
+                walk_expr_unsafe(a, func, file, out);
+            }
+        }
+        ExprKind::OutArg(inner) => walk_expr_unsafe(inner, func, file, out),
+        ExprKind::Field { base, .. } => walk_expr_unsafe(base, func, file, out),
+        ExprKind::Index { base, index } => {
+            walk_expr_unsafe(base, func, file, out);
+            walk_expr_unsafe(index, func, file, out);
+        }
+        ExprKind::Conv { expr, .. } | ExprKind::Bitcast { expr, .. } => walk_expr_unsafe(expr, func, file, out),
+        ExprKind::ArrayLit(v) => {
+            for x in v {
+                walk_expr_unsafe(x, func, file, out);
+            }
+        }
+        ExprKind::ArrayRepeat { value, size } => {
+            walk_expr_unsafe(value, func, file, out);
+            walk_expr_unsafe(size, func, file, out);
+        }
+        ExprKind::StructLit { fields, .. } => {
+            for fi in fields {
+                walk_expr_unsafe(&fi.value, func, file, out);
+            }
+        }
+        ExprKind::EnumCtor { args, .. } => {
+            for a in args {
+                walk_expr_unsafe(a, func, file, out);
+            }
+        }
+        ExprKind::CastPtr { arg, .. } | ExprKind::AddrToPtr { arg, .. } => walk_expr_unsafe(arg, func, file, out),
+        ExprKind::FieldPtr { ptr, .. } => walk_expr_unsafe(ptr, func, file, out),
+        ExprKind::Block(b) => walk_block_unsafe(b, func, file, out),
+        ExprKind::If { cond, then_blk, else_blk } => {
+            walk_expr_unsafe(cond, func, file, out);
+            walk_block_unsafe(then_blk, func, file, out);
+            if let Some(el) = else_blk {
+                walk_expr_unsafe(el, func, file, out);
+            }
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            walk_expr_unsafe(scrutinee, func, file, out);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    walk_expr_unsafe(g, func, file, out);
+                }
+                walk_expr_unsafe(&arm.body, func, file, out);
+            }
+        }
+        ExprKind::Loop(b) => walk_block_unsafe(b, func, file, out),
+        ExprKind::While { cond, body } => {
+            walk_expr_unsafe(cond, func, file, out);
+            walk_block_unsafe(body, func, file, out);
+        }
+        ExprKind::Wrapping(b) | ExprKind::Saturating(b) => walk_block_unsafe(b, func, file, out),
+        ExprKind::Return(opt) => {
+            if let Some(x) = opt {
+                walk_expr_unsafe(x, func, file, out);
+            }
+        }
+        ExprKind::Assert(x) | ExprKind::Panic(x) | ExprKind::Paren(x) | ExprKind::Try(x) => {
+            walk_expr_unsafe(x, func, file, out)
         }
     }
 }

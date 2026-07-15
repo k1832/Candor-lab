@@ -336,6 +336,73 @@ fn audit_generic_boundary_keeps_effect_reach() {
     );
 }
 
+// ---- 12. audit surfaces the whole trust surface: unsafe regions ----------
+// 0017 review F1b: `candor audit` must list the program's `unsafe` regions (the
+// memory-safety trust the reader inherits, philosophy §7), not just the boundary
+// externs. Over the ffi_audit tree — which carries both a `boundary` extern block
+// AND two `unsafe "justification" { .. }` valves — the audit must enumerate each
+// unsafe region with its justification, enclosing function, file, and span, while
+// the pre-existing boundary/extern/effect-reach enumeration is unchanged.
+#[test]
+fn audit_enumerates_unsafe_regions() {
+    let dir = format!("{}/tests/fixtures/ffi_audit", env!("CARGO_MANIFEST_DIR"));
+    let got = candor_proto::audit::audit_path(std::path::Path::new(&dir))
+        .expect("audit succeeds");
+    let doc: serde_json::Value = serde_json::from_str(&got).expect("audit emits JSON");
+
+    // No regression: the boundary/extern/export/effect-reach surface still stands.
+    assert!(got.contains("\"name\": \"c_len\""), "lost extern c_len:\n{got}");
+    assert!(got.contains("valid_nul_terminated"), "lost trust predicate:\n{got}");
+    assert!(got.contains("\"symbol\": \"candor_checksum\""), "lost export:\n{got}");
+    assert_eq!(doc["effect_reach"][0]["function"], "main::safe_len");
+    assert_eq!(doc["summary"]["externs"], 2);
+
+    // New: both `unsafe` valves are enumerated, in source order, with their
+    // justification, enclosing function, file, and a non-empty span.
+    let regions = doc["unsafe_regions"].as_array().expect("unsafe_regions array");
+    assert_eq!(regions.len(), 2, "expected both unsafe valves:\n{got}");
+    assert_eq!(doc["summary"]["unsafe_regions"], 2);
+
+    assert_eq!(regions[0]["function"], "main::safe_len");
+    assert_eq!(regions[0]["file"], "main.cnr");
+    assert_eq!(
+        regions[0]["justification"],
+        "c_len trust discharged: s is a live NUL-terminated view"
+    );
+    let (lo, hi) = (
+        regions[0]["span"]["start"].as_u64().unwrap(),
+        regions[0]["span"]["end"].as_u64().unwrap(),
+    );
+    assert!(lo < hi, "unsafe span must be non-empty: {lo}..{hi}");
+
+    assert_eq!(regions[1]["function"], "main::thin_raw");
+    assert_eq!(
+        regions[1]["justification"],
+        "re-exported raw: caller must not outlive p"
+    );
+}
+
+// ---- 13. audit surfaces unsafe regions in a NON-boundary corpus module ----
+// The F1b gap is that a plain `unsafe` block — memory-safety trust that never
+// touches the foreign boundary — appeared in `candor audit` nowhere. The bump
+// allocator is such a module: no `extern`, yet two raw-pointer `unsafe` valves.
+#[test]
+fn audit_lists_unsafe_regions_in_corpus_allocator() {
+    let file = format!("{}/tests/fixtures/corelib/std/bump.cnr", env!("CARGO_MANIFEST_DIR"));
+    let got = candor_proto::audit::audit_path(std::path::Path::new(&file))
+        .expect("audit succeeds");
+    let doc: serde_json::Value = serde_json::from_str(&got).expect("audit emits JSON");
+
+    let regions = doc["unsafe_regions"].as_array().expect("unsafe_regions array");
+    let fns: Vec<&str> = regions.iter().map(|r| r["function"].as_str().unwrap()).collect();
+    assert!(fns.contains(&"bump::bump_alloc"), "missing bump_alloc valve:\n{got}");
+    assert!(fns.contains(&"bump::mk_alloc"), "missing mk_alloc valve:\n{got}");
+    assert!(
+        regions.iter().all(|r| !r["justification"].as_str().unwrap().is_empty()),
+        "every unsafe region carries a justification:\n{got}"
+    );
+}
+
 fn debug_run(r: &RunResult) -> String {
     match r {
         RunResult::Ok(run) => format!("Ok(ret={})", run.ret),
