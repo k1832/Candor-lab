@@ -72,7 +72,7 @@ fn describe(r: RunResult) -> String {
 // ---------------------------------------------------------------------------
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use candor_proto::{compile_path, resolve_pkg, run_dir_mir, run_dir_native, MirRunResult};
+use candor_proto::{build, compile_path, modules, resolve_pkg, run_dir_mir, run_dir_native, MirRunResult};
 
 static STAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -141,6 +141,99 @@ fn app_depends_on_b_builds_and_runs_across_engines() {
     assert!(check_dir(&app).unwrap().is_empty(), "app should check clean: {:?}", codes_at(&app));
     // b::value() = helper::secret() (23) + 100 = 123.
     assert_all_engines(&app, 123);
+}
+
+// ---------------------------------------------------------------------------
+// The incremental build resolves cross-package dependencies (design 0017
+// Open-Q4): `candor build` on a package-with-deps discovers EVERY package's
+// modules under its pkgid — the same multi-package universe check/run/compile
+// build — and the two-hash cache invalidates correctly across the boundary.
+// ---------------------------------------------------------------------------
+
+/// The set of module paths a `candor build` report covers.
+fn built_paths(r: &build::BuildReport) -> std::collections::BTreeSet<String> {
+    r.modules.iter().map(|m| m.path.clone()).collect()
+}
+
+#[test]
+fn incremental_build_covers_dependency_and_universe_matches_check() {
+    let root = stage(&["app", "b"]);
+    let app = root.join("app");
+
+    let report = build::build_dir(&app).expect("incremental build must not hard-error");
+    assert!(report.ok(), "incremental build clean: {:?}", report.diags.iter().map(|d| &d.code).collect::<Vec<_>>());
+
+    // Anti-divergence: the incremental universe is exactly the resolver's shared
+    // pkgid-prefixed discovery — the same module set build_tree (check/run/compile)
+    // builds. The two paths cannot diverge because they share `discover_multi`.
+    let res = resolve_pkg::resolve(&app).unwrap();
+    let want: std::collections::BTreeSet<String> =
+        modules::discover_multi(&res).unwrap().into_iter().map(|(path, _, _)| path.join("::")).collect();
+    assert_eq!(built_paths(&report), want, "incremental universe must equal build_tree's discovery");
+
+    // b's modules appear under b's pkgid — the dependency is not silently dropped.
+    let b = res.packages.iter().find(|p| p.name == "b").expect("b resolved");
+    let b_prefix = format!("{}::", b.pkgid);
+    assert!(
+        built_paths(&report).iter().any(|p| p.starts_with(&b_prefix)),
+        "b's modules must be in the incremental universe: {:?}",
+        built_paths(&report),
+    );
+    // Consistency with the merge path: check sees the same clean build.
+    assert!(check_dir(&app).unwrap().is_empty(), "check agrees the build is clean");
+}
+
+#[test]
+fn incremental_build_invalidates_across_package_boundary() {
+    let root = stage(&["app", "b"]);
+    let app = root.join("app");
+    let res = resolve_pkg::resolve(&app).unwrap();
+    let b = res.packages.iter().find(|p| p.name == "b").expect("b resolved");
+    let helper_path = format!("{}::helper", b.pkgid);
+    let main_path = format!("{}::main", res.root_pkg().pkgid);
+
+    let first = build::build_dir(&app).unwrap();
+    assert!(first.ok() && first.reused().is_empty(), "first build reuses nothing");
+
+    // A no-change rebuild reuses EVERYTHING, including the dependency's modules.
+    let second = build::build_dir(&app).unwrap();
+    assert!(second.ok());
+    assert!(second.checked().is_empty(), "no-change rebuild re-analyzed {:?}", second.checked());
+    assert!(
+        second.reused().contains(&helper_path),
+        "a dependency module is reused on a no-change rebuild: {:?}",
+        second.reused(),
+    );
+
+    // Edit the dependency's `helper` module BODY (a cross-boundary source change).
+    // Its signature is unchanged, so only `helper` re-analyzes; `b` (sig stable)
+    // and app's `main` (which does not depend on helper) stay reused — the same
+    // two-hash zero-downstream behavior an in-package edit gets (design 0008 §2).
+    std::fs::write(root.join("b/src/helper.cnr"), "pub fn secret() -> i64 {
+    return 24;
+}
+").unwrap();
+    let third = build::build_dir(&app).unwrap();
+    assert!(third.ok(), "rebuild after dep edit clean: {:?}", third.diags.iter().map(|d| &d.code).collect::<Vec<_>>());
+    assert_eq!(third.checked(), vec![helper_path.clone()], "only the changed dep module re-analyzes");
+    assert!(third.reused().contains(&main_path), "app's main stays reused across the boundary: {:?}", third.reused());
+}
+
+#[test]
+fn incremental_build_of_dependency_free_package_takes_single_package_path() {
+    // A manifest-carrying but dependency-free package resolves nothing and keeps
+    // the historical single-package universe (bare module paths, no pkgid, no
+    // lock) — the incremental build is byte-for-byte unchanged from before.
+    let root = stage(&["bin_pkg"]);
+    let pkg = root.join("bin_pkg");
+    let report = build::build_dir(&pkg).expect("build must not hard-error");
+    assert!(report.ok(), "dep-free package builds clean: {:?}", report.diags.iter().map(|d| &d.code).collect::<Vec<_>>());
+    assert!(!pkg.join("candor.lock").exists(), "a dep-free package resolves nothing (single-package path)");
+    assert!(
+        report.modules.iter().all(|m| !m.path.contains('#')),
+        "single-package modules keep bare paths (no pkgid): {:?}",
+        report.modules.iter().map(|m| &m.path).collect::<Vec<_>>(),
+    );
 }
 
 // ---- the visibility wall: a b item not re-exported from b's public root -----

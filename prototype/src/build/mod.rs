@@ -237,6 +237,57 @@ fn json_str(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
 }
 
+/// The resolved build target of a `candor build`: a single package (a bare
+/// directory or a dependency-free manifested package) or a multi-package set
+/// (design 0017 Open-Q4). The universe/entry/collision differences between the two
+/// live here so the two-hash machinery downstream operates over one uniform module
+/// universe.
+enum Plan {
+    Single(modules::DirRoot),
+    Multi(crate::resolve_pkg::Resolution),
+}
+
+impl Plan {
+    /// The discovered module universe — `(full path, source file, resolver index)`
+    /// — the per-module import resolvers, and the entry module whose `fn main`
+    /// keeps the bare global name.
+    #[allow(clippy::type_complexity)]
+    fn universe(
+        &self,
+    ) -> Result<(Vec<(Vec<String>, PathBuf, usize)>, Vec<modules::ImportResolver>, Option<Vec<String>>), Diag> {
+        match self {
+            Plan::Single(root) => {
+                let discovered = modules::discover_module_files(root.discover_root())?
+                    .into_iter()
+                    .map(|(path, file)| (path, file, 0usize))
+                    .collect();
+                Ok((discovered, vec![modules::ImportResolver::single()], Some(vec![String::from("main")])))
+            }
+            Plan::Multi(res) => Ok((
+                modules::discover_multi(res)?,
+                modules::ImportResolver::per_package(res),
+                res.entry_module(),
+            )),
+        }
+    }
+
+    /// Entry-presence gate (path granularity), single- or multi-package.
+    fn check_entry(&self, has_path: impl Fn(&str) -> bool, diags: &mut Vec<Diag>) {
+        match self {
+            Plan::Single(root) => modules::check_entry_present(root, has_path, diags),
+            Plan::Multi(res) => modules::check_multi_entry_present(res, has_path, diags),
+        }
+    }
+
+    /// The multi-package dep-name / local-module collision gate (E0930); a no-op
+    /// for a single package.
+    fn check_collisions<'a>(&self, paths: impl Iterator<Item = &'a [String]>, diags: &mut Vec<Diag>) {
+        if let Plan::Multi(res) = self {
+            modules::check_dep_name_collisions(res, paths, diags);
+        }
+    }
+}
+
 /// `candor build <dir>` (design 0010 §3): discover the module tree, compute the
 /// DAG, and per module reuse or re-analyze per the two-hash rule. Uses the real
 /// schema/toolchain salt.
@@ -251,23 +302,35 @@ pub fn build_dir_with_salt(dir: &Path, salt: &str) -> Result<BuildReport, Diag> 
     let cache_dir = dir.join(".candor-cache");
     let cached = load_cache(&cache_dir);
 
-    // 1. The present-source universe: read + hash every `.cnr` file (NO parse).
-    //    A manifested package (design 0017 §1) roots its tree at `src/`; a bare
-    //    directory (design 0008 §2.4) stays rooted at the directory itself.
-    let root = modules::resolve_dir_root(dir)?;
-    let files = modules::discover_module_files(root.discover_root())?;
+    // 1. Resolve the module universe. A package with `[dependencies]` (design 0017
+    //    Open-Q4) resolves its pinned package set and discovers EVERY package's
+    //    modules under its pkgid — the same multi-package universe `candor
+    //    check`/`run`/`compile` build via `modules::build_tree`, so the incremental
+    //    build cannot diverge from the merge build. A dep-free package or bare
+    //    directory keeps the historical single-package universe (bare paths,
+    //    identity resolver), byte-for-byte unchanged.
+    let plan = if modules::has_dependencies(dir)? {
+        Plan::Multi(crate::resolve_pkg::resolve(dir)?)
+    } else {
+        Plan::Single(modules::resolve_dir_root(dir)?)
+    };
+    let (discovered, resolvers, entry) = plan.universe()?;
+
+    // The present-source universe: read + hash every `.cnr` file (NO parse).
     struct Present {
         path: Vec<String>,
         source: String,
         source_hash: String,
+        /// Index into `resolvers`: this module's package import resolver.
+        resolver: usize,
     }
     let mut present: BTreeMap<String, Present> = BTreeMap::new();
-    for (mp, file) in files {
+    for (mp, file, ri) in discovered {
         let source = std::fs::read_to_string(&file).map_err(|e| {
             Diag::error("E0900", format!("cannot read module `{}`: {e}", file.display()), crate::span::Span::point(0))
         })?;
         let source_hash = sha256::hex(source.as_bytes());
-        present.insert(path_str(&mp), Present { path: mp, source, source_hash });
+        present.insert(path_str(&mp), Present { path: mp, source, source_hash, resolver: ri });
     }
 
     // 2. Module-path universe = present sources ∪ cached artifacts (a reused
@@ -297,8 +360,21 @@ pub fn build_dir_with_salt(dir: &Path, salt: &str) -> Result<BuildReport, Diag> 
         if clean {
             edges.insert(path.clone(), art.unwrap().edges.clone());
         } else if let Some(pr) = pr {
-            let po = modules::parse_one(&pr.path, &pr.source)?;
-            let mut es: Vec<String> = po.uses.iter().map(|u| u.segments.join("::")).collect();
+            let po = modules::parse_one(&pr.path, &pr.source, entry.as_deref())?;
+            // A dirty module's edges are its `use`s RESOLVED through its package's
+            // import resolver — cross-package aware in a multi-package build, so a
+            // dependency's module is an edge exactly as an in-package one is.
+            let mut es: Vec<String> = Vec::new();
+            for u in &po.uses {
+                match resolvers[pr.resolver].resolve_use(&u.segments) {
+                    modules::UseResolution::Intra { target } => es.push(path_str(&target)),
+                    modules::UseResolution::Cross { target, is_public_root, .. } => {
+                        if is_public_root {
+                            es.push(path_str(&target));
+                        }
+                    }
+                }
+            }
             es.sort();
             es.dedup();
             edges.insert(path.clone(), es);
@@ -317,11 +393,8 @@ pub fn build_dir_with_salt(dir: &Path, salt: &str) -> Result<BuildReport, Diag> 
                 .with_note("the import graph must be an acyclic DAG (design 0008 §3)", None),
         );
     }
-    modules::check_entry_present(
-        &root,
-        |p| present.contains_key(p) || cached.contains_key(p),
-        &mut diags,
-    );
+    plan.check_entry(|p| present.contains_key(p) || cached.contains_key(p), &mut diags);
+    plan.check_collisions(present.values().map(|pr| pr.path.as_slice()), &mut diags);
     if diags.iter().any(|d| d.severity == Severity::Error) {
         return Ok(BuildReport { cache_dir, modules: Vec::new(), codegen: Vec::new(), diags });
     }
@@ -379,7 +452,7 @@ pub fn build_dir_with_salt(dir: &Path, salt: &str) -> Result<BuildReport, Diag> 
                 let pr = present.get(path).ok_or_else(|| {
                     Diag::error("E0906", format!("module `{path}` must re-check but its source is absent"), crate::span::Span::point(0))
                 })?;
-                let po = modules::parse_one(&pr.path, &pr.source)?;
+                let po = modules::parse_one(&pr.path, &pr.source, entry.as_deref())?;
                 parsed.entry(path.clone()).or_insert(po)
             }
         };
@@ -387,7 +460,8 @@ pub fn build_dir_with_salt(dir: &Path, salt: &str) -> Result<BuildReport, Diag> 
             .iter()
             .filter_map(|i| resolved_exports.get(i).map(|me| (i.clone(), clone_me(me))))
             .collect();
-        let (qitems, qdiags) = modules::qualify_one(po, &import_exports);
+        let ri = present.get(path).map(|p| p.resolver).unwrap_or(0);
+        let (qitems, qdiags) = modules::qualify_one(po, &import_exports, &resolvers[ri]);
         let source_hash = present.get(path).map(|p| p.source_hash.clone()).unwrap_or_default();
         let is_pub = po.is_pub.clone();
         let boundary = po.boundary;

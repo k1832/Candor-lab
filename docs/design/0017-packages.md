@@ -587,12 +587,23 @@ identifiers Open-Q1/Q4/Q5 are kept stable.*
    `candor audit` extension (F1b) is the first implementation slice this document
    depends on.
 
-4. **Incremental-build interaction (coherent in sketch, heavy in
-   implementation).** §7 makes the package boundary the interface-artifact
-   boundary (0008 §2 stages 3–4) and salts the codegen cache key with package
-   identity + version. The story is coherent, but the implementation weight (0008
-   §2's two-hash machinery, now per package, plus a resolved-graph cache) is real
-   and lands on the same stages 0008 §6 already flagged as the expensive ones.
+4. **Incremental-build interaction (Open-Q4) — CLOSED (2026-07-15), implemented.**
+   §7 makes the package boundary the interface-artifact boundary (0008 §2 stages
+   3–4). `candor build` now routes through the resolver when the package declares
+   `[dependencies]` (mirroring `modules::build_tree`): it discovers EVERY resolved
+   package's modules under its pkgid via the shared `modules::discover_multi` — the
+   single source of truth `check`/`run`/`compile` also use, so the incremental and
+   merge universes cannot diverge — and resolves each `use` through a shared
+   per-package `ImportResolver` (one `use`-to-module scheme). The two-hash
+   machinery is unchanged, only widened over the multi-package universe: cache keys
+   are the pkgid-prefixed module paths (disjoint across packages), and a
+   dependency's module edit invalidates and re-analyzes exactly as an in-package
+   edit does (a body edit preserving signatures re-analyzes nothing downstream,
+   across the boundary). A dependency-free / manifest-less package keeps the
+   historical single-package path (bare paths, identity resolver) byte-for-byte.
+   Gated in `tests/packages.rs` (dep built incrementally + universe equals the
+   resolver discovery; cross-package invalidation; no-change reuse incl. deps;
+   dep-free unchanged).
 
 5. **Single-version unification vs real diamonds.** Is a hard conflict error
    acceptable for the first release, or will path/git diamonds be common enough
