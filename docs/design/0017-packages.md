@@ -432,6 +432,28 @@ stages 3–4), not a prerequisite for the first working multi-package build.
   constraint*, coherently with P9's layering (`core`/`std` are themselves packages,
   0008 §5).
 
+  **Implemented 2026-07-15 (review F5)** — a **post-resolution** composition check
+  (`resolve` calls it right after the audit-free `resolve_graph`, before the trust
+  pass) gated on the **root** package's `freestanding` claim walks the pinned
+  package set and rejects (**E0935**) any package that contributes a
+  `boundary`/`foreign` surface, plus any transitive import of the `std` package
+  (0008 §5). The boundary/foreign surface is read from the whole-graph audit's own
+  structural enumeration (`audit::first_boundary_surface`, reusing
+  `structural_surface` — the single source of truth), so a **declared-but-uncalled**
+  transitive `foreign` extern is caught, not only a called one; the diagnostic
+  names the offending package + the specific boundary module / extern so the author
+  can act. The gate is the root's flag (the final artifact links no libc), not each
+  dependency's own claim — a boundary surface is rejected regardless of what the
+  dependency declares. Files: `prototype/src/resolve_pkg.rs`
+  (`check_freestanding_composition`), `prototype/src/audit.rs`
+  (`first_boundary_surface`). Gate: `prototype/tests/packages.rs` (the `blink -> hal`
+  escape with an uncalled extern; a transitive std import; a legit freestanding
+  composition over pure deps; a non-freestanding root over the same foreign dep,
+  unaffected). Std note: this edition models std types as ambient builtins, so the
+  transitive-std check keys on the `std` **package** appearing in the resolved graph
+  (P9's "std is a package", 0008 §5); a finer `use std::` token check awaits std
+  shipping as a real toolchain package.
+
 - **The foreign / audit trust boundary — the adversary's target — is aggregated,
   not hidden.** A dependency may contain `boundary` modules with `extern "C"`
   foreign declarations (0011), `unsafe` regions (P1), and `assumed-proven`

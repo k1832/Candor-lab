@@ -115,6 +115,7 @@ struct Node {
 /// (a manifest-less or dependency-free package uses the single-package path).
 pub fn resolve(root_dir: &Path) -> Result<Resolution, Diag> {
     let (root_dir, mut resolution) = resolve_graph(root_dir)?;
+    check_freestanding_composition(&resolution)?;
     let summaries = trust_summaries(&resolution.packages)?;
     resolution.lock_reused = write_or_verify_lock(&root_dir, &resolution.packages, &summaries)?;
     Ok(resolution)
@@ -223,6 +224,86 @@ fn resolve_graph(root_dir: &Path) -> Result<(PathBuf, Resolution), Diag> {
     let root = node_to_pkg[&0];
 
     Ok((root_dir, Resolution { packages, root, root_entry, lock_reused: false }))
+}
+
+/// Enforce the root package's `freestanding` claim across the whole resolved
+/// graph (design 0017 §8, review F5). When the ROOT declares `freestanding =
+/// true`, the final artifact links no libc (0011 §5), so **no** package in the
+/// transitive graph may contribute a `foreign` boundary surface, and the graph
+/// must not import the `std` package (0008 §5).
+///
+/// The gate is the **root's** flag — the final artifact's property — not each
+/// dependency's own claim: a dependency's boundary surface is rejected regardless
+/// of what the dependency itself declares, because the surface (not the flag) is
+/// what has no libc to link against. The boundary/foreign surface is read from the
+/// audit's structural enumeration ([`crate::audit::first_boundary_surface`]) — the
+/// single source of truth for a package's boundary modules and `foreign` externs —
+/// so this consumes the same data `candor audit` reports rather than re-walking.
+///
+/// Packages are visited in the resolution's deterministic topological order, and
+/// each package's surface is itself deterministically ordered, so the first
+/// violation reported is stable.
+fn check_freestanding_composition(res: &Resolution) -> Result<(), Diag> {
+    if !res.root_pkg().freestanding {
+        return Ok(());
+    }
+    let root = &res.root_pkg().name;
+    for pkg in &res.packages {
+        // A transitive `std` import (0008 §5). Under P9's package layering `std`
+        // is itself a package, so the `std` package appearing anywhere in the
+        // resolved set *is* a std import sneaking into a freestanding graph; a
+        // freestanding target must import only `core`/pure packages.
+        if pkg.name == "std" {
+            return Err(freestanding_std_diag(root));
+        }
+        // The load-bearing F5 case: a transitive `boundary`/`foreign` surface. A
+        // declared `foreign` extern (even one never called) has no libc to bind to
+        // under freestanding (0011 §5).
+        if let Some(surface) = crate::audit::first_boundary_surface(&pkg.src_root)? {
+            return Err(freestanding_boundary_diag(root, pkg, &surface));
+        }
+    }
+    Ok(())
+}
+
+fn freestanding_boundary_diag(
+    root: &str,
+    pkg: &ResolvedPackage,
+    surface: &crate::audit::BoundarySurface,
+) -> Diag {
+    let item = match &surface.foreign_extern {
+        Some(ext) => {
+            format!("boundary module `{}` declaring `foreign` extern `{}`", surface.module, ext)
+        }
+        None => format!("boundary module `{}`", surface.module),
+    };
+    let subject = if pkg.is_root {
+        format!("package `{}` itself contributes a {item}", pkg.name)
+    } else {
+        format!("dependency `{}` contributes a {item}", pkg.name)
+    };
+    diag("E0935", format!("freestanding composition rejected: {subject}"))
+        .with_note(
+            format!(
+                "the root package `{root}` declares `freestanding = true`, which links no libc: a transitive `foreign` extern has nothing to bind to (design 0011 §5)"
+            ),
+            None,
+        )
+        .with_note(
+            "drop the foreign boundary surface from the transitive graph, or drop the `freestanding` claim (design 0017 §8, review F5)",
+            None,
+        )
+}
+
+fn freestanding_std_diag(root: &str) -> Diag {
+    diag(
+        "E0935",
+        format!("freestanding composition rejected: the resolved graph of `{root}` imports the `std` package"),
+    )
+    .with_note(
+        "`std` is not freestanding-compatible: a freestanding target must import only `core`/pure packages (design 0008 §5)",
+        None,
+    )
 }
 
 /// Compute each resolved package's trust summary and write/verify the lock. This

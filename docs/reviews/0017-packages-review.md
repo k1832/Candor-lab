@@ -117,6 +117,19 @@ just `std` imports.
 **Disposition:** ACCEPTED (2026-07-15). Repair applied to 0017 §8: `freestanding`
 composition rejects any **transitive `boundary`/`foreign`** surface (0011 §5), not
 only a transitive `std` import; the whole-graph audit already enumerates the data.
+**Implemented 2026-07-15** — a post-resolution composition check gated on the
+**root's** `freestanding` claim walks the pinned package set and rejects (E0935)
+any package that contributes a `boundary`/`foreign` surface, and any transitive
+import of the `std` package (0008 §5). The boundary/foreign surface is read from
+the audit's structural enumeration (`audit::first_boundary_surface`, reusing
+`structural_surface` — the single source of truth), so a **declared-but-uncalled**
+transitive `foreign` extern (the `blink -> hal` escape) is caught; the diagnostic
+names the offending package + the specific boundary module / extern. The gate is
+the final artifact's property, not each dependency's own flag. Files:
+`prototype/src/resolve_pkg.rs` (`check_freestanding_composition`),
+`prototype/src/audit.rs` (`first_boundary_surface`); gate:
+`prototype/tests/packages.rs` (F5 escape with an uncalled extern, transitive std
+import, legit freestanding composes, non-freestanding unaffected).
 
 ## F6a — `src/` root contradicts 0008 + the implementation; a governance obligation. Severity: REPAIR
 

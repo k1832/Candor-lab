@@ -274,6 +274,33 @@ pub fn trust_counts(src_root: &Path) -> Result<TrustSummary, Diag> {
     })
 }
 
+/// The boundary/foreign surface a freestanding graph may not contain (design
+/// 0017 §8, review F5; 0011 §5). It is the specific item to name in the
+/// composition diagnostic so the author can act.
+pub struct BoundarySurface {
+    /// The module-qualified boundary module (e.g. `hal::hal`).
+    pub module: String,
+    /// The first `foreign` extern the module declares, when any — the specific
+    /// item that has no libc to link against under freestanding (0011 §5).
+    pub foreign_extern: Option<String>,
+}
+
+/// The first boundary/foreign surface a package rooted at `src_root` contributes,
+/// or `None` when it has none — the datum the freestanding composition check
+/// (`resolve_pkg`) rejects on (review F5). This reuses the exact structural
+/// enumeration `candor audit` walks ([`structural_surface`]) — the single source
+/// of truth for a package's boundary modules and `foreign` externs — so the check
+/// consumes the audit's data instead of re-walking. Boundary modules are
+/// enumerated in module-path-sorted order and externs in source order, so the
+/// reported surface is deterministic.
+pub fn first_boundary_surface(src_root: &Path) -> Result<Option<BoundarySurface>, Diag> {
+    let s = structural_surface(src_root)?;
+    Ok(s.boundary_modules.into_iter().next().map(|m| BoundarySurface {
+        module: m.module,
+        foreign_extern: m.externs.into_iter().next().map(|e| e.name),
+    }))
+}
+
 /// The structural trust surface of a program rooted at `path`: its boundary
 /// modules, `unsafe` regions, and the extern/predicate/export tallies — a pure
 /// parse walk (no checker). Shared by [`audit_program`] and [`trust_counts`] so

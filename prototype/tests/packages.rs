@@ -728,3 +728,80 @@ fn git_dependency_audit_surfaces_trust_surface() {
 
     std::env::remove_var("CANDOR_CACHE_DIR");
 }
+
+// ---------------------------------------------------------------------------
+// F5 (review 0017 §8): freestanding composition rejects any transitive
+// `boundary`/`foreign` surface (0011 §5) and any transitive `std` import (0008
+// §5) across the resolved graph, gated on the ROOT package's `freestanding`
+// claim. The check runs post-resolution over the pinned package set and reuses
+// the audit's structural boundary enumeration (single source of truth).
+// ---------------------------------------------------------------------------
+
+/// The hard error a failed resolution/composition raises (its `Err` diagnostic),
+/// or `None` if the package resolved and checked. Only a resolver-level failure
+/// (E0935 here) surfaces as `Err`; per-module check diagnostics surface as `Ok`.
+fn resolve_error(dir: &std::path::Path) -> Option<candor_proto::diag::Diag> {
+    check_dir(dir).err()
+}
+
+// The load-bearing F5 escape (`blink -> hal`): the freestanding root pulls in a
+// dependency whose `boundary` module declares a `foreign` extern that is never
+// called. Resolution must fail, naming the offending package + the extern.
+#[test]
+fn freestanding_rejects_transitive_declared_but_uncalled_foreign_extern() {
+    let root = stage(&["blink", "hal"]);
+    let blink = root.join("blink");
+    let diag = resolve_error(&blink)
+        .expect("freestanding blink over hal's foreign surface must be rejected");
+    assert_eq!(diag.code, "E0935", "want the freestanding-composition code, got {diag:?}");
+    let text = format!("{} {}", diag.message, diag.to_json());
+    assert!(text.contains("hal"), "diagnostic must name the offending package `hal`: {text}");
+    assert!(
+        text.contains("hal_write"),
+        "diagnostic must name the declared-but-uncalled extern `hal_write`: {text}"
+    );
+}
+
+// A transitive `std` import (0008 §5): the `std` package appears in a
+// freestanding root's resolved graph. Rejected with the same code.
+#[test]
+fn freestanding_rejects_transitive_std_import() {
+    let root = stage(&["fs_std", "stdpkg"]);
+    let app = root.join("fs_std");
+    let diag =
+        resolve_error(&app).expect("freestanding fs_std importing the `std` package must be rejected");
+    assert_eq!(diag.code, "E0935", "want the freestanding-composition code, got {diag:?}");
+    assert!(
+        format!("{} {}", diag.message, diag.to_json()).contains("std"),
+        "diagnostic must name the `std` package: {diag:?}"
+    );
+}
+
+// Regression guard: a freestanding root over only pure, core-only dependencies
+// (no boundary/foreign, no std) composes clean and runs across every engine.
+#[test]
+fn freestanding_over_pure_deps_composes_clean() {
+    let root = stage(&["fs_ok", "purelib"]);
+    let app = root.join("fs_ok");
+    assert!(
+        check_dir(&app).unwrap().is_empty(),
+        "legit freestanding composition must check clean: {:?}",
+        codes_at(&app)
+    );
+    assert_all_engines(&app, 42);
+}
+
+// A NORMAL (non-freestanding) root over the same foreign-boundary dependency
+// must build exactly as before — the composition check is gated on the root's
+// flag and must not touch it.
+#[test]
+fn non_freestanding_root_over_foreign_dep_is_unaffected() {
+    let root = stage(&["hosted_app", "hal"]);
+    let app = root.join("hosted_app");
+    assert!(
+        check_dir(&app).unwrap().is_empty(),
+        "non-freestanding root over a foreign dep must check clean: {:?}",
+        codes_at(&app)
+    );
+    assert_eq!(native_ret(run_dir_mir(&app)), 0, "non-freestanding root still runs");
+}
