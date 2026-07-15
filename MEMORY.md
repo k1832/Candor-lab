@@ -1138,3 +1138,33 @@ once you add the literal node). Key design/impl facts worth reusing:
   (`-c user.name=… -c user.email=…`) or they fail with no global git config. The
   checkout has its `.git` removed so it is plain read-only source that survives
   mirror eviction. (2026-07-15).
+
+- **The pkgid (per-package mangling/cache-key prefix) must be the package NAME —
+  not a path hash, not a content hash.** design 0017 was internally contradictory:
+  §5/F2 said pkgid = name + *source hash* (injectivity + provenance), but §7/Open-Q4
+  make the pkgid the incremental cache-key prefix that must be *stable under body
+  edits*. A content hash can't be both — any body edit changes it, renaming every
+  symbol in the package and defeating per-module incrementality. The original impl
+  dodged that by hashing the absolute *path* (stable under edits) — which leaks the
+  build path into object bytes and breaks NN#16 reproducibility (a SINK: same source
+  at two paths → different binaries). Resolution: the source hash was only ever there
+  for injectivity, which the *name already provides* — the resolver enforces one
+  source per package name (E0923 single-version unification), so names are unique
+  across any resolved build. `pkgid_of(name) -> name`. Injective (unique names; every
+  item incl. root is pkgid-prefixed so the leading segment identifies the owner —
+  F6b), path-independent (NN#16), stable under body edits (§7). Provenance stays in
+  the lock's `content_hash` field. Forward-compat caveat: a future registry allowing
+  same-named packages must reintroduce a namespace/version qualifier then. Lesson:
+  when one identifier is asked to be both reproducible-identity AND
+  stable-incremental-key, check whether an *enforced uniqueness invariant* already
+  gives you injectivity for free — then the identity needs no hash at all. (2026-07-15).
+
+- **An accepted adversarial-review repair is not done until it's in code — grep the
+  field, not the prose.** F5 (freestanding must reject transitive foreign/std
+  surface) was dispositioned ACCEPTED and written into the design, but the
+  implementation only *assigned* `ResolvedPackage.freestanding` and read it nowhere —
+  a dead field. A fresh-context adversarial pass over the *finished* stack caught it
+  (and the pkgid SINK) where the design-time review couldn't. Worth a verification
+  pass over a feature-complete subsystem specifically checking each prior repair is
+  honored in code (`grep` every read of the field the repair added), not just present
+  in the doc. (2026-07-15).
