@@ -284,20 +284,46 @@ underlying package when they differ). This is decidable from the manifest plus a
 the whole module tree into one name-qualified `Program` by mangling each item to
 `module::name` (`prototype/src/modules.rs`). This extends by prepending an
 **injective package-identity** segment to the mangle: an item becomes
-`<pkgid>::module::name`, where `<pkgid>` is the package **name + its resolved-source
-hash** (§6). **The prefix is applied to *every* item in the merged table, including
+`<pkgid>::module::name`, where `<pkgid>` is the package **name** — unique within any
+resolved build by single-version-per-package unification (§6, E0923), so the name
+alone is injective (2026-07-15 erratum; the source hash it once carried was
+redundant given unification and incompatible with §7 incrementality). **The prefix is applied to *every* item in the merged table, including
 the root (buildable) package's own items — not only dependencies' items.** That is
 what makes the merge collision-proof: because the root is prefixed too, a local
 top-level module can never collide with a *transitive* dependency that happens to
 share its name (the §5 disjoint-check catches only *direct* dependency names, so it
-cannot be relied on for the transitive case), and two distinct versions/sources of
-`util` cannot collide in the merged table. It also secures **cross-package
+cannot be relied on for the transitive case); and single-version unification (§6,
+E0923) guarantees at most one `util` exists per build, so two versions/sources of it
+cannot coexist to collide in the merged table in the first place. It also secures **cross-package
 acyclicity**: two same-named modules from different packages carry distinct
 `<pkgid>` prefixes and therefore never merge into one node of the module DAG (§8;
 review F6b). The merged `Program` is still fed unchanged to the resolver / checker /
 interpreter (as `modules.rs` does today); **cross-package linking introduces no new
 mechanism for 0.x** — it is the same merge, with package-qualified names. (Separate compilation, dynamic linking, and a stable
 native ABI are P14's C-ABI story, out of scope — §Scope.)
+
+> **Erratum (2026-07-15).** `<pkgid>` is the package **name**, nothing content- or
+> path-derived. The first prototype hashed the package's *absolute canonicalized
+> directory path*, which leaked the build path into every mangled symbol, object,
+> cache hash, and executable — two checkouts of identical source at different paths
+> produced different binaries, violating NN#16 ("Same source + same lock + same
+> toolchain ⇒ bit-identical artifacts"). Deriving the pkgid from the package's
+> *content hash* fixes NN#16 but breaks §7: a body edit changes the content hash,
+> renaming every symbol in the package, so the whole package re-analyzes and a
+> dependent's cached symbols dangle. The **name** satisfies all three constraints at
+> once: injective (single-version unification / E0923 makes names unique per build,
+> and every item — the root package's included — is pkgid-prefixed, so the leading
+> segment identifies the owning package), reproducible/path-independent (NN#16), and
+> stable under body edits (§7 — symbols no longer rename, so downstream re-analysis
+> is preserved). The source hash was only ever there for injectivity, which unique
+> names already provide, so it is dropped as redundant. Provenance is unaffected:
+> the lock's `content_hash` field still records each package's source hash. Pinned by
+> two tests in `prototype/tests/packages.rs` — `pkgid_is_path_independent`
+> (reproducibility) and `incremental_build_invalidates_across_package_boundary`
+> (a dep body edit re-analyzes only the changed module, no symbol rename).
+> **Forward-compat caveat:** a future design that permits same-named packages in one
+> build (a registry with namespaces, vendored forks) must reintroduce a
+> disambiguating qualifier in the pkgid at that point.
 
 ### 6. Resolver and lockfile — simplest correct for 0.x
 

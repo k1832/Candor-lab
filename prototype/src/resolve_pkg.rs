@@ -332,7 +332,7 @@ fn resolved_package(node: &Node, is_root: bool) -> Result<ResolvedPackage, Diag>
     let src_root = node.dir.join("src");
     let content_hash = hash_sources(&src_root)?;
     let source = node.source.clone();
-    let pkgid = pkgid_of(&node.manifest.package.name, &node.dir);
+    let pkgid = pkgid_of(&node.manifest.package.name);
     Ok(ResolvedPackage {
         pkgid,
         name: node.manifest.package.name.clone(),
@@ -349,14 +349,17 @@ fn resolved_package(node: &Node, is_root: bool) -> Result<ResolvedPackage, Diag>
     })
 }
 
-/// The injective package id (design 0017 §5, review F2): the package name plus a
-/// hash of its resolved source. The `#` separator can never occur in a source
-/// identifier, so the pkgid segment cannot collide with any module name — which
-/// is what keeps two same-named modules from different packages from merging into
-/// one node of the flat program (securing cross-package acyclicity, review F6b).
-fn pkgid_of(name: &str, canonical_dir: &Path) -> String {
-    let hash = sha256::hex(canonical_dir.to_string_lossy().as_bytes());
-    format!("{name}#{}", &hash[..16])
+/// The injective package id (design 0017 §5, review F2): the package **name**.
+/// Single-version-per-package unification (E0923, `create_node`) makes names
+/// unique within any successfully-resolved build, so the name alone is injective;
+/// no source hash is needed (and hashing content would rename every symbol on a
+/// body edit, breaking §7 incrementality — 2026-07-15 erratum). Every item —
+/// including the root package's own — is prefixed by its package's pkgid, so the
+/// leading path segment uniquely identifies the owning package: two same-named
+/// modules from different packages never merge into one node of the flat program
+/// (securing cross-package acyclicity, review F6b).
+fn pkgid_of(name: &str) -> String {
+    name.to_string()
 }
 
 /// A deterministic content hash over a package's `src/` sources (design 0017 §6):

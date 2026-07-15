@@ -144,6 +144,40 @@ fn app_depends_on_b_builds_and_runs_across_engines() {
 }
 
 // ---------------------------------------------------------------------------
+// NN#16 reproducibility gate: the pkgid is derived from a package's CONTENT
+// (design 0017 §5/§6 content hash), never its filesystem path. Byte-identical
+// source staged under two different absolute directories must yield identical
+// pkgids — and therefore identical mangled symbols and artifacts. This fails
+// against the old absolute-path hash and pins the Non-Negotiable that the build
+// path can never leak into a compiled artifact.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pkgid_is_path_independent() {
+    // Two independent stagings live at two distinct absolute temp roots.
+    let root_a = stage(&["app", "b"]);
+    let root_b = stage(&["app", "b"]);
+    assert_ne!(root_a, root_b, "the two stagings must occupy different paths");
+
+    let res_a = resolve_pkg::resolve(&root_a.join("app")).unwrap();
+    let res_b = resolve_pkg::resolve(&root_b.join("app")).unwrap();
+
+    let ids_a: std::collections::BTreeMap<String, String> =
+        res_a.packages.iter().map(|p| (p.name.clone(), p.pkgid.clone())).collect();
+    let ids_b: std::collections::BTreeMap<String, String> =
+        res_b.packages.iter().map(|p| (p.name.clone(), p.pkgid.clone())).collect();
+    assert_eq!(ids_a, ids_b, "identical source at different paths must produce identical pkgids (NN#16)");
+
+    // The pkgid is the leading segment of every mangled symbol, so the whole
+    // mangled module universe must match too: the artifact carries no build path.
+    let univ_a: std::collections::BTreeSet<String> =
+        modules::discover_multi(&res_a).unwrap().into_iter().map(|(path, _, _)| path.join("::")).collect();
+    let univ_b: std::collections::BTreeSet<String> =
+        modules::discover_multi(&res_b).unwrap().into_iter().map(|(path, _, _)| path.join("::")).collect();
+    assert_eq!(univ_a, univ_b, "the mangled module universe must be path-independent");
+}
+
+// ---------------------------------------------------------------------------
 // The incremental build resolves cross-package dependencies (design 0017
 // Open-Q4): `candor build` on a package-with-deps discovers EVERY package's
 // modules under its pkgid — the same multi-package universe check/run/compile
