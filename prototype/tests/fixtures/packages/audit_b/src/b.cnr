@@ -1,0 +1,13 @@
+boundary
+extern "C" {
+    fn b_native_read(p: rawptr u8) -> usize
+        trust "audit fixture: reads one byte, retains nothing" {
+            no_retain(p),
+        };
+}
+
+pub fn b_read(p: rawptr u8) -> usize {
+    unsafe "b_native_read trust discharged: p is a live view" {
+        return b_native_read(p);
+    }
+}

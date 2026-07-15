@@ -1,0 +1,7 @@
+// audit_app: a manifested binary whose dependency graph (b -> c) carries a
+// `foreign` + `unsafe` trust surface. The whole-graph `candor audit` must
+// enumerate b's and c's surface attributed to each package, even though the
+// root's own body is inert — a dependency cannot hide I/O from the consumer.
+fn main() -> i64 {
+    return 0;
+}

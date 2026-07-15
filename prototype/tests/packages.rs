@@ -222,6 +222,91 @@ fn lockfile_is_written_then_reused() {
     assert!(second.lock_reused, "a present, consistent lock is reused verbatim");
 }
 
+// ---- whole-graph audit: a dependency's foreign + unsafe surface is aggregated
+// and attributed to it (design 0017 §8; review F1b) --------------------------
+//
+// `audit_app` -> `b` -> `c`: `candor audit audit_app` walks the WHOLE resolved
+// graph. Each package's trust surface is enumerated and tagged with its name,
+// version, and source, so a dependency's `foreign` externs and `unsafe` regions
+// are visible and traceable to it — a dep (and a dep-of-a-dep) cannot hide I/O.
+
+#[test]
+fn audit_aggregates_dependency_trust_surface_across_graph() {
+    let root = stage(&["audit_app", "audit_b", "audit_c"]);
+    let app = root.join("audit_app");
+    let got = candor_proto::audit::audit_path(&app).expect("graph audit succeeds");
+    let doc: serde_json::Value = serde_json::from_str(&got).expect("audit emits JSON");
+
+    let packages = doc["packages"].as_array().expect("packages array");
+    assert_eq!(packages.len(), 3, "root + b + c are all enumerated:\n{got}");
+    let find = |name: &str| {
+        packages
+            .iter()
+            .find(|p| p["package"] == name)
+            .unwrap_or_else(|| panic!("missing package `{name}`:\n{got}"))
+    };
+
+    // The root package is attributed and flagged; its surface is also the report's
+    // top level (the backward-compatible single-package shape).
+    let app_pkg = find("audit_app");
+    assert_eq!(app_pkg["is_root"], true);
+    assert_eq!(doc["boundary_modules"], app_pkg["boundary_modules"]);
+    assert_eq!(doc["summary"], app_pkg["summary"]);
+
+    // b: its `foreign` extern AND its `unsafe` region, attributed to b
+    // (name + version + source).
+    let b = find("b");
+    assert_eq!(b["is_root"], false);
+    assert_eq!(b["version"], "0.2.0");
+    assert_eq!(b["source"]["kind"], "path");
+    assert!(
+        b["source"]["path"].as_str().unwrap().ends_with("audit_b"),
+        "b's source is its canonical path:\n{got}"
+    );
+    assert!(has_foreign_extern(b, "b_native_read"), "b's foreign extern:\n{got}");
+    assert!(has_unsafe_fn(b, "b::b_read"), "b's unsafe region:\n{got}");
+    assert_eq!(b["summary"]["externs"], 1);
+    assert_eq!(b["summary"]["unsafe_regions"], 1);
+
+    // Transitive depth: c is a dependency of b, yet its surface still appears,
+    // attributed to c — a dep-of-a-dep cannot hide.
+    let c = find("c");
+    assert_eq!(c["is_root"], false);
+    assert_eq!(c["version"], "0.3.0");
+    assert!(c["source"]["path"].as_str().unwrap().ends_with("audit_c"), "c source:\n{got}");
+    assert!(has_foreign_extern(c, "c_native_write"), "c's foreign extern:\n{got}");
+    assert!(has_unsafe_fn(c, "c::c_write"), "c's unsafe region:\n{got}");
+}
+
+// ---- backward compat: a dependency-free package audits with the unchanged
+// single-package shape (no `packages` layer) --------------------------------
+
+#[test]
+fn audit_of_dependency_free_package_is_single_package_shape() {
+    let root = stage(&["audit_c"]);
+    let got = candor_proto::audit::audit_path(&root.join("audit_c")).expect("audit succeeds");
+    let doc: serde_json::Value = serde_json::from_str(&got).expect("audit emits JSON");
+    assert!(doc.get("packages").is_none(), "no graph layer for a dep-free package:\n{got}");
+    assert_eq!(doc["summary"]["externs"], 1);
+    assert_eq!(doc["summary"]["unsafe_regions"], 1);
+}
+
+/// Whether any of `pkg`'s boundary modules declares a `foreign` extern named `name`.
+fn has_foreign_extern(pkg: &serde_json::Value, name: &str) -> bool {
+    pkg["boundary_modules"].as_array().unwrap().iter().any(|m| {
+        m["externs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["name"] == name && e["foreign"] == true)
+    })
+}
+
+/// Whether `pkg` records an `unsafe` region in the module-qualified function `func`.
+fn has_unsafe_fn(pkg: &serde_json::Value, func: &str) -> bool {
+    pkg["unsafe_regions"].as_array().unwrap().iter().any(|u| u["function"] == func)
+}
+
 fn codes_at(dir: &std::path::Path) -> Vec<String> {
     match check_dir(dir) {
         Ok(diags) => diags.into_iter().map(|d| d.code).collect(),

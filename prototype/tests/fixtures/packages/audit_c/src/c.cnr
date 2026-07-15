@@ -1,0 +1,13 @@
+boundary
+extern "C" {
+    fn c_native_write(p: rawptr u8) -> usize
+        trust "audit fixture: writes one byte, retains nothing" {
+            no_retain(p),
+        };
+}
+
+pub fn c_write(p: rawptr u8) -> usize {
+    unsafe "c_native_write trust discharged: p is a live sink" {
+        return c_native_write(p);
+    }
+}

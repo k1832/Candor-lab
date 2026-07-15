@@ -1113,3 +1113,15 @@ once you add the literal node). Key design/impl facts worth reusing:
   dir-globbed run/ fixtures auto-ride the aot/llvm corpus. Gate: two same-pattern
   guarded arms (first false, second fires) proves fall-through-and-retry. 871 nextest
   green (full, incl. self-host) + clippy clean. (match guards, 2026-07-14).
+
+- **`candor audit`'s whole-graph aggregation audits each package's `src/` in
+  ISOLATION.** The graph audit (0017 §8; `audit.rs::audit_graph`) reuses the
+  resolver for the pinned set, then runs the per-package walk over each package's
+  own `src/` tree. The structural boundary/`unsafe` enumeration is a pure per-file
+  parse (always robust), but a package's `effect_reach` runs the checker over that
+  package ALONE — so a package with cross-package `use` in its bodies would have
+  its isolated effect-reach degrade (the dep symbols are unresolved). Multi-package
+  audit fixtures are therefore kept self-contained (manifest edges drive the graph;
+  bodies don't cross-reference). Schema is additive: top-level fields stay the
+  ROOT's local surface (single-package shape, goldens byte-unchanged); a `packages`
+  array adds the per-package name/version/source attribution. (2026-07-15).

@@ -1,0 +1,9 @@
+[package]
+name = "b"
+version = "0.2.0"
+edition = "2026"
+
+[lib]
+
+[dependencies]
+c = { path = "../audit_c" }

@@ -27,7 +27,7 @@ use serde::Serialize;
 use crate::ast::*;
 use crate::diag::Diag;
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct AuditReport {
     pub boundary_modules: Vec<ModuleReport>,
     pub effect_reach: Vec<ReachEntry>,
@@ -35,7 +35,7 @@ pub struct AuditReport {
     pub summary: Summary,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct ModuleReport {
     pub module: String,
     pub file: String,
@@ -44,7 +44,7 @@ pub struct ModuleReport {
     pub exports: Vec<ExportReport>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct ExternReport {
     pub name: String,
     pub signature: String,
@@ -52,21 +52,21 @@ pub struct ExternReport {
     pub trust: Option<TrustReport>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct TrustReport {
     pub justification: String,
     pub span: SpanRep,
     pub predicates: Vec<PredReport>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct PredReport {
     pub predicate: String,
     pub args: Vec<String>,
     pub span: SpanRep,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct ExportReport {
     pub symbol: String,
     pub signature: String,
@@ -74,7 +74,7 @@ pub struct ExportReport {
     pub inbound_fault: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct ReachEntry {
     pub function: String,
     pub status: String,
@@ -84,7 +84,7 @@ pub struct ReachEntry {
 /// Its `function` is the module-qualified enclosing definition, `span` covers the
 /// whole `unsafe` expression, and `justification` is the mandatory (P1) rationale
 /// string the author must supply.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct UnsafeReport {
     pub function: String,
     pub file: String,
@@ -92,7 +92,7 @@ pub struct UnsafeReport {
     pub span: SpanRep,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct Summary {
     pub boundary_modules: usize,
     pub externs: usize,
@@ -114,9 +114,121 @@ impl From<crate::span::Span> for SpanRep {
     }
 }
 
+// ----- whole-graph aggregation (design 0017 §8; review F1b) ----------------
+
+/// The aggregated audit of a manifested package and its whole resolved
+/// dependency graph. The top-level `boundary_modules` / `effect_reach` /
+/// `unsafe_regions` / `summary` are the **root package's** local surface — the
+/// exact shape a single-package audit emits, so existing readers are unaffected.
+/// The added `packages` array is the per-package attribution layer: every package
+/// in the resolved set (root + every transitive path dependency) with its own
+/// trust surface tagged by name + version + source. A dependency's `foreign`
+/// externs and `unsafe` regions are thus visible and traceable to it — a
+/// dependency cannot hide I/O from the consumer's `candor audit`.
+#[derive(Serialize)]
+struct GraphAuditReport {
+    #[serde(flatten)]
+    root: AuditReport,
+    packages: Vec<PackageAudit>,
+}
+
+/// One package's audit, attributed to its provenance (design 0017 §8, P16).
+#[derive(Serialize)]
+struct PackageAudit {
+    package: String,
+    version: String,
+    source: PackageSource,
+    is_root: bool,
+    #[serde(flatten)]
+    audit: AuditReport,
+}
+
+/// A package's pinned source, mirroring the resolver's `ResolvedSource`
+/// (design 0017 §4/§6): a canonical directory, or a git url pinned to a rev.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum PackageSource {
+    Path { path: String },
+    Git { url: String, rev: String },
+}
+
+/// True when `path` is a manifested package directory declaring at least one
+/// dependency — the gate that routes the audit to the whole-graph aggregation.
+fn is_multi_package(path: &Path) -> Result<bool, Diag> {
+    if !path.is_dir() {
+        return Ok(false);
+    }
+    match crate::manifest::load_manifest(path) {
+        Ok(Some(m)) => Ok(!m.dependencies.is_empty()),
+        Ok(None) => Ok(false),
+        Err(e) => Err(Diag::error(
+            e.code,
+            format!("cannot read package manifest: {}", e.message),
+            crate::span::Span::point(0),
+        )),
+    }
+}
+
+/// Resolve the root package's dependency graph (reusing the resolver) and audit
+/// every package in the pinned set, attributing each finding to its package
+/// (design 0017 §8). The root package's own surface is also surfaced at the top
+/// level for the backward-compatible single-package shape.
+fn audit_graph(root_dir: &Path) -> Result<String, Diag> {
+    let resolution = crate::resolve_pkg::resolve(root_dir)?;
+    let mut packages = Vec::with_capacity(resolution.packages.len());
+    let mut root_audit: Option<AuditReport> = None;
+    for (i, pkg) in resolution.packages.iter().enumerate() {
+        // Each package is audited over its own `src/` tree; the structural
+        // boundary/unsafe enumeration is a pure parse per file, and the effect
+        // reach runs the checker over that package alone.
+        let audit = audit_program(&pkg.src_root)?;
+        let is_root = i == resolution.root;
+        if is_root {
+            root_audit = Some(audit.clone());
+        }
+        packages.push(PackageAudit {
+            package: pkg.name.clone(),
+            version: format!("{}.{}.{}", pkg.version.major, pkg.version.minor, pkg.version.patch),
+            source: package_source(&pkg.source),
+            is_root,
+            audit,
+        });
+    }
+    let root = root_audit.expect("the resolved set always contains the root package");
+    Ok(serde_json::to_string_pretty(&GraphAuditReport { root, packages })
+        .expect("GraphAuditReport serializes"))
+}
+
+fn package_source(src: &crate::resolve_pkg::ResolvedSource) -> PackageSource {
+    match src {
+        crate::resolve_pkg::ResolvedSource::Path(dir) => {
+            PackageSource::Path { path: dir.to_string_lossy().into_owned() }
+        }
+        crate::resolve_pkg::ResolvedSource::Git { url, rev } => {
+            PackageSource::Git { url: url.clone(), rev: rev.clone() }
+        }
+    }
+}
+
 /// Audit a `.cnr` file or a directory of them. Returns pretty JSON (design 0011
 /// §6), or a hard parse/IO error.
+///
+/// A manifested package that declares dependencies is audited across its **whole
+/// resolved dependency graph** (design 0017 §8): every package's trust surface is
+/// enumerated and attributed to it. A bare file, a manifest-less directory, or a
+/// dependency-free package takes the unchanged single-package walk.
 pub fn audit_path(path: &Path) -> Result<String, Diag> {
+    if is_multi_package(path)? {
+        return audit_graph(path);
+    }
+    let report = audit_program(path)?;
+    Ok(serde_json::to_string_pretty(&report).expect("AuditReport serializes"))
+}
+
+/// Audit one program rooted at `path` (a `.cnr` file or a module-tree directory):
+/// its boundary modules, effect reach, and `unsafe` regions. This is the per-
+/// package walk the whole-graph audit runs over each resolved package.
+fn audit_program(path: &Path) -> Result<AuditReport, Diag> {
     let files = collect_files(path)?;
     let mut modules = Vec::new();
     let mut unsafe_regions = Vec::new();
@@ -193,7 +305,7 @@ pub fn audit_path(path: &Path) -> Result<String, Diag> {
     let boundary_count = modules.len();
 
     let unsafe_count = unsafe_regions.len();
-    Ok(serde_json::to_string_pretty(&AuditReport {
+    Ok(AuditReport {
         boundary_modules: modules,
         effect_reach: foreign_report,
         unsafe_regions,
@@ -206,7 +318,6 @@ pub fn audit_path(path: &Path) -> Result<String, Diag> {
             unsafe_regions: unsafe_count,
         },
     })
-    .expect("AuditReport serializes"))
 }
 
 /// Run the checker over the whole program and return the boundary-module effect

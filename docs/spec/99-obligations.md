@@ -5035,3 +5035,49 @@ yet resolve deps — it builds only the root `src/` tree, so cross-package `use`
 is unresolved (the resolver/merge lands in `build_tree`, used by
 check/run/compile). The `candor audit` whole-graph trust aggregation (0017 §8 /
 F1b) is a separate queued slice, not this one.
+
+## OBL-0017-AUDIT-GRAPH — packaging slice: `candor audit` walks the WHOLE resolved dependency graph (2026-07-15)
+
+Closes the cross-package half of review F1b (0017 §8): `candor audit` on a
+manifested package that declares dependencies now enumerates every package's
+trust surface across the **whole resolved graph** and attributes each finding to
+its package + version + source (P16 provenance). A dependency's `foreign` externs
+and `unsafe` regions are visible and traceable to it — a dep (or a dep-of-a-dep)
+cannot hide I/O from the consumer's audit. Composes the two landed pieces (it
+re-implements neither): the resolver (`resolve_pkg::resolve`, OBL-0017-RESOLVE)
+for the pinned package set + provenance, and the per-package audit walk
+(`audit.rs`, boundary externs/exports + effect-reach + `unsafe` regions).
+
+- **Detection (`prototype/src/audit.rs`).** `audit_path` routes to the graph
+  aggregation only when the target is a directory with a `candor.toml` that
+  declares ≥1 dependency; a bare file, a manifest-less directory, or a
+  dependency-free package takes the **unchanged** single-package walk
+  (`audit_program`, the former `audit_path` body, refactored to return the report
+  struct).
+- **Aggregation + attribution.** For each package in the pinned set (root + every
+  transitive path dependency) the per-package walk runs over that package's `src/`
+  tree; the result is tagged with the package `name`, `version`, and `source`
+  (canonical path; git url+rev when git lands). Additive JSON schema: the top-level
+  `boundary_modules`/`effect_reach`/`unsafe_regions`/`summary` remain the **root
+  package's** local surface (the exact single-package shape, so existing readers
+  and the `ffi_audit`/`bump.cnr` goldens are unaffected); a new `packages` array
+  carries the per-package attribution layer.
+- **Git deps** keep erroring cleanly (E0924, "not yet fetched") via the reused
+  resolver — the git surface audits once git-fetch lands.
+- **Gate (`prototype/tests/packages.rs`, +2 tests).** `audit_app` → `b` → `c`:
+  `candor audit audit_app` enumerates b's `foreign` extern (`b_native_read`) AND
+  its `unsafe` region (`b::b_read`), each attributed to package `b` v0.2.0 at its
+  canonical `audit_b` source; transitive `c`'s surface (`c_native_write`,
+  `c::c_write`) surfaces attributed to `c` v0.3.0. A dependency-free package audits
+  with the unchanged single-package shape (no `packages` layer). Full
+  `cargo nextest run` green (906 tests, +2) incl. all self-host + native + wasm
+  gates; `--profile fast` green; clippy clean. The `ffi_audit`/`bump.cnr` single-
+  program audits in `tests/foreign.rs` are byte-unchanged.
+
+**Deferred (reported):** the per-dependency **trust summary in `candor.lock`**
+(0017 §8 — counts of boundary modules / externs / `unsafe` regions per resolved
+dep, so a lock update surfaces a trust delta). Adding it would couple the resolver
+to the audit walk (the lock is written inside `resolve()`, which must stay
+audit-free) and would perturb the lock's `PartialEq` reuse check; the required
+deliverable is the audit-command aggregation, which is independent and complete.
+A *gating* trust-delta diff on lock updates remains a first-1.0 need (0017 Open-Q1).

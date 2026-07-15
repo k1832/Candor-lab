@@ -1,0 +1,6 @@
+[package]
+name = "c"
+version = "0.3.0"
+edition = "2026"
+
+[lib]
