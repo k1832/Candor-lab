@@ -58,7 +58,7 @@ fn main() -> ExitCode {
 
 /// The CLI usage text, shared by `--help` (stdout, exit 0) and the unknown-command
 /// error path (stderr, exit 2).
-const USAGE: &str = "usage: candor (parse|check|run|count|audit|build|manifest) <file>  |  run [--engine=mir] <file>  |  compile <file_or_dir> -o <prog> [--release] [--freestanding]  |  migrate <file.cn> [-o <out.cnr>]  |  fmt <file_or_dir.cnr> [--check|--stdout]  |  --version  |  --help   (.cnr = real syntax, .cn = throwaway)";
+const USAGE: &str = "usage: candor (parse|check|run|count|audit|build|manifest) <file>  |  run [--engine=mir] <file>  |  compile <file_or_dir> -o <prog> [--release] [--freestanding] [--linker=<name>]  |  migrate <file.cn> [-o <out.cnr>]  |  fmt <file_or_dir.cnr> [--check|--stdout]  |  --version  |  --help   (.cnr = real syntax, .cn = throwaway)";
 
 /// True when the path names a real-syntax (`.cnr`) source file.
 fn is_real(path: &str) -> bool {
@@ -354,6 +354,10 @@ fn run_audit(path: &str) -> ExitCode {
 /// selects the LLVM `-O2` backend instead (optimized native — the release build;
 /// `--backend=llvm` is a synonym). `--freestanding` links the no-libc runtime
 /// (`-nostdlib -static -no-pie`), the NN#6 proof artifact — no JIT, no libc.
+/// `--linker=<name>` selects an alternate linker (e.g. `mold`, `lld`, `gold`,
+/// `bfd`), passed to `cc`/`clang` as `-fuse-ld=<name>` — opt-in and explicit so a
+/// build's linker stays a deterministic toolchain choice (NN#16 reproducibility),
+/// never "whatever happens to be installed".
 fn run_compile(rest: &[String]) -> ExitCode {
     let mut out: Option<&str> = None;
     let mut input: Option<&str> = None;
@@ -382,6 +386,18 @@ fn run_compile(rest: &[String]) -> ExitCode {
                 llvm = true;
                 i += 1;
             }
+            // `--linker=<name>` selects the linker (e.g. mold, lld, gold, bfd),
+            // passed to cc/clang as `-fuse-ld=<name>`. Opt-in and explicit so the
+            // build stays reproducible; sets CANDOR_LINKER, which the backends read.
+            s if s.starts_with("--linker=") => {
+                let name = &s["--linker=".len()..];
+                if name.is_empty() {
+                    eprintln!("error: `--linker=` requires a linker name (e.g. --linker=mold)");
+                    return ExitCode::from(2);
+                }
+                std::env::set_var("CANDOR_LINKER", name);
+                i += 1;
+            }
             other => {
                 input = Some(other);
                 i += 1;
@@ -391,7 +407,7 @@ fn run_compile(rest: &[String]) -> ExitCode {
     let (input, out) = match (input, out) {
         (Some(a), Some(b)) => (a, b),
         _ => {
-            eprintln!("usage: candor compile [--release] [--freestanding] <file_or_dir> -o <prog>");
+            eprintln!("usage: candor compile [--release] [--freestanding] [--linker=<name>] <file_or_dir> -o <prog>");
             return ExitCode::from(2);
         }
     };

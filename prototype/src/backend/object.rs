@@ -245,6 +245,7 @@ fn link(object: &[u8], out: &Path) -> Result<(), String> {
         .arg(out)
         .arg("-no-pie")
         .arg("-pthread")
+        .args(linker_select_args())
         .status()
         .map_err(|e| format!("could not invoke the system linker (cc): {e}"))?;
 
@@ -290,6 +291,7 @@ fn link_freestanding(object: &[u8], out: &Path) -> Result<(), String> {
         .arg("-fno-pic")
         .arg(&section_arg)
         .arg("-Wl,-e,_start")
+        .args(linker_select_args())
         .status()
         .map_err(|e| format!("could not invoke the system linker (cc): {e}"))?;
 
@@ -298,4 +300,44 @@ fn link_freestanding(object: &[u8], out: &Path) -> Result<(), String> {
         return Err(format!("freestanding linker (cc) failed with status {status}"));
     }
     Ok(())
+}
+
+/// Opt-in linker selection from the `CANDOR_LINKER` env var (set by
+/// `candor compile --linker=<name>`), passed to `cc`/`clang` as `-fuse-ld=<name>`
+/// (e.g. `mold`, `lld`, `gold`, `bfd`). Empty/unset -> the system default linker.
+///
+/// This is deliberately explicit and never "use whatever is installed": the linker
+/// is a chosen toolchain component, and a build's linker must be deterministic for
+/// the NN#16 reproducibility guarantee (a mold-linked binary differs from an
+/// ld-linked one). Selecting a linker that is not installed fails the link with the
+/// underlying `cc`/`clang` error.
+pub(crate) fn linker_select_args() -> Vec<String> {
+    match std::env::var("CANDOR_LINKER") {
+        Ok(name) if !name.trim().is_empty() => vec![format!("-fuse-ld={}", name.trim())],
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod linker_select_tests {
+    use super::linker_select_args;
+
+    // Deterministic (no external linker needed). nextest runs each test in its own
+    // process, so the CANDOR_LINKER mutation here is isolated.
+    #[test]
+    fn env_maps_to_fuse_ld_arg() {
+        std::env::remove_var("CANDOR_LINKER");
+        assert!(linker_select_args().is_empty(), "unset => system default linker");
+
+        std::env::set_var("CANDOR_LINKER", "mold");
+        assert_eq!(linker_select_args(), vec!["-fuse-ld=mold".to_string()]);
+
+        std::env::set_var("CANDOR_LINKER", "  lld  ");
+        assert_eq!(linker_select_args(), vec!["-fuse-ld=lld".to_string()], "trims");
+
+        std::env::set_var("CANDOR_LINKER", "   ");
+        assert!(linker_select_args().is_empty(), "blank => default");
+
+        std::env::remove_var("CANDOR_LINKER");
+    }
 }

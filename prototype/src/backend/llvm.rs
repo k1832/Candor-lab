@@ -3221,6 +3221,7 @@ pub fn link_ll(ll: &str, out: &Path) -> Result<(), String> {
         .arg(out)
         .arg("-no-pie")
         .arg("-pthread")
+        .args(super::object::linker_select_args())
         .status()
         .map_err(|e| format!("could not invoke clang: {e}"))?;
 
