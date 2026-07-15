@@ -58,7 +58,7 @@ fn main() -> ExitCode {
 
 /// The CLI usage text, shared by `--help` (stdout, exit 0) and the unknown-command
 /// error path (stderr, exit 2).
-const USAGE: &str = "usage: candor (parse|check|run|count|audit|build|manifest) <file>  |  run [--engine=mir] <file>  |  compile <file_or_dir> -o <prog> [--freestanding]  |  migrate <file.cn> [-o <out.cnr>]  |  fmt <file_or_dir.cnr> [--check|--stdout]  |  --version  |  --help   (.cnr = real syntax, .cn = throwaway)";
+const USAGE: &str = "usage: candor (parse|check|run|count|audit|build|manifest) <file>  |  run [--engine=mir] <file>  |  compile <file_or_dir> -o <prog> [--release] [--freestanding]  |  migrate <file.cn> [-o <out.cnr>]  |  fmt <file_or_dir.cnr> [--check|--stdout]  |  --version  |  --help   (.cnr = real syntax, .cn = throwaway)";
 
 /// True when the path names a real-syntax (`.cnr`) source file.
 fn is_real(path: &str) -> bool {
@@ -347,10 +347,12 @@ fn run_audit(path: &str) -> ExitCode {
     }
 }
 
-/// `compile [--freestanding] <file_or_dir> -o <prog>` — AOT-compile to a linked
-/// native executable (design 0010 §5). Lowers the same checked MIR the native
-/// engine runs, emits a relocatable object (cranelift-object), and links it via
-/// `cc` into a standalone ELF. `--freestanding` links the no-libc runtime
+/// `compile [--release] [--freestanding] <file_or_dir> -o <prog>` — AOT-compile
+/// to a linked native executable (design 0010 §5). The default lowers the checked
+/// MIR through the Cranelift backend (fast compile, no global optimization — the
+/// dev/debug build) and links it via `cc` into a standalone ELF. `--release`
+/// selects the LLVM `-O2` backend instead (optimized native — the release build;
+/// `--backend=llvm` is a synonym). `--freestanding` links the no-libc runtime
 /// (`-nostdlib -static -no-pie`), the NN#6 proof artifact — no JIT, no libc.
 fn run_compile(rest: &[String]) -> ExitCode {
     let mut out: Option<&str> = None;
@@ -374,7 +376,9 @@ fn run_compile(rest: &[String]) -> ExitCode {
                 freestanding = true;
                 i += 1;
             }
-            "--backend=llvm" => {
+            // `--release` is the blessed name for the optimized LLVM backend;
+            // `--backend=llvm` remains as a synonym.
+            "--release" | "--backend=llvm" => {
                 llvm = true;
                 i += 1;
             }
@@ -387,7 +391,7 @@ fn run_compile(rest: &[String]) -> ExitCode {
     let (input, out) = match (input, out) {
         (Some(a), Some(b)) => (a, b),
         _ => {
-            eprintln!("usage: candor compile [--freestanding] [--backend=llvm] <file_or_dir> -o <prog>");
+            eprintln!("usage: candor compile [--release] [--freestanding] <file_or_dir> -o <prog>");
             return ExitCode::from(2);
         }
     };

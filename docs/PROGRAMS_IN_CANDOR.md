@@ -146,9 +146,13 @@ $CANDOR run $WASM                            # prints 42
 
 # (b) COMPILE the WASM interpreter to a native x86-64 executable and run THAT
 $CANDOR compile $WASM -o /tmp/wasmvm && /tmp/wasmvm ; echo "exit = $?"   # -> 42
-#   ^ a real native binary, produced by Candor, that IS a WebAssembly interpreter
+#   ^ default backend: Cranelift (fast compile, no optimization — the dev build)
 
-# (b′) THE showpiece: compile it FREESTANDING — a static, NO-libc native binary
+# (b′) the RELEASE build: optimized native via the LLVM -O2 backend
+$CANDOR compile --release $WASM -o /tmp/wasmvm_rel && /tmp/wasmvm_rel     # -> 42
+#   (--backend=llvm is a synonym; Candor -> LLVM IR -> optimized native)
+
+# (b″) THE showpiece: compile it FREESTANDING — a static, NO-libc native binary
 $CANDOR compile $WASM -o /tmp/wasmvm_fs --freestanding && /tmp/wasmvm_fs ; echo "exit = $?"
 ldd /tmp/wasmvm_fs                           # -> "not a dynamic executable"
 #   ^ a no-runtime, no-libc native WebAssembly interpreter, written in Candor
