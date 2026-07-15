@@ -1,0 +1,4 @@
+// A local top-level module named `b` — collides with the dependency named `b`.
+pub fn thing() -> i64 {
+    return 1;
+}

@@ -1,0 +1,9 @@
+[package]
+name = "cyc_b"
+version = "0.1.0"
+edition = "2026"
+
+[lib]
+
+[dependencies]
+cyc_a = { path = "../cyc_a" }

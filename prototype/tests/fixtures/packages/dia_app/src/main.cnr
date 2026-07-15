@@ -1,0 +1,7 @@
+// Diamond: dia_c is reached via dia_b AND directly — unified to one build node.
+use dia_b::{mid};
+use dia_c::{base};
+
+fn main() -> i64 {
+    return mid() + base();
+}

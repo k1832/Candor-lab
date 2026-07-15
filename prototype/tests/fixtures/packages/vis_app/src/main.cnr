@@ -1,0 +1,7 @@
+// `secret` lives in b's internal `helper` module — `pub`, but not re-exported
+// from b's public root, so it must NOT cross the package boundary (the wall).
+use b::helper::{secret};
+
+fn main() -> i64 {
+    return secret();
+}

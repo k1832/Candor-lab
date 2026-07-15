@@ -4972,3 +4972,66 @@ today's degenerate bare package, 0017 §1/§6, left unchanged). The `toml` crate
 Next packaging slices: the `src/` module-root support (0008 §2.4 erratum) +
 cross-package resolver + `candor.lock` lockfile, then the multi-package build
 driver (0017 §6/§7).
+
+## OBL-0017-RESOLVE — packaging slice: cross-package resolver + `candor.lock` + package-qualified `use` — "A depends on B, build them together" (2026-07-15)
+
+The milestone slice of design 0017: a manifested package's `[dependencies]` are
+resolved, linked, and built with it into one program, so **package A can depend on
+package B (path source) and build+run together**. Implements 0017 §5/§6/§7 and the
+F2 injective-pkgid repair; reuses 0008's visibility + acyclicity + merged-`Program`
+model unchanged (§8, no new linking/visibility mechanism).
+
+- **Resolver (`prototype/src/resolve_pkg.rs`).** From the root package it
+  transitively loads each dependency's `candor.toml` (`load_manifest`) and builds
+  the pinned set. **Path deps** resolve relative to the depending manifest's dir
+  and canonicalize; **single-version unification** dedups a package reached via the
+  **same** canonical source to one node and rejects the **same name via different
+  sources** with a hard conflict naming both request paths (E0923, §6). The
+  **package graph must be acyclic** — a transitive self-dependency is E0927 (§8).
+  **Git deps are a clean deferral:** they error (E0924, "not yet fetched") rather
+  than fetch; the resolver is shaped so a git source slots in as a resolved
+  directory without disturbing the path-dep milestone.
+- **`candor.lock` (§6).** TOML at the root package: per resolved package `name`,
+  `version`, `edition`, exact source (canonicalized path; git url+rev when git
+  lands), and a **content hash** over its `src/` sources. Written on resolution; a
+  present lock consistent with the manifest is **reused verbatim** (not rewritten,
+  so its bytes are stable). Written only when dependencies exist, so a manifest-less
+  or dependency-free package's directory is untouched.
+- **Cross-package `use` (§5).** `use b::{item}` — the first segment is a
+  `[dependencies]` **local** name; the remainder resolves as filesystem position in
+  that dependency's `src/` root. **What crosses is exactly 0008 §3
+  external-reachability:** only the dependency's public-root `pub` surface crosses;
+  a package-internal item (not re-exported from the public root) is walled with the
+  existing E0903-class error. The **name-collision rule** — dep local names vs the
+  root's top-level `src/` module names must be disjoint (E0930) — with the
+  `package = "…"` alias as the fix.
+- **Injective pkgid mangling (§5, review F2).** Every item's mangled name is
+  prefixed with an injective `<name>#<source-hash>` pkgid, **including the root
+  package's own items**, so a local module can never collide with a transitive
+  dependency's package name and two same-named modules from different packages never
+  merge into one DAG node (securing acyclicity, F6b). The `#` separator cannot occur
+  in a source identifier, so the pkgid segment cannot alias any module name. **The
+  pkgid is applied only in a multi-package build:** a manifest-less or
+  dependency-free package takes the unchanged single-package merge path, and the
+  root entry `fn main` keeps the bare global `main` in both, so **single-package /
+  manifest-less builds are observably identical** (verified: self-host byte-exact
+  gates + native/wasm corpus green).
+- **Build driver (§7).** `modules::build_tree` routes a dependency-having package to
+  `build_tree_multi`: discover each package's `src/` tree under its pkgid prefix,
+  resolve cross-package `use`, and merge into one pkgid-qualified `Program` fed
+  unchanged to the checker/interp/codegen. So `candor check`/`run`/`compile` on a
+  manifested package with dependencies works across every engine.
+- **Gate (`prototype/tests/packages.rs`, +8 tests, 12 total).** `app`→`b` builds and runs to
+  **123 byte-exact across tree-walker/MIR/native/AOT**; the visibility wall
+  (E0903), diamond unification (`dia_c` deduped once), divergent-diamond conflict
+  (E0923), package cycle (E0927), name collision (E0930) + alias fix, and the
+  lockfile (written with content hashes, then reused). Full `cargo nextest run`
+  green (904 tests) incl. all self-host + native + wasm; `--profile fast` green
+  (773); clippy clean.
+
+**Deferred (reported):** git-dependency fetch + content-addressed cache (E0924
+error stands in); the incremental `candor build` (Stage C, `build/mod.rs`) does not
+yet resolve deps — it builds only the root `src/` tree, so cross-package `use` there
+is unresolved (the resolver/merge lands in `build_tree`, used by
+check/run/compile). The `candor audit` whole-graph trust aggregation (0017 §8 /
+F1b) is a separate queued slice, not this one.

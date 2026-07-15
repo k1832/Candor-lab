@@ -1,0 +1,5 @@
+use dia_c::{base};
+
+pub fn mid() -> i64 {
+    return base() + 1;
+}

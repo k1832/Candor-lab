@@ -89,10 +89,22 @@ fn path_str(path: &[String]) -> String {
     path.join("::")
 }
 
-/// Global (merged-table) name of an item. The root `fn main` keeps the name
-/// `main`; everything else is `module::name`.
-fn mangle(path: &[String], name: &str, kind: Kind) -> String {
-    if kind == Kind::Value && path == ["main"] && name == "main" {
+/// The single-package entry module path (`["main"]`): a bare directory and a
+/// dependency-free manifested package keep `fn main` in module `main` unmangled,
+/// exactly as before the packaging slice (design 0008 §2.4 / 0017 §5).
+fn bare_main_entry() -> [String; 1] {
+    [String::from("main")]
+}
+
+/// Global (merged-table) name of an item. The program **entry** `fn main` keeps
+/// the bare name `main` (so the backend/interpreter finds it); everything else is
+/// `module::name`. In a multi-package build every path already carries its
+/// package's injective pkgid as its first segment (design 0017 §5), so `mangle`
+/// yields `<pkgid>::module::name` there without any extra work — only the root
+/// entry is exempted, via `entry`. A single-package build passes `entry =
+/// Some(["main"])`, exactly reproducing the historical bare-`main` special case.
+fn mangle(path: &[String], name: &str, kind: Kind, entry: Option<&[String]>) -> String {
+    if kind == Kind::Value && name == "main" && entry == Some(path) {
         "main".to_string()
     } else {
         format!("{}::{}", path_str(path), name)
@@ -300,11 +312,12 @@ fn assemble(root: &DirRoot) -> Result<Assembled, Diag> {
     }
 
     // Parse every file and collect its exports.
+    let bare = bare_main_entry();
     let mut modules: Vec<Module> = Vec::new();
     for (path, file) in files {
         let src = std::fs::read_to_string(&file).map_err(|e| io_err(&file, &e.to_string()))?;
         let (program, uses, vis, boundary) = crate::real::parse_module(&src)?;
-        let (type_exports, value_exports) = collect_exports(&path, &program, &vis);
+        let (type_exports, value_exports) = collect_exports(&path, &program, &vis, Some(bare.as_slice()));
         modules.push(Module {
             path,
             program,
@@ -428,7 +441,18 @@ fn qualify(modules: &mut [Module], scopes: &[Scope], diags: &mut Vec<Diag>) -> V
 
 /// Build a module tree rooted at `dir` into one merged program plus the
 /// module-layer diagnostics. A hard I/O or parse error is returned as `Err`.
+///
+/// A manifested package with `[dependencies]` resolves its dependency graph
+/// (design 0017 §6/§7) and merges every package's module tree into one program
+/// with **pkgid-qualified** names (design 0017 §5). A manifest-less or
+/// dependency-free package takes the unchanged single-package path below, so its
+/// merge — and every observable of a manifest-less build — is byte-for-byte
+/// identical to before the packaging slice.
 pub fn build_tree(dir: &Path) -> Result<ModuleBuild, Diag> {
+    if has_dependencies(dir)? {
+        let resolution = crate::resolve_pkg::resolve(dir)?;
+        return build_tree_multi(&resolution);
+    }
     let root = resolve_dir_root(dir)?;
     let Assembled { mut modules, scopes, mut diags, .. } = assemble(&root)?;
     let per_module = qualify(&mut modules, &scopes, &mut diags);
@@ -437,6 +461,246 @@ pub fn build_tree(dir: &Path) -> Result<ModuleBuild, Diag> {
         merged.items.extend(items);
     }
     Ok(ModuleBuild { program: merged, diags })
+}
+
+/// Whether `dir` is a manifested package declaring at least one dependency (the
+/// gate that routes a build to the multi-package resolver).
+fn has_dependencies(dir: &Path) -> Result<bool, Diag> {
+    match crate::manifest::load_manifest(dir) {
+        Ok(Some(m)) => Ok(!m.dependencies.is_empty()),
+        Ok(None) => Ok(false),
+        Err(e) => Err(Diag::error(e.code, format!("cannot read package manifest: {}", e.message), Span::point(0))),
+    }
+}
+
+/// Build a resolved multi-package set (design 0017 §7) into one merged program.
+/// Each package's modules are discovered under its `src/` root with the package's
+/// injective pkgid as their leading path segment, so the existing merge produces
+/// `<pkgid>::module::name` for every item (the root package included, review F2).
+/// Cross-package `use` names a dependency by its local name as the first segment;
+/// the remainder resolves within that dependency, and only the dependency's
+/// externally-reachable public root crosses the boundary (design 0008 §3 / §5).
+fn build_tree_multi(res: &crate::resolve_pkg::Resolution) -> Result<ModuleBuild, Diag> {
+    let entry = res.entry_module();
+
+    // pkgid -> the package's public-root module as a combined (pkgid-prefixed) path.
+    let mut public_root: HashMap<String, Vec<String>> = HashMap::new();
+    for p in &res.packages {
+        let mut pr = vec![p.pkgid.clone()];
+        pr.extend(p.public_root.iter().cloned());
+        public_root.insert(p.pkgid.clone(), pr);
+    }
+
+    // Discover + parse every package's modules, each path prefixed by its pkgid.
+    let mut modules: Vec<Module> = Vec::new();
+    let mut mod_pkg: Vec<usize> = Vec::new(); // module index -> res.packages index
+    for (pi, p) in res.packages.iter().enumerate() {
+        let mut files = Vec::new();
+        discover(&p.src_root, std::slice::from_ref(&p.pkgid), &mut files)?;
+        if files.is_empty() {
+            return Err(io_err(&p.src_root, "no `.cnr` module files found"));
+        }
+        for (path, file) in files {
+            let src = std::fs::read_to_string(&file).map_err(|e| io_err(&file, &e.to_string()))?;
+            let (program, uses, vis, boundary) = crate::real::parse_module(&src)?;
+            let (type_exports, value_exports) =
+                collect_exports(&path, &program, &vis, entry.as_deref());
+            modules.push(Module {
+                path,
+                program,
+                uses,
+                type_exports,
+                value_exports,
+                source: src,
+                boundary,
+                is_pub: vis,
+            });
+            mod_pkg.push(pi);
+        }
+    }
+
+    let index: HashMap<String, usize> =
+        modules.iter().enumerate().map(|(i, m)| (path_str(&m.path), i)).collect();
+
+    let mut diags = Vec::new();
+
+    // Name-collision rule (design 0017 §5): the root package's dependency local
+    // names and its own top-level `src/` module names must be disjoint.
+    let root_top: std::collections::HashSet<String> = modules
+        .iter()
+        .zip(mod_pkg.iter())
+        .filter(|(_, &pi)| pi == res.root)
+        .filter_map(|(m, _)| m.path.get(1).cloned())
+        .collect();
+    for dep_local in res.root_pkg().deps.keys() {
+        if root_top.contains(dep_local) {
+            diags.push(
+                Diag::error(
+                    "E0930",
+                    format!("dependency name `{dep_local}` collides with the local top-level module `src/{dep_local}.cnr`"),
+                    Span::point(0),
+                )
+                .with_note("rename the module, or alias the dependency with a distinct `[dependencies]` key + `package = \"…\"` (design 0017 §5)", None),
+            );
+        }
+    }
+
+    // Resolve imports (cross-package aware) into per-module scopes + the DAG.
+    let mut scopes: Vec<Scope> = Vec::with_capacity(modules.len());
+    let mut adj: Vec<Vec<(usize, Span)>> = vec![Vec::new(); modules.len()];
+    for i in 0..modules.len() {
+        let pkg = &res.packages[mod_pkg[i]];
+        let mut scope = Scope::default();
+        for (name, e) in &modules[i].type_exports {
+            scope.type_scope.insert(name.clone(), e.global.clone());
+        }
+        for (name, e) in &modules[i].value_exports {
+            scope.value_scope.insert(name.clone(), e.global.clone());
+        }
+        let uses = modules[i].uses.clone();
+        for u in &uses {
+            let seg0 = &u.segments[0];
+            let display = u.segments.join("::");
+            if let Some(dep_pkgid) = pkg.deps.get(seg0) {
+                // Cross-package: the remainder addresses a module within the
+                // dependency; only its externally-reachable public root crosses.
+                let pr = &public_root[dep_pkgid];
+                let rest = &u.segments[1..];
+                let target: Vec<String> = if rest.is_empty() {
+                    pr.clone()
+                } else {
+                    let mut t = vec![dep_pkgid.clone()];
+                    t.extend(rest.iter().cloned());
+                    t
+                };
+                let is_public_root = &target == pr;
+                match index.get(&path_str(&target)) {
+                    Some(&tidx) if is_public_root => {
+                        adj[i].push((tidx, u.span));
+                        bind_use(u, &display, tidx, &modules, &mut scope, &mut diags);
+                    }
+                    _ => {
+                        // Package-internal (not re-exported from the dependency's
+                        // public root): the boundary wall (design 0008 §3 / §5).
+                        for name in u.names.as_deref().unwrap_or(&[]) {
+                            diags.push(boundary_private_err(seg0, &display, name, u.span));
+                        }
+                        if u.names.is_none() {
+                            diags.push(boundary_private_err(seg0, &display, "*", u.span));
+                        }
+                    }
+                }
+            } else {
+                // Intra-package: address within this package's own `src/` root.
+                let mut target = vec![pkg.pkgid.clone()];
+                target.extend(u.segments.iter().cloned());
+                match index.get(&path_str(&target)) {
+                    Some(&tidx) => {
+                        adj[i].push((tidx, u.span));
+                        bind_use(u, &display, tidx, &modules, &mut scope, &mut diags);
+                    }
+                    None => {
+                        diags.push(
+                            Diag::error("E0901", format!("unresolved import: no module `{display}`"), u.span)
+                                .with_note("a module is a `.cnr` file; `a::b` is the file `a/b.cnr`", None),
+                        );
+                    }
+                }
+            }
+        }
+        scopes.push(scope);
+    }
+
+    if let Some(cycle) = find_cycle(&adj) {
+        diags.push(cycle_diag(&modules, &adj, &cycle));
+    }
+
+    check_multi_entry(res, &index, &modules, &mut diags);
+
+    let per_module = qualify(&mut modules, &scopes, &mut diags);
+    let mut merged = Program { items: Vec::new() };
+    for items in per_module {
+        merged.items.extend(items);
+    }
+    Ok(ModuleBuild { program: merged, diags })
+}
+
+/// Bind one resolved `use` into a module scope: a group import binds each named
+/// item (rejecting a non-`pub` one, E0903), a namespace import binds the module
+/// alias. `display` is the module path as written, for diagnostics.
+fn bind_use(
+    u: &UseDecl,
+    display: &str,
+    tidx: usize,
+    modules: &[Module],
+    scope: &mut Scope,
+    diags: &mut Vec<Diag>,
+) {
+    match &u.names {
+        None => {
+            let alias = u.segments.last().cloned().unwrap_or_default();
+            scope.aliases.insert(alias, tidx);
+        }
+        Some(names) => {
+            let tm = &modules[tidx];
+            for name in names {
+                let ty = tm.type_exports.get(name);
+                let val = tm.value_exports.get(name);
+                if ty.is_none() && val.is_none() {
+                    diags.push(Diag::error(
+                        "E0902",
+                        format!("unresolved import: `{display}` has no item `{name}`"),
+                        u.span,
+                    ));
+                    continue;
+                }
+                if let Some(e) = ty {
+                    if e.is_pub {
+                        scope.type_scope.insert(name.clone(), e.global.clone());
+                    } else {
+                        diags.push(private_err(display, name, u.span));
+                    }
+                }
+                if let Some(e) = val {
+                    if e.is_pub {
+                        scope.value_scope.insert(name.clone(), e.global.clone());
+                    } else {
+                        diags.push(private_err(display, name, u.span));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The cross-package visibility-wall error (design 0008 §3 / 0017 §5): an item
+/// whose module is not the dependency's externally-reachable public root.
+fn boundary_private_err(dep: &str, display: &str, name: &str, span: Span) -> Diag {
+    Diag::error(
+        "E0903",
+        format!("`{name}` is not part of dependency `{dep}`'s public API (`{display}` is not re-exported from its public root)"),
+        span,
+    )
+    .with_note("only a dependency's public-root `pub` surface crosses the package boundary (design 0008 §3 / 0017 §5)", None)
+}
+
+/// The root package's binary entry must be present with `fn main` (design 0017
+/// §1/§7); a library-only root requires no entry.
+fn check_multi_entry(
+    res: &crate::resolve_pkg::Resolution,
+    index: &HashMap<String, usize>,
+    modules: &[Module],
+    diags: &mut Vec<Diag>,
+) {
+    let Some(rel) = &res.root_entry else { return };
+    let mut p = vec![res.root_pkg().pkgid.clone()];
+    p.extend(rel.iter().cloned());
+    let file = format!("src/{}.cnr", rel.join("/"));
+    match index.get(&path_str(&p)) {
+        Some(&mi) if modules[mi].value_exports.contains_key("main") => {}
+        Some(_) => diags.push(entry_no_main_diag(&file)),
+        None => diags.push(entry_missing_diag(&file)),
+    }
 }
 
 /// Per-module data for the Stage-C incremental build (design 0008 §2): one node
@@ -485,6 +749,7 @@ fn collect_exports(
     path: &[String],
     program: &Program,
     vis: &[bool],
+    entry: Option<&[String]>,
 ) -> (HashMap<String, Export>, HashMap<String, Export>) {
     let mut type_exports = HashMap::new();
     let mut value_exports = HashMap::new();
@@ -498,7 +763,7 @@ fn collect_exports(
             Item::Impl(_) => continue,
             Item::Extern(_) | Item::Export(_) => continue,
         };
-        let export = Export { global: mangle(path, name, kind), is_pub, is_fn };
+        let export = Export { global: mangle(path, name, kind, entry), is_pub, is_fn };
         match kind {
             Kind::Type => {
                 type_exports.insert(name.clone(), export);
@@ -537,7 +802,8 @@ pub struct ParsedOne {
 /// modules whose own source changed.
 pub fn parse_one(path: &[String], source: &str) -> Result<ParsedOne, Diag> {
     let (program, uses, vis, boundary) = crate::real::parse_module(source)?;
-    let (type_exports, value_exports) = collect_exports(path, &program, &vis);
+    let bare = bare_main_entry();
+    let (type_exports, value_exports) = collect_exports(path, &program, &vis, Some(bare.as_slice()));
     Ok(ParsedOne {
         items: program.items,
         uses,

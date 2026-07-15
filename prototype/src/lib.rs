@@ -20,6 +20,7 @@ pub mod mir;
 pub mod modules;
 pub mod parser;
 pub mod real;
+pub mod resolve_pkg;
 pub mod resolve;
 pub mod span;
 pub mod token;

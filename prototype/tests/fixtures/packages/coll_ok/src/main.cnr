@@ -1,0 +1,8 @@
+// `mylib` aliases package `b`; `b` here is the LOCAL module `src/b.cnr`. The
+// alias makes the dependency name and the local module name disjoint (0017 §5).
+use mylib::{value};
+use b::{thing};
+
+fn main() -> i64 {
+    return value() + thing();
+}

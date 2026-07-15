@@ -1,0 +1,6 @@
+// Package `b`'s public root is `src/b.cnr`; its `pub` items are b's public API.
+use helper::{secret};
+
+pub fn value() -> i64 {
+    return secret() + 100;
+}

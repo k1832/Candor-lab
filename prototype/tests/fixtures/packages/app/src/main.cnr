@@ -1,0 +1,8 @@
+// The milestone: a manifested binary depending on package `b` by a path source.
+// `b` is the [dependencies] local name; `value` is one of b's public-root pub
+// items. Cross-package `use` (design 0017 §5) crosses only b's public API.
+use b::{value};
+
+fn main() -> i64 {
+    return value();
+}

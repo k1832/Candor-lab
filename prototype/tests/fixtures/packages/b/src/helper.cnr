@@ -1,0 +1,5 @@
+// An internal module of `b`: `pub` here, but NOT re-exported from b's public
+// root, so it is invisible across the package boundary (design 0008 §3 / 0017 §5).
+pub fn secret() -> i64 {
+    return 23;
+}

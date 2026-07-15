@@ -1,0 +1,9 @@
+[package]
+name = "dia_b"
+version = "0.1.0"
+edition = "2026"
+
+[lib]
+
+[dependencies]
+dia_c = { path = "../dia_c" }
