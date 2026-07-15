@@ -445,6 +445,22 @@ stages 3–4), not a prerequisite for the first working multi-package build.
   *gating* trust-delta diff on lock updates is a **first-1.0 need** (Open-Q1), not
   delivered here.
 
+  **Implemented 2026-07-15** — each `candor.lock` entry now carries a `[package.trust]`
+  sub-table counting the package's boundary modules, foreign externs, and `unsafe`
+  regions (`prototype/src/resolve_pkg.rs`; the counts reuse the impl #4 per-package
+  audit walk via `audit::trust_counts`, `prototype/src/audit.rs`). The summary is
+  computed in a **post-resolution pass** (`resolve` calls `resolve_graph` — the
+  audit-free resolver core — then the trust pass, then writes the lock), so the
+  resolver never depends on the audit walk. The lock field is additive (an older
+  lock without it stays reusable). Gate: `prototype/tests/packages.rs`
+  (`lock_records_per_package_trust_summary_and_tracks_the_delta` asserts the
+  recorded counts and that adding one `unsafe` region to a dependency increments its
+  recorded count — the visible supply-chain delta). Enumerate-only; the **gating**
+  trust-delta check on lock updates remains the first-1.0 need (Open-Q1). The
+  `assumed-proven` count is not a separate field: this edition has no distinct
+  `assumed-proven` construct, so that surface is exactly the boundary `trust` clauses
+  plus `unsafe` justifications already counted (see `prototype/src/audit.rs`).
+
 ## Rejected alternatives
 
 - **A `.cnr` (Candor-syntax) manifest instead of TOML.** Rejected. It mixes code

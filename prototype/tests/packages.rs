@@ -222,6 +222,75 @@ fn lockfile_is_written_then_reused() {
     assert!(second.lock_reused, "a present, consistent lock is reused verbatim");
 }
 
+// ---- per-package trust summary in the lock + the supply-chain delta ---------
+// design 0017 §8: each lock entry records counts of boundary modules / foreign
+// externs / `unsafe` regions (reusing the impl #4 audit walk) so that bumping a
+// dependency surfaces its trust delta in `git diff candor.lock`. Enumerate-only,
+// not gating (gating is Open-Q1).
+
+#[test]
+fn lock_records_per_package_trust_summary_and_tracks_the_delta() {
+    let root = stage(&["audit_app", "audit_b", "audit_c"]);
+    let app = root.join("audit_app");
+
+    // Gate: `app` -> `b` (a foreign extern + an `unsafe` region) records b's
+    // CORRECT counts — matching b's actual boundary externs + unsafe regions —
+    // and the root package records its own (inert) summary too.
+    resolve_pkg::resolve(&app).unwrap();
+    assert_eq!(lock_trust(&app, "audit_app"), (0, 0, 0), "the root's own summary");
+    assert_eq!(lock_trust(&app, "b"), (1, 1, 1), "b: 1 boundary module, 1 extern, 1 unsafe");
+    assert_eq!(lock_trust(&app, "c"), (1, 1, 1), "transitive c is summarized too");
+
+    // The delta is the point: add one `unsafe` region to b, re-resolve, and b's
+    // recorded `unsafe_regions` increments (1 -> 2) — the visible supply-chain
+    // delta a reviewer sees in the lock diff.
+    let (_, _, before) = lock_trust(&app, "b");
+    add_unsafe_region_to_b(&root.join("audit_b"));
+    resolve_pkg::resolve(&app).unwrap();
+    let (_, _, after) = lock_trust(&app, "b");
+    assert_eq!(after, before + 1, "b's recorded unsafe_regions must track the new region");
+}
+
+#[test]
+fn dependency_free_package_writes_no_lock() {
+    // A manifest-carrying but dependency-free package resolves nothing and takes
+    // the single-package path — no `candor.lock`, unchanged from before this slice.
+    let root = stage(&["audit_c"]);
+    let c = root.join("audit_c");
+    assert!(check_dir(&c).unwrap().is_empty(), "dep-free package checks clean: {:?}", codes_at(&c));
+    assert!(!c.join("candor.lock").exists(), "a dep-free package writes no lock");
+}
+
+/// The `(boundary_modules, externs, unsafe_regions)` recorded for package `name`
+/// in the root's `candor.lock` — the per-package trust summary (design 0017 §8).
+fn lock_trust(app: &std::path::Path, name: &str) -> (i64, i64, i64) {
+    let text = std::fs::read_to_string(app.join("candor.lock")).expect("candor.lock written");
+    let doc: toml::Value = toml::from_str(&text).expect("candor.lock is TOML");
+    let entry = doc["package"]
+        .as_array()
+        .expect("package array")
+        .iter()
+        .find(|p| p["name"].as_str() == Some(name))
+        .unwrap_or_else(|| panic!("no lock entry for `{name}`:\n{text}"));
+    let t = &entry["trust"];
+    let n = |k: &str| t[k].as_integer().unwrap_or_else(|| panic!("trust.{k} missing:\n{text}"));
+    (n("boundary_modules"), n("externs"), n("unsafe_regions"))
+}
+
+/// Append one more `unsafe` region to the `audit_b` fixture's public root, growing
+/// its trust surface by exactly one region (a pure source edit; only parsing feeds
+/// the trust count, so it need not type-check).
+fn add_unsafe_region_to_b(pkg_dir: &std::path::Path) {
+    let f = pkg_dir.join("src/b.cnr");
+    let mut src = std::fs::read_to_string(&f).unwrap();
+    src.push_str(
+        "\npub fn b_read_again(p: rawptr u8) -> usize {\n    \
+         unsafe \"a second region added to grow the trust surface\" {\n        \
+         return b_native_read(p);\n    }\n}\n",
+    );
+    std::fs::write(&f, src).unwrap();
+}
+
 // ---- whole-graph audit: a dependency's foreign + unsafe surface is aggregated
 // and attributed to it (design 0017 §8; review F1b) --------------------------
 //

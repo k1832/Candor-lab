@@ -22,7 +22,7 @@
 
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ast::*;
 use crate::diag::Diag;
@@ -99,6 +99,18 @@ pub struct Summary {
     pub trust_predicates: usize,
     pub undischarged_foreign_wrappers: usize,
     pub exports: usize,
+    pub unsafe_regions: usize,
+}
+
+/// The per-package trust-surface counts `candor.lock` records so that *adding or
+/// updating* a dependency surfaces its trust delta in the lock diff (design 0017
+/// §8; enumerate-only, not gating — Open-Q1). These are exactly the structural
+/// fields of an audit [`Summary`], produced by the same per-package walk, so the
+/// recorded counts track the real trust surface.
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Copy, Default)]
+pub struct TrustSummary {
+    pub boundary_modules: usize,
+    pub externs: usize,
     pub unsafe_regions: usize,
 }
 
@@ -229,6 +241,52 @@ pub fn audit_path(path: &Path) -> Result<String, Diag> {
 /// its boundary modules, effect reach, and `unsafe` regions. This is the per-
 /// package walk the whole-graph audit runs over each resolved package.
 fn audit_program(path: &Path) -> Result<AuditReport, Diag> {
+    let Surface { boundary_modules, unsafe_regions, externs, trust_predicates, exports } =
+        structural_surface(path)?;
+
+    // Effect reach: run the checker over the merged/single program.
+    let (foreign_report, undischarged) = effect_reach(path)?;
+
+    let summary = Summary {
+        boundary_modules: boundary_modules.len(),
+        externs,
+        trust_predicates,
+        undischarged_foreign_wrappers: undischarged,
+        exports,
+        unsafe_regions: unsafe_regions.len(),
+    };
+    Ok(AuditReport { boundary_modules, effect_reach: foreign_report, unsafe_regions, summary })
+}
+
+/// Count a package's trust surface — boundary modules, foreign externs, and
+/// `unsafe` regions — over its own `src/` tree (design 0017 §8). This reuses the
+/// exact structural enumeration `candor audit` performs per package (the boundary
+/// walk + [`collect_unsafe_regions`]); it deliberately skips the checker's effect
+/// reach, which the counts do not need. It is the post-resolution pass's source
+/// of the lockfile's per-package trust summary — kept here, beside the walk it
+/// reuses, so the resolver never depends on the audit's enumeration itself.
+pub fn trust_counts(src_root: &Path) -> Result<TrustSummary, Diag> {
+    let s = structural_surface(src_root)?;
+    Ok(TrustSummary {
+        boundary_modules: s.boundary_modules.len(),
+        externs: s.externs,
+        unsafe_regions: s.unsafe_regions.len(),
+    })
+}
+
+/// The structural trust surface of a program rooted at `path`: its boundary
+/// modules, `unsafe` regions, and the extern/predicate/export tallies — a pure
+/// parse walk (no checker). Shared by [`audit_program`] and [`trust_counts`] so
+/// the enumeration lives in exactly one place.
+struct Surface {
+    boundary_modules: Vec<ModuleReport>,
+    unsafe_regions: Vec<UnsafeReport>,
+    externs: usize,
+    trust_predicates: usize,
+    exports: usize,
+}
+
+fn structural_surface(path: &Path) -> Result<Surface, Diag> {
     let files = collect_files(path)?;
     let mut modules = Vec::new();
     let mut unsafe_regions = Vec::new();
@@ -300,23 +358,12 @@ fn audit_program(path: &Path) -> Result<AuditReport, Diag> {
         });
     }
 
-    // Effect reach: run the checker over the merged/single program.
-    let (foreign_report, undischarged) = effect_reach(path)?;
-    let boundary_count = modules.len();
-
-    let unsafe_count = unsafe_regions.len();
-    Ok(AuditReport {
+    Ok(Surface {
         boundary_modules: modules,
-        effect_reach: foreign_report,
         unsafe_regions,
-        summary: Summary {
-            boundary_modules: boundary_count,
-            externs: total_externs,
-            trust_predicates: total_preds,
-            undischarged_foreign_wrappers: undischarged,
-            exports: total_exports,
-            unsafe_regions: unsafe_count,
-        },
+        externs: total_externs,
+        trust_predicates: total_preds,
+        exports: total_exports,
     })
 }
 
