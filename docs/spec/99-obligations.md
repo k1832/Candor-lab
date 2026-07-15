@@ -4922,3 +4922,17 @@ proposals, multi-table, and bulk-memory (`memory.copy`/`fill`, passive segments)
 non-MVP. Running real clang/rustc `.wasm` output additionally needs the WASI import
 surface those toolchains target (only a WASI-lite `print_i32`/`print_str` is wired), so
 the interpreter is MVP-complete but not yet a drop-in host for arbitrary compiled wasm.
+
+## Design 0017 (packages) ACCEPTED — `candor audit` extension queued (2026-07-15)
+
+Design 0017 (packages, manifests, dependency resolution) ACCEPTED with review
+repairs applied (`docs/reviews/0017-packages-review.md`; also issued a dated erratum
+to design 0008 §2.4 for the `src/` root move, review F6a). New obligation, queued as
+the **first packaging implementation slice**: extend `candor audit` to enumerate
+`unsafe` regions + all `assumed-proven` contracts **graph-wide** (not only the
+`boundary` foreign surface it walks today, `prototype/src/audit.rs`) — this both
+meets philosophy §7's success criterion, which the shipping tool does not yet meet
+(a pre-existing local-audit gap, review F1b), and is the prerequisite for 0017 §8's
+whole-graph trust aggregation. Relates to OBL-FFI and OBL-CONTRACT (the
+`assumed-proven` enumeration surface). Trust-delta *gating* on lock updates stays a
+first-1.0 need (0017 Open-Q1), not 0.x.

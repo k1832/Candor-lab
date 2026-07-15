@@ -213,6 +213,17 @@ root module is the root-level file `main.cd` (prototype: `main.cnr`), and the
 program entry is its `fn main` — the filesystem-is-the-tree convention applied
 to entry as well; no manifest entry-point field.
 
+**Erratum (2026-07-15, design 0017 review F6a).** For a **manifested package**
+(design 0017: a directory carrying a `candor.toml`), the module-tree root
+**relocates from the directory-root `main.cnr` to `src/`**: a library's public root
+is `src/<name>.cnr`, and a binary's entry is `fn main` in `src/main.cnr` (or
+`src/bin/<name>.cnr`). The ruling above is **unchanged for the manifest-less bare
+directory** (the degenerate package, design 0017 §6): its root module stays the
+directory-root `main.cnr`, no `src/`. This erratum records the refinement so the two
+neighboring designs do not quietly diverge (GOVERNANCE §9); it resolves 0017 review
+F6a and preserves the doc hierarchy. The `modules.rs` implementation of `src/`
+support lands with the packaging implementation, not with this erratum.
+
 ### 3. The dependency DAG
 
 **Import spelling.** `use net::tcp;` brings the module `tcp` into scope (uses

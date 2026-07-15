@@ -25,7 +25,11 @@ a **pure** signature; the consumer sees nothing. The headline "no hidden I/O" pr
 therefore rests **entirely on the structural whole-graph audit walk, not the effect
 system**. **Repair:** strike the effect-propagation sentence; attribute the guarantee to
 the audit walk only.
-**Disposition:** _(pending)_
+**Disposition:** ACCEPTED (2026-07-15). Repair applied to 0017 §8: the false
+effect-propagation sentence is struck; the "no hidden I/O" guarantee is attributed
+to the structural whole-graph audit walk (0011 §2 rule 4 makes a discharged wrapper
+export a non-`foreign` signature — the norm), not to the effect system riding across
+the boundary.
 
 ## F1b — The aggregated audit covers a strict subset of the TCB. Severity: REPAIR (security-critical); also a **pre-existing gap in `candor audit`**
 
@@ -41,7 +45,12 @@ tool**. So 0017's promised TCB enumeration is a strict subset of the real TCB �
 shortfall exists in the shipping `candor audit` independent of 0017.
 **Repair:** the audit must walk `unsafe` + all `assumed-proven` graph-wide (and fix the
 local audit to match philosophy §7); state that 0017's aggregation depends on it.
-**Disposition:** _(pending)_
+**Disposition:** ACCEPTED (2026-07-15). Repair applied to 0017 §8: the aggregation
+now *depends on* first extending `candor audit` to enumerate `unsafe` +
+`assumed-proven` graph-wide (matching philosophy §7), which also fixes the
+pre-existing local-audit gap; 0.x policy stays enumerate-only with gating deferred
+to Open-Q1. **The `candor audit` extension is queued as the first implementation
+slice.**
 
 ## F2 — Package-qualified mangling: root package not prefixed → mis-link. Severity: REPAIR
 
@@ -55,7 +64,10 @@ collision with a **transitive** dependency's package name.
 **Repair:** prepend an **injective** pkgid (name + resolved-source hash) to **every** item
 including the root package's. (Also closes the attack-6b acyclicity concern — two
 same-named modules must not merge into one DAG node.)
-**Disposition:** _(pending)_
+**Disposition:** ACCEPTED (2026-07-15). Repair applied to 0017 §5: an injective
+pkgid (name + resolved-source hash) is prepended to **every** item including the
+root package's own, so a local module cannot collide with a transitive dependency's
+package name; this also secures cross-package acyclicity (closes F6b).
 
 ## F3 — The semver signature-hash "oracle" overclaims; the lint is mis-directional. Severity: REPAIR
 
@@ -68,7 +80,11 @@ warns when a version bump *disagrees* with the hash delta — so a **correct maj
 for a behavioral/inline/trust break (no hash delta) is flagged, pressuring authors to
 *under*-bump. **Repair:** soften the claim to "the typed interface"; make the lint one-way
 (flag hash-change-**without**-bump only). (Same-source-same-content-hash is closed.)
-**Disposition:** _(pending)_
+**Disposition:** ACCEPTED (2026-07-15). Repair applied to 0017 §3: the oracle is
+softened to "did the *typed* public interface change" (it misses behavioral,
+`inline`/generic-body, and trust-surface breaks); the optional lint is made one-way
+— flag a signature-hash change *without* a version bump only, never a major bump
+with no hash delta.
 
 ## F4 — Cross-edition linking silently constrains every future edition. Severity: REPAIR (1.0-gating)
 
@@ -82,7 +98,11 @@ failure forced a memory-model rework (the exact un-migratable break NN#14 guards
 unnamed cost). **Repair:** record the "editions must preserve interface-artifact
 semantics" invariant explicitly as a constraint the 1.0 edition mechanism inherits, not a
 free consequence.
-**Disposition:** _(pending)_
+**Disposition:** ACCEPTED (2026-07-15). Repair applied to 0017 §3 (and recorded in
+the §Settled disposition section): cross-edition linking imposes a binding invariant
+— no future edition may change interface-artifact semantics — with the corollary
+that the compiler retains every shipped edition's front-end; a constraint the 1.0
+edition mechanism inherits.
 
 ## F5 — `freestanding` composition checks the wrong axis. Severity: REPAIR
 
@@ -94,7 +114,9 @@ touches `std`, so 0017's check passes — yet the transitive libc extern violate
 The data exists (the whole-graph audit enumerates every boundary module). **Repair:**
 freestanding composition must reject any **transitive `boundary`/`foreign` surface**, not
 just `std` imports.
-**Disposition:** _(pending)_
+**Disposition:** ACCEPTED (2026-07-15). Repair applied to 0017 §8: `freestanding`
+composition rejects any **transitive `boundary`/`foreign`** surface (0011 §5), not
+only a transitive `std` import; the whole-graph audit already enumerates the data.
 
 ## F6a — `src/` root contradicts 0008 + the implementation; a governance obligation. Severity: REPAIR
 
@@ -104,7 +126,10 @@ contradicts both. GOVERNANCE §9 forbids *quiet* divergence — a **deferred** O
 lingering disagreement between two neighboring designs plus a shipped implementation.
 **Repair:** the authority must actually **issue an 0008 erratum** (accept the `src/` move
 and amend 0008 + `modules.rs`) **or reject** the `src/` move — not defer it.
-**Disposition:** _(pending)_
+**Disposition:** ACCEPTED (2026-07-15) — the `src/` root move is accepted, no longer
+deferred. Applied to 0017 §1/§Consequences (moved to §Settled) and issued as a dated
+**erratum to 0008 §2.4** (`docs/design/0008-modules.md`), per GOVERNANCE §9. The
+`modules.rs` change lands with the packaging implementation.
 
 ## F6b — Package + module acyclicity: closed by construction (conditional on F2)
 
@@ -113,6 +138,8 @@ dependent→dependency, so the merged module DAG stays acyclic — **provided** 
 pkgid (F2) keeps two same-named modules from different packages from merging into one
 node. No dev-dep/build-dep stanza exists → no build-graph cycle vector. **Closed**, given
 F2.
+**Disposition:** Closed by F2 (2026-07-15) — the injective pkgid keeps two
+same-named modules from distinct packages from merging into one module-DAG node.
 
 ---
 

@@ -1,6 +1,6 @@
 # 0017 — Packages, Manifests, and Dependency Resolution
 
-**Status:** draft — pending adversarial review + deciding-authority disposition
+**Status:** ACCEPTED (with review repairs applied), 2026-07-15 (adversarial review: `docs/reviews/0017-packages-review.md`)
 **Date:** 2026-07-15
 **Philosophy hooks:** P16/NN#16 (one blessed toolchain *including the package
 manager*; reproducible-by-default builds; recorded provenance; no configuration
@@ -103,8 +103,10 @@ valid as the **degenerate, manifest-less package**, §6).
 tree is rooted at `src/` beside the manifest; a library's public root module is
 `src/<name>.cnr` (or a namespace-only `src/` directory), and a binary's entry is
 `fn main` in `src/main.cnr` (0008's entry ruling, relocated under `src/`). This
-is the one place this document *refines* 0008's "root-level `main.cnr`" ruling —
-flagged in §Open-questions, because it touches an 0008 convention. The
+is the one place this document *refines* 0008's "root-level `main.cnr`" ruling,
+**ACCEPTED by the deciding authority (2026-07-15)** and recorded as a dated erratum
+to **0008 §2.4** (`docs/design/0008-modules.md`; review F6a) so the two neighboring
+designs do not diverge (GOVERNANCE §9) — no longer an open question. The
 manifest-less directory (§6) keeps 0008's behavior unchanged: `main.cnr` at the
 directory root, no `src/`.
 
@@ -150,17 +152,27 @@ ships; P6).
 ### 3. Version and edition — two orthogonal axes
 
 **Package version: semver** (`major.minor.patch`). The breaking/compatible
-distinction maps precisely onto 0008 §2's interface artifact: a package's public
-API *is* the set of its externally-reachable `pub` signatures (0008 §3
-reachability), and its aggregate **signature hash** (0008 §2) is the
-machine-checkable oracle for "did the public API change." This ties semver to a
-fact the toolchain already computes. Crucially, P2's effect-upper-bound rule
-makes this bite: a leaf function that *starts allocating* ripples its `alloc`
-marker up through every `pub` signature above it (P2, "the churn is the truth"),
-which changes the package's signature hash — a **major** version bump. Semver is
-therefore the honest carrier of P2's "API churn when the truth changes" refusal.
-*(Optional 0.x lint, not required: the toolchain may warn when a declared version
-bump disagrees with the signature-hash delta — a P4/P16 provenance aid.)*
+distinction maps onto 0008 §2's interface artifact: a package's public API *is*
+the set of its externally-reachable `pub` signatures (0008 §3 reachability), and
+its aggregate **signature hash** (0008 §2) is the machine-checkable oracle for
+**"did the *typed* public interface change"** — **not** a complete breaking-change
+oracle. It is a one-directional witness: a signature-hash delta *is* a
+public-interface change, but a breaking change can occur with **no** signature-hash
+delta, because the signature hash misses (1) **behavioral** changes that keep the
+same types, (2) `inline`/generic **body** changes (0008 §2: those move the
+*codegen* hash, not the *signature* hash, yet a consumer compiles those bodies),
+and (3) **trust-surface weakening** inside a `boundary` module. This still ties one
+honest direction of semver to a fact the toolchain already computes. Crucially,
+P2's effect-upper-bound rule makes that direction bite: a leaf function that
+*starts allocating* ripples its `alloc` marker up through every `pub` signature
+above it (P2, "the churn is the truth"), which changes the package's signature
+hash — a **major** version bump. Semver is therefore the honest carrier of P2's
+"API churn when the truth changes" refusal.
+*(Optional 0.x lint, not required — and strictly **one-way**: the toolchain may
+warn when a **signature-hash change carries no version bump** (an under-bump, the
+unsound direction). It must **not** warn on a major bump with no hash delta — that
+is a *correct* bump for a behavioral, `inline`/generic-body, or trust-surface break
+the signature hash cannot see. A P4/P16 provenance aid.)*
 
 **Language edition: a separate axis** (`edition = "YYYY"`), the language's own
 breaking-change unit (P15). It is orthogonal to package version: `http 3.0.0` may
@@ -175,6 +187,18 @@ edition 2026, because editions change surface syntax and check rules, *not* the
 edition-agnostic interface artifact (checked signatures + IR, 0008 §2) through
 which a dependency is consumed. This is the coherence that makes editions
 composable across the dependency graph.
+
+**This composability is not free — it binds every future edition (review F4).**
+"Cross-edition deps link normally" holds *only because* the interface artifact is
+edition-agnostic, which in turn **requires that no future edition ever change the
+*semantics* of the interface artifact** (the meaning of a signature + the checked
+IR). If a post-1.0 edition ever did — e.g. a Bet 5 re-measurement failure forcing a
+memory-model rework, the exact un-migratable break NN#14 guards — then "link
+normally" across that edition boundary would become **unsound**. There is a
+corollary cost: because git dependencies are rev-pinned and therefore
+**unmigratable in place**, the compiler must **retain every shipped edition's
+front-end** to keep consuming them. This is a constraint the eventual 1.0 edition
+mechanism *inherits* (recorded in §Settled), not a free consequence of the design.
 
 **Pre-1.0 reality (P15/NN#14, ROADMAP step 3).** There is exactly **one legal
 edition value today** (the 0.x preview edition, written `"2026"` here as a
@@ -258,14 +282,21 @@ underlying package when they differ). This is decidable from the manifest plus a
 
 **Linking model (preserves the merged `Program`).** The existing pipeline merges
 the whole module tree into one name-qualified `Program` by mangling each item to
-`module::name` (`prototype/src/modules.rs`). This extends by prepending a
-**package identity** segment to the mangle: an item becomes
-`<pkgid>::module::name`, where `<pkgid>` carries the package name **and** its
-resolved version/source hash (§6), so two distinct versions of `util` cannot
-collide in the merged table. The merged `Program` is still fed unchanged to the
-resolver / checker / interpreter (as `modules.rs` does today); **cross-package
-linking introduces no new mechanism for 0.x** — it is the same merge, with
-package-qualified names. (Separate compilation, dynamic linking, and a stable
+`module::name` (`prototype/src/modules.rs`). This extends by prepending an
+**injective package-identity** segment to the mangle: an item becomes
+`<pkgid>::module::name`, where `<pkgid>` is the package **name + its resolved-source
+hash** (§6). **The prefix is applied to *every* item in the merged table, including
+the root (buildable) package's own items — not only dependencies' items.** That is
+what makes the merge collision-proof: because the root is prefixed too, a local
+top-level module can never collide with a *transitive* dependency that happens to
+share its name (the §5 disjoint-check catches only *direct* dependency names, so it
+cannot be relied on for the transitive case), and two distinct versions/sources of
+`util` cannot collide in the merged table. It also secures **cross-package
+acyclicity**: two same-named modules from different packages carry distinct
+`<pkgid>` prefixes and therefore never merge into one node of the module DAG (§8;
+review F6b). The merged `Program` is still fed unchanged to the resolver / checker /
+interpreter (as `modules.rs` does today); **cross-package linking introduces no new
+mechanism for 0.x** — it is the same merge, with package-qualified names. (Separate compilation, dynamic linking, and a stable
 native ABI are P14's C-ABI story, out of scope — §Scope.)
 
 ### 6. Resolver and lockfile — simplest correct for 0.x
@@ -363,8 +394,17 @@ stages 3–4), not a prerequisite for the first working multi-package build.
   transitive import DAG — now including cross-package edges — so a package that
   declares `freestanding = true` but pulls in a dependency that transitively
   imports `std` **fails the build** (0008 §5's tool-checked claim, extended across
-  packages). The claim thus becomes a *dependency constraint*, coherently with
-  P9's layering (`core`/`std` are themselves packages, 0008 §5).
+  packages). **The `std`-import check is necessary but not sufficient:** 0011 §5
+  makes a `foreign` extern under `--freestanding` a **compile error** (there is no
+  libc to link), so a dependency that imports only `core` yet exposes a transitive
+  `boundary`/`foreign` extern violates the claim even though its import DAG never
+  touches `std`. Freestanding composition must therefore reject any **transitive
+  `boundary`/`foreign` surface**, not only a transitive `std` import — and the
+  whole-graph audit (above) already enumerates every boundary module in the
+  resolved graph, so the data to enforce "freestanding claim ⇒ zero transitive
+  foreign surface" already exists. The claim thus becomes a *dependency
+  constraint*, coherently with P9's layering (`core`/`std` are themselves packages,
+  0008 §5).
 
 - **The foreign / audit trust boundary — the adversary's target — is aggregated,
   not hidden.** A dependency may contain `boundary` modules with `extern "C"`
@@ -374,17 +414,36 @@ stages 3–4), not a prerequisite for the first working multi-package build.
   must see it. Therefore `candor audit` (0011 §6) is extended to walk the **whole
   resolved package graph**, not just the local package: every `boundary` module in
   every transitive dependency is enumerated, **attributed to its package +
-  version + source** (P16 provenance). The `foreign` effect (0011 §2) propagates
-  across a package boundary exactly as within one — it rides on signatures — so a
-  safe package that imports a function transitively reaching foreign code sees the
-  effect in the signature, and the partition (0011 §2) is preserved across
-  packages. The lockfile (§6) additionally records a per-dependency **trust
-  summary** (counts of boundary modules / `unsafe` regions / `assumed-proven`
-  contracts) so that *adding or updating* a dependency surfaces its trust delta in
-  review — the supply-chain question P16 names. A named residual risk: a git-rev
-  bump could silently introduce a new boundary module; the content hash + trust
-  summary make the delta *visible*, but a *gating* diff on lock updates is left to
-  §Open-questions.
+  version + source** (P16 provenance). The "no hidden I/O" guarantee rests on this
+  **structural whole-graph audit walk, not on the effect system riding across the
+  boundary**: 0011 §2 rule 4 makes a *discharged* boundary wrapper export a
+  **non-`foreign` signature** (the effect is born at the extern and extinguished at
+  the wrapper — the healthy norm), so a consumer that imports such a wrapper sees a
+  *pure* signature with nothing in its effect set. The `foreign` effect *does* ride
+  on signatures for **un-discharged / propagating** surface — and the partition of
+  0011 §2 is preserved across packages exactly as within one — but the guarantee
+  cannot depend on that, because the discharged wrapper is the norm; it depends on
+  the structural walk enumerating every boundary module graph-wide.
+
+  **Implementation prerequisite (review F1b).** The aggregation as promised is a
+  strict superset of what the shipping `candor audit` (`prototype/src/audit.rs`)
+  computes today: the current tool enumerates **only** the `boundary` foreign
+  surface (externs/exports + effect-reach) and walks **no** `unsafe` regions and
+  **no** `assumed-proven` contracts — even for the local package. That already
+  falls short of philosophy §7's own success criterion ("lists boundary modules,
+  unsafe regions, assumed-proven contracts … with one command"). 0017's whole-graph
+  audit therefore **depends on first extending `candor audit` to enumerate `unsafe`
+  + `assumed-proven`** graph-wide; that extension also repairs the pre-existing
+  local-audit gap, and is the **first implementation slice** this document names.
+
+  The lockfile (§6) additionally records a per-dependency **trust summary** (counts
+  of boundary modules / `unsafe` regions / `assumed-proven` contracts) so that
+  *adding or updating* a dependency surfaces its trust delta in review — the
+  supply-chain question P16 names. **The 0.x policy is enumerate-only, not
+  gating.** A named residual risk: a git-rev bump could silently introduce a new
+  boundary module; the content hash + trust summary make the delta *visible*, but a
+  *gating* trust-delta diff on lock updates is a **first-1.0 need** (Open-Q1), not
+  delivered here.
 
 ## Rejected alternatives
 
@@ -452,16 +511,17 @@ stages 3–4), not a prerequisite for the first working multi-package build.
   package's module root from `main.cnr`-at-root (0008's ruling) to `src/` is a
   small break for anyone who read 0008 literally. It is migratable (mechanical
   move) and the manifest-less directory is unchanged, but it is a refinement of a
-  neighboring design and is flagged for disposition (§Open-questions), not slipped
-  in.
+  neighboring design and is **ACCEPTED by the deciding authority (2026-07-15)**,
+  recorded as an erratum to 0008 §2.4 (review F6a) — not slipped in, and no longer
+  an open question.
 
 - **The whole-graph audit is only as good as the walk.** Extending `candor audit`
   across the dependency graph makes the trust surface *visible*, but visibility is
   not verification (P17's standing honesty: boundary contracts are mostly trust,
   not proof). A large dependency graph has a large trusted surface, and this
   document enumerates it rather than shrinking it. The supply-chain gate (a
-  trust-*delta* check on lock updates) is named as a future need, not delivered
-  here.
+  trust-*delta* check on lock updates) is named as a first-1.0 need (Open-Q1), not
+  delivered here.
 
 - **Single-version unification will sometimes say no.** A hard conflict error on
   a version diamond (§6) is simple and correct but less permissive than Cargo; in
@@ -469,35 +529,47 @@ stages 3–4), not a prerequisite for the first working multi-package build.
   force a human to reconcile versions the toolchain could (with more machinery)
   have reconciled itself. Accepted for 0.x; the override seam is the escape.
 
-## Open questions and risks
+## Settled by disposition (2026-07-15)
 
-*Ordered by how much the author wants the adversarial reviewer and the deciding
-authority to scrutinize them.*
+*The deciding authority (k1832) **ACCEPTED** 0017 subject to the review repairs
+(F1a–F6a, applied above), **ACCEPTED** the `src/` root move, and chose an
+**enumerate-only** supply-chain audit for 0.x (gating deferred to first-1.0). The
+following are no longer open:*
 
-1. **Cross-package `foreign`/audit trust aggregation and supply-chain security
-   (least settled).** §8 aggregates the transitive boundary/`unsafe`/
-   `assumed-proven` surface with provenance and records a per-dependency trust
-   summary in the lock — but is *enumeration + a visible delta* sufficient for
-   0.x, or does the first release need a **gating** trust-delta check when a lock
-   update introduces new foreign surface? And fetching + building a git
-   dependency's `boundary` module is itself the largest new attack surface the
-   package system opens (P17's domain). This is where an adversary should push
-   hardest.
+- **The `src/` module root (was Open-Q3; review F6a) — ACCEPTED.** A manifested
+  package's module tree roots at `src/` (§1); the change is recorded as a dated
+  **erratum to 0008 §2.4** (`docs/design/0008-modules.md`) so the two neighboring
+  designs do not quietly diverge (GOVERNANCE §9). The manifest-less directory keeps
+  0008's original `main.cnr`-at-root behavior unchanged. The `modules.rs`
+  implementation of `src/` support lands with the packaging implementation, not
+  now.
 
-2. **Editions × semver interplay and the 1.0 gate (load-bearing, hard to
-   reverse).** Is a *required, single-valued* `edition` the right reservation, or
-   does a mandatory no-op field invite drift? When a second edition eventually
-   ships, exactly how does a **cross-edition dependency's migrator** run (does A's
-   edition bump touch B's source, or only A's view of B through interface
-   artifacts?) — NN#14/#15 load-bearing, and the 1.0 gate (ROADMAP step 3) sits on
-   this answer.
+- **Cross-edition linking imposes an invariant the 1.0 edition mechanism inherits
+  (was part of Open-Q2; review F4).** Recorded in §3: cross-edition "link normally"
+  is sound *only* while every future edition preserves the *semantics* of the
+  interface artifact (signature meaning + checked IR); an edition that ever changed
+  them (e.g. a post-1.0 Bet 5 re-measurement forcing a memory-model rework) would
+  make cross-edition linking unsound, and the compiler must retain every shipped
+  edition's front-end (git deps are rev-pinned, unmigratable in place). This is a
+  constraint the eventual 1.0 edition mechanism (ROADMAP step 3) inherits, not a
+  free consequence. The remaining second-edition *migrator-run* mechanics travel
+  with that 1.0 work.
 
-3. **The `src/` root refinement of 0008's entry ruling.** Is relocating the
-   manifested-package module root to `src/` the right convention, and does it
-   warrant an erratum/amendment to 0008 (which explicitly ruled `main.cnr` at the
-   directory root), or does it stay a pure 0017 convention layered on top? A clean
-   disposition here prevents two neighboring designs from disagreeing about where
-   a program's root lives.
+## Open questions and risks (remaining)
+
+*Ordered by how much the author wants the deciding authority to keep watching them.
+Open-Q2 (the editions invariant) and Open-Q3 (`src/`) are resolved above; the
+identifiers Open-Q1/Q4/Q5 are kept stable.*
+
+1. **Trust-delta *gating* for the supply chain — a first-1.0 need, not 0.x
+   (Open-Q1).** §8's 0.x policy is settled as **enumerate-only** with a visible
+   per-dependency trust delta in the lock; the open item is the **gating** upgrade
+   — a hard trust-delta check that fails a lock update introducing new
+   foreign/`unsafe`/`assumed-proven` surface — named as a **first-1.0**
+   requirement. Fetching and building a git dependency's `boundary` module remains
+   the largest new attack surface the package system opens (P17's domain). The
+   `candor audit` extension (F1b) is the first implementation slice this document
+   depends on.
 
 4. **Incremental-build interaction (coherent in sketch, heavy in
    implementation).** §7 makes the package boundary the interface-artifact
