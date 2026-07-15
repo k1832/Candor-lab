@@ -222,7 +222,7 @@ directory** (the degenerate package, design 0017 §6): its root module stays the
 directory-root `main.cnr`, no `src/`. This erratum records the refinement so the two
 neighboring designs do not quietly diverge (GOVERNANCE §9); it resolves 0017 review
 F6a and preserves the doc hierarchy. The `modules.rs` implementation of `src/`
-support lands with the packaging implementation, not with this erratum.
+support lands with the packaging implementation, not with this erratum. **Implemented 2026-07-15** (`prototype/src/modules.rs` `resolve_dir_root`/`check_entry`, `prototype/src/build/mod.rs`; gate `prototype/tests/packages.rs`): a directory build branches on `candor.toml` presence, roots a manifested package's tree at `src/`, and derives the entry target from the manifest (`src/main.cnr` | `src/bin/<name>.cnr` | library root `src/<name>.cnr`), leaving the manifest-less bare directory's directory-root `main.cnr` behavior unchanged.
 
 ### 3. The dependency DAG
 

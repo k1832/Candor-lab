@@ -1,0 +1,4 @@
+// Module `helper` = `src/helper.cnr`, an internal (non-re-exported) helper.
+pub fn scale(n: i64) -> i64 {
+    return n * 2;
+}

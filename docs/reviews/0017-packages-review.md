@@ -129,7 +129,7 @@ and amend 0008 + `modules.rs`) **or reject** the `src/` move — not defer it.
 **Disposition:** ACCEPTED (2026-07-15) — the `src/` root move is accepted, no longer
 deferred. Applied to 0017 §1/§Consequences (moved to §Settled) and issued as a dated
 **erratum to 0008 §2.4** (`docs/design/0008-modules.md`), per GOVERNANCE §9. The
-`modules.rs` change lands with the packaging implementation.
+`modules.rs` change lands with the packaging implementation. **Implemented 2026-07-15** — the `src/` module-root relocation shipped (`prototype/src/modules.rs`, `prototype/src/build/mod.rs`; gate `prototype/tests/packages.rs`); see the dated erratum note in 0008 §2.4.
 
 ## F6b — Package + module acyclicity: closed by construction (conditional on F2)
 

@@ -1,0 +1,4 @@
+// Module `util` = `src/util.cnr`, a path relative to the package's `src/` root.
+pub fn double(n: i64) -> i64 {
+    return n + n;
+}

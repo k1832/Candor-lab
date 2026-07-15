@@ -1,0 +1,9 @@
+// Manifested binary entry (design 0017 §1): the module tree roots at `src/`, so
+// the implicit binary's entry `fn main` lives in `src/main.cnr` (not the
+// directory-root `main.cnr` of a bare directory). `util` is the sibling module
+// `src/util.cnr`, addressed relative to `src/`.
+use util::{double};
+
+fn main() -> i64 {
+    return double(21);
+}

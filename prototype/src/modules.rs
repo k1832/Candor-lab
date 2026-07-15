@@ -137,14 +137,166 @@ fn io_err(path: &Path, msg: &str) -> Diag {
     )
 }
 
+// ---------------------------------------------------------------------------
+// Directory-build root resolution (design 0008 §2.4 + its 2026-07-15 erratum,
+// design 0017 §1): a manifest-less bare directory roots its module tree at the
+// directory and requires `fn main` in the root `main.cnr`; a manifested package
+// (a `candor.toml` beside it) relocates the root to `src/` and takes its entry
+// targets from the manifest. This slice ONLY moves where the tree roots — the
+// merge into one name-qualified `Program` (design 0008) is unchanged.
+// ---------------------------------------------------------------------------
+
+/// A directory build's module-tree root plus its entry-point requirement.
+pub struct DirRoot {
+    /// The directory the module tree is discovered from: `dir` for a bare
+    /// directory, `dir/src` for a manifested package.
+    root: PathBuf,
+    entry: EntryRule,
+}
+
+impl DirRoot {
+    /// The directory to discover `.cnr` module files from.
+    pub fn discover_root(&self) -> &Path {
+        &self.root
+    }
+}
+
+/// What entry a directory build requires (design 0008 §2.4 + 0017 §1).
+enum EntryRule {
+    /// Manifest-less bare directory: the root module `main.cnr` must define `fn main`.
+    BareMain,
+    /// Manifested package: each declared target's entry file must be present (and a
+    /// binary entry must define `fn main`). A library-only package requires no entry
+    /// file — its public root `src/<name>.cnr` may be absent (a namespace-only `src/`).
+    Package(Vec<RequiredEntry>),
+}
+
+/// One required entry file of a manifested package.
+struct RequiredEntry {
+    /// The entry module's path relative to `src/`: `["main"]` or `["bin", name]`.
+    path: Vec<String>,
+    /// A binary entry must define `fn main`; a library root need only exist.
+    needs_main: bool,
+    /// The expected file, for the missing-entry diagnostic (`src/main.cnr`, ...).
+    file: String,
+}
+
+/// Resolve a directory build's module-tree root by manifest presence (reusing
+/// [`crate::manifest::load_manifest`]): `Ok(None)` => a manifest-less bare
+/// directory (design 0008 §2.4, unchanged); `Ok(Some(_))` => a manifested package
+/// rooted at `src/` (0017 §1). A manifest parse error surfaces as a build `Diag`.
+pub fn resolve_dir_root(dir: &Path) -> Result<DirRoot, Diag> {
+    match crate::manifest::load_manifest(dir) {
+        Ok(None) => Ok(DirRoot { root: dir.to_path_buf(), entry: EntryRule::BareMain }),
+        Ok(Some(m)) => Ok(DirRoot { root: dir.join("src"), entry: package_entry(&m) }),
+        Err(e) => Err(Diag::error(
+            e.code,
+            format!("cannot read package manifest: {}", e.message),
+            Span::point(0),
+        )
+        .with_note("a manifested package is a directory with a `candor.toml` (design 0017 §1)", None)),
+    }
+}
+
+/// The entry-file requirements of a manifested package (design 0017 §1): each
+/// `[[bin]]` builds from `src/bin/<name>.cnr`; with no `[[bin]]`, a `[lib]`-only
+/// package needs no entry file (namespace-only `src/` is allowed), and otherwise a
+/// single implicit binary builds from `src/main.cnr`.
+fn package_entry(m: &crate::manifest::Manifest) -> EntryRule {
+    let mut required = Vec::new();
+    if !m.bins.is_empty() {
+        for b in &m.bins {
+            required.push(RequiredEntry {
+                path: vec!["bin".to_string(), b.name.clone()],
+                needs_main: true,
+                file: format!("src/bin/{}.cnr", b.name),
+            });
+        }
+    } else if m.lib.is_none() {
+        // No library and no named binaries: the implicit single binary.
+        required.push(RequiredEntry {
+            path: vec!["main".to_string()],
+            needs_main: true,
+            file: "src/main.cnr".to_string(),
+        });
+    }
+    EntryRule::Package(required)
+}
+
+/// The bare-directory entry diagnostic (design 0008 §2.4), shared by the merge
+/// assembler and the incremental builder so their `E0905` text stays identical.
+fn bare_main_diag() -> Diag {
+    Diag::error("E0905", "no root module `main.cnr` defining `fn main`", Span::point(0))
+        .with_note("a directory program's entry is `fn main` in the root file `main.cnr`", None)
+}
+
+/// A manifested package's declared target entry file is missing (design 0017 §1).
+fn entry_missing_diag(file: &str) -> Diag {
+    Diag::error("E0906", format!("missing package entry file `{file}`"), Span::point(0))
+        .with_note("a manifested package's module tree roots at `src/` (design 0017 §1)", None)
+}
+
+/// A manifested package's binary entry file exists but defines no `fn main`.
+fn entry_no_main_diag(file: &str) -> Diag {
+    Diag::error("E0905", format!("package entry `{file}` does not define `fn main`"), Span::point(0))
+        .with_note("a binary target's entry is `fn main` in its entry file (design 0017 §1)", None)
+}
+
+/// The entry-point gate over parsed modules (the merge path): a bare directory
+/// needs `fn main` in module `main`; a manifested package needs each declared
+/// target's entry module present, with `fn main` for a binary.
+fn check_entry(
+    entry: &EntryRule,
+    index: &HashMap<String, usize>,
+    modules: &[Module],
+    diags: &mut Vec<Diag>,
+) {
+    match entry {
+        EntryRule::BareMain => match index.get("main") {
+            Some(&mi) if modules[mi].value_exports.contains_key("main") => {}
+            _ => diags.push(bare_main_diag()),
+        },
+        EntryRule::Package(required) => {
+            for r in required {
+                match index.get(&path_str(&r.path)) {
+                    Some(&mi) if !r.needs_main || modules[mi].value_exports.contains_key("main") => {}
+                    Some(_) => diags.push(entry_no_main_diag(&r.file)),
+                    None => diags.push(entry_missing_diag(&r.file)),
+                }
+            }
+        }
+    }
+}
+
+/// The entry-point gate for the incremental builder (`build_dir`), which knows
+/// module *paths* (present union cached) but not their parsed items — so it checks
+/// entry-file presence at path granularity (the coarse gate the bare path always
+/// used), never the `fn main` body.
+pub fn check_entry_present(root: &DirRoot, has_path: impl Fn(&str) -> bool, diags: &mut Vec<Diag>) {
+    match &root.entry {
+        EntryRule::BareMain => {
+            if !has_path("main") {
+                diags.push(bare_main_diag());
+            }
+        }
+        EntryRule::Package(required) => {
+            for r in required {
+                if !has_path(&path_str(&r.path)) {
+                    diags.push(entry_missing_diag(&r.file));
+                }
+            }
+        }
+    }
+}
+
 /// Internal: discover, parse, resolve imports, and run the module-layer checks
 /// (visibility, cycle, entry), returning the per-module data plus the DAG. Both
 /// [`build_tree`] (merge) and [`build_tree_parts`] (per-module, Stage C) share it.
-fn assemble(dir: &Path) -> Result<Assembled, Diag> {
+fn assemble(root: &DirRoot) -> Result<Assembled, Diag> {
     let mut files = Vec::new();
-    discover(dir, &[], &mut files)?;
+    discover(&root.root, &[], &mut files)?;
     if files.is_empty() {
-        return Err(io_err(dir, "no `.cnr` module files found"));
+        return Err(io_err(&root.root, "no `.cnr` module files found"));
     }
 
     // Parse every file and collect its exports.
@@ -239,14 +391,10 @@ fn assemble(dir: &Path) -> Result<Assembled, Diag> {
         diags.push(cycle_diag(&modules, &adj, &cycle));
     }
 
-    // Entry-point convention: the root module `main.cnr` must define `fn main`.
-    match index.get("main") {
-        Some(&mi) if modules[mi].value_exports.contains_key("main") => {}
-        _ => diags.push(
-            Diag::error("E0905", "no root module `main.cnr` defining `fn main`", Span::point(0))
-                .with_note("a directory program's entry is `fn main` in the root file `main.cnr`", None),
-        ),
-    }
+    // Entry-point convention (design 0008 §2.4 + the 2026-07-15 `src/` erratum,
+    // design 0017 §1): a bare directory requires `fn main` in the root `main.cnr`;
+    // a manifested package requires each declared target's entry file under `src/`.
+    check_entry(&root.entry, &index, &modules, &mut diags);
 
     Ok(Assembled { modules, scopes, adj, diags })
 }
@@ -281,7 +429,8 @@ fn qualify(modules: &mut [Module], scopes: &[Scope], diags: &mut Vec<Diag>) -> V
 /// Build a module tree rooted at `dir` into one merged program plus the
 /// module-layer diagnostics. A hard I/O or parse error is returned as `Err`.
 pub fn build_tree(dir: &Path) -> Result<ModuleBuild, Diag> {
-    let Assembled { mut modules, scopes, mut diags, .. } = assemble(dir)?;
+    let root = resolve_dir_root(dir)?;
+    let Assembled { mut modules, scopes, mut diags, .. } = assemble(&root)?;
     let per_module = qualify(&mut modules, &scopes, &mut diags);
     let mut merged = Program { items: Vec::new() };
     for items in per_module {
@@ -312,7 +461,8 @@ pub struct TreeParts {
 /// the Stage-C interface-artifact builder consumes this to hash and check each
 /// module independently over the DAG.
 pub fn build_tree_parts(dir: &Path) -> Result<TreeParts, Diag> {
-    let Assembled { mut modules, scopes, adj, mut diags } = assemble(dir)?;
+    let root = resolve_dir_root(dir)?;
+    let Assembled { mut modules, scopes, adj, mut diags } = assemble(&root)?;
     let meta: Vec<(Vec<String>, String, bool, Vec<bool>)> = modules
         .iter()
         .map(|m| (m.path.clone(), m.source.clone(), m.boundary, m.is_pub.clone()))

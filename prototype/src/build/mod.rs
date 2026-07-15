@@ -252,7 +252,10 @@ pub fn build_dir_with_salt(dir: &Path, salt: &str) -> Result<BuildReport, Diag> 
     let cached = load_cache(&cache_dir);
 
     // 1. The present-source universe: read + hash every `.cnr` file (NO parse).
-    let files = modules::discover_module_files(dir)?;
+    //    A manifested package (design 0017 §1) roots its tree at `src/`; a bare
+    //    directory (design 0008 §2.4) stays rooted at the directory itself.
+    let root = modules::resolve_dir_root(dir)?;
+    let files = modules::discover_module_files(root.discover_root())?;
     struct Present {
         path: Vec<String>,
         source: String,
@@ -314,13 +317,11 @@ pub fn build_dir_with_salt(dir: &Path, salt: &str) -> Result<BuildReport, Diag> 
                 .with_note("the import graph must be an acyclic DAG (design 0008 §3)", None),
         );
     }
-    let has_main = present.contains_key("main") || cached.contains_key("main");
-    if !has_main {
-        diags.push(
-            Diag::error("E0905", "no root module `main.cnr` defining `fn main`", crate::span::Span::point(0))
-                .with_note("a directory program's entry is `fn main` in the root file `main.cnr`", None),
-        );
-    }
+    modules::check_entry_present(
+        &root,
+        |p| present.contains_key(p) || cached.contains_key(p),
+        &mut diags,
+    );
     if diags.iter().any(|d| d.severity == Severity::Error) {
         return Ok(BuildReport { cache_dir, modules: Vec::new(), codegen: Vec::new(), diags });
     }

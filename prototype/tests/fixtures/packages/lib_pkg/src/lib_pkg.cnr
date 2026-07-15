@@ -1,0 +1,8 @@
+// A library package's public root is `src/<name>.cnr` (design 0017 §1); here the
+// package is named `lib_pkg`, so this file (`src/lib_pkg.cnr`) is the root module
+// and its `pub` item is the package's public surface. No `fn main` is required.
+use helper::{scale};
+
+pub fn answer() -> i64 {
+    return scale(21);
+}
