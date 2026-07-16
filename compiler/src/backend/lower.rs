@@ -2336,9 +2336,10 @@ impl<M: Module> Cg<'_, '_, M> {
         self.b.switch_to_block(cont);
     }
 
-    /// Grow a `Vec`'s buffer to fit `need` more elements (alloc-new + copy + free-
-    /// old), mirroring `mir::interp::vec_reserve` — element `stride`/`align` scale
-    /// the byte sizes, `newcap = (len+need).max(cap*2).max(4)`, OOM faults `Panic`.
+    /// Grow a `Vec`'s buffer to fit `need` more elements through the allocator's
+    /// `realloc` (grow-in-place or move-copy), mirroring `mir::interp::vec_reserve`
+    /// — element `stride`/`align` scale the byte sizes, `newcap =
+    /// (len+need).max(cap*2).max(4)`, OOM faults `Panic`.
     fn vec_reserve(&mut self, base: Value, stride: i64, align: i64, need: i64, span: Span) {
         let b8 = self.add_off(base, 8);
         let len = self.load_u64(b8);
@@ -2363,31 +2364,33 @@ impl<M: Module> Cg<'_, '_, M> {
         let ctx = self.load_u64(b24);
         let b32 = self.add_off(base, 32);
         let vt = self.load_u64(b32);
-        let newbuf = self.call_alloc(ctx, vt, allocsz, align);
+        let oldbuf = self.load_u64(base);
         let zero = self.iconst(0);
+        let has_old = self.b.ins().icmp(IntCC::NotEqual, oldbuf, zero);
+        let alloc_b = self.b.create_block();
+        let realloc_b = self.b.create_block();
+        let joined = self.b.create_block();
+        let newbuf = self.b.append_block_param(joined, types::I64);
+        self.b.ins().brif(has_old, realloc_b, &[], alloc_b, &[]);
+        self.b.switch_to_block(alloc_b);
+        let nb_a = self.call_alloc(ctx, vt, allocsz, align);
+        self.b.ins().jump(joined, &[BlockArg::from(nb_a)]);
+        self.b.switch_to_block(realloc_b);
+        let oldsz = self.b.ins().imul(len, stridev);
+        let nb_r = self.call_realloc(ctx, vt, oldbuf, oldsz, allocsz, align);
+        self.b.ins().jump(joined, &[BlockArg::from(nb_r)]);
+        self.b.switch_to_block(joined);
         let is_oom = self.b.ins().icmp(IntCC::Equal, newbuf, zero);
         self.fault_if(is_oom, FaultKind::Panic, span);
-        let oldbuf = self.load_u64(base);
-        let has_old = self.b.ins().icmp(IntCC::NotEqual, oldbuf, zero);
-        let cp_b = self.b.create_block();
-        let after = self.b.create_block();
-        self.b.ins().brif(has_old, cp_b, &[], after, &[]);
-        self.b.switch_to_block(cp_b);
-        let copysz = self.b.ins().imul(len, stridev);
-        self.call_copy_val(newbuf, oldbuf, copysz);
-        let capsz = self.b.ins().imul(cap, stridev);
-        self.call_free_val(ctx, vt, oldbuf, capsz, align);
-        self.b.ins().jump(after, &[]);
-        self.b.switch_to_block(after);
         self.store_u64(base, newbuf);
         self.store_u64(b16, newcap);
         self.b.ins().jump(cont, &[]);
         self.b.switch_to_block(cont);
     }
 
-    /// Grow a `String`'s buffer to fit `need` more bytes (alloc-new + copy + free-
-    /// old; the vtable has no realloc), mirroring `mir::interp::string_reserve` —
-    /// `newcap = (len+need).max(cap*2).max(8)`, OOM faults `Panic`.
+    /// Grow a `String`'s buffer to fit `need` more bytes through the allocator's
+    /// `realloc` (grow-in-place or move-copy), mirroring `mir::interp::string_reserve`
+    /// — `newcap = (len+need).max(cap*2).max(8)`, OOM faults `Panic`.
     fn string_reserve(&mut self, base: Value, need: Value, span: Span) {
         let b8 = self.add_off(base, 8);
         let len = self.load_u64(b8);
@@ -2409,20 +2412,23 @@ impl<M: Module> Cg<'_, '_, M> {
         let ctx = self.load_u64(b24);
         let b32 = self.add_off(base, 32);
         let vt = self.load_u64(b32);
-        let newbuf = self.call_alloc(ctx, vt, newcap, 1);
+        let oldbuf = self.load_u64(base);
         let zero = self.iconst(0);
+        let has_old = self.b.ins().icmp(IntCC::NotEqual, oldbuf, zero);
+        let alloc_b = self.b.create_block();
+        let realloc_b = self.b.create_block();
+        let joined = self.b.create_block();
+        let newbuf = self.b.append_block_param(joined, types::I64);
+        self.b.ins().brif(has_old, realloc_b, &[], alloc_b, &[]);
+        self.b.switch_to_block(alloc_b);
+        let nb_a = self.call_alloc(ctx, vt, newcap, 1);
+        self.b.ins().jump(joined, &[BlockArg::from(nb_a)]);
+        self.b.switch_to_block(realloc_b);
+        let nb_r = self.call_realloc(ctx, vt, oldbuf, len, newcap, 1);
+        self.b.ins().jump(joined, &[BlockArg::from(nb_r)]);
+        self.b.switch_to_block(joined);
         let is_oom = self.b.ins().icmp(IntCC::Equal, newbuf, zero);
         self.fault_if(is_oom, FaultKind::Panic, span);
-        let oldbuf = self.load_u64(base);
-        let has_old = self.b.ins().icmp(IntCC::NotEqual, oldbuf, zero);
-        let cp_b = self.b.create_block();
-        let after = self.b.create_block();
-        self.b.ins().brif(has_old, cp_b, &[], after, &[]);
-        self.b.switch_to_block(cp_b);
-        self.call_copy_val(newbuf, oldbuf, len);
-        self.call_free_val(ctx, vt, oldbuf, cap, 1);
-        self.b.ins().jump(after, &[]);
-        self.b.switch_to_block(after);
         self.store_u64(base, newbuf);
         self.store_u64(b16, newcap);
         self.b.ins().jump(cont, &[]);
@@ -2443,6 +2449,16 @@ impl<M: Module> Cg<'_, '_, M> {
         let afn = self.load_u64(aa);
         let al = self.iconst(align);
         self.call_fnptr_id(afn, &[ctx, size, al])
+    }
+
+    /// Grow `ptr` (holding `old_size` bytes) to `new_size` through the vtable's
+    /// `realloc` slot; returns the (possibly moved) pointer (0 on OOM).
+    fn call_realloc(&mut self, ctx: Value, vt: Value, ptr: Value, old_size: Value, new_size: Value, align: i64) -> Value {
+        let realloc_off = self.field_off(&self.alloc_vtable_name(), "realloc");
+        let ra = self.add_off(vt, realloc_off);
+        let rfn = self.load_u64(ra);
+        let al = self.iconst(align);
+        self.call_fnptr_id(rfn, &[ctx, ptr, old_size, new_size, al])
     }
 
     /// Free through the vtable with a runtime `size` (the String buffer capacity).

@@ -1183,3 +1183,26 @@ once you add the literal node). Key design/impl facts worth reusing:
   code is not a supply-chain delta. Env-mutating tests rely on nextest's
   process-per-test isolation; serialize them with a `Mutex` for the plain `cargo test`
   harness (the `GIT_ENV_LOCK` pattern). (2026-07-16).
+
+- **Adding a vtable slot to `AllocVtable` (e.g. `realloc`) touches ~68 embedded
+  allocator copies, and the copy must read only INITIALIZED bytes.** Every test
+  fixture and self-host source embeds its own `alloc`/`free` (bump/freelist/pool),
+  in three formats: multiline named+`alloc`-effect fields, single-line structs,
+  and unnamed-param no-effect fields (`free: fn(rawptr u8, ...) -> unit`); plus
+  `.rs` fixtures embed Candor either as raw strings (bare `"`) or escaped normal
+  strings (`\"` + `\u{2014}` is invalid — keep injected Candor ASCII). All four
+  grow lowerings (interp/eval.rs, mir/interp.rs, backend/lower.rs, backend/llvm.rs)
+  resolve the new slot's offset via `field_offset(...).unwrap_or(0)`, so a vtable
+  MISSING the field silently reads the `alloc` pointer at offset 0 → catastrophe;
+  a construction that sets a field the struct lacks is E0107. THE key correctness
+  trap: `realloc`'s copy must copy the LIVE length (`len`/`len*stride`), NOT the
+  capacity — the interpreter's init-byte guard faults on reading the never-written
+  `[len, cap)` tail (and element padding), and it only surfaces on the move-copy
+  path (in-place grows skip the copy, so freelist tests pass while bump ones fault).
+  bump_realloc must NOT reconstruct its state struct with a hardcoded field set:
+  24 fixtures use `Bump { next, end, live }`, so call the arena's own
+  `bump_alloc`/`bump_free` (alloc+copy+free) to keep an instrumented `live` counter
+  balanced. Map growth can't use realloc (rehash needs a fresh zeroed buffer). And
+  the 0001 §11 demo `.cnr` are migrator output of committed `.cn` (migrate.rs pins
+  them) with golden item-counts (golden.rs) — they're grow-free, so leave their
+  vtables two-slot rather than churn `.cn`/goldens. (2026-07-16).

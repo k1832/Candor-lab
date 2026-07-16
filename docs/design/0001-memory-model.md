@@ -308,6 +308,7 @@ An allocator is a small **copy handle**:
 struct AllocVtable {
     alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,   // null == out of memory
     free:  fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,   // alloc-marked conservatively
+    realloc: fn(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) alloc -> rawptr u8,   // grow/shrink; preserves min(old,new) bytes; null == OOM (landed 2026-07-16)
 }
 
 copy struct Alloc {          // copy: it is a handle, freely passed and stored
@@ -318,7 +319,7 @@ copy struct Alloc {          // copy: it is a handle, freely passed and stored
 
 `Alloc` is `copy` and its `rawptr` fields are inert in safe code (§4.2), so a handle can be passed by value, stored in a `Box`, and copied without a valve. Only the *implementation* of an allocator dereferences `ctx`/`vt` (inside `unsafe`). This is "the capability travels as an ordinary value" (P2) in concrete form.
 
-Function pointers (`fn(...) -> ...`) are the one mechanism the vtable needs; they may not capture (no closures), so a vtable entry is always a top-level function. **A function pointer's type includes its parameter modes *and* its effect marker.** Assigning an `alloc`-marked function to a non-`alloc` fn-pointer type is a **checker error** (it would understate the effect, NN#19); assigning a non-`alloc` function to an `alloc`-typed slot is permitted conservatism (effects are upper bounds, §3.2). An **indirect call takes its effect from the pointer's type**: calling through an `alloc`-typed pointer makes the caller `alloc`; calling through a non-`alloc`-typed pointer does not. There is **no vtable special case** — the `AllocVtable` fields are `alloc`-typed (both `alloc` and, conservatively, `free`), so every call through them is `alloc` by this one general rule.
+Function pointers (`fn(...) -> ...`) are the one mechanism the vtable needs; they may not capture (no closures), so a vtable entry is always a top-level function. **A function pointer's type includes its parameter modes *and* its effect marker.** Assigning an `alloc`-marked function to a non-`alloc` fn-pointer type is a **checker error** (it would understate the effect, NN#19); assigning a non-`alloc` function to an `alloc`-typed slot is permitted conservatism (effects are upper bounds, §3.2). An **indirect call takes its effect from the pointer's type**: calling through an `alloc`-typed pointer makes the caller `alloc`; calling through a non-`alloc`-typed pointer does not. There is **no vtable special case** — the `AllocVtable` fields are `alloc`-typed (`alloc`, `realloc`, and, conservatively, `free`), so every call through them is `alloc` by this one general rule.
 
 - **To BE an allocator** (the allocator basket program): define `ctx` state, write `alloc`/`free` functions matching the vtable signatures, and build an `Alloc { ctx: addr_of_mut(state), vt: addr_of(MY_VTABLE) }` (the `addr_of`s are in `unsafe`). §11.1.
 - **To USE an allocator:** call the safe surface below.

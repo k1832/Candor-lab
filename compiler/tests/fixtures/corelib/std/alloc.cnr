@@ -5,6 +5,7 @@
 pub struct AllocVtable {
     alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
     free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+    realloc: fn(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) alloc -> rawptr u8,
 }
 // `copy`: an `Alloc` is a handle — freely passed by value, stored in a `Box`,
 // and copied without a valve; its `rawptr` fields are inert in safe code (§4.2).

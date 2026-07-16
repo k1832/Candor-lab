@@ -2289,6 +2289,20 @@ impl<'a> Interp<'a> {
         Ok(())
     }
 
+    /// Grow `ptr` (holding `old_size` bytes) to `new_size` through the allocator's
+    /// `realloc` vtable slot; returns the (possibly moved) pointer, 0 on OOM.
+    fn call_realloc(&mut self, ctx: u64, vt: u64, ptr: u64, old_size: u64, new_size: u64, align: u64) -> R<u64> {
+        let (_, realloc_off) = self.field_offset(self.alloc_vtable_name(), "realloc");
+        let rfn = self.read_u64(vt + realloc_off)?;
+        self.call_scalar(rfn, vec![
+            (Type::RawPtr(Box::new(Type::Scalar(ScalarTy::U8))), ctx),
+            (Type::RawPtr(Box::new(Type::Scalar(ScalarTy::U8))), ptr),
+            (Type::usize(), old_size),
+            (Type::usize(), new_size),
+            (Type::usize(), align),
+        ])
+    }
+
     fn bi_ptr_read(&mut self, args: &[Expr]) -> R<RVal> {
         let pv = self.eval_value(&args[0], None)?;
         let inner = match &pv.ty {
@@ -2662,8 +2676,8 @@ impl<'a> Interp<'a> {
     }
 
     /// Ensure the String at `base` has room for `need` more bytes, growing through
-    /// its carried allocator (alloc-new + copy + free-old — the vtable has no
-    /// `realloc`). Faults on OOM (prototype: `push`/`append` return no result).
+    /// its carried allocator's `realloc` (grow-in-place when possible, else move-
+    /// copy). Faults on OOM (prototype: `push`/`append` return no result).
     fn string_reserve(&mut self, base: u64, need: u64) -> R<()> {
         let buf_off = self.string_field_off("buf");
         let len = self.read_u64(base + self.string_field_off("len"))?;
@@ -2674,16 +2688,14 @@ impl<'a> Interp<'a> {
         let newcap = (len + need).max(cap * 2).max(8);
         let ctx = self.read_u64(base + self.string_field_off("ctx"))?;
         let vt = self.read_u64(base + self.string_field_off("vt"))?;
-        let newbuf = self.string_vt_alloc(ctx, vt, newcap)?;
+        let oldbuf = self.read_u64(base + buf_off)?;
+        let newbuf = if oldbuf == 0 {
+            self.string_vt_alloc(ctx, vt, newcap)?
+        } else {
+            self.call_realloc(ctx, vt, oldbuf, len, newcap, 1)?
+        };
         if newbuf == 0 {
             return Err(self.fault(FaultKind::Panic, "String allocation failed (OOM)"));
-        }
-        let oldbuf = self.read_u64(base + buf_off)?;
-        if len > 0 && oldbuf != 0 {
-            self.move_bytes(newbuf, oldbuf, len)?;
-        }
-        if oldbuf != 0 {
-            self.call_free(ctx, vt, oldbuf, cap, 1)?;
         }
         self.write_bytes(base + buf_off, &newbuf.to_le_bytes())?;
         self.write_bytes(base + self.string_field_off("cap"), &newcap.to_le_bytes())?;
@@ -2738,7 +2750,7 @@ impl<'a> Interp<'a> {
     // std growable `Vec[T]` (PROPOSAL-selfhost-ergonomics candidate A). Compiler-
     // known, allocator-explicit. Layout mirrors `String`:
     // `{ buf: rawptr @0, len @8, cap @16, ctx @24, vt @32 }` (5 u64 words).
-    // Growth is alloc-new + copy + free-old (the vtable exposes no `realloc`).
+    // Growth goes through the allocator's `realloc` (grow-in-place or move-copy).
     // ===================================================================
 
     fn arg0_is_vec(&self, args: &[Expr]) -> bool {
@@ -2816,7 +2828,7 @@ impl<'a> Interp<'a> {
         Ok(RVal { ty, addr, origin: Origin::Temp(id) })
     }
 
-    /// Ensure room for `need` more elements, growing via alloc-copy-free.
+    /// Ensure room for `need` more elements, growing via the allocator's `realloc`.
     fn vec_reserve(&mut self, base: u64, elem: &Type, need: u64) -> R<()> {
         let len = self.read_u64(base + 8)?;
         let cap = self.read_u64(base + 16)?;
@@ -2828,22 +2840,20 @@ impl<'a> Interp<'a> {
         let newcap = (len + need).max(cap * 2).max(4);
         let ctx = self.read_u64(base + 24)?;
         let vt = self.read_u64(base + 32)?;
-        let (_, alloc_off) = self.field_offset(self.alloc_vtable_name(), "alloc");
-        let afn = self.read_u64(vt + alloc_off)?;
-        let newbuf = self.call_scalar(afn, vec![
-            (Type::RawPtr(Box::new(Type::Scalar(ScalarTy::U8))), ctx),
-            (Type::usize(), newcap * stride),
-            (Type::usize(), align),
-        ])?;
+        let oldbuf = self.read_u64(base)?;
+        let newbuf = if oldbuf == 0 {
+            let (_, alloc_off) = self.field_offset(self.alloc_vtable_name(), "alloc");
+            let afn = self.read_u64(vt + alloc_off)?;
+            self.call_scalar(afn, vec![
+                (Type::RawPtr(Box::new(Type::Scalar(ScalarTy::U8))), ctx),
+                (Type::usize(), newcap * stride),
+                (Type::usize(), align),
+            ])?
+        } else {
+            self.call_realloc(ctx, vt, oldbuf, len * stride, newcap * stride, align)?
+        };
         if newbuf == 0 {
             return Err(self.fault(FaultKind::Panic, "Vec allocation failed (OOM)"));
-        }
-        let oldbuf = self.read_u64(base)?;
-        if len > 0 && oldbuf != 0 {
-            self.move_bytes(newbuf, oldbuf, len * stride)?;
-        }
-        if oldbuf != 0 {
-            self.call_free(ctx, vt, oldbuf, cap * stride, align)?;
         }
         self.write_bytes(base, &newbuf.to_le_bytes())?;
         self.write_bytes(base + 16, &newcap.to_le_bytes())?;

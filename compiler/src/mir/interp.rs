@@ -806,6 +806,12 @@ impl<'a> Engine<'a> {
         self.call_id_word(afn, &[ctx as i128, size as i128, align as i128])
     }
 
+    fn call_realloc(&mut self, ctx: u64, vt: u64, ptr: u64, old_size: u64, new_size: u64, align: u64) -> Result<u64, Fault> {
+        let realloc_off = self.field_off(self.alloc_vtable_name(), "realloc");
+        let rfn = self.read_u64(vt + realloc_off)?;
+        self.call_id_word(rfn, &[ctx as i128, ptr as i128, old_size as i128, new_size as i128, align as i128])
+    }
+
     fn collection_op(&mut self, dst: &Place, op: &CollOp, mf: &MirFn, frame: &Frame) -> Result<(), Fault> {
         match op {
             CollOp::New { alloc } => {
@@ -1011,23 +1017,21 @@ impl<'a> Engine<'a> {
         let newcap = (len + need).max(cap * 2).max(4);
         let ctx = self.read_u64(base + 24)?;
         let vt = self.read_u64(base + 32)?;
-        let newbuf = self.call_alloc(ctx, vt, newcap * stride, align)?;
+        let oldbuf = self.read_u64(base)?;
+        let newbuf = if oldbuf == 0 {
+            self.call_alloc(ctx, vt, newcap * stride, align)?
+        } else {
+            self.call_realloc(ctx, vt, oldbuf, len * stride, newcap * stride, align)?
+        };
         if newbuf == 0 {
             return Err(self.fault(FaultKind::Panic, span, "Vec allocation failed (OOM)"));
-        }
-        let oldbuf = self.read_u64(base)?;
-        if len > 0 && oldbuf != 0 {
-            self.copy_bytes(newbuf, oldbuf, len * stride)?;
-        }
-        if oldbuf != 0 {
-            self.call_free(ctx, vt, oldbuf, cap * stride, align)?;
         }
         self.write_u64(base, newbuf)?;
         self.write_u64(base + 16, newcap)?;
         Ok(())
     }
 
-    /// Ensure the String has room for `need` more bytes (alloc-copy-free growth).
+    /// Ensure the String has room for `need` more bytes (grow via `realloc`).
     fn string_reserve(&mut self, base: u64, need: u64, span: Span) -> Result<(), Fault> {
         let len = self.read_u64(base + 8)?;
         let cap = self.read_u64(base + 16)?;
@@ -1037,16 +1041,14 @@ impl<'a> Engine<'a> {
         let newcap = (len + need).max(cap * 2).max(8);
         let ctx = self.read_u64(base + 24)?;
         let vt = self.read_u64(base + 32)?;
-        let newbuf = self.call_alloc(ctx, vt, newcap, 1)?;
+        let oldbuf = self.read_u64(base)?;
+        let newbuf = if oldbuf == 0 {
+            self.call_alloc(ctx, vt, newcap, 1)?
+        } else {
+            self.call_realloc(ctx, vt, oldbuf, len, newcap, 1)?
+        };
         if newbuf == 0 {
             return Err(self.fault(FaultKind::Panic, span, "String allocation failed (OOM)"));
-        }
-        let oldbuf = self.read_u64(base)?;
-        if len > 0 && oldbuf != 0 {
-            self.copy_bytes(newbuf, oldbuf, len)?;
-        }
-        if oldbuf != 0 {
-            self.call_free(ctx, vt, oldbuf, cap, 1)?;
         }
         self.write_u64(base, newbuf)?;
         self.write_u64(base + 16, newcap)?;

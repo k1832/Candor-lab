@@ -1,3 +1,12 @@
+// Focused `realloc` gate (ABI 0001 §6.1, realloc landed 2026-07-16): drives the
+// free-list `realloc` slot DIRECTLY (no collection) so both physical paths run
+// deterministically on every engine — the tree-walking oracle, the MIR
+// interpreter, the Cranelift no-opt/opt backends, and (via the tests/fixtures/run
+// corpus) the LLVM engine. Path A: a block at the frontier is grown IN PLACE
+// (same pointer, bytes preserved). Path B: with the following block occupied,
+// realloc MOVES to a fresh block and copies the bytes. Returns 100 iff both
+// paths preserve the payload byte-for-byte and pick the expected in-place/move
+// pointer; any divergence yields a different sentinel.
 // Native `String` (design 0013): `string_new` over a reclaiming free-list
 // allocator, `append` byte-views that force `string_reserve` growth across the
 // initial capacity, then read back through `as_str` + byte `len`/index. Every
@@ -174,60 +183,75 @@ fn mk_alloc(state: write FreeList) -> Alloc {
     }
 }
 
+fn freelist_ctx(state: write FreeList) -> rawptr u8 {
+    unsafe "ctx aliases the live FreeList local for the whole run" {
+        return cast_ptr[u8](addr_of_mut(state.*));
+    }
+}
+
+fn write_pattern(p: rawptr u8, n: usize) -> unit {
+    unsafe "p points at a live block of at least n bytes carved from this arena" {
+        let mut i: usize = 0usize;
+        while i < n {
+            let b: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(p) + i);
+            ptr_write(b, conv u8 (i % 251usize));
+            i = i + 1usize;
+        }
+    }
+}
+
+fn check_pattern(p: rawptr u8, n: usize) -> bool {
+    unsafe "p points at a live block of at least n bytes carved from this arena" {
+        let mut i: usize = 0usize;
+        while i < n {
+            let b: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(p) + i);
+            let v: u8 = ptr_read(b);
+            if conv usize v != i % 251usize {
+                return false;
+            }
+            i = i + 1usize;
+        }
+        return true;
+    }
+}
+
+fn same_ptr(a: rawptr u8, b: rawptr u8) -> bool {
+    unsafe "comparing two rawptr addresses carved from this arena is a read-only check" {
+        return ptr_to_addr(a) == ptr_to_addr(b);
+    }
+}
+
 fn main() alloc -> i64 {
     let mut st: FreeList = with_window(16777216usize, 1048576usize);
-    let a: Alloc = mk_alloc(write st);
+    let ctx: rawptr u8 = freelist_ctx(write st);
 
-    // Empty string: no buffer is ever allocated; `as_str` is a {0, 0} view.
-    let e: String = string_new(read a);
-    let ev: str = as_str(read e);
-    trace(conv i64 len(ev));
+    // Path A: p1 sits at the bump frontier, so growing it extends in place.
+    let p1: rawptr u8 = freelist_alloc(ctx, 64usize, 1usize);
+    write_pattern(p1, 64usize);
+    let g1: rawptr u8 = freelist_realloc(ctx, p1, 64usize, 128usize, 1usize);
+    let a_in_place: bool = same_ptr(g1, p1);
+    let a_kept: bool = check_pattern(g1, 64usize);
 
-    // A single append below the initial capacity (cap 0 -> 8): no re-grow yet.
-    // Content is read back through `as_bytes` (the str -> [u8] free retype) + byte
-    // index, since a native str carries no direct indexing surface.
-    let mut one: String = string_new(read a);
-    append(write one, "hi");
-    let ov: str = as_str(read one);
-    let ob: [u8] = as_bytes(ov);
-    trace(conv i64 len(ov));
-    trace(conv i64 ob[0]);
-    trace(conv i64 ob[1]);
+    // Fill the whole extended block so the move below copies only written bytes.
+    write_pattern(g1, 128usize);
 
-    // Repeated appends crossing the initial cap force `string_reserve` growth
-    // (alloc-new + rt_copy + free-old) more than once: 5 -> 10 -> 15 -> 20 bytes.
-    let mut s: String = string_new(read a);
-    append(write s, "abcde");
-    append(write s, "fghij");
-    append(write s, "klmno");
-    append(write s, "pqrst");
-    let v: str = as_str(read s);
-    let vb: [u8] = as_bytes(v);
-    trace(conv i64 len(v));
-    trace(conv i64 vb[0]);
-    trace(conv i64 vb[10]);
-    trace(conv i64 vb[19]);
-    // String::push: encode Unicode scalars to UTF-8 (1/2/3/4 bytes). The final
-    // 4-byte push crosses a `string_reserve` growth (cap 8 -> 16), and every
-    // encoded byte must equal `utf8_encode_scalar`'s under all engines.
-    let mut p: String = string_new(read a);
-    push(write p, 65);      // 'A'  -> 65
-    push(write p, 233);     // 'e' + acute -> 195 169
-    push(write p, 8364);    // euro sign   -> 226 130 172
-    push(write p, 128512);  // grinning face -> 240 159 152 128
-    let pv: str = as_str(read p);
-    let pb: [u8] = as_bytes(pv);
-    trace(conv i64 len(pv));
-    trace(conv i64 pb[0]);
-    trace(conv i64 pb[1]);
-    trace(conv i64 pb[2]);
-    trace(conv i64 pb[3]);
-    trace(conv i64 pb[4]);
-    trace(conv i64 pb[5]);
-    trace(conv i64 pb[6]);
-    trace(conv i64 pb[7]);
-    trace(conv i64 pb[8]);
-    trace(conv i64 pb[9]);
+    // Occupy the block physically following g1, then grow again: must MOVE + copy.
+    let q: rawptr u8 = freelist_alloc(ctx, 64usize, 1usize);
+    let g2: rawptr u8 = freelist_realloc(ctx, g1, 128usize, 256usize, 1usize);
+    let b_moved: bool = !same_ptr(g2, g1);
+    let b_kept: bool = check_pattern(g2, 128usize);
+    let q_here: bool = !same_ptr(q, g2);
 
-    return conv i64 len(v);
+    if a_in_place {
+        if a_kept {
+            if b_moved {
+                if b_kept {
+                    if q_here {
+                        return 100;
+                    }
+                }
+            }
+        }
+    }
+    return 1;
 }

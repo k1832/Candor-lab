@@ -6,6 +6,7 @@
 struct AllocVtable {
     alloc: fn(rawptr u8, usize, usize) -> rawptr u8,
     free: fn(rawptr u8, rawptr u8, usize, usize) -> unit,
+    realloc: fn(rawptr u8, rawptr u8, usize, usize, usize) -> rawptr u8,
 }
 copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
 struct Bump { next: usize, end: usize }
@@ -22,7 +23,28 @@ fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
     }
 }
 fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit { return; }
-static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+fn bump_realloc(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) -> rawptr u8 {
+    unsafe "bump cannot reclaim, so it cannot grow in place: carve a fresh block, copy old_size bytes into it, and release the old block through bump_free (a no-op for a real bump, so the old space is leaked as bump semantics require)" {
+        let newp: rawptr u8 = bump_alloc(ctx, new_size, align);
+        if is_null(newp) {
+            return newp;
+        }
+        let a: usize = ptr_to_addr(ptr);
+        let base: usize = ptr_to_addr(newp);
+        let mut i: usize = 0usize;
+        while i < old_size {
+            let s: rawptr u8 = addr_to_ptr[u8](a + i);
+            let d: rawptr u8 = addr_to_ptr[u8](base + i);
+            let v: u8 = ptr_read(s);
+            ptr_write(d, v);
+            i = i + 1usize;
+        }
+        bump_free(ctx, ptr, old_size, align);
+        return newp;
+    }
+}
+
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free, realloc: bump_realloc };
 
 fn main() alloc -> i64 {
     let mut st: Bump = Bump { next: 8192usize, end: 16384usize };

@@ -308,7 +308,7 @@ fn slice_copy_dead_before_conflict_is_clean() {
 // Real (`.cnr`) syntax: the `str`/`String` view builtins and the `conv` cast used
 // below are real-surface constructs, so these go through `check_source_real`.
 const STR_PREAMBLE: &str = "
-struct AllocVtable { alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8, free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit }
+struct AllocVtable { alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8, free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit, realloc: fn(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) alloc -> rawptr u8 }
 copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
 fn use_i(v: i64) -> unit { }
 ";

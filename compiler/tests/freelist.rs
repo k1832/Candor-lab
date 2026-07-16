@@ -71,6 +71,17 @@ fn freelist_box_oom_all_engines() {
     assert_all_engines(&fixture("freelist_oom.cnr"), 42);
 }
 
+// `realloc` landed (ABI 0001 §6.1, 2026-07-16): drive both physical paths
+// directly. Path A grows a frontier block IN PLACE (same pointer); path B, with
+// the physically-following block occupied, MOVES to a fresh block and copies the
+// payload. Returns 100 iff both paths preserve the bytes and pick the expected
+// in-place/move pointer — byte-exact across the oracle, MIR, and both native
+// backends (LLVM covers it transitively via the run-corpus gate).
+#[test]
+fn freelist_realloc_in_place_and_move_all_engines() {
+    assert_all_engines(&fixture("freelist_realloc.cnr"), 100);
+}
+
 // A focused unit driving `alloc`/`free` directly (no box): alloc two blocks,
 // free the first, alloc again — the third alloc must reuse the freed block's
 // address, and the still-live second block must be untouched.
@@ -78,6 +89,7 @@ const DIRECT_DRIVE: &str = r#"
 struct AllocVtable {
     alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
     free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+    realloc: fn(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) alloc -> rawptr u8,
 }
 struct FreeList { next: usize, end: usize, head: rawptr u8 }
 struct FreeBlock { next: rawptr u8, size: usize }

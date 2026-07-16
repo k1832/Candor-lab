@@ -3733,10 +3733,13 @@ and `alloc` reuses.
   `tests/fixtures/run/`, so the Cranelift-AOT ELF (`tests/aot.rs`) and LLVM
   clang-`-O2` ELF (`tests/llvm.rs`) full-corpus gates and the four-engine
   `tests/stage_d.rs` gate cover them transitively — six engines agree.
-- DEFERRED: best-fit, and realloc (an ABI decision — the `std::alloc` vtable has
-  no `realloc` slot). Splitting + forward/backward coalescing landed, so the
-  allocator no longer fragments under churn; first-fit (not best-fit) is retained
-  as the simplest policy that the split/coalesce tests prove non-fragmenting.
+- `realloc` LANDED (see REALLOC-ABI below, 2026-07-16): the `std::alloc` vtable
+  now carries a third slot `realloc(ctx, ptr, old_size, new_size, align) -> ptr`;
+  the freelist grows in place (bump-frontier extend or adjacent-free absorb, with
+  tail-split) else moves+copies. DEFERRED: best-fit — splitting + forward/backward
+  coalescing landed, so the allocator no longer fragments under churn; first-fit
+  (not best-fit) is retained as the simplest policy the split/coalesce tests prove
+  non-fragmenting.
 - The corelib module tree grew 8 -> 9 modules (`std::freelist` discovered +
   checked clean by the module-tree checker); `tests/stage_c.rs`'s incremental-
   build module counts updated 8 -> 9 accordingly.
@@ -5141,3 +5144,51 @@ comes from the lock's pinned commit sha, never from checked-in copies.
 first-1.0) and the incremental `candor build` (Stage C) resolving deps — both
 unchanged by this slice. A moving-ref build does not re-fetch a present mirror
 (rev-pinned reproducibility; re-resolution is a manifest-change action, §6).
+
+
+## REALLOC-ABI — a `realloc` slot on the allocator vtable; native grow paths rewired (2026-07-16)
+
+Ratified fork (deciding authority, 2026-07-16). `AllocVtable` grew a third slot
+`realloc(ctx: rawptr u8, ptr, old_size, new_size, align) alloc -> rawptr u8`
+(same ctx/align convention as `alloc`/`free`; `{alloc, free}` unchanged).
+
+- **Implementors.** `std::freelist` grows IN PLACE when it can — extend the bump
+  frontier when the block ends there, else absorb the physically-adjacent free
+  block beginning exactly at `ptr + old_span` (reusing the coalescing invariants,
+  splitting its tail when the remainder is >= MIN_SPLIT) — otherwise `alloc(new)`
+  + copy + `free(old)`. Shrink keeps the block in place. `std::bump` cannot
+  reclaim, so it always `alloc(new)` + copy + `free(old)` (a no-op free for a real
+  bump — old space leaked, bump semantics); this uses the arena's own
+  `bump_alloc`/`bump_free`, so an instrumented `bump_free` (the `live`-counter
+  fixtures) stays balanced exactly as the prior alloc-copy-free grow did. `pool`
+  (11_1 demo) gets an alloc+copy+free `realloc` for vtable completeness. Best-fit
+  stays DEFERRED.
+- **Native grow paths rewired.** `String`/`Vec` growth in all four grow lowerings
+  (tree-walk `interp/eval.rs`, `mir/interp.rs`, Cranelift `backend/lower.rs`, LLVM
+  `backend/llvm.rs`) now calls `realloc` instead of manual alloc-new + copy +
+  free-old (a first grow with a null buffer still calls `alloc`). `old_size` is
+  passed as the LIVE byte count (`len`/`len*stride`), not capacity: this bounds
+  the copy to initialized bytes (the interpreter's init-byte guard faults on
+  reading the never-written `[len, cap)` tail — capacity would read uninitialized
+  memory), and at a `Vec` grow `len == cap` so the freelist's span/frontier logic
+  stays exact. `Map` growth is NOT rewired — a hash-table rehash reorganizes slots
+  by capacity and needs a fresh zeroed buffer distinct from the old one during
+  migration, which a byte-preserving `realloc` cannot express; it keeps
+  alloc-new(zeroed) + rehash + free-old.
+- **Soundness UNCHANGED.** The grow-invalidates-views loan rule (STR-VIEW-UAF /
+  0015 F1 residual, obligations above) already forbids holding a borrowed view
+  across a grow statically, independent of whether `realloc` moved the buffer, so
+  `realloc` introduces no new UAF and no loan rule was weakened.
+- **Gate.** Byte-exact across all five engines (tree-walk, MIR interp, Cranelift
+  no-opt/opt, LLVM `-O2`): all `String`/`Vec`/`Map` + freelist + std_io growth
+  fixtures stay green and identical, plus a focused `realloc` gate
+  (`tests/fixtures/run/freelist_realloc.cnr`, `freelist.rs`) that direct-drives
+  BOTH physical paths — frontier in-place grow (same pointer) and move-copy with
+  the following block occupied — asserting the payload survives byte-for-byte.
+  Every `AllocVtable` construction site + implementor across corelib, fixtures,
+  and the self-host sources (`analyses.cnr`/`checker.cnr`) carries the complete
+  three-slot vtable; the grow-free 0001 §11 demo fixtures (`11_1_allocator`,
+  `11_4_parser`, `11_5_arena`) keep their two-slot vtables (never exercise a grow;
+  their golden item-counts and `.cn`/migrator pairing are unchanged). Full
+  `cargo nextest run` green (929 tests) incl. self-host interp+lower corpus, AOT,
+  LLVM fifth-engine, wasm; clippy `--all-targets` clean.

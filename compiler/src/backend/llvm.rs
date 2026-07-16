@@ -2130,25 +2130,27 @@ impl<'a> FnEmit<'a> {
         let ctx = self.load_u64(&b24);
         let b32 = self.add_off_candor(base, 32);
         let vt = self.load_u64(&b32);
-        let newbuf = self.call_alloc(&ctx, &vt, &allocsz, align);
-        let is_oom = self.t();
-        self.line(&format!("{is_oom} = icmp eq i64 {newbuf}, 0"));
-        self.fault_if(&is_oom, FaultKind::Panic, span);
         let oldbuf = self.load_u64(base);
         let has_old = self.t();
         self.line(&format!("{has_old} = icmp ne i64 {oldbuf}, 0"));
-        let cp_b = self.l();
-        let after = self.l();
-        self.line(&format!("br i1 {has_old}, label %{cp_b}, label %{after}"));
-        self.label(&cp_b);
-        let copysz = self.t();
-        self.line(&format!("{copysz} = mul i64 {len}, {stride}"));
-        self.rt_copy_val(&newbuf, &oldbuf, &copysz);
-        let capsz = self.t();
-        self.line(&format!("{capsz} = mul i64 {cap}, {stride}"));
-        self.call_free_val(&ctx, &vt, &oldbuf, &capsz, align);
-        self.line(&format!("br label %{after}"));
-        self.label(&after);
+        let alloc_b = self.l();
+        let realloc_b = self.l();
+        let joined = self.l();
+        self.line(&format!("br i1 {has_old}, label %{realloc_b}, label %{alloc_b}"));
+        self.label(&alloc_b);
+        let nb_a = self.call_alloc(&ctx, &vt, &allocsz, align);
+        self.line(&format!("br label %{joined}"));
+        self.label(&realloc_b);
+        let oldsz = self.t();
+        self.line(&format!("{oldsz} = mul i64 {len}, {stride}"));
+        let nb_r = self.call_realloc(&ctx, &vt, &oldbuf, &oldsz, &allocsz, align);
+        self.line(&format!("br label %{joined}"));
+        self.label(&joined);
+        let newbuf = self.t();
+        self.line(&format!("{newbuf} = phi i64 [ {nb_a}, %{alloc_b} ], [ {nb_r}, %{realloc_b} ]"));
+        let is_oom = self.t();
+        self.line(&format!("{is_oom} = icmp eq i64 {newbuf}, 0"));
+        self.fault_if(&is_oom, FaultKind::Panic, span);
         self.store_u64(base, &newbuf);
         self.store_u64(&b16, &newcap);
         self.line(&format!("br label %{cont}"));
@@ -2180,21 +2182,25 @@ impl<'a> FnEmit<'a> {
         let ctx = self.load_u64(&b24);
         let b32 = self.add_off_candor(base, 32);
         let vt = self.load_u64(&b32);
-        let newbuf = self.call_alloc(&ctx, &vt, &newcap, 1);
-        let is_oom = self.t();
-        self.line(&format!("{is_oom} = icmp eq i64 {newbuf}, 0"));
-        self.fault_if(&is_oom, FaultKind::Panic, span);
         let oldbuf = self.load_u64(base);
         let has_old = self.t();
         self.line(&format!("{has_old} = icmp ne i64 {oldbuf}, 0"));
-        let cp_b = self.l();
-        let after = self.l();
-        self.line(&format!("br i1 {has_old}, label %{cp_b}, label %{after}"));
-        self.label(&cp_b);
-        self.rt_copy_val(&newbuf, &oldbuf, &len);
-        self.call_free_val(&ctx, &vt, &oldbuf, &cap, 1);
-        self.line(&format!("br label %{after}"));
-        self.label(&after);
+        let alloc_b = self.l();
+        let realloc_b = self.l();
+        let joined = self.l();
+        self.line(&format!("br i1 {has_old}, label %{realloc_b}, label %{alloc_b}"));
+        self.label(&alloc_b);
+        let nb_a = self.call_alloc(&ctx, &vt, &newcap, 1);
+        self.line(&format!("br label %{joined}"));
+        self.label(&realloc_b);
+        let nb_r = self.call_realloc(&ctx, &vt, &oldbuf, &len, &newcap, 1);
+        self.line(&format!("br label %{joined}"));
+        self.label(&joined);
+        let newbuf = self.t();
+        self.line(&format!("{newbuf} = phi i64 [ {nb_a}, %{alloc_b} ], [ {nb_r}, %{realloc_b} ]"));
+        let is_oom = self.t();
+        self.line(&format!("{is_oom} = icmp eq i64 {newbuf}, 0"));
+        self.fault_if(&is_oom, FaultKind::Panic, span);
         self.store_u64(base, &newbuf);
         self.store_u64(&b16, &newcap);
         self.line(&format!("br label %{cont}"));
@@ -2217,6 +2223,15 @@ impl<'a> FnEmit<'a> {
         let aa = self.add_off_candor(vt, alloc_off);
         let afn = self.load_u64(&aa);
         self.call_fnptr_id(&afn, &[ctx.to_string(), size.to_string(), format!("{align}")])
+    }
+
+    /// Grow `ptr` (holding `old_size` bytes) to `new_size` through the vtable's
+    /// `realloc` slot; returns the (possibly moved) pointer (0 on OOM).
+    fn call_realloc(&mut self, ctx: &str, vt: &str, ptr: &str, old_size: &str, new_size: &str, align: u64) -> String {
+        let realloc_off = self.field_off(&self.alloc_vtable_name(), "realloc");
+        let ra = self.add_off_candor(vt, realloc_off);
+        let rfn = self.load_u64(&ra);
+        self.call_fnptr_id(&rfn, &[ctx.to_string(), ptr.to_string(), old_size.to_string(), new_size.to_string(), format!("{align}")])
     }
 
     /// Free through the vtable with a runtime `size` (the String buffer capacity).
