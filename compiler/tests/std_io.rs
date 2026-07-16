@@ -1199,3 +1199,166 @@ fn buf_writer_round_trip_crosses_flush_threshold_both_engines() {
     assert_eq!(mir_out, expected, "MIR: buffered writes flushed in order, byte-exact");
     assert_eq!(expected.len(), 6004, "300*20 + 4 bytes");
 }
+
+
+// ===========================================================================
+// Directory listing over the std_io boundary (design 0013 dir listing): the
+// `sys_listdir` opendir/readdir extern with two-call sizing, wrapped by the safe
+// `list_dir(a, path) -> LsIoResult` that allocates the exact buffer, fills it, and
+// splits the NUL-separated names into an owned `Vec[String]`. The self-contained
+// fixture lists a directory and writes each entry name newline-terminated; the
+// readdir order is engine-dependent, so the harness SORTS the captured lines to
+// assert a byte-exact set. The native (Cranelift + LLVM) gate lives in tests/aot.rs
+// (`gate_aot_native_list_dir`).
+// ===========================================================================
+fn listdir_dir() -> String {
+    format!("{}/tests/fixtures/std_io_listdir", env!("CARGO_MANIFEST_DIR"))
+}
+fn listdir_fixture() -> String {
+    std::fs::read_to_string(format!("{}/main.cnr", listdir_dir())).expect("read listdir fixture")
+}
+fn listdir_prefix() -> String {
+    let f = listdir_fixture();
+    let idx = f.find("fn main").expect("listdir fixture has a main");
+    f[..idx].to_string()
+}
+
+/// Split captured stdout on '\n' (dropping the trailing empty) and SORT — the
+/// readdir order differs across engines, so the sorted set is the byte-exact datum.
+fn sorted_lines(out: &[u8]) -> Vec<String> {
+    let s = String::from_utf8(out.to_vec()).expect("entry names are utf-8 in the test");
+    let mut v: Vec<String> = s.lines().map(|l| l.to_string()).collect();
+    v.sort();
+    v
+}
+
+/// Populate a fresh temp directory with the given file names, returning its path.
+fn make_listdir_tmp(tag: &str, files: &[&str]) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("candor-listdir-{}-{}", tag, std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    for f in files {
+        std::fs::write(d.join(f), b"x").unwrap();
+    }
+    d
+}
+
+// ---- deterministic sorted listing, byte-exact on the tree-walker AND MIR --------
+#[test]
+fn list_dir_sorted_entries_tree_and_mir() {
+    let _g = lock();
+    let src = listdir_fixture();
+    let tmp = make_listdir_tmp("set", &["b.txt", "a.txt", "c.txt"]);
+
+    foreign_io::reset();
+    foreign_io::set_root(&tmp);
+    foreign_io::register_std_io();
+    let tw = run_ok(&src);
+    let tw_out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+
+    foreign_io::reset();
+    foreign_io::set_root(&tmp);
+    foreign_io::register_std_io();
+    let mir = run_ok_mir(&src);
+    let mir_out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    assert_eq!(tw, 3, "three entries listed (tree-walker)");
+    assert_eq!(mir, 3, "MIR entry count matches the tree oracle");
+    let want = vec!["a.txt".to_string(), "b.txt".to_string(), "c.txt".to_string()];
+    assert_eq!(sorted_lines(&tw_out), want, "tree: sorted entry set");
+    assert_eq!(sorted_lines(&mir_out), want, "MIR: sorted entry set");
+}
+
+// ---- error path: listing a nonexistent directory is the Err arm, not a crash ----
+const LISTDIR_ERR_MAIN: &str = r#"
+fn main() alloc -> i64 {
+    let mut st: FreeList = with_window(16777216usize, 1048576usize);
+    let a: Alloc = mk_alloc(write st);
+    let name: [8]u8 = [110u8, 111u8, 45u8, 115u8, 117u8, 99u8, 104u8, 0u8];
+    match list_dir(read a, slice_of(name)) {
+        LsIoResult::Ok(v) => { return conv i64 len(read v); },
+        LsIoResult::Err(e) => { match e { IoError::Errno(n) => { return 0i64 - 1i64; }, } },
+    }
+}
+"#;
+#[test]
+fn list_dir_missing_path_is_err_tree_and_mir() {
+    let _g = lock();
+    let src = format!("{}{}", listdir_prefix(), LISTDIR_ERR_MAIN);
+    let empty = make_listdir_tmp("empty-root", &[]);
+
+    foreign_io::reset();
+    foreign_io::set_root(&empty);
+    foreign_io::register_std_io();
+    let tw = run_ok(&src);
+    foreign_io::unregister_std_io();
+
+    foreign_io::reset();
+    foreign_io::set_root(&empty);
+    foreign_io::register_std_io();
+    let mir = run_ok_mir(&src);
+    foreign_io::unregister_std_io();
+    let _ = std::fs::remove_dir_all(&empty);
+
+    assert_eq!(tw, -1, "opendir of a missing dir -> list_dir Err arm (tree-walker)");
+    assert_eq!(mir, -1, "MIR matches: missing dir -> Err arm");
+}
+
+// ---- empty directory (after excluding . and ..) lists to an empty Vec -----------
+#[test]
+fn list_dir_empty_dir_is_empty_vec_tree_and_mir() {
+    let _g = lock();
+    let src = listdir_fixture();
+    let empty = make_listdir_tmp("empty", &[]);
+
+    foreign_io::reset();
+    foreign_io::set_root(&empty);
+    foreign_io::register_std_io();
+    let tw = run_ok(&src);
+    let tw_out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+
+    foreign_io::reset();
+    foreign_io::set_root(&empty);
+    foreign_io::register_std_io();
+    let mir = run_ok_mir(&src);
+    let mir_out = foreign_io::take_stdout();
+    foreign_io::unregister_std_io();
+    let _ = std::fs::remove_dir_all(&empty);
+
+    assert_eq!(tw, 0, "empty dir -> zero entries (tree-walker)");
+    assert_eq!(mir, 0, "MIR matches: empty dir -> zero entries");
+    assert!(tw_out.is_empty(), "no names written for an empty dir (tree)");
+    assert!(mir_out.is_empty(), "no names written for an empty dir (MIR)");
+}
+
+// ---- audit enumerates the new sys_listdir extern (new TCB surface) ---------------
+#[test]
+fn audit_enumerates_listdir_extern_and_discharge() {
+    let _g = lock();
+    let json = candor::audit::audit_path(std::path::Path::new(&listdir_dir())).expect("audit");
+    assert!(json.contains("\"name\": \"sys_listdir\""), "sys_listdir extern enumerated:\n{json}");
+    assert!(json.contains("opendir/readdir"), "listdir trust justification enumerated");
+    assert!(json.contains("\"undischarged_foreign_wrappers\": 0"), "every wrapper discharges foreign");
+    assert!(json.contains("discharges foreign"), "list_dir shown as discharging foreign");
+    assert!(!json.contains("propagates foreign"), "no wrapper leaks foreign — pub API is safe");
+}
+
+// ---- freestanding gate (0011 §5 / F5): the listdir boundary's foreign surface is
+// enumerable, so the freestanding-composition check (resolve_pkg) rejects a
+// freestanding graph containing it — the same datum tests/packages.rs' F5 gate
+// rejects on. Confirms the new extern does not slip past the freestanding wall.
+#[test]
+fn listdir_foreign_surface_is_visible_to_freestanding_gate() {
+    let surface = candor::audit::first_boundary_surface(std::path::Path::new(&listdir_dir()))
+        .expect("boundary surface enumeration")
+        .expect("the listdir module is a boundary with a foreign extern");
+    assert_eq!(
+        surface.foreign_extern.as_deref(),
+        Some("sys_write"),
+        "the first foreign extern the freestanding check names (source order)"
+    );
+}

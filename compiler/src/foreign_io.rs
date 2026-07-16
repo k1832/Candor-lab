@@ -102,11 +102,12 @@ pub fn register_std_io() {
     crate::foreign::register("sys_close", shim_close);
     crate::foreign::register("sys_read", shim_read);
     crate::foreign::register("sys_write", shim_write);
+    crate::foreign::register("sys_listdir", shim_listdir);
 }
 
 /// Remove the std/io shims, restoring `no_foreign_runtime` for their symbols.
 pub fn unregister_std_io() {
-    for sym in ["sys_open", "sys_close", "sys_read", "sys_write"] {
+    for sym in ["sys_open", "sys_close", "sys_read", "sys_write", "sys_listdir"] {
         crate::foreign::unregister(sym);
     }
 }
@@ -259,4 +260,47 @@ fn shim_write(args: &[i128], mem: &mut Mem) -> i128 {
             }
         }
     }
+}
+
+/// `sys_listdir(path: rawptr u8, dst: rawptr u8, dcap: usize) -> isize` — the
+/// opendir/readdir enumerator over `std::fs::read_dir` (which already excludes
+/// `.` and `..`, matching the native shim's explicit skip). Two-call sizing: it
+/// returns the total bytes the entry names need (each name + a NUL separator), and
+/// — only when `dcap` is large enough — writes them NUL-separated into `dst`. The
+/// entry SET matches the native shim; the raw order may differ (the test sorts).
+/// Returns `-1` on error (unreadable path), the POSIX convention the wrapper turns
+/// into its `Err` arm.
+fn shim_listdir(args: &[i128], mem: &mut Mem) -> i128 {
+    use std::os::unix::ffi::OsStrExt;
+    let path_addr = args[0] as u64;
+    let dst_addr = args[1] as u64;
+    let dcap = args[2] as u64;
+    let name = read_cstr(mem, path_addr);
+    let dir = {
+        let s = state().lock().unwrap();
+        s.root.join(std::ffi::OsStr::from_bytes(&name))
+    };
+    let rd = match std::fs::read_dir(&dir) {
+        Ok(r) => r,
+        Err(_) => return -1,
+    };
+    let mut entries: Vec<Vec<u8>> = Vec::new();
+    for ent in rd {
+        match ent {
+            Ok(e) => entries.push(e.file_name().as_bytes().to_vec()),
+            Err(_) => return -1,
+        }
+    }
+    let needed: u64 = entries.iter().map(|n| n.len() as u64 + 1).sum();
+    if dcap >= needed && needed > 0 {
+        let mut buf = Vec::with_capacity(needed as usize);
+        for n in &entries {
+            buf.extend_from_slice(n);
+            buf.push(0);
+        }
+        if mem.write(dst_addr, &buf).is_err() {
+            return -1;
+        }
+    }
+    needed as i128
 }

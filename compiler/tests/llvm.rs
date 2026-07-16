@@ -609,6 +609,64 @@ fn gate_llvm_native_io_open_error() {
 }
 
 #[test]
+fn gate_llvm_native_list_dir() {
+    assert!(clang_available(), "clang unavailable");
+    let _g = io_guard();
+    // The directory-listing boundary (`sys_listdir` opendir/readdir + two-call
+    // sizing) built by clang -O2 into a real binary calling the linked `listdir`
+    // runtime shim. The readdir order is engine-dependent, so the observable set is
+    // compared SORTED (byte-exact after sort) against the shim-backed oracle.
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/std_io_listdir");
+    let main_cnr = dir.join("main.cnr");
+    let src = std::fs::read_to_string(&main_cnr).expect("read listdir fixture");
+    let work = std::env::temp_dir().join(format!("candor-llvm-listdir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    for f in ["b.txt", "a.txt", "c.txt"] {
+        std::fs::write(work.join(f), b"x").unwrap();
+    }
+
+    // Oracle: the shim-backed interpreter (real std::fs::read_dir) rooted at `work`.
+    candor::foreign_io::reset();
+    candor::foreign_io::set_root(&work);
+    candor::foreign_io::register_std_io();
+    let (exp_ret, exp_out) = match run_source_real(&src) {
+        RunResult::Ok(r) => (r.ret, candor::foreign_io::take_stdout()),
+        _ => {
+            candor::foreign_io::unregister_std_io();
+            panic!("shim-backed interpreter should run the listdir demonstrator");
+        }
+    };
+    candor::foreign_io::unregister_std_io();
+
+    // Native: a clang -O2 binary calling the real `listdir`/`write` shims, run with
+    // `work` as cwd so `opendir(".")` resolves to the directory we populated.
+    let out = std::env::temp_dir().join(format!("candor-llvm-listdir-bin-{}", std::process::id()));
+    candor::compile_path_llvm(&main_cnr, &out).expect("compile listdir demonstrator via clang -O2");
+    let output = Command::new(&out)
+        .current_dir(&work)
+        .output()
+        .expect("run compiled listdir binary");
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_dir_all(&work);
+
+    let sorted = |b: &[u8]| -> Vec<String> {
+        let s = String::from_utf8(b.to_vec()).expect("entry names are utf-8 in the test");
+        let mut v: Vec<String> = s.lines().map(|l| l.to_string()).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(output.status.code(), Some(exp_ret as u8 as i32), "exit byte vs shim run");
+    assert_eq!(sorted(&output.stdout), sorted(&exp_out), "native sorted set == shim sorted set");
+    assert_eq!(
+        sorted(&output.stdout),
+        vec!["a.txt".to_string(), "b.txt".to_string(), "c.txt".to_string()],
+        "the known sorted entry set"
+    );
+    assert_eq!(exp_ret, 3, "three entries listed");
+}
+
+#[test]
 fn gate_llvm_native_read_file_string() {
     assert!(clang_available(), "clang unavailable");
     let _g = io_guard();

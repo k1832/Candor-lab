@@ -1,0 +1,320 @@
+boundary
+// std::io directory listing — a POSIX opendir/readdir boundary module over the
+// 0011 foreign boundary (companion to the file I/O in std_io/main.cnr). The
+// externs carry the C-boundary TRUST; the pub wrappers carry the ENFORCED value
+// contracts and discharge the `foreign` effect, so the module's public surface is
+// ordinary safe Candor — audit-clean.
+//
+// The extern symbols are `sys_*` (the edition's extern-name -> C-symbol rule
+// strips the prefix): `sys_write` binds to libc `write`; `sys_listdir` binds to
+// the runtime's `listdir` shim (there is no libc `listdir`) — an opendir/readdir
+// enumerator using the SAME two-call sizing ABI the interpreter shim implements.
+
+extern "C" {
+    fn sys_write(fd: i32, buf: rawptr u8, count: usize) foreign -> isize
+        trust "POSIX write(2): reads at most count bytes from buf, retains no pointer, thread-confined" {
+            valid_for(buf, count),
+            no_retain(buf),
+            thread_confined(buf),
+        };
+    fn sys_listdir(path: rawptr u8, dst: rawptr u8, dcap: usize) foreign -> isize
+        trust "opendir/readdir(3) enumerator: reads a NUL-terminated path; writes at most dcap bytes of NUL-separated entry names into dst and returns the total bytes the names need (dcap 0 sizes only); retains no pointer, thread-confined to this call" {
+            valid_nul_terminated(path),
+            no_retain(path),
+            valid_for(dst, dcap),
+            no_retain(dst),
+            thread_confined(dst),
+        };
+}
+
+pub enum IoError {
+    Errno(i32),
+}
+
+pub enum IoResult {
+    ok Ok(usize),
+    Err(IoError),
+}
+
+// The directory-listing result: an owned `Vec[String]` of entry names (excluding
+// `.` and `..`) on success, or the structured `IoError` on failure.
+pub enum LsIoResult {
+    ok Ok(Vec[String]),
+    Err(IoError),
+}
+
+pub fn stdout() -> i32 { return 1i32; }
+
+pub fn write_all(fd: i32, s: read [u8]) -> IoResult {
+    let total: usize = len(s);
+    if total == 0usize {
+        return IoResult::Ok(0usize);
+    }
+    unsafe "sys_write trust discharged: s is a live [u8] view valid for len(s) bytes; write retains nothing (POSIX), thread-confined" {
+        let n: isize = sys_write(fd, addr_of(s[0]), total);
+        if n < 0isize {
+            return IoResult::Err(IoError::Errno(conv i32 n));
+        }
+        if conv usize n < total {
+            return IoResult::Err(IoError::Errno(0i32 - 1i32));
+        }
+        return IoResult::Ok(total);
+    }
+}
+
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+    realloc: fn(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) alloc -> rawptr u8,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+
+struct FreeList { next: usize, end: usize, head: rawptr u8 }
+struct FreeBlock { next: rawptr u8, size: usize }
+
+fn with_window(base: usize, size: usize) -> FreeList {
+    unsafe "the empty free list starts with a null head; no block is threaded yet" {
+        return FreeList { next: base, end: base + size, head: ptr_null[u8]() };
+    }
+}
+
+fn block_span(size: usize, align: usize) -> usize {
+    let mut need: usize = size;
+    if need < 16usize {
+        need = 16usize;
+    }
+    return (need + align - 1usize) / align * align;
+}
+
+fn freelist_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live FreeList whose [next, end) window and address-ordered free chain are reserved to this arena alone; every carved block stays inside [next, end) and is >= header-sized, and a split remainder (kept only when >= MIN_SPLIT) is written into the block's own tail" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let need: usize = block_span(size, align);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) {
+            let blk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if blk.size >= need {
+                if blk.size - need >= 32usize {
+                    let rem: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(cur) + need);
+                    ptr_write(cast_ptr[FreeBlock](rem), FreeBlock { next: blk.next, size: blk.size - need });
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: rem });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: rem, size: pblk.size });
+                    }
+                } else {
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: blk.next });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: blk.next, size: pblk.size });
+                    }
+                }
+                return cur;
+            }
+            prev = cur;
+            cur = blk.next;
+        }
+        let aligned: usize = (st.next + align - 1usize) / align * align;
+        if aligned + need > st.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: aligned + need, end: st.end, head: st.head });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+
+fn freelist_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    unsafe "the free list is kept ADDRESS-ORDERED; the freed block's own storage (>= header-sized, guaranteed by block_span in alloc) holds its FreeBlock header {next, size}, and a merge joins two blocks ONLY when their byte spans are exactly adjacent (addr + size == neighbour addr), so a merge can never overlap live memory nor bridge a gap" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let mut cap: usize = block_span(size, align);
+        let a: usize = ptr_to_addr(ptr);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) && ptr_to_addr(cur) < a {
+            let cblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            prev = cur;
+            cur = cblk.next;
+        }
+        let mut link: rawptr u8 = cur;
+        if !is_null(cur) {
+            let nblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if a + cap == ptr_to_addr(cur) {
+                cap = cap + nblk.size;
+                link = nblk.next;
+            }
+        }
+        if !is_null(prev) {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            if ptr_to_addr(prev) + pblk.size == a {
+                ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: link, size: pblk.size + cap });
+                return;
+            }
+        }
+        ptr_write(cast_ptr[FreeBlock](ptr), FreeBlock { next: link, size: cap });
+        if is_null(prev) {
+            ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: ptr });
+        } else {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: ptr, size: pblk.size });
+        }
+    }
+}
+
+fn freelist_realloc(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live FreeList; [ptr, ptr+old_span) is the block carved for old_size (block_span rounds identically on alloc/free). Growing in place either extends the bump frontier inside [next, end) or absorbs the physically-adjacent free block beginning exactly at ptr+old_span (splitting its tail when the remainder is >= MIN_SPLIT); the fallback carves a fresh block, copies old_size bytes into it, and frees the old block" {
+        let old_span: usize = block_span(old_size, align);
+        let new_span: usize = block_span(new_size, align);
+        if new_span <= old_span {
+            return ptr;
+        }
+        let a: usize = ptr_to_addr(ptr);
+        let tail: usize = a + old_span;
+        let extra: usize = new_span - old_span;
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        if tail == st.next {
+            if tail + extra <= st.end {
+                ptr_write(cast_ptr[FreeList](ctx), FreeList { next: tail + extra, end: st.end, head: st.head });
+                return ptr;
+            }
+        } else {
+            let mut prev: rawptr u8 = ptr_null[u8]();
+            let mut cur: rawptr u8 = st.head;
+            while !is_null(cur) && ptr_to_addr(cur) < tail {
+                let cblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+                prev = cur;
+                cur = cblk.next;
+            }
+            if !is_null(cur) && ptr_to_addr(cur) == tail {
+                let fblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+                if fblk.size >= extra {
+                    let mut link: rawptr u8 = fblk.next;
+                    if fblk.size - extra >= 32usize {
+                        let rem: rawptr u8 = addr_to_ptr[u8](tail + extra);
+                        ptr_write(cast_ptr[FreeBlock](rem), FreeBlock { next: fblk.next, size: fblk.size - extra });
+                        link = rem;
+                    }
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: link });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: link, size: pblk.size });
+                    }
+                    return ptr;
+                }
+            }
+        }
+        let newp: rawptr u8 = freelist_alloc(ctx, new_size, align);
+        if is_null(newp) {
+            return newp;
+        }
+        let mut i: usize = 0usize;
+        while i < old_size {
+            let s: rawptr u8 = addr_to_ptr[u8](a + i);
+            let d: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(newp) + i);
+            let v: u8 = ptr_read(s);
+            ptr_write(d, v);
+            i = i + 1usize;
+        }
+        freelist_free(ctx, ptr, old_size, align);
+        return newp;
+    }
+}
+
+static FREELIST_VT: AllocVtable = AllocVtable { alloc: freelist_alloc, free: freelist_free, realloc: freelist_realloc };
+
+fn mk_alloc(state: write FreeList) -> Alloc {
+    unsafe "ctx (the caller's FreeList local) and vt (the static FREELIST_VT) outlive every String this handle serves; the caller keeps the window and FREELIST_VT alive for the whole run and drops every String before the window dies" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(FREELIST_VT) };
+    }
+}
+
+// List a directory's entry names (excluding `.` and `..`) into an owned
+// `Vec[String]`. Two-call sizing over the `sys_listdir` ABI: a cap-0 call returns
+// the total bytes the NUL-separated names need; the wrapper allocates exactly that
+// through the caller's allocator, fills it with a second call, and splits the
+// buffer on NUL into owned Strings. The buffer is bounded to the sized `cap`, each
+// name is copied through a NAME_MAX-bounded scratch, and `str_from_unchecked`
+// retypes the ASCII/UTF-8 bytes without re-validation (a non-UTF-8 name is kept
+// verbatim rather than crashing). The buffer is freed before returning.
+pub fn list_dir(a: read Alloc, path: read [u8]) alloc -> LsIoResult {
+    let mut names: Vec[String] = vec_new(a);
+    unsafe "sys_listdir trust discharged: path is a live NUL-terminated [u8] view; the cap-0 sizing call writes nothing and only returns the byte count (POSIX opendir/readdir), retaining nothing" {
+        let needed: isize = sys_listdir(addr_of(path[0]), ptr_null[u8](), 0usize);
+        if needed < 0isize {
+            return LsIoResult::Err(IoError::Errno(conv i32 needed));
+        }
+        let cap: usize = conv usize needed;
+        if cap == 0usize {
+            return LsIoResult::Ok(names);
+        }
+        let vt: AllocVtable = ptr_read(a.vt);
+        let alloc_fn: fn(rawptr u8, usize, usize) alloc -> rawptr u8 = vt.alloc;
+        let buf: rawptr u8 = alloc_fn(a.ctx, cap, 1usize);
+        if is_null(buf) {
+            return LsIoResult::Err(IoError::Errno(0i32 - 1i32));
+        }
+        let wrote: isize = sys_listdir(addr_of(path[0]), buf, cap);
+        let free_fn: fn(rawptr u8, rawptr u8, usize, usize) alloc -> unit = vt.free;
+        if wrote < 0isize {
+            free_fn(a.ctx, buf, cap, 1usize);
+            return LsIoResult::Err(IoError::Errno(conv i32 wrote));
+        }
+        let filled: usize = conv usize wrote;
+        if filled <= cap {
+            let base: usize = ptr_to_addr(buf);
+            let mut scratch: [256]u8 = [0u8; 256];
+            let mut j: usize = 0usize;
+            let mut i: usize = 0usize;
+            loop {
+                if i >= filled { break; }
+                let b: u8 = ptr_read(addr_to_ptr[u8](base + i));
+                if b == 0u8 {
+                    let mut name: String = string_new(a);
+                    append(write name, str_from_unchecked(subslice(slice_of(scratch), 0usize, j)));
+                    push(write names, name);
+                    j = 0usize;
+                } else {
+                    if j < 256usize {
+                        scratch[j] = b;
+                        j = j + 1usize;
+                    }
+                }
+                i = i + 1usize;
+            }
+        }
+        free_fn(a.ctx, buf, cap, 1usize);
+        return LsIoResult::Ok(names);
+    }
+}
+
+// Demonstrator: list the current directory, writing each entry name followed by a
+// newline (raw readdir order — the differential harness SORTS the lines, so the
+// engine-dependent order does not matter), and return the entry count.
+fn main() alloc -> i64 {
+    let mut st: FreeList = with_window(16777216usize, 1048576usize);
+    let a: Alloc = mk_alloc(write st);
+    let dot: [2]u8 = [46u8, 0u8];
+    let names: Vec[String] = match list_dir(read a, slice_of(dot)) {
+        LsIoResult::Ok(v) => v,
+        LsIoResult::Err(e) => { return 0i64 - 1i64; },
+    };
+    let n: usize = len(read names);
+    let mut i: usize = 0usize;
+    loop {
+        if i >= n { break; }
+        match write_all(stdout(), as_bytes(as_str(read get(read names, i).*))) {
+            IoResult::Ok(c) => { },
+            IoResult::Err(e) => { return 0i64 - 2i64; },
+        }
+        let nl: [1]u8 = [10u8];
+        match write_all(stdout(), slice_of(nl)) {
+            IoResult::Ok(c) => { },
+            IoResult::Err(e) => { return 0i64 - 3i64; },
+        }
+        i = i + 1usize;
+    }
+    return conv i64 n;
+}

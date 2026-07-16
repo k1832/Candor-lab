@@ -40,6 +40,7 @@
 #include <stdatomic.h>
 #include <sys/mman.h>
 #include <pthread.h>
+#include <dirent.h>
 
 /* Must match src/interp/mem.rs and src/backend/object.rs MEM_BASE. */
 #define MEM_BASE    0x0000200000000000UL
@@ -82,6 +83,44 @@ uint64_t rt_stack_alloc(uint64_t size, uint64_t align) {
 /* Byte-copy `len` bytes src -> dst within the flat model. */
 void rt_copy(uint64_t dst, uint64_t src, uint64_t len) {
     if (len) memmove(g_base + dst, g_base + src, (size_t)len);
+}
+
+/* ------------------------------------------------------------------------- */
+/* std::io directory listing (design 0013 dir listing over the 0011 boundary). */
+/* ------------------------------------------------------------------------- */
+
+/* `sys_listdir` binds here (there is no libc `listdir`): opendir the
+ * NUL-terminated `path`, enumerate entries EXCLUDING "." and ".." (matching the
+ * interpreter shim's `std::fs::read_dir`, which omits them), and — only when
+ * `dcap` is large enough — write each name followed by a NUL into `dst`. Returns
+ * the total bytes the NUL-separated names need (the two-call sizing datum), or -1
+ * on error. `path`/`dst` arrive already translated to real host pointers at the
+ * boundary (backend::lower::host_addr). The entry SET matches the interpreter
+ * shim; the readdir order may differ (the test sorts). */
+int64_t listdir(const char *path, char *dst, uint64_t dcap) {
+    DIR *d = opendir(path);
+    if (!d) return -1;
+    uint64_t needed = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        const char *n = e->d_name;
+        if (n[0] == '.' && (n[1] == '\0' || (n[1] == '.' && n[2] == '\0'))) continue;
+        needed += (uint64_t)strlen(n) + 1;
+    }
+    if (dcap >= needed && needed > 0) {
+        rewinddir(d);
+        uint64_t off = 0;
+        while ((e = readdir(d)) != NULL) {
+            const char *n = e->d_name;
+            if (n[0] == '.' && (n[1] == '\0' || (n[1] == '.' && n[2] == '\0'))) continue;
+            uint64_t len = (uint64_t)strlen(n);
+            memcpy(dst + off, n, (size_t)len);
+            off += len;
+            dst[off++] = '\0';
+        }
+    }
+    closedir(d);
+    return (int64_t)needed;
 }
 
 /* ------------------------------------------------------------------------- */
