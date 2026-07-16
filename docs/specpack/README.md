@@ -24,8 +24,8 @@ generator and eval harness are later stages; this pack is their spec anchor.
 language changes. Authority order (LANG_PHYLOSOPHY.md §9): philosophy > design
 docs > spec chapters > implementation. Grammar/lexis: `docs/spec/01`,`02` +
 design `0006`. Semantics: `docs/spec/03`–`08` + designs `0001`,`0004`,`0005`.
-Generics/iteration: designs `0007`,`0009`. Corpus: `prototype/tests/fixtures/**`.
-Diagnostics: mined from `prototype/src/`. When spec and implementation disagree,
+Generics/iteration: designs `0007`,`0009`. Corpus: `compiler/tests/fixtures/**`.
+Diagnostics: mined from `compiler/src/`. When spec and implementation disagree,
 `grammar.md`/`semantics.md` say which is ahead (see the "Divergences" section in
 each).
 

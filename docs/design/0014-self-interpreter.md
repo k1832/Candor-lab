@@ -13,10 +13,10 @@ signature by inference — the type/layout table is annotation-directed, no
 inference). Builds on 0001 (the memory model, §1.5 drop order, §4.2 memory, §5–§8
 the interpreter semantics), 0010 §5 (the four-engine equivalence gate this rides),
 0013 (`str`/`[u8]` and the collection stage plan that S7 would need). Mirrors the
-Rust reference interpreter `prototype/src/interp/{mod,eval,layout,mem}.rs`.
-**Prototype:** `prototype/selfhost/interp/interp.cnr` (~3100 lines of Candor),
+Rust reference interpreter `compiler/src/interp/{mod,eval,layout,mem}.rs`.
+**Prototype:** `selfhost/interp/interp.cnr` (~3100 lines of Candor),
 composed with the `lexer` and `parser` self-host modules by named `use`, gated by
-`prototype/tests/selfhost_interp.rs` (execution equality vs `run_source_real`) over
+`compiler/tests/selfhost_interp.rs` (execution equality vs `run_source_real`) over
 a 71-fixture corpus (61 returns, 10 faults) that includes all five systems-corpus
 programs (11_1..11_5). Slices S1–S6b are recorded in chapter 99 (the obligations
 tracker) as the authoritative slice-by-slice ledger; this document is their
@@ -60,7 +60,7 @@ Correctness here is not "passes a hand-written expectation." It is defined
 **differentially**: for every fixture in the corpus, the observable dump produced
 by running the program *through `interp.cnr`* must be **byte-identical** to the
 dump produced by running the same program through the Rust reference interpreter
-(`run_source_real`). The gate lives in `prototype/tests/selfhost_interp.rs`
+(`run_source_real`). The gate lives in `compiler/tests/selfhost_interp.rs`
 (`candor_interp_execution_equal_to_oracle_over_corpus`) and asserts
 `assert_eq!(mine, oracle)` per fixture.
 
@@ -96,7 +96,7 @@ The reference interpreter is not just *an* implementation; it is the anchor of t
 prototype's **four-engine equivalence gate** (design 0010 §5): the tree-walking
 interpreter (`run_source_real`), the MIR interpreter (Stage A), the native
 Cranelift JIT (Stage B), and the optimized native engine (Stage D) are all held to
-semantic-trace equality on every corpus program (`prototype/src/lib.rs`, "the
+semantic-trace equality on every corpus program (`compiler/src/lib.rs`, "the
 four-engine gate proves the trace survives," lib.rs:333). The tree-walker is the
 reference the other three are proven equal to.
 

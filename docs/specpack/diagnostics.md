@@ -1,6 +1,6 @@
 # Candor diagnostics — the error-code taxonomy
 
-Every code mined from `prototype/src/`. Format: **code — meaning — the fix a model
+Every code mined from `compiler/src/`. Format: **code — meaning — the fix a model
 should make.** Grouped by family. (This doubles as the P4 diagnostic taxonomy.)
 `P0xxx` = parse errors; `E01xx`–`E11xx` = check errors.
 

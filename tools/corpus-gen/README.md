@@ -113,11 +113,11 @@ the toolchain itself, a shape that no longer matches the language starts *reject
 
 ```
 # build the toolchain filter once
-cargo build --release --manifest-path ../../prototype/Cargo.toml
+cargo build --release --manifest-path ../../compiler/Cargo.toml
 
 # generate (the seed corpus)
 cargo run -- generate --seed 1 --count 200 \
-    --candor ../../prototype/target/release/candor-proto --out corpus-seed
+    --candor ../../compiler/target/release/candor-proto --out corpus-seed
 
 # --count splits 3:1 positive:negative by default; override with
 #   --positive P --negative Q. --candor also reads $CANDOR_PROTO.

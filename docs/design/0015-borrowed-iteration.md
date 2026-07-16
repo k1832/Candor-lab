@@ -32,7 +32,7 @@ and this one changes.
 collection by *shared reference* to each element (`read Item`) rather than by
 owned copy (`Indexed`, 0009 §3.2) or by consumption (`Iter`, 0009 §3.1). It
 proposes to admit the `RefIndexed` protocol already *declared but unimplemented*
-in the corelib seed (`prototype/tests/fixtures/corelib/core/iter.cnr`) and to
+in the corelib seed (`compiler/tests/fixtures/corelib/core/iter.cnr`) and to
 specify its `for`-by-ref desugar, its checker discipline, and its soundness. It
 takes up the **region-free branch** of the gate 0009 §9 set on **OBL-ITER-BORROW**:
 "0007 §3.5's region-parameterized-type question reopened, **or a region-free
@@ -128,7 +128,7 @@ may change (0001/0007 outrank this document):
    as it (or anything derived from it) lives, the collection is frozen to shared.
 
 6. **NLL-lite, lifetime-variable-free checking** (0001 §2.3). The checker is
-   backward liveness of borrow bindings plus a conflict scan (`prototype/src/check/
+   backward liveness of borrow bindings plus a conflict scan (`compiler/src/check/
    loans.rs`) — no lifetime solver, no cross-function region unification. Whatever
    this design demands of the checker must fit that shape: *a loan held over a live
    range, and a conflict scan*, nothing more.

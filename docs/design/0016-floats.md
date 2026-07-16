@@ -95,7 +95,7 @@ NaN-payload / signaling-NaN edge cases; a flexible float-literal type.
 ## 8. Formatting (`fmt_f64`) — landed
 
 Float-to-`String` rendering lives in the `String` formatting image
-`prototype/tests/fixtures/std_fmt.cnr` (alongside `fmt_i64`), written in Candor
+`compiler/tests/fixtures/std_fmt.cnr` (alongside `fmt_i64`), written in Candor
 over this slice's `f64` ops. It is a *defined, documented* format — not the
 shortest round trip (Ryū), which is deferred (§7):
 

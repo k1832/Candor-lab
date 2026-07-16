@@ -11,5 +11,5 @@ path = "src/main.rs"
 [dependencies]
 serde_json = "1"
 # In-process consumption of the prototype front end (lib crate). We depend on the
-# library only; we never shell out and never modify prototype/src.
-candor-proto = { path = "../../prototype" }
+# library only; we never shell out and never modify compiler/src.
+candor-proto = { path = "../../compiler" }

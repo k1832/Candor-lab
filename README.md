@@ -89,9 +89,9 @@ docs/
   design/            numbered design documents (memory model, grammar, soundness)
   reviews/           adversarial review records with dispositions
   measurements/      raw counter output for baselines and ports
-prototype/           the compiler: lexer, parser, checker, MIR, Cranelift backend,
+compiler/           the compiler: lexer, parser, checker, MIR, Cranelift backend,
                      AOT/freestanding emission, incremental build, formatter, migrator
-prototype/selfhost/  Candor compiling itself — lexer/parser/checker/analyses in .cnr,
+selfhost/  Candor compiling itself — lexer/parser/checker/analyses in .cnr,
                      each oracle-gated against the Rust reference. All six slices
                      load as a `use`/`pub` module tree (dogfooding stage-1 modules)
 dist/                the extractable 0.x distribution surface (README, tour, examples)

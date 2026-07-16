@@ -7,7 +7,7 @@ canonical S-expression serializer, and the full frozen vector suite (P1–P32)
 below the `// Test harness` marker (ruling R14). `main` returns the sentinel
 **777** on full success; any vector failure faults.
 
-Toolchain: `prototype/target/release/candor-proto check|run ports/candor/parser/parser.cn`.
+Toolchain: `compiler/target/release/candor-proto check|run ports/candor/parser/parser.cn`.
 Suite runtime: ~0.03 s. The implementation section above the marker was
 verified to parse and check standalone.
 

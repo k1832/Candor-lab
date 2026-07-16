@@ -1,0 +1,7 @@
+// A freestanding root over hal. It calls only hal::nothing (pure); hal_write is
+// never reached — yet the declared foreign surface must still reject the build.
+use hal::{nothing};
+
+fn main() -> i64 {
+    return nothing();
+}

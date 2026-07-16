@@ -98,7 +98,7 @@ externally fixed intent."
 
 These tasks are the SMALL sub-problems. The basket's FULL programs
 (`docs/basket/spec-{allocator,arena,mmio,parser,scheduler}.md`, realized in
-`prototype/tests/fixtures/run/11_*.cnr`) become the **graduation tasks** later:
+`compiler/tests/fixtures/run/11_*.cnr`) become the **graduation tasks** later:
 the same runner shape (spec + statement as prompt material; a fresh acceptance
 main or the program's own `main` sentinel as the anchor; `check`/`run` scoring),
 scaled from a single function to a whole ported program. The corpus pipeline,
@@ -108,11 +108,11 @@ when funded against Bet 1 evidence, feeds the same anchors.
 
 ```
 # build the oracle once
-cargo build --manifest-path ../../prototype/Cargo.toml
+cargo build --manifest-path ../../compiler/Cargo.toml
 
 # score, pointing at the built oracle
 cargo run -- score tests/submissions_good \
-    --candor ../../prototype/target/debug/candor-proto --round 1
+    --candor ../../compiler/target/debug/candor-proto --round 1
 
 cargo test        # runner scored vs known-good / known-defective submissions
 ```

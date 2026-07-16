@@ -1,0 +1,8 @@
+[package]
+name = "blink"
+version = "0.1.0"
+edition = "2026"
+freestanding = true
+
+[dependencies]
+hal = { path = "../hal" }

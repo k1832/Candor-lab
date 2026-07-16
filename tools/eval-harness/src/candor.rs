@@ -2,7 +2,7 @@
 //! toolchain). The harness NEVER re-implements the language's judgement — every
 //! pass/fail is a `candor-proto check`/`run` exit code + its JSON output.
 //!
-//! Contract observed from `prototype/src/main.rs`:
+//! Contract observed from `compiler/src/main.rs`:
 //! * `check <file>` — exit 0 clean; exit 1 with one JSON diagnostic per stdout
 //!   line otherwise (code `P0xxx`/`L*` = parse/lex, `E*` = check).
 //! * `run <file>`   — exit 0 with the `i64` sentinel on stdout; a fault writes a

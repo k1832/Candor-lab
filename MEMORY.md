@@ -11,7 +11,7 @@ One lesson per entry, one-line summary first.
   parallelizes all tests in one process pool → ~3.2 min full suite (gated by the
   self-host corpus integration tests, each a couple of minutes of interpreted Candor
   over the corpus — that's the floor without optimizing the build). The `fast` nextest
-  profile (`prototype/.config/nextest.toml`) drops the slow integration binaries
+  profile (`compiler/.config/nextest.toml`) drops the slow integration binaries
   (self-host, aot/llvm/stage native gates, freestanding, concurrency_native, golden)
   for a ~2.3 s / 518-test edit-check loop; CI still runs the full default profile.
   Deliberately did NOT add `[profile.test] opt-level` — it speeds the interpreted
@@ -965,7 +965,7 @@ once you add the literal node). Key design/impl facts worth reusing:
 - **Integer-literal `match` patterns: the shared `PatKind` enum forces
   completeness edits in ~13 sites, and integer exhaustiveness is a HARD
   catch-all requirement (not variant enumeration).** Added `PatKind::IntLit
-  { value, negative, suffix }` (`prototype/src/ast.rs`, with `int_pat_value`
+  { value, negative, suffix }` (`compiler/src/ast.rs`, with `int_pat_value`
   helper). An integer match can never enumerate 2^N values, so exhaustiveness is
   redefined: an integer-scrutinee match is exhaustive IFF it has a `_`/binding
   arm, else `E0601` — required for soundness (an unmatched value is UB). The
@@ -1127,7 +1127,7 @@ once you add the literal node). Key design/impl facts worth reusing:
   array adds the per-package name/version/source attribution. (2026-07-15).
 
 - **Hermetic git-dependency tests: local repo + `CANDOR_CACHE_DIR` temp cache, and
-  prove cache-reuse by deleting the source.** `prototype/tests/packages.rs` fetches
+  prove cache-reuse by deleting the source.** `compiler/tests/packages.rs` fetches
   a git dep from a `git init`'d temp repo (no network) with the cache redirected via
   `CANDOR_CACHE_DIR`. To assert a second build reuses the content-addressed checkout
   (no re-clone) *definitively*, delete BOTH the source repo and the mirror db
@@ -1168,3 +1168,18 @@ once you add the literal node). Key design/impl facts worth reusing:
   pass over a feature-complete subsystem specifically checking each prior repair is
   honored in code (`grep` every read of the field the repair added), not just present
   in the doc. (2026-07-15).
+
+- **A new gate on a shared path can break a pre-existing "observe the delta" test.**
+  Implementing the 0017 Open-Q1 trust-delta gate (fail a `candor.lock` update that
+  grows a dependency's foreign/`unsafe` surface, in `resolve_pkg::write_or_verify_lock`,
+  E0936) broke `lock_records_per_package_trust_summary_and_tracks_the_delta` — the
+  enumerate-only test that *grows* b's surface then re-resolves expecting success. The
+  fix was to thread the acceptance override (`CANDOR_ACCEPT_TRUST_DELTA`, an env var
+  mirroring the `CANDOR_LINKER` precedent — chosen over a CLI flag because the lock
+  writer sits behind `build_tree`'s many callers plus the `build`/`audit` entries)
+  through that test. Lesson: when gating a code path, grep existing tests that
+  deliberately trigger the now-gated condition. Also: the gate must exclude the ROOT
+  package (it's in `packages`/the lock with `is_root`) — a developer editing their own
+  code is not a supply-chain delta. Env-mutating tests rely on nextest's
+  process-per-test isolation; serialize them with a `Mutex` for the plain `cargo test`
+  harness (the `GIT_ENV_LOCK` pattern). (2026-07-16).

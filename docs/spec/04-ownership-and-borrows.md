@@ -240,7 +240,7 @@ live ranges by any means (the prototype uses body-local non-lexical liveness,
 ## Appendix 4-A (non-normative) — clause-to-prototype-diagnostic map
 
 This mapping is informative. The specification speaks in clauses; the prototype
-checker (`prototype/src/check/`, design 0003) emits E-numbered diagnostics. The
+checker (`compiler/src/check/`, design 0003) emits E-numbered diagnostics. The
 map aids implementers and the diagnostic taxonomy (P4/P19); it is not normative.
 
 | Spec clause | Prototype diagnostic |

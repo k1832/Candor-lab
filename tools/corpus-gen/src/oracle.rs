@@ -6,7 +6,7 @@
 //! — validate that the corpus is *correct* or *idiomatic*. The corpus is TRAINING
 //! material; the eval anchors stay external (see `README.md#bet-6`).
 //!
-//! Contract observed from `prototype/src/main.rs`:
+//! Contract observed from `compiler/src/main.rs`:
 //! * `check <file>` — exit 0 clean; exit 1 with one JSON diagnostic per stdout
 //!   line otherwise (`P0xxx` = parse, `E....` = check).
 //! * `run <file>`   — exit 0 with the `i64` sentinel on stdout; a runtime fault

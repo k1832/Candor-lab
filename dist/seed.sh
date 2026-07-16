@@ -32,18 +32,18 @@ echo "  lab    : $LAB_ROOT"
 echo "  target : $TARGET"
 echo
 
-# --- 1. toolchain crate: prototype/ -> toolchain/ ----------------------------
+# --- 1. toolchain crate: compiler/ -> toolchain/ ----------------------------
 # Ship src/, Cargo.toml, Cargo.lock, benches/, .gitignore (MANIFEST SHIPS row).
 # EXCLUDE tests/ and selfhost/: neither is a Cargo target the manifest declares
 # (no [[test]]/[[example]], no build.rs), so the crate builds `candor` without
 # them and they only bloat the distribution. `target/` is a build artifact.
-echo "-> toolchain/  (from prototype/: src, Cargo.toml, Cargo.lock, benches)"
+echo "-> toolchain/  (from compiler/: src, Cargo.toml, Cargo.lock, benches)"
 mkdir -p "$TARGET/toolchain"
-cp -R "$LAB_ROOT/prototype/src"        "$TARGET/toolchain/src"
-cp -R "$LAB_ROOT/prototype/benches"    "$TARGET/toolchain/benches"
-cp    "$LAB_ROOT/prototype/Cargo.toml" "$TARGET/toolchain/Cargo.toml"
-cp    "$LAB_ROOT/prototype/Cargo.lock" "$TARGET/toolchain/Cargo.lock"
-cp    "$LAB_ROOT/prototype/.gitignore" "$TARGET/toolchain/.gitignore"
+cp -R "$LAB_ROOT/compiler/src"        "$TARGET/toolchain/src"
+cp -R "$LAB_ROOT/compiler/benches"    "$TARGET/toolchain/benches"
+cp    "$LAB_ROOT/compiler/Cargo.toml" "$TARGET/toolchain/Cargo.toml"
+cp    "$LAB_ROOT/compiler/Cargo.lock" "$TARGET/toolchain/Cargo.lock"
+cp    "$LAB_ROOT/compiler/.gitignore" "$TARGET/toolchain/.gitignore"
 
 # --- 2. normative spec + spec-pack -------------------------------------------
 echo "-> spec/       (from docs/spec/: chapters 00-12 + 99-obligations)"
@@ -57,8 +57,8 @@ cp -R "$LAB_ROOT/docs/specpack" "$TARGET/specpack"
 
 # --- 3. stdlib seed: relocate corelib fixture to a first-class stdlib/ --------
 # MANIFEST operator action 3: out of tests/fixtures/, into a real library path.
-echo "-> stdlib/     (from prototype/tests/fixtures/corelib/: core, std, main.cnr)"
-cp -R "$LAB_ROOT/prototype/tests/fixtures/corelib" "$TARGET/stdlib"
+echo "-> stdlib/     (from compiler/tests/fixtures/corelib/: core, std, main.cnr)"
+cp -R "$LAB_ROOT/compiler/tests/fixtures/corelib" "$TARGET/stdlib"
 
 # --- 4. editor tools ---------------------------------------------------------
 echo "-> editor/vscode/  (from tools/vscode-candor/)"
@@ -69,10 +69,10 @@ mkdir -p "$TARGET/editor/lsp"
 cp -R "$LAB_ROOT/tools/candor-lsp/src"        "$TARGET/editor/lsp/src"
 cp    "$LAB_ROOT/tools/candor-lsp/Cargo.lock" "$TARGET/editor/lsp/Cargo.lock"
 # The LSP crate depends on the toolchain library by relative path. In the lab it
-# is ../../prototype; in the seeded layout the toolchain lives at ../../toolchain.
-sed -e 's#path = "../../prototype"#path = "../../toolchain"#' \
+# is ../../compiler; in the seeded layout the toolchain lives at ../../toolchain.
+sed -e 's#path = "../../compiler"#path = "../../toolchain"#' \
     "$LAB_ROOT/tools/candor-lsp/Cargo.toml" > "$TARGET/editor/lsp/Cargo.toml"
-sed -e 's#`../../prototype`#`../../toolchain`#g' \
+sed -e 's#`../../compiler`#`../../toolchain`#g' \
     "$LAB_ROOT/tools/candor-lsp/README.md" > "$TARGET/editor/lsp/README.md"
 
 # --- 5. dist/ contents become the repo root ----------------------------------

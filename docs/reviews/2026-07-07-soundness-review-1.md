@@ -3,7 +3,7 @@
 **Date:** 2026-07-07
 **Reviewer:** independent LLM session (heavy reasoning tier); did not author the argument or the
 checker. Attacked both the argument text and the running binary; repros under
-`prototype/target/scratch-review/`.
+`compiler/target/scratch-review/`.
 **Verdict:** NOT acceptable for freeze step (i) as written. Two decisive breaches — one
 wrongly-accepted memory-unsafe program, and the §0 RESOLVED claim shown false — plus three
 further findings. The core loan machinery, move-join rule, unsafe boundary, and structural

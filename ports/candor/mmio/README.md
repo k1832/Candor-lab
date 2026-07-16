@@ -6,7 +6,7 @@ the full frozen scenario suite (M1–M10 with byte-exact trace comparison,
 plus the M11–M14 cross-checks). `main` returns the sentinel **777** on full
 success; any scenario failure faults (exit 2).
 
-Toolchain: `prototype/target/release/candor-proto check|run ports/candor/mmio/mmio.cn`.
+Toolchain: `compiler/target/release/candor-proto check|run ports/candor/mmio/mmio.cn`.
 The implementation/harness split per ruling R14 (`// Test harness` marker) is
 verified: the implementation section (222 lines) parses and checks standalone.
 

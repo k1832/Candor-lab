@@ -24,8 +24,8 @@ errors inline while that toolchain is built. It implements exactly:
   read/dispatch/write loop stays auditable. (`tower-lsp` was the alternative; it
   is the heavier choice here.)
 - **In-process check pipeline.** The server depends on the `candor_proto`
-  **library** crate by path (`../../prototype`) and calls it directly — it never
-  shells out to the `candor-proto` binary. `prototype/src` is consumed, never
+  **library** crate by path (`../../compiler`) and calls it directly — it never
+  shells out to the `candor-proto` binary. `compiler/src` is consumed, never
   modified.
   - `.cnr` → `candor_proto::check_source_real` (real surface syntax; generics
     are handled inside `check_program_real`).

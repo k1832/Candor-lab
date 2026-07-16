@@ -282,7 +282,7 @@ underlying package when they differ). This is decidable from the manifest plus a
 
 **Linking model (preserves the merged `Program`).** The existing pipeline merges
 the whole module tree into one name-qualified `Program` by mangling each item to
-`module::name` (`prototype/src/modules.rs`). This extends by prepending an
+`module::name` (`compiler/src/modules.rs`). This extends by prepending an
 **injective package-identity** segment to the mangle: an item becomes
 `<pkgid>::module::name`, where `<pkgid>` is the package **name** — unique within any
 resolved build by single-version-per-package unification (§6, E0923), so the name
@@ -318,7 +318,7 @@ native ABI are P14's C-ABI story, out of scope — §Scope.)
 > is preserved). The source hash was only ever there for injectivity, which unique
 > names already provide, so it is dropped as redundant. Provenance is unaffected:
 > the lock's `content_hash` field still records each package's source hash. Pinned by
-> two tests in `prototype/tests/packages.rs` — `pkgid_is_path_independent`
+> two tests in `compiler/tests/packages.rs` — `pkgid_is_path_independent`
 > (reproducibility) and `incremental_build_invalidates_across_package_boundary`
 > (a dep body edit re-analyzes only the changed module, no symbol rename).
 > **Forward-compat caveat:** a future design that permits same-named packages in one
@@ -360,7 +360,7 @@ solver (§Rejected) — those solve a problem 0.x does not have.
 ### 7. The build driver — resolve, build-per-package, merge
 
 `candor build` extends today's `build_tree` / `build::build_dir`
-(`prototype/src/`) as:
+(`compiler/src/`) as:
 
 1. **Read** the root `candor.toml`.
 2. **Resolve** (§6): transitively read each dependency's manifest, produce the
@@ -444,9 +444,9 @@ stages 3–4), not a prerequisite for the first working multi-package build.
   names the offending package + the specific boundary module / extern so the author
   can act. The gate is the root's flag (the final artifact links no libc), not each
   dependency's own claim — a boundary surface is rejected regardless of what the
-  dependency declares. Files: `prototype/src/resolve_pkg.rs`
-  (`check_freestanding_composition`), `prototype/src/audit.rs`
-  (`first_boundary_surface`). Gate: `prototype/tests/packages.rs` (the `blink -> hal`
+  dependency declares. Files: `compiler/src/resolve_pkg.rs`
+  (`check_freestanding_composition`), `compiler/src/audit.rs`
+  (`first_boundary_surface`). Gate: `compiler/tests/packages.rs` (the `blink -> hal`
   escape with an uncalled extern; a transitive std import; a legit freestanding
   composition over pure deps; a non-freestanding root over the same foreign dep,
   unaffected). Std note: this edition models std types as ambient builtins, so the
@@ -474,7 +474,7 @@ stages 3–4), not a prerequisite for the first working multi-package build.
   the structural walk enumerating every boundary module graph-wide.
 
   **Implementation prerequisite (review F1b).** The aggregation as promised is a
-  strict superset of what the shipping `candor audit` (`prototype/src/audit.rs`)
+  strict superset of what the shipping `candor audit` (`compiler/src/audit.rs`)
   computes today: the current tool enumerates **only** the `boundary` foreign
   surface (externs/exports + effect-reach) and walks **no** `unsafe` regions and
   **no** `assumed-proven` contracts — even for the local package. That already
@@ -495,12 +495,12 @@ stages 3–4), not a prerequisite for the first working multi-package build.
 
   **Implemented 2026-07-15** — each `candor.lock` entry now carries a `[package.trust]`
   sub-table counting the package's boundary modules, foreign externs, and `unsafe`
-  regions (`prototype/src/resolve_pkg.rs`; the counts reuse the impl #4 per-package
-  audit walk via `audit::trust_counts`, `prototype/src/audit.rs`). The summary is
+  regions (`compiler/src/resolve_pkg.rs`; the counts reuse the impl #4 per-package
+  audit walk via `audit::trust_counts`, `compiler/src/audit.rs`). The summary is
   computed in a **post-resolution pass** (`resolve` calls `resolve_graph` — the
   audit-free resolver core — then the trust pass, then writes the lock), so the
   resolver never depends on the audit walk. The lock field is additive (an older
-  lock without it stays reusable). Gate: `prototype/tests/packages.rs`
+  lock without it stays reusable). Gate: `compiler/tests/packages.rs`
   (`lock_records_per_package_trust_summary_and_tracks_the_delta` asserts the
   recorded counts and that adding one `unsafe` region to a dependency increments its
   recorded count — the visible supply-chain delta). The **gating** trust-delta
@@ -508,7 +508,7 @@ stages 3–4), not a prerequisite for the first working multi-package build.
   (Open-Q1, CLOSED 2026-07-16; see the Open-Q1 ledger entry below). The
   `assumed-proven` count is not a separate field: this edition has no distinct
   `assumed-proven` construct, so that surface is exactly the boundary `trust` clauses
-  plus `unsafe` justifications already counted (see `prototype/src/audit.rs`).
+  plus `unsafe` justifications already counted (see `compiler/src/audit.rs`).
 
 ## Rejected alternatives
 
@@ -629,7 +629,7 @@ identifiers Open-Q1/Q4/Q5 are kept stable.*
 1. **Trust-delta *gating* for the supply chain (Open-Q1) — CLOSED (2026-07-16),
    implemented.** §8's 0.x policy was settled as **enumerate-only** with a visible
    per-dependency trust delta in the lock; the **gating** upgrade named here is now
-   delivered. `write_or_verify_lock` (`prototype/src/resolve_pkg.rs`), reached by
+   delivered. `write_or_verify_lock` (`compiler/src/resolve_pkg.rs`), reached by
    every re-resolving command through `resolve()`, runs a **trust-delta gate**
    before overwriting a diverged-but-parseable lock: it diffs the freshly resolved
    per-package `[package.trust]` counts against the on-disk lock's and **hard-fails
@@ -653,8 +653,8 @@ identifiers Open-Q1/Q4/Q5 are kept stable.*
    construct (its surface is the boundary `trust` clauses + `unsafe` justifications
    already counted, §8), so gating the three recorded counts covers it; a dedicated
    `assumed-proven` count is a follow-up if that construct ever ships. Files:
-   `prototype/src/resolve_pkg.rs` (`trust_delta_growth`, `accept_trust_delta`, the
-   gate in `write_or_verify_lock`). Gate: `prototype/tests/packages.rs`
+   `compiler/src/resolve_pkg.rs` (`trust_delta_growth`, `accept_trust_delta`, the
+   gate in `write_or_verify_lock`). Gate: `compiler/tests/packages.rs`
    (grow-fails-and-lock-untouched [load-bearing], override-rewrites, new-foreign-dep
    gated, new-pure-dep ungated, shrink ungated, initial-creation + no-change
    ungated). Fetching and building a git dependency's `boundary` module remains the

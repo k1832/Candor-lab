@@ -12,8 +12,8 @@ candidate reopens a settled design, this document **presents the trade and stops
 **Date:** 2026-07-10
 **Evidence source:** `docs/spec/99-obligations.md` OBL-SELFHOST-ERGO (the six
 frictions from the lexer slice), read against the self-hosted lexer
-`prototype/selfhost/lexer/lexer.cnr` and the corelib
-(`prototype/tests/fixtures/corelib/`). More frictions will accrue from the parser
+`selfhost/lexer/lexer.cnr` and the corelib
+(`compiler/tests/fixtures/corelib/`). More frictions will accrue from the parser
 slice; this works from what is recorded.
 **Philosophy hooks:** **P19** (dogfooding — self-hosting as the forcing function),
 **P6** (small fixed core; add-requires-remove), **P9** (allocator-explicit;

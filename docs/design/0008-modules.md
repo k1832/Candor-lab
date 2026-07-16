@@ -222,7 +222,7 @@ directory** (the degenerate package, design 0017 §6): its root module stays the
 directory-root `main.cnr`, no `src/`. This erratum records the refinement so the two
 neighboring designs do not quietly diverge (GOVERNANCE §9); it resolves 0017 review
 F6a and preserves the doc hierarchy. The `modules.rs` implementation of `src/`
-support lands with the packaging implementation, not with this erratum. **Implemented 2026-07-15** (`prototype/src/modules.rs` `resolve_dir_root`/`check_entry`, `prototype/src/build/mod.rs`; gate `prototype/tests/packages.rs`): a directory build branches on `candor.toml` presence, roots a manifested package's tree at `src/`, and derives the entry target from the manifest (`src/main.cnr` | `src/bin/<name>.cnr` | library root `src/<name>.cnr`), leaving the manifest-less bare directory's directory-root `main.cnr` behavior unchanged.
+support lands with the packaging implementation, not with this erratum. **Implemented 2026-07-15** (`compiler/src/modules.rs` `resolve_dir_root`/`check_entry`, `compiler/src/build/mod.rs`; gate `compiler/tests/packages.rs`): a directory build branches on `candor.toml` presence, roots a manifested package's tree at `src/`, and derives the entry target from the manifest (`src/main.cnr` | `src/bin/<name>.cnr` | library root `src/<name>.cnr`), leaving the manifest-less bare directory's directory-root `main.cnr` behavior unchanged.
 
 ### 3. The dependency DAG
 
@@ -367,7 +367,7 @@ single-file prototype, in this order:
    stage co-arrives with the P11 generics implementation, since it is that
    feature's plumbing.
 
-**Status — stages 1–2 shipped** in the prototype (`prototype/src/modules.rs`, real (`.cnr`) front-end only; single files stay valid degenerate modules): filesystem→module mapping, `use` resolution, `pub`/private visibility (error family `E09xx`), and the acyclic-DAG check with the P4 cycle diagnostic; the `foo.cnr`-beside-`foo/` body merge, `pub use` re-exports, and the §2 interface-artifact/hash tiers remain deferred.
+**Status — stages 1–2 shipped** in the prototype (`compiler/src/modules.rs`, real (`.cnr`) front-end only; single files stay valid degenerate modules): filesystem→module mapping, `use` resolution, `pub`/private visibility (error family `E09xx`), and the acyclic-DAG check with the P4 cycle diagnostic; the `foo.cnr`-beside-`foo/` body merge, `pub use` re-exports, and the §2 interface-artifact/hash tiers remain deferred.
 
 Stages 1–2 are a small import resolver and can land before generics exist;
 stages 3–4 are where the P20 targets in CI (single-digit-second incremental

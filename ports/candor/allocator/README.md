@@ -5,7 +5,7 @@ Port of `docs/basket/spec-allocator.md` (frozen) to Candor, per
 and the full frozen vector suite (A1–A22) in `main`. `main` returns the
 sentinel **777** on full success; any vector failure faults (exit 2).
 
-Toolchain: `prototype/target/release/candor-proto check|run ports/candor/allocator/allocator.cn`.
+Toolchain: `compiler/target/release/candor-proto check|run ports/candor/allocator/allocator.cn`.
 
 ## Mechanism (spec 1.5, for the adjudicator)
 

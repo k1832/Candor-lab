@@ -1,0 +1,5 @@
+use purelib::{answer};
+
+fn main() -> i64 {
+    return answer();
+}

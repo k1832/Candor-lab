@@ -1,6 +1,6 @@
 # Candor idioms — canonical patterns from the corpus
 
-One exemplar per pattern, drawn from `prototype/tests/fixtures/**`. These are how
+One exemplar per pattern, drawn from `compiler/tests/fixtures/**`. These are how
 correct Candor actually looks; prefer them over invented shapes.
 
 ## 1. Error enums + `From` widening + `?`

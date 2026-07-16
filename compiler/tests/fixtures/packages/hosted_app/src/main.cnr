@@ -1,0 +1,5 @@
+use hal::{nothing};
+
+fn main() -> i64 {
+    return nothing();
+}

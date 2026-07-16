@@ -13,15 +13,15 @@ native path); a program "passes" only when all of them agree, and where an exter
 reference exists (e.g. `wasmi` for WebAssembly), against that too.
 
 > Paths below are relative to the repo root. The CLI is `candor` (build it with
-> `cargo build --bin candor` inside `prototype/`, then `prototype/target/debug/candor`).
-> Tests run with `cargo nextest run` inside `prototype/` (see `.config/nextest.toml`:
+> `cargo build --bin candor` inside `compiler/`, then `compiler/target/debug/candor`).
+> Tests run with `cargo nextest run` inside `compiler/` (see `.config/nextest.toml`:
 > full suite ~3 min; `--profile fast` ~2 s for the logic tests).
 
 ---
 
 ## 1. A WebAssembly runtime — in Candor  ⭐ the showpiece
 
-**`prototype/tests/fixtures/wasm/interp.cnr`** (~1,900 lines). A from-scratch
+**`compiler/tests/fixtures/wasm/interp.cnr`** (~1,900 lines). A from-scratch
 WebAssembly interpreter: it decodes a real `.wasm` binary (magic/version, the
 type/function/code/memory/data/global/table/element/import sections, LEB128) and
 executes it on a value stack.
@@ -41,7 +41,7 @@ What it covers (essentially the WASM MVP):
 - **host imports**, including the real **WASI** `fd_write`/`proc_exit` ABI, so a
   wasm module produces real output.
 
-**How it's verified:** `prototype/tests/wasm.rs` compares the Candor interpreter's
+**How it's verified:** `compiler/tests/wasm.rs` compares the Candor interpreter's
 result against **`wasmi`** (an independent, spec-compliant Rust runtime) over ~350
 modules — including trap-equivalence — *and* asserts the Candor interpreter itself
 gives identical results on all five engines. The differential reference has already
@@ -50,7 +50,7 @@ expected value never would.
 
 ```
 # run the whole WASM suite (decode, integer/float ISA, wasmi differential, WASI)
-cd prototype && cargo nextest run -E 'binary(wasm)'
+cd compiler && cargo nextest run -E 'binary(wasm)'
 ```
 
 **Demo:** the interpreter reads the shipped `fib10.wasm` / `wasi_hello.wasm`
@@ -61,7 +61,7 @@ WASM interpreter" demo.
 
 ## 2. The self-hosted compiler — Candor compiling Candor  ⭐
 
-**`prototype/selfhost/*.cnr`** (~19,300 lines). The Candor toolchain, written in
+**`selfhost/*.cnr`** (~19,300 lines). The Candor toolchain, written in
 Candor: `lexer`, `parser`, `checker`, `analyses` (move/init, the borrow checker's
 XOR loans, alloc-effect partition, match exhaustiveness), `interp` (a tree-walking
 interpreter), `lower` (AST → MIR), `mono` (monomorphizer), `codegen` (x86-64
@@ -75,14 +75,14 @@ Four self-hosting tiers, each verified **byte-exact against the Rust reference**
   **no Rust in the compile path** (just Candor and `as`/`ld`).
 
 ```
-cd prototype && cargo nextest run -E 'binary(/selfhost/)'
+cd compiler && cargo nextest run -E 'binary(/selfhost/)'
 ```
 
 ---
 
 ## 3. The standard library — in Candor
 
-**`prototype/tests/fixtures/corelib/`** and the `std_*` fixtures:
+**`compiler/tests/fixtures/corelib/`** and the `std_*` fixtures:
 - `core/opt.cnr`, `core/res.cnr` — `Opt`/`Res` + combinators (`map`/`and_then`/`?`),
 - `core/arena.cnr`, `std/list.cnr` — an arena and a cons list,
 - `std/alloc.cnr`, `std/bump.cnr`, **`std/freelist.cnr`** — the allocator interface, a
@@ -94,7 +94,7 @@ cd prototype && cargo nextest run -E 'binary(/selfhost/)'
   read/write, `read_lines`, and a streaming `BufReader`/`BufWriter`.
 
 ```
-cd prototype && cargo nextest run -E 'binary(corelib) | binary(fmt) | binary(std_io) | binary(freelist)'
+cd compiler && cargo nextest run -E 'binary(corelib) | binary(fmt) | binary(std_io) | binary(freelist)'
 ```
 
 Note: `String`/`Vec`/`Map` are compiler-provided but **compile to native code** on
@@ -104,13 +104,13 @@ both backends (allocate + grow + reclaim through the free-list allocator).
 
 ## 4. The systems corpus — the hardest programs
 
-Five deliberately hard systems programs (`prototype/tests/fixtures/`): a bump
+Five deliberately hard systems programs (`compiler/tests/fixtures/`): a bump
 allocator, an intrusive-list scheduler, MMIO registers, a recursive-descent parser,
 and a `Box [4096]Node` arena. These are what the self-hosting tiers and the native
 backends are all validated against, byte-exact across engines.
 
 ```
-cd prototype && cargo nextest run -E 'binary(stage_d) | binary(aot) | binary(llvm)'
+cd compiler && cargo nextest run -E 'binary(stage_d) | binary(aot) | binary(llvm)'
 ```
 
 ---
@@ -126,7 +126,7 @@ proven property; adversarial design reviews live in `docs/reviews/`.
 
 ```
 # the full suite: every program, every engine, ~3 minutes
-cd prototype && cargo nextest run
+cd compiler && cargo nextest run
 ```
 
 ---
@@ -134,12 +134,12 @@ cd prototype && cargo nextest run
 ## 6. Show-off demos (CLI)
 
 The CLI runs a Candor program on the interpreter (`run`), or compiles it to a real
-native executable (`compile`). Build it once: `cd prototype && cargo build --bin candor`.
+native executable (`compile`). Build it once: `cd compiler && cargo build --bin candor`.
 **All commands below are verified working** (from the repo root).
 
 ```
-CANDOR=prototype/target/debug/candor
-WASM=prototype/tests/fixtures/wasm/interp.cnr
+CANDOR=compiler/target/debug/candor
+WASM=compiler/tests/fixtures/wasm/interp.cnr
 
 # (a) run the WASM interpreter on the tree-walker — its embedded module computes 40+2
 $CANDOR run $WASM                            # prints 42
@@ -158,12 +158,12 @@ ldd /tmp/wasmvm_fs                           # -> "not a dynamic executable"
 #   ^ a no-runtime, no-libc native WebAssembly interpreter, written in Candor
 
 # (c) Candor checks its own compiler source (whole self-host module tree, via tests)
-cd prototype && cargo nextest run -E 'binary(/selfhost/)' ; cd ..
+cd compiler && cargo nextest run -E 'binary(/selfhost/)' ; cd ..
 #   (a single self-host module can't be `candor check`ed alone — it `use`s the others;
 #    the self-host tests load the module tree and verify byte-exact vs the Rust oracle.)
 
 # (d) audit the I/O trust boundary — machine-readable JSON of every extern + its effect
-$CANDOR audit prototype/tests/fixtures/std_io
+$CANDOR audit compiler/tests/fixtures/std_io
 ```
 
 ---
@@ -172,8 +172,8 @@ $CANDOR audit prototype/tests/fixtures/std_io
 
 | Program | Path | ~Lines of Candor |
 |---|---|---|
-| WebAssembly runtime | `prototype/tests/fixtures/wasm/interp.cnr` | 1,900 |
-| Self-hosted compiler | `prototype/selfhost/*.cnr` | 19,300 |
-| Standard library | `prototype/tests/fixtures/corelib/`, `std_*.cnr` | — |
-| Systems corpus | `prototype/tests/fixtures/11_*.cnr` etc. | — |
-| Verification harnesses (Rust) | `prototype/tests/*.rs` | — |
+| WebAssembly runtime | `compiler/tests/fixtures/wasm/interp.cnr` | 1,900 |
+| Self-hosted compiler | `selfhost/*.cnr` | 19,300 |
+| Standard library | `compiler/tests/fixtures/corelib/`, `std_*.cnr` | — |
+| Systems corpus | `compiler/tests/fixtures/11_*.cnr` etc. | — |
+| Verification harnesses (Rust) | `compiler/tests/*.rs` | — |

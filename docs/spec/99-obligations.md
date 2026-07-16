@@ -428,7 +428,7 @@ paths; OBL-TEXT-RESULT left open as a separate smaller question.
 
 ### Slice 3 addendum — the type checker (name resolution + type-error core in Candor, 2026-07-10)
 
-Writing the self-hosted CHECKER (`prototype/selfhost/checker/checker.cnr`, composed after
+Writing the self-hosted CHECKER (`selfhost/checker/checker.cnr`, composed after
 lexer + parser; gated by DIAGNOSTIC equality vs the Rust oracle over a corpus) surfaced three
 findings, the first of which is the load-bearing datum the Candidate-C ruling named as its
 re-open trigger.
@@ -483,7 +483,7 @@ specific codes).
 
 ### Slice 4 addendum — the move/init core of the borrow checker (in Candor, 2026-07-10)
 
-Writing the self-hosted MOVE/INIT analysis (`prototype/selfhost/analyses/analyses.cnr`,
+Writing the self-hosted MOVE/INIT analysis (`selfhost/analyses/analyses.cnr`,
 composed after lexer + parser; gated by DIAGNOSTIC equality vs the Rust oracle's `init.rs`
 over `dataflow.rs`) surfaced four findings. This is the hardest slice — the borrow checker is
 state-heavy (per-place move state + init state) — so the CONTEXT-TUPLE datum was the load-bearing
@@ -599,7 +599,7 @@ First end-to-end turn of the self-check loop on real self-host source: the self-
 oracle, which also emits nothing on this valid source. `lexer.cnr` is the right first target: a LEAF
 module (no `use`, no `Vec`), so every name it uses is locally declared and no builtin is missing —
 the checker resolves it CLEAN on the first try, with no false positive to fix. Gate added to
-`prototype/tests/selfhost_checker.rs` (`candor_checker_checks_lexer_source_clean_fixpoint`), reusing
+`compiler/tests/selfhost_checker.rs` (`candor_checker_checks_lexer_source_clean_fixpoint`), reusing
 the slice-3 module-tree harness; a negative smoke (a param of an unknown type appended to the source)
 is asserted to be flagged E0102, so the clean assertion is non-vacuous.
 
@@ -716,7 +716,7 @@ loader (`run_module_tree`), completing the split — all six slices are now modu
 
 Step 3-continued of self-checking self-hosting: `use`/`pub` import resolution added to the
 self-host front-end so a module can be checked IN ISOLATION with its imported names resolved,
-instead of concatenating sources. Payoff gate added to `prototype/tests/selfhost_checker.rs`
+instead of concatenating sources. Payoff gate added to `compiler/tests/selfhost_checker.rs`
 (`candor_checker_checks_checker_source_clean_via_import_resolution`): the self-host checker checks
 `selfhost/checker/checker.cnr` — a NON-LEAF module that imports names from BOTH the `lexer` and
 `parser` modules (`use lexer::{Buf, span_eq, ...}; use parser::{Node, P, T_FN, ...}`) — and emits
@@ -776,7 +776,7 @@ E0801-E0804, effect E0401, exhaustiveness E0601) run OVER real self-host source
 (`lexer.cnr` and `checker.cnr`) now emits an EMPTY covered-diagnostic set, byte-equal
 to the module-aware Rust oracle (`check_dir` over the real lexer+parser+analyses[+checker]
 tree, which runs the full Rust check pipeline and is likewise ∅). Two gates added to
-`prototype/tests/selfhost_analyses.rs` (`candor_analyses_check_lexer_source_clean_fixpoint`,
+`compiler/tests/selfhost_analyses.rs` (`candor_analyses_check_lexer_source_clean_fixpoint`,
 `candor_analyses_check_checker_source_clean_fixpoint`), each with a use-after-move injected
 into a copy of the checked source asserted to fire E0301 — so the clean set is non-vacuous.
 Runtime ~7.5s for both (two analyze passes over ~3.7k/4.0k-token files). checker.cnr is the
@@ -823,7 +823,7 @@ Gate to unlock: extend `checker.cnr`'s builtin table + isolate the line-560 reso
 
 RESOLUTION (2026-07-10). analyses.cnr now checks CLEAN (∅ E0102/E0103) under the self-host checker,
 byte-equal to the module-aware oracle. Gate added:
-`prototype/tests/selfhost_checker.rs::candor_checker_checks_analyses_source_clean_via_import_resolution`
+`compiler/tests/selfhost_checker.rs::candor_checker_checks_analyses_source_clean_via_import_resolution`
 (the FOURTH module under the name-res fixpoint, first to exercise the collection builtins). Teeth
 held: the naive single-file check flags the unresolved imports E0102 (>0), and an injected
 unknown-typed param flags E0102 — so the clean set is non-vacuous. Two causes, as predicted, but
@@ -853,7 +853,7 @@ the few KB of distinct literals, far below the stack. This is a latent memory-sa
 literal-heavy program, not just the self-host checker. All 580 prior tests stay byte-exact green.
 
 BONUS — analyses.cnr also passes ANALYSES-clean now. Gate added:
-`prototype/tests/selfhost_analyses.rs::candor_analyses_check_analyses_source_clean_fixpoint`
+`compiler/tests/selfhost_analyses.rs::candor_analyses_check_analyses_source_clean_fixpoint`
 (the analysis accepts its OWN source; injected use-after-move teeth fire E0301). It tripped TWO NEW
 false-positive patterns (10× spurious E0301), both `ty_copy` mis-classifications fixed minimally:
 (A) T_ARRAY copy-ness recursed on `nd.a` — but the parser stores `nd.a` = size expr, `nd.b` = element
@@ -928,11 +928,11 @@ selfhost_{lexer,parser,checker,analyses,loans,effects} harnesses stay byte-exact
 
 ### S1 — self-INTERPRETING Candor: a scalar tree-walker in Candor (first slice, 2026-07-10)
 
-The first self-interpreting slice: `prototype/selfhost/interp/interp.cnr`, a tree-walking
+The first self-interpreting slice: `selfhost/interp/interp.cnr`, a tree-walking
 SCALAR interpreter WRITTEN IN CANDOR, executes an in-subset Candor program directly over the
 self-hosted parser's Node arena and reproduces the Rust reference interpreter
-(`prototype/src/interp/`) BYTE-EXACT — same `main` return, same `trace` sequence, same fault
-identity (kind + span). Gated by EXECUTION equality in `prototype/tests/selfhost_interp.rs`
+(`compiler/src/interp/`) BYTE-EXACT — same `main` return, same `trace` sequence, same fault
+identity (kind + span). Gated by EXECUTION equality in `compiler/tests/selfhost_interp.rs`
 against `run_source_real` over a 24-fixture in-subset corpus (15 returns, 9 faults).
 
 SCOPE (STRICT MVP, P6). Integer (`i8..i64`/`u8..u64`/`usize`/`isize`) + `bool` scalars only;
@@ -975,9 +975,9 @@ modules were. No in-subset construct was un-matchable; the whole MVP subset repr
 
 ### S2 — flat byte-memory + structs and arrays in the self-interpreter (second slice, 2026-07-10)
 
-The self-interpreter (`prototype/selfhost/interp/interp.cnr`) gains a FLAT BYTE-MEMORY model
-plus STRUCTS and ARRAYS, extended to match the Rust reference (`prototype/src/interp/`) byte-exact
-on aggregate programs. Same gate (`prototype/tests/selfhost_interp.rs`, EXECUTION equality vs
+The self-interpreter (`selfhost/interp/interp.cnr`) gains a FLAT BYTE-MEMORY model
+plus STRUCTS and ARRAYS, extended to match the Rust reference (`compiler/src/interp/`) byte-exact
+on aggregate programs. Same gate (`compiler/tests/selfhost_interp.rs`, EXECUTION equality vs
 `run_source_real`): the corpus grows from 24 to 36 fixtures (34 returns, 2 faults) — the 12 new
 S2 fixtures cover struct literal + field read, nested struct, field assignment, struct as by-value
 fn param + return, mixed-width struct layout (bool/i8/i64 padding), array literal + index read,
@@ -1023,9 +1023,9 @@ result (`make().f`) — S2 fixtures assign to a local first. interp.cnr remains 
 
 ### S3 — MOVE/DROP schedule with trace-on-drop in the self-interpreter (third slice, 2026-07-10)
 
-The self-interpreter (`prototype/selfhost/interp/interp.cnr`) gains the MOVE/DROP SCHEDULE —
+The self-interpreter (`selfhost/interp/interp.cnr`) gains the MOVE/DROP SCHEDULE —
 the observable-trace crux of the language — reproducing the Rust reference (`src/interp/eval.rs`)
-byte-exact on drop-bearing programs. Same gate (`prototype/tests/selfhost_interp.rs`, EXECUTION
+byte-exact on drop-bearing programs. Same gate (`compiler/tests/selfhost_interp.rs`, EXECUTION
 equality vs `run_source_real`): the corpus grows from 36 to 44 fixtures (42 returns, 2 faults) —
 the 8 new S3 fixtures cover single drop, reverse-order scope drops, move-suppresses-drop, a
 one-level partial move (drop the un-moved field only), move-out via return (drop in the caller,
@@ -1088,9 +1088,9 @@ self-checked.
 
 ### S4 — ENUMS and MATCH in the self-interpreter (fourth slice, 2026-07-10)
 
-The self-interpreter (`prototype/selfhost/interp/interp.cnr`) gains ENUM VALUES and `match`,
+The self-interpreter (`selfhost/interp/interp.cnr`) gains ENUM VALUES and `match`,
 reproducing the Rust reference (`src/interp/{layout,eval}.rs`) byte-exact. Same gate
-(`prototype/tests/selfhost_interp.rs`, EXECUTION equality vs `run_source_real`): the corpus grows
+(`compiler/tests/selfhost_interp.rs`, EXECUTION equality vs `run_source_real`): the corpus grows
 from 44 to 50 fixtures (all returns; one also traces a drop schedule). Confined to interp.cnr — NO
 parser change; slice-2's parser already emits `T_ENUM`/`T_VARIANT`, `T_ENUMCTOR`, `T_MATCH`/`T_ARM`,
 and the `T_WILD`/`T_BIND`/`T_PVARIANT` pattern nodes. All 44 prior interp fixtures and every
@@ -1139,11 +1139,11 @@ this enum layout + tag-directed drop. interp.cnr remains NOT self-checked.
 
 ### S5a — ALLOCATOR-ABI FOUNDATION in the self-interpreter (fifth slice, part a, 2026-07-11)
 
-The self-interpreter (`prototype/selfhost/interp/interp.cnr`) gains the machinery `box` needs
+The self-interpreter (`selfhost/interp/interp.cnr`) gains the machinery `box` needs
 but NOT box itself (that is S5b): `rawptr`/`fn`-ptr as scalar values, top-level `static`
 evaluation, fn-name-as-value, INDIRECT calls through a fn-ptr, structural `Alloc`/`AllocVtable`
 identification, and the minimal raw-pointer surface. Same gate
-(`prototype/tests/selfhost_interp.rs`, EXECUTION equality vs `run_source_real`): the corpus grows
+(`compiler/tests/selfhost_interp.rs`, EXECUTION equality vs `run_source_real`): the corpus grows
 from 50 to 54 fixtures (all returns). Confined to interp.cnr — NO parser change; the parser
 already emits `T_RAWPTR`/`T_FNPTR` types, `T_STATIC`, `T_UNSAFE`, and the `T_CASTPTR`/`T_ADDRTOPTR`/
 `T_PTRNULL` intrinsic nodes. All 50 prior interp fixtures and every lexer/parser/checker/analyses/
@@ -1201,10 +1201,10 @@ the raw-pointer intrinsics).
 
 ### S5b — BOX / BoxResult / unbox / Box-deref + alloc-on-drop in the self-interpreter (fifth slice, part b, 2026-07-11)
 
-The self-interpreter (`prototype/selfhost/interp/interp.cnr`) gains THE HEAP on top of S5a's
+The self-interpreter (`selfhost/interp/interp.cnr`) gains THE HEAP on top of S5a's
 allocator-ABI foundation: `box`/`unbox`, the compiler-known `BoxResult` enum, `.*` Box-deref
 (and field/index auto-deref THROUGH a Box), and alloc-on-drop. Same gate
-(`prototype/tests/selfhost_interp.rs`, EXECUTION equality vs `run_source_real`): the corpus grows
+(`compiler/tests/selfhost_interp.rs`, EXECUTION equality vs `run_source_real`): the corpus grows
 from 54 to 60 fixtures (all returns). Confined to interp.cnr — NO parser change (the parser already
 emits `T_BOX`/`T_BOXRESULT` type nodes, `box`/`unbox` as `T_CALL` builtins, and `.*` as
 `T_PREFIX`/`PF_DEREF`). All 54 prior interp fixtures and every lexer/parser/checker/analyses/loans/
@@ -1258,10 +1258,10 @@ raw-pointer intrinsics).
 
 ### S6a — PAGED memory model + the three pointer intrinsics (sixth slice, part a, 2026-07-11)
 
-The self-interpreter (`prototype/selfhost/interp/interp.cnr`) swaps its flat 16 KiB byte arena for a
+The self-interpreter (`selfhost/interp/interp.cnr`) swaps its flat 16 KiB byte arena for a
 PAGED backing store and adds the three pointer intrinsics the systems corpus needs — the
 INFRASTRUCTURE for that corpus; the five corpus programs (11_1..11_5) are S6b, a separate slice.
-Same gate (`prototype/tests/selfhost_interp.rs`, EXECUTION equality vs `run_source_real`): the corpus
+Same gate (`compiler/tests/selfhost_interp.rs`, EXECUTION equality vs `run_source_real`): the corpus
 grows from 60 to 66 fixtures (all returns). Confined to interp.cnr — NO parser change (the parser
 already emits `T_OFFSETOF`, and `ptr_offset`/`ptr_to_addr` are `T_CALL` builtins). All 60 prior
 interp fixtures stay byte-exact through the paged model (the migration-without-regression check), and
@@ -1319,9 +1319,9 @@ ONLY on S6b — the corpus programs themselves. interp.cnr remains NOT self-chec
 
 ### S6b — THE MILESTONE: the self-interpreter RUNS the five systems-corpus programs (sixth slice, part b, 2026-07-11)
 
-The self-hosted Candor interpreter (`prototype/selfhost/interp/interp.cnr`) now EXECUTES all five
+The self-hosted Candor interpreter (`selfhost/interp/interp.cnr`) now EXECUTES all five
 systems-corpus programs — Candor's hardest real programs — each byte-exact against the Rust reference
-(`run_source_real`). Same gate (`prototype/tests/selfhost_interp.rs`, EXECUTION equality): the corpus
+(`run_source_real`). Same gate (`compiler/tests/selfhost_interp.rs`, EXECUTION equality): the corpus
 grows from 66 to 71 fixtures (61 returns, 10 faults). Confined to interp.cnr + the gate list (plus one
 harness line mapping `ConvLoss`) — NO parser change (the parser already emits every needed node). All
 66 prior interp fixtures stay byte-exact, every lexer/parser/checker/analyses self-check gate stays
@@ -1369,7 +1369,7 @@ parser — matching the reference engine byte-for-byte. interp.cnr remains NOT s
 ### interp.cnr consolidation + self-check probe (2026-07-11)
 
 CONSOLIDATION (output-invariant; all 71 interp fixtures + every self-check gate + the whole suite
-byte-exact, clippy clean). Four review-specified cleanups to `prototype/selfhost/interp/interp.cnr`:
+byte-exact, clippy clean). Four review-specified cleanups to `selfhost/interp/interp.cnr`:
 - The identical drop-owned-locals loop — save the five value registers, drop owned not-moved locals
   `[base, loc_n)` in reverse, restore the registers — was hand-copied in `exec_block`, `call_fn`, and
   `eval_match`. Factored into `fn drop_owned_locals_from(pp, src, e, base) -> i32` (returns 1 if a
@@ -1414,11 +1414,11 @@ run-and-report; no probe test committed.)
 
 The self-check probe above is now a COMMITTED gate with teeth. Two gates added, mirroring the
 existing per-module fixpoint gates (same shape as the parser.cnr/analyses.cnr gates):
-- `prototype/tests/selfhost_checker.rs::candor_checker_checks_interp_source_clean_via_import_resolution`
+- `compiler/tests/selfhost_checker.rs::candor_checker_checks_interp_source_clean_via_import_resolution`
   — the self-host CHECKER name-resolves interp.cnr clean (empty E0102/E0103), byte-equal to the
   module-aware oracle over the real lexer+parser+checker+interp tree. Teeth: the naive single-file
   check flags the unresolved imports E0102 (>0), and an injected unknown-type param fires E0102.
-- `prototype/tests/selfhost_analyses.rs::candor_analyses_check_interp_source_clean_fixpoint`
+- `compiler/tests/selfhost_analyses.rs::candor_analyses_check_interp_source_clean_fixpoint`
   — the self-host ANALYSES (move/init E0301/E0304, loans E0801-4, effect E0401, exhaustiveness E0601)
   emits an EMPTY covered set over interp.cnr, byte-equal to the module-aware oracle. Teeth: an
   injected use-after-move fires E0301.
@@ -1441,7 +1441,7 @@ oracle. Built SOLO, Rust-side only — NO Candor lowering yet (that is L1+). The
 is proven on REAL MIR produced by the existing Rust lowering (`mir::build`), so it is
 validated before any Candor code depends on it.
 
-- WIRE FORMAT (`prototype/src/mir/serial.rs`): a canonical, deterministic, human-readable
+- WIRE FORMAT (`compiler/src/mir/serial.rs`): a canonical, deterministic, human-readable
   S-expression text for a whole `MirProgram`. Atoms are bare keywords/decimal integers;
   names and string literals are `"…"`-quoted with `\\ \" \n \t` escapes; whitespace-
   insensitive on read, canonically indented on write. Deliberately simple to EMIT — the
@@ -1460,7 +1460,7 @@ validated before any Candor code depends on it.
 - SERIALIZER/DESERIALIZER: `serialize(prog) -> String` / `deserialize(s) -> Result<MirProgram, String>`,
   round-trip-exact (`serialize(deserialize(serialize(p))) == serialize(p)`).
 
-- GATE (`prototype/tests/mir_serial.rs`): for each corpus fixture — lower source to MIR
+- GATE (`compiler/tests/mir_serial.rs`): for each corpus fixture — lower source to MIR
   via `mir::build`, serialize → deserialize → run via `mir::interp::run(prog, rebuilt
   items, consts)`, render RET/TRACE/FAULT in the `selfhost_interp` schema, and assert
   byte-exact to `run_source_real` (the oracle). Three facts per fixture: (1) wire round-trip
@@ -1488,7 +1488,7 @@ Node arena, lowers the SCALAR + CONTROL-FLOW subset to MIR, and EMITS the L0 wir
 (the exact `mir::serial` format), so the Rust `deserialize` accepts it and `mir::interp`
 runs it. Built SOLO. This proves Candor can emit an executable control-flow graph — the
 first time a Candor-authored lowering feeds the MIR interpreter. It ports the scalar half
-of the Rust reference lowering (`prototype/src/mir/build.rs`).
+of the Rust reference lowering (`compiler/src/mir/build.rs`).
 
 - SCOPE (scalar + control flow ONLY): integer/bool scalars; `let`/assignment; `if`/`else`;
   `while`; `loop` + `break`/`continue`; `return`; arithmetic `+ - * / %` in the Checked/
@@ -1533,7 +1533,7 @@ of the Rust reference lowering (`prototype/src/mir/build.rs`).
   build.rs's `new_local`/`new_block` order faithfully, the emitted wire is byte-IDENTICAL to
   `serialize(mir::build …)` on 19/24 fixtures.
 
-- GATE (`prototype/tests/selfhost_lower.rs`): for each in-subset fixture — run `lower.cnr`
+- GATE (`compiler/tests/selfhost_lower.rs`): for each in-subset fixture — run `lower.cnr`
   in the tree-walker over the embedded source to produce the wire text, `deserialize` it
   Rust-side, rebuild `items`/`consts` from the same SOURCE, `mir::interp::run`, render
   RET/TRACE/FAULT, and assert byte-exact to `run_source_real` (the oracle). PROVEN:
@@ -1558,7 +1558,7 @@ Additive: every existing gate stays green; new gate green in isolation; clippy c
 ### Self-lowering L2 — STRUCTS and ARRAYS: flat aggregates → MIR (2026-07-11)
 
 L2 extends `selfhost/lower/lower.cnr` from scalars to flat COPY aggregates, porting the
-aggregate half of the Rust reference lowering (`prototype/src/mir/build.rs`): struct/array
+aggregate half of the Rust reference lowering (`compiler/src/mir/build.rs`): struct/array
 literals, field/element access + assignment, and by-value struct params/returns. Built SOLO.
 DEFERRED to L3+: drop schedule (L3), enums/`match` (L4), box/pointers (L5), slices, `?`,
 statics, contracts, borrow params.
@@ -1607,7 +1607,7 @@ statics, contracts, borrow params.
   (the call yields the return-slot address) then `copyval <dst> (place <tmp> (proj (deref
   <ty>))) <ty>`; the callee lowers `return <struct>` straight into `_0`.
 
-- GATE (`prototype/tests/selfhost_lower.rs`, S2 fixtures added to the existing corpus): each
+- GATE (`compiler/tests/selfhost_lower.rs`, S2 fixtures added to the existing corpus): each
   runs `lower.cnr` in the tree-walker → wire → `deserialize` → `mir::interp::run` → byte-exact
   RET/TRACE/FAULT vs `run_source_real`. PROVEN EXECUTION byte-exact on all 12 S2 aggregate
   fixtures (11 returns + 1 fault): struct_field, nested_struct, field_assign, struct_param_ret,
@@ -1662,7 +1662,7 @@ each struct `drop` hook to a MIR function, mirroring `src/mir/build.rs`.
   dropping that struct (hook FIRST, then fields reverse — the recursion lives in the
   interp's `drop_value`, so `drop_nested` emits ONE `Drop` for the outer local).
 
-- GATE (`prototype/tests/selfhost_lower.rs`, 8 S3 fixtures added to the corpus): each
+- GATE (`compiler/tests/selfhost_lower.rs`, 8 S3 fixtures added to the corpus): each
   runs `lower.cnr` → wire → `deserialize` → `mir::interp::run` → byte-exact RET/TRACE/
   FAULT vs `run_source_real`. PROVEN EXECUTION byte-exact on all 8 — the trace-on-drop
   ORDER is the load-bearing signal: drop_single (one hook), drop_scope_order (reverse
@@ -1746,7 +1746,7 @@ S4 enum layout of `selfhost/interp/interp.cnr`. Plain user enums only — `BoxRe
   the lowerer emits ONE `Drop` per needs-drop enum local; the tag-directed resolution
   lives in the interp, unchanged.
 
-- GATE (`prototype/tests/selfhost_lower.rs`, 6 S4 fixtures added to the corpus): each
+- GATE (`compiler/tests/selfhost_lower.rs`, 6 S4 fixtures added to the corpus): each
   runs `lower.cnr` → wire → `deserialize` → `mir::interp::run` → byte-exact RET/TRACE/
   FAULT vs `run_source_real`. PROVEN EXECUTION byte-exact on all 6 — enum_construct_match
   (tag write + tag-switch + scalar payload bind + branch chain), match_wildcard (unit
@@ -1836,7 +1836,7 @@ This is the last infrastructure slice before the L6 systems-corpus milestone. Po
   Place first); no gate fixture needs it and it is added when an L6 program requires
   it.
 
-- GATE (`prototype/tests/selfhost_lower.rs`, 16 S5/S6 fixtures added): each runs
+- GATE (`compiler/tests/selfhost_lower.rs`, 16 S5/S6 fixtures added): each runs
   `lower.cnr` → wire → `deserialize` → `mir::interp::run` → byte-exact RET/TRACE/FAULT
   vs `run_source_real`. PROVEN EXECUTION byte-exact on all 16 — offsetof_first_field,
   offsetof_nonzero_field, ptr_roundtrip, cast_ptr_read, ptr_offset_stride,
@@ -1921,7 +1921,7 @@ all self-check + mir_serial gates green; full suite green (0 failing); clippy cl
 ## OBL-G1-MONOMORPHIZER — the shared generic pre-pass: user generics resolved to concrete instances for self-interpret (2026-07-11)
 
 The first slice of the generic/std self-hosting tail: a shared Candor MONOMORPHIZER
-(`prototype/selfhost/mono/mono.cnr`, `use parser`), an engine-independent pre-pass
+(`selfhost/mono/mono.cnr`, `use parser`), an engine-independent pre-pass
 mirroring the Rust oracle `src/generics.rs`. It resolves USER generics
 (`fn[T]`/`struct[T]`/`enum[T]`) into concrete instances over the parse arena, wired
 into the self-host interpreter (`interp.cnr`) so the tree-walker runs generic
@@ -1999,7 +1999,7 @@ no fixpoint gate is claimed for it).
 ## OBL-L-GEN — the monomorphizer wired into the self-hosted MIR lowering: user generics compiled to MIR (2026-07-11)
 
 The LOWER-tier counterpart of OBL-G1: the shared `mono.cnr` pre-pass is now wired
-into the self-hosted MIR lowering (`prototype/selfhost/lower/lower.cnr`), so the
+into the self-hosted MIR lowering (`selfhost/lower/lower.cnr`), so the
 self-host compiles USER generics (`fn[T]`/`struct[T]`/`enum[T]`) to MIR wire text,
 byte-exact vs the `monomorphize → build.rs → mir::interp` oracle. `lower_dump` runs
 `mono_program` right after `parse_program`, then lowers the CONCRETE arena.
@@ -2051,7 +2051,7 @@ clean; whole suite green. Runtime: `selfhost_lower` ~140s.
 ## OBL-L-STD — std collections lowered to MIR CollectionOp: the generic/std self-hosting tail is COMPLETE (2026-07-11)
 
 The FINAL slice of the generic/std tail: the self-hosted MIR lowering
-(`prototype/selfhost/lower/lower.cnr`) now lowers the compiler-known `Vec[T]` /
+(`selfhost/lower/lower.cnr`) now lowers the compiler-known `Vec[T]` /
 `Map[V]` / `String` builtins to `StatementKind::CollectionOp { dst, op }`, so Candor
 COMPILES collection programs to MIR (not just interprets them). With user generics
 (L-gen) already lowering, Candor now compiles ANY in-subset program — user generics
@@ -2362,7 +2362,7 @@ oracle; after instantiation the method call resolves by the concrete nominal.
 ## T5 — trait-generics, FINAL slice: the `?` operator + `From` widening lowered to a MIR ok/err CFG — the trait-generics arc is COMPLETE (2026-07-11)
 
 The last slice of the trait-generics arc: teach the self-hosted lowering
-(`prototype/selfhost/lower/lower.cnr`) to lower `expr?` (`T_TRY`) + cross-type
+(`selfhost/lower/lower.cnr`) to lower `expr?` (`T_TRY`) + cross-type
 `From` widening to a MIR control-flow graph, landing `fromq` and `gfromq`
 COMPILING on the lower tier (both RET 7, byte-exact to `run_source_real`). Mirrors
 `selfhost/interp/interp.cnr`'s T4 `eval_try`/`eval_try_from`/`find_from_fn` and the
@@ -2409,7 +2409,7 @@ tier, byte-exact to the Rust oracle on both.
 ## N1 — the native self-compile tier's FIRST slice: a Candor code generator that emits x86-64 assembly TEXT for the scalar subset, assembled+linked+run byte-exact vs the oracle (2026-07-11)
 
 The first slice of the native self-compile tier (the true bootstrap): a new
-Candor module `prototype/selfhost/codegen/codegen.cnr` walks the parser's AST
+Candor module `selfhost/codegen/codegen.cnr` walks the parser's AST
 arena — mirroring `selfhost/lower/lower.cnr`'s scalar-subset walk and its
 `cur`-span / fault-edge threading — and EMITS x86-64 assembly TEXT (AT&T syntax)
 through the same `trace` byte sink `lower_dump` uses for its MIR wire. The system
@@ -2417,7 +2417,7 @@ through the same `trace` byte sink `lower_dump` uses for its MIR wire. The syste
 (`src/backend/aot_runtime.c`) into a REAL ELF process whose observable outcome —
 θ (stdout trace), the exit byte, and the `(kind, span)` fault JSON on stderr — is
 asserted byte-exact to the tree-walking oracle (`run_source_real`). Gated by
-`prototype/tests/selfhost_codegen.rs`.
+`compiler/tests/selfhost_codegen.rs`.
 
 SUBSET (same as lower.cnr's L1): integer (i8..i64/u8..u64/isize/usize) + bool
 scalars; `let`/`let mut` + assignment; `if`/`else if`/`else`; `while`; `loop` +
@@ -2481,9 +2481,9 @@ MVP), and structs/arrays/enums/box/pointers/drop/concurrency codegen (N2–N5).
 
 ## N2 — the native self-compile tier's SECOND slice: flat aggregates (structs + arrays) codegen, byte-exact vs the oracle (2026-07-12)
 
-The second native slice extends `prototype/selfhost/codegen/codegen.cnr` to emit
+The second native slice extends `selfhost/codegen/codegen.cnr` to emit
 x86-64 asm for FLAT (copy) STRUCTS and ARRAYS, matching the tree-walking oracle
-(`run_source_real`) byte-exact. Gated by `prototype/tests/selfhost_codegen.rs`
+(`run_source_real`) byte-exact. Gated by `compiler/tests/selfhost_codegen.rs`
 (the new `..._over_aggregate_subset` test); the N1 scalar gate stays green.
 
 MEMORY MODEL SHIFT (mirroring `src/backend/lower.rs`): N1's scalars stayed in
@@ -2541,12 +2541,12 @@ aggregates, slices/collections, and a register allocator.
 
 ## N3 — the native self-compile tier's THIRD slice: the MOVE/DROP SCHEDULE with trace-on-drop, byte-exact vs the oracle (2026-07-12)
 
-The third native slice extends `prototype/selfhost/codegen/codegen.cnr` to emit
+The third native slice extends `selfhost/codegen/codegen.cnr` to emit
 the DROP SCHEDULE for non-copy aggregates as x86-64 asm, matching the tree-walking
 oracle (`run_source_real`) byte-exact. It MIRRORS `selfhost/lower/lower.cnr`'s L3
 ownership/schedule logic (proven on the same fixtures) but emits a `call` to a
 drop-hook asm fn instead of a MIR `Drop` op. Gated by the new
-`..._over_drop_subset` test in `prototype/tests/selfhost_codegen.rs`; the N1
+`..._over_drop_subset` test in `compiler/tests/selfhost_codegen.rs`; the N1
 scalar and N2 aggregate gates stay green.
 
 MOVE MASK (mirrors lower.cnr `collect_path`/`mark_moved`/`whole_moved`): a
@@ -2594,12 +2594,12 @@ mask reassign path is unexercised by the corpus), and a register allocator.
 
 ## N4 — the native self-compile tier's FOURTH slice: ENUMS + MATCH codegen (tag-switch jump chain + tag-directed enum drop), byte-exact vs the oracle (2026-07-12)
 
-The fourth native slice extends `prototype/selfhost/codegen/codegen.cnr` to emit
+The fourth native slice extends `selfhost/codegen/codegen.cnr` to emit
 ENUM CONSTRUCTION and MATCH as x86-64 asm, matching the tree-walking oracle
 (`run_source_real`) byte-exact. It MIRRORS `selfhost/lower/lower.cnr`'s L4
 (`lower_enum_ctor`/`lower_match_full`/`lower_match_arm`) but lowers directly to
 machine instructions. Gated by the new `..._over_enum_subset` test in
-`prototype/tests/selfhost_codegen.rs`; the N1 scalar, N2 aggregate, and N3 drop
+`compiler/tests/selfhost_codegen.rs`; the N1 scalar, N2 aggregate, and N3 drop
 gates stay green.
 
 ENUM CONSTRUCTION (`gen_enum_ctor`, mirrors `lower_enum_ctor`): `T_ENUMCTOR`
@@ -2653,10 +2653,10 @@ materialized (call/ctor) scrutinees, and BoxResult/`?` (N5).
 
 ## N5 — the native self-compile tier's FIFTH slice: the BOX/ALLOCATOR ABI + the rawptr/fnptr surface + statics, byte-exact vs the oracle (2026-07-12)
 
-The fifth native slice extends `prototype/selfhost/codegen/codegen.cnr` to emit
+The fifth native slice extends `selfhost/codegen/codegen.cnr` to emit
 x86-64 asm for the whole Box/alloc/rawptr/fnptr surface, reproducing the
 tree-walking oracle (`run_source_real`) byte-exact. Gated by the new
-`..._over_box_subset` test in `prototype/tests/selfhost_codegen.rs`; N1-N4 stay
+`..._over_box_subset` test in `compiler/tests/selfhost_codegen.rs`; N1-N4 stay
 green. This is the last infrastructure slice before the systems-corpus native
 milestone (N6).
 
@@ -2718,12 +2718,12 @@ scrutinee), so per the no-speculative-generality rule they are NOT added here.
 
 ## N6 — THE MILESTONE: Candor native-compiles all five systems-corpus programs to real x86-64 executables, byte-exact vs the oracle (no Rust in the compile path) (2026-07-12)
 
-The true-bootstrap milestone: `prototype/selfhost/codegen/codegen.cnr` (composed
+The true-bootstrap milestone: `selfhost/codegen/codegen.cnr` (composed
 with the Candor `lexer`+`parser`+`layout` modules, run in the tree-walker) now
 emits x86-64 asm for the FULL systems corpus, and each program `codegen -> cc +
 aot_runtime.c -> run` reproduces `run_source_real` byte-exact (exit / θ trace /
 fault JSON). Gated by five `n6_11_*` tests in
-`prototype/tests/selfhost_codegen.rs`. The five programs — an allocator/pool
+`compiler/tests/selfhost_codegen.rs`. The five programs — an allocator/pool
 (`11_1`, RET 1234), a scheduler intrusive list (`11_2`, 42), MMIO device state
 (`11_3`, 42), a recursive-descent parser over a byte-string (`11_4`, 17), and a
 `Box [4096]Node` arena (`11_5`, 5) — are the SAME corpus the interp (S6b) and
@@ -4738,7 +4738,7 @@ interp can reinterpret its i64-held stack bits as f32/f64); math functions
 
 ## WASM-FLOAT — the WebAssembly float ISA landed in the Candor-written interpreter, gated == wasmi + bit-exact across the Candor engines (2026-07-14)
 
-CONTEXT. The M0-M4 WASM interpreter (`prototype/tests/fixtures/wasm/interp.cnr`,
+CONTEXT. The M0-M4 WASM interpreter (`compiler/tests/fixtures/wasm/interp.cnr`,
 written IN Candor: LEB128 byte cursor, id-dispatched section walk, non-recursive
 `exec` over a `[256]i64` operand stack + `[256]Act` activation stack, integer ISA /
 structured control / linear memory / host imports) carried only integers. FLOATS-S1/
@@ -4781,7 +4781,7 @@ than shipping a wrong answer (do NOT ship a non-bit-exact float op). **trunc_sat
 (the saturating `0xFC`-prefixed truncations) — a later opcode set, not implemented. No
 rounding op was deferred: all of ceil/floor/trunc/nearest are bit-exact here.
 
-GATES. Extended `prototype/tests/wasm.rs` with a wasmi (1.1.0) differential over float
+GATES. Extended `compiler/tests/wasm.rs` with a wasmi (1.1.0) differential over float
 modules: each module runs through the Candor interp AND wasmi with results asserted
 equal — non-NaN float results BIT-EXACT (`to_bits`), NaN results by IS-NAN, and the
 trapping trunc conversions trap in BOTH. Coverage: f32/f64 arithmetic, min/max (incl.
@@ -4856,7 +4856,7 @@ defined `global.get`/`global.set`), tables + `call_indirect`, the `trunc_sat`
 
 ## WASM-GTC — globals + tables/`call_indirect` land in the Candor-written WASM interpreter, closing the core MVP; gated == wasmi incl. trap-equivalence + byte-exact across the Candor engines (2026-07-14)
 
-CONTEXT. The WASM interpreter (`prototype/tests/fixtures/wasm/interp.cnr`, written IN
+CONTEXT. The WASM interpreter (`compiler/tests/fixtures/wasm/interp.cnr`, written IN
 Candor) ran M0-M5 (decode+eval, control flow, linear memory, host imports, the full
 float ISA). The two remaining CORE MVP features were GLOBALS and TABLES +
 `call_indirect` — the machinery a compiled language needs for function pointers /
@@ -4897,7 +4897,7 @@ the two opcodes now share one `exec` branch that resolves `callee` (direct immed
 table lookup) then runs the common host/defined dispatch, respecting the function index
 space.
 
-GATES. `prototype/tests/wasm.rs` extends the wasmi (1.1.0) differential (M6): globals —
+GATES. `compiler/tests/wasm.rs` extends the wasmi (1.1.0) differential (M6): globals —
 a mutable global a function increments and returns, an immutable read, an i64
 round-trip, two-globals set/get, all `== wasmi`, and an imported-global index-space test
 (a defined global at index 1 after an imported global at index 0) byte-exact across the
@@ -4930,7 +4930,7 @@ repairs applied (`docs/reviews/0017-packages-review.md`; also issued a dated err
 to design 0008 §2.4 for the `src/` root move, review F6a). New obligation, queued as
 the **first packaging implementation slice**: extend `candor audit` to enumerate
 `unsafe` regions + all `assumed-proven` contracts **graph-wide** (not only the
-`boundary` foreign surface it walks today, `prototype/src/audit.rs`) — this both
+`boundary` foreign surface it walks today, `compiler/src/audit.rs`) — this both
 meets philosophy §7's success criterion, which the shipping tool does not yet meet
 (a pre-existing local-audit gap, review F1b), and is the prerequisite for 0017 §8's
 whole-graph trust aggregation. Relates to OBL-FFI and OBL-CONTRACT (the
@@ -4941,7 +4941,7 @@ first-1.0 need (0017 Open-Q1), not 0.x.
 
 First code slice of design 0017 (packages). Lands the manifest **data model +
 parse + validate** only — no resolver, no lockfile, no multi-package build driver
-(later slices). `prototype/src/manifest.rs`: `Manifest`/`Package`/`Version`/`Lib`/
+(later slices). `compiler/src/manifest.rs`: `Manifest`/`Package`/`Version`/`Lib`/
 `Bin`/`Dependency`/`Source` model 0017 §2's schema; `parse_manifest(text)` and
 `load_manifest(dir)` (the latter returns `Ok(None)` for a manifest-less directory —
 today's degenerate bare package, 0017 §1/§6, left unchanged). The `toml` crate
@@ -4962,7 +4962,7 @@ today's degenerate bare package, 0017 §1/§6, left unchanged). The `toml` crate
   "unknown source kind" error (M0201), not silent acceptance.
 - **Wiring:** a `candor manifest <dir_or_file>` debug command parses + prints the
   manifest as JSON; the parse API is exposed for tests.
-- **Gate:** `prototype/tests/manifest.rs` (18 tests) — a full valid manifest
+- **Gate:** `compiler/tests/manifest.rs` (18 tests) — a full valid manifest
   (name/version/edition/freestanding + `[lib]` + two `[[bin]]` + path/git/aliased
   deps) plus each rejection (unknown package key, unknown top-level table, bad
   version, unknown edition, missing required field, git-without-rev, empty path,
@@ -4981,7 +4981,7 @@ package B (path source) and build+run together**. Implements 0017 §5/§6/§7 an
 F2 injective-pkgid repair; reuses 0008's visibility + acyclicity + merged-`Program`
 model unchanged (§8, no new linking/visibility mechanism).
 
-- **Resolver (`prototype/src/resolve_pkg.rs`).** From the root package it
+- **Resolver (`compiler/src/resolve_pkg.rs`).** From the root package it
   transitively loads each dependency's `candor.toml` (`load_manifest`) and builds
   the pinned set. **Path deps** resolve relative to the depending manifest's dir
   and canonicalize; **single-version unification** dedups a package reached via the
@@ -5021,7 +5021,7 @@ model unchanged (§8, no new linking/visibility mechanism).
   resolve cross-package `use`, and merge into one pkgid-qualified `Program` fed
   unchanged to the checker/interp/codegen. So `candor check`/`run`/`compile` on a
   manifested package with dependencies works across every engine.
-- **Gate (`prototype/tests/packages.rs`, +8 tests, 12 total).** `app`→`b` builds and runs to
+- **Gate (`compiler/tests/packages.rs`, +8 tests, 12 total).** `app`→`b` builds and runs to
   **123 byte-exact across tree-walker/MIR/native/AOT**; the visibility wall
   (E0903), diamond unification (`dia_c` deduped once), divergent-diamond conflict
   (E0923), package cycle (E0927), name collision (E0930) + alias fix, and the
@@ -5048,7 +5048,7 @@ re-implements neither): the resolver (`resolve_pkg::resolve`, OBL-0017-RESOLVE)
 for the pinned package set + provenance, and the per-package audit walk
 (`audit.rs`, boundary externs/exports + effect-reach + `unsafe` regions).
 
-- **Detection (`prototype/src/audit.rs`).** `audit_path` routes to the graph
+- **Detection (`compiler/src/audit.rs`).** `audit_path` routes to the graph
   aggregation only when the target is a directory with a `candor.toml` that
   declares ≥1 dependency; a bare file, a manifest-less directory, or a
   dependency-free package takes the **unchanged** single-package walk
@@ -5064,7 +5064,7 @@ for the pinned package set + provenance, and the per-package audit walk
   carries the per-package attribution layer.
 - **Git deps** keep erroring cleanly (E0924, "not yet fetched") via the reused
   resolver — the git surface audits once git-fetch lands.
-- **Gate (`prototype/tests/packages.rs`, +2 tests).** `audit_app` → `b` → `c`:
+- **Gate (`compiler/tests/packages.rs`, +2 tests).** `audit_app` → `b` → `c`:
   `candor audit audit_app` enumerates b's `foreign` extern (`b_native_read`) AND
   its `unsafe` region (`b::b_read`), each attributed to package `b` v0.2.0 at its
   canonical `audit_b` source; transitive `c`'s surface (`c_native_write`,
@@ -5091,7 +5091,7 @@ dependency — same transitive-load, unification, merge, build, and audit paths.
 Replaces the E0924 "not yet fetched" deferral (OBL-0017-RESOLVE). Reproducibility
 comes from the lock's pinned commit sha, never from checked-in copies.
 
-- **Fetch (`prototype/src/pkg_fetch.rs`).** Shells out to the system `git`. Cache
+- **Fetch (`compiler/src/pkg_fetch.rs`).** Shells out to the system `git`. Cache
   layout under a root that defaults to a per-user cache dir and is **overridable by
   `CANDOR_CACHE_DIR`** (so tests use an isolated temp cache, never a real one):
   `git-db/<url-hash>/` is a bare mirror of the url (for resolving refs);
@@ -5106,7 +5106,7 @@ comes from the lock's pinned commit sha, never from checked-in copies.
   manifest is resolved against the mirror (`git rev-parse <ref>^{commit}`) to its
   full commit sha; that resolved sha is what the lock records, so the build pins to
   the commit even when the manifest names a moving ref (design 0017 §4).
-- **Integration (`prototype/src/resolve_pkg.rs`).** `resolve_source` returns the
+- **Integration (`compiler/src/resolve_pkg.rs`).** `resolve_source` returns the
   package dir + its `ResolvedSource`; a git dep's checkout dir feeds the existing
   BFS/unification/merge unchanged. Two deps at the same (url, sha) resolve to the
   same content-addressed dir and unify to one build node; the same name via a
@@ -5123,7 +5123,7 @@ comes from the lock's pinned commit sha, never from checked-in copies.
   resolve, a git dependency's `foreign`/`unsafe` surface is enumerated and
   attributed to it (name + version + **git source: url + resolved sha**) through the
   reused resolver (review F1b / §8).
-- **Gate (`prototype/tests/packages.rs`, +4 tests, HERMETIC + offline).** Each test
+- **Gate (`compiler/tests/packages.rs`, +4 tests, HERMETIC + offline).** Each test
   builds a **local** git repo in a temp dir (no network) and points
   `CANDOR_CACHE_DIR` at a temp cache; if `git` cannot be spawned the tests skip
   cleanly with a reason. `app` → `b` via `{ git = file://…, rev = <sha> }` fetches

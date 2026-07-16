@@ -6,7 +6,7 @@ scheduler and the full frozen vector suite (T1–T20, including the T19
 20,000-step stress with per-step shadow-model comparison). `main` returns the
 sentinel **777** on full success; any vector failure faults (exit 2).
 
-Toolchain: `prototype/target/release/candor-proto check|run ports/candor/scheduler/scheduler.cn`.
+Toolchain: `compiler/target/release/candor-proto check|run ports/candor/scheduler/scheduler.cn`.
 The implementation/harness split per ruling R14 (`// Test harness` marker) is
 verified: the implementation section parses and checks standalone.
 

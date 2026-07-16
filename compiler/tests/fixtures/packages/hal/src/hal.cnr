@@ -1,0 +1,14 @@
+// hal's public root. Its boundary module declares a `foreign` extern that is
+// never called: the declared-but-uncalled transitive surface the review's
+// `blink -> hal` escape relies on (0011 §5 — no libc to link under freestanding).
+boundary
+extern "C" {
+    fn hal_write(p: rawptr u8) -> usize
+        trust "hal fixture: declared, never called" {
+            no_retain(p),
+        };
+}
+
+pub fn nothing() -> i64 {
+    return 0;
+}

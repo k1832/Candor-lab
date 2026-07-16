@@ -17,7 +17,7 @@ Dispositions are the deciding authority's; recorded inline per finding once made
 §5 case (2) claims an escaping `x` "keeps the loop loan `L` live past the loop." The
 implemented loan model does the **opposite**: a borrow copied into a binding **sheds
 its loan** — `carries_borrow` returns `false` for a bare identifier
-(`prototype/src/check/stmt.rs:171-194`), so `let c = b` anchors nothing
+(`compiler/src/check/stmt.rs:171-194`), so `let c = b` anchors nothing
 (`stmt.rs:63-67, 93-102`); and the loan `x` does carry is rooted at `__c`, not `coll`
 (deref collapses to the root, `dataflow.rs:69-72`; distinct roots don't overlap,
 `dataflow.rs:91-93`), so it could never freeze `coll` regardless.

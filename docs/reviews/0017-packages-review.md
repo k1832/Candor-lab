@@ -34,7 +34,7 @@ the boundary.
 ## F1b — The aggregated audit covers a strict subset of the TCB. Severity: REPAIR (security-critical); also a **pre-existing gap in `candor audit`**
 
 §8 promises to aggregate the dependency graph's `foreign`/**`unsafe`**/**`assumed-proven`**
-surface. But the cited mechanism (`prototype/src/audit.rs:107-158,181-204`) enumerates
+surface. But the cited mechanism (`compiler/src/audit.rs:107-158,181-204`) enumerates
 **only** `Item::Extern`/`Item::Export` in `boundary` files + `effect_reach` — it walks
 **no** `unsafe` regions and **no** non-boundary `assumed-proven` contracts, *even for the
 local package today*. A git dependency with a plain `unsafe` block doing unchecked pointer
@@ -54,7 +54,7 @@ slice.**
 
 ## F2 — Package-qualified mangling: root package not prefixed → mis-link. Severity: REPAIR
 
-`prototype/src/modules.rs:94` mangles to `module::name` with **no package prefix today**;
+`compiler/src/modules.rs:94` mangles to `module::name` with **no package prefix today**;
 the bare-`main` special case (line 95) shows a flat merged namespace. §5 claims a
 `<pkgid>::module::name` prefix but is ambiguous whether the **root** package's items are
 prefixed. If not: `app` (local top-level module `util`) → dep `widget` → real package
@@ -126,15 +126,15 @@ the audit's structural enumeration (`audit::first_boundary_surface`, reusing
 transitive `foreign` extern (the `blink -> hal` escape) is caught; the diagnostic
 names the offending package + the specific boundary module / extern. The gate is
 the final artifact's property, not each dependency's own flag. Files:
-`prototype/src/resolve_pkg.rs` (`check_freestanding_composition`),
-`prototype/src/audit.rs` (`first_boundary_surface`); gate:
-`prototype/tests/packages.rs` (F5 escape with an uncalled extern, transitive std
+`compiler/src/resolve_pkg.rs` (`check_freestanding_composition`),
+`compiler/src/audit.rs` (`first_boundary_surface`); gate:
+`compiler/tests/packages.rs` (F5 escape with an uncalled extern, transitive std
 import, legit freestanding composes, non-freestanding unaffected).
 
 ## F6a — `src/` root contradicts 0008 + the implementation; a governance obligation. Severity: REPAIR
 
 0008 §2.4 ruled the directory-build root is the **root-level `main.cnr`**, and
-`prototype/src/modules.rs:242-249` **enforces** it (E0905). 0017 §1's `src/main.cnr`
+`compiler/src/modules.rs:242-249` **enforces** it (E0905). 0017 §1's `src/main.cnr`
 contradicts both. GOVERNANCE §9 forbids *quiet* divergence — a **deferred** Open-Q3 is a
 lingering disagreement between two neighboring designs plus a shipped implementation.
 **Repair:** the authority must actually **issue an 0008 erratum** (accept the `src/` move
@@ -142,7 +142,7 @@ and amend 0008 + `modules.rs`) **or reject** the `src/` move — not defer it.
 **Disposition:** ACCEPTED (2026-07-15) — the `src/` root move is accepted, no longer
 deferred. Applied to 0017 §1/§Consequences (moved to §Settled) and issued as a dated
 **erratum to 0008 §2.4** (`docs/design/0008-modules.md`), per GOVERNANCE §9. The
-`modules.rs` change lands with the packaging implementation. **Implemented 2026-07-15** — the `src/` module-root relocation shipped (`prototype/src/modules.rs`, `prototype/src/build/mod.rs`; gate `prototype/tests/packages.rs`); see the dated erratum note in 0008 §2.4.
+`modules.rs` change lands with the packaging implementation. **Implemented 2026-07-15** — the `src/` module-root relocation shipped (`compiler/src/modules.rs`, `compiler/src/build/mod.rs`; gate `compiler/tests/packages.rs`); see the dated erratum note in 0008 §2.4.
 
 ## F6b — Package + module acyclicity: closed by construction (conditional on F2)
 

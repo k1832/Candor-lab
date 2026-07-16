@@ -1,6 +1,6 @@
 //! Runner tests: the harness scored against known-good and known-defective
 //! submissions, plus task-set and stage-classification checks. Requires a built
-//! `candor-proto` (set `$CANDOR_PROTO`, or the sibling `prototype/target/...`).
+//! `candor-proto` (set `$CANDOR_PROTO`, or the sibling `compiler/target/...`).
 
 use std::path::{Path, PathBuf};
 
@@ -19,15 +19,15 @@ fn candor_bin() -> String {
     }
     let manifest = root();
     for cand in [
-        "../../prototype/target/debug/candor-proto",
-        "../../prototype/target/release/candor-proto",
+        "../../compiler/target/debug/candor-proto",
+        "../../compiler/target/release/candor-proto",
     ] {
         let p = manifest.join(cand);
         if p.exists() {
             return p.display().to_string();
         }
     }
-    panic!("candor-proto not found; run `cargo build` in prototype/ or set CANDOR_PROTO");
+    panic!("candor-proto not found; run `cargo build` in compiler/ or set CANDOR_PROTO");
 }
 
 fn score(sub_subdir: &str) -> Report {

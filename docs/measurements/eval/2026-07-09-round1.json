@@ -1,6 +1,6 @@
 {
   "round": 1,
-  "candor_proto": "../../prototype/target/debug/candor-proto",
+  "candor_proto": "../../compiler/target/debug/candor-proto",
   "submission_dir": "/tmp/claude-1000/eval-round1",
   "aggregate": {
     "total": 12,

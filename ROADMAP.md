@@ -32,16 +32,16 @@ ground), its largest P19 corpus, and its credibility proof — gated on std, not
 - Graduation-tier eval campaign (the first slope-capable measurement).
 - Toolchain packaging: candor-proto → candor, install story, the distribution repo (publication
   step 2 above).
-  - **Repo-layout rename (do it here, one commit, while the tree is quiescent).** `prototype/`
-    is a historical misnomer — it began as the Bet-5 throwaway measurement prototype but is now
-    the production reference compiler (README already calls it "the production toolchain"). Rename
-    `prototype/` → `compiler/` (crate/binary already renamed `candor-proto → candor` above), and
-    hoist the self-hosted compiler to a top-level `selfhost/` (currently `prototype/selfhost/`) so
-    the Rust reference compiler and the Candor self-host are visibly peers, not one nested in the
-    other. Pure churn touching every `prototype/...` path reference (docs, tests, nextest
-    invocations, `dist/`, PROGRAMS_IN_CANDOR.md) — so serialize it SOLO, after the packaging
-    implementation work settles and outside any compiler-crate agent's window. No build-output
-    change (NN#16 reproducibility unaffected: a path rename doesn't alter emitted artifacts).
+  - **Repo-layout rename — DONE (2026-07-16).** The old `prototype/` directory was a historical
+    misnomer (it began as the Bet-5 throwaway measurement prototype but became the production
+    reference compiler). Renamed `prototype/` → `compiler/` and hoisted the self-hosted compiler
+    to a top-level `selfhost/` (was `prototype/selfhost/`), so the Rust reference compiler and the
+    Candor self-host are visibly peers. `git mv` preserved history (453 renames); build + full
+    suite unchanged (927 green); no build-output change (NN#16 unaffected — a path rename doesn't
+    alter emitted artifacts). **Still outstanding here:** the crate/binary rename `candor-proto →
+    candor` (a larger, independent change — the crate name has no `prototype` substring, so it was
+    left as a separate follow-up), and removing the committed absolute build paths from the
+    `candor.lock` example fixtures (a pre-existing reproducibility smell, unrelated to the rename).
 - Text-type budget design (P3's named obligation; gates self-hosting and real std growth).
 - I/O boundary module (gates self-hosting).
 - Bare-metal target (blocked locally on qemu; the freestanding proof stands meanwhile).
@@ -361,7 +361,7 @@ The publication-step-2 packaging is assembled and proven, ready to seed the stan
 - **Toolchain renamed** candor-proto -> candor (Cargo [[bin]]; the candor_proto LIBRARY name
   stays; ~25 user-facing strings swept; the dist shim deleted). candor --version / --help
   added. 602 tests green, clippy clean.
-- **dist/seed.sh** assembles a standalone 0.x from the lab's MANIFEST SHIPS rows: prototype/
+- **dist/seed.sh** assembles a standalone 0.x from the lab's MANIFEST SHIPS rows: compiler/
   -> toolchain/ (tests/ + selfhost/ excluded, still builds), docs/spec -> spec/, the corelib
   seed -> stdlib/ (first-class), tools/{vscode-candor,candor-lsp} -> editor/ (LSP path-dep
   rewritten to the seeded toolchain), dist/ docs+examples -> repo root. No permanent spec/

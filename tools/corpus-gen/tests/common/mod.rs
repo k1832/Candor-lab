@@ -10,7 +10,7 @@ pub fn oracle_bin() -> String {
     if let Ok(p) = std::env::var("CANDOR_PROTO") {
         return p;
     }
-    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../prototype/target");
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../compiler/target");
     for profile in ["release", "debug"] {
         let cand = base.join(profile).join("candor-proto");
         if cand.exists() {
@@ -18,7 +18,7 @@ pub fn oracle_bin() -> String {
         }
     }
     panic!(
-        "candor-proto not found. Build it:\n  cargo build --release --manifest-path ../../prototype/Cargo.toml\nor set $CANDOR_PROTO."
+        "candor-proto not found. Build it:\n  cargo build --release --manifest-path ../../compiler/Cargo.toml\nor set $CANDOR_PROTO."
     );
 }
 

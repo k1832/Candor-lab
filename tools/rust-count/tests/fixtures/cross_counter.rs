@@ -1,5 +1,5 @@
 // Shared cross-counter fixture (Rust side).
-// Paired with prototype/tests/fixtures/count/cross_counter.cn; both counters
+// Paired with compiler/tests/fixtures/count/cross_counter.cn; both counters
 // must report the SAME valve_statements. Hand-computed total = 6.
 //
 // fn worker: a statement before, an unsafe block holding two statements, a

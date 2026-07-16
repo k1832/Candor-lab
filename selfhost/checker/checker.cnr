@@ -1,0 +1,615 @@
+// The THIRD self-hosted slice of Candor: a TYPE CHECKER core, WRITTEN IN CANDOR,
+// consuming the self-hosted parser's Node ARENA (slice 2) and producing type-level
+// diagnostics. Gated by DIAGNOSTIC equality (code + span) against the Rust oracle
+// checker (`compiler/src/check/`, `resolve.rs`) over a corpus, filtered to the
+// code families this slice covers. Spec: docs/spec/03-types-and-values.md.
+//
+// This file is a LIBRARY module, composed with the `lexer` and `parser` modules
+// (the harness in compiler/tests/selfhost_checker.rs builds a module tree of
+// lexer + parser + checker + a generated root `main`). It IMPORTS the lexer's
+// `span_eq`/`emit_*` helpers and the parser's `Node`/`P` arena and `T_*` tag
+// statics via the `use` decls below (the built-in `trace` sink stays global); it
+// does NOT redefine them.
+//
+// COVERED CODE FAMILIES (the sound core this slice proves against the oracle):
+//   E0102  unknown type   (a Named type with no struct/enum/known declaration)
+//   E0103  unknown name   (a value identifier that is no local/param/fn/static)
+// Both are single-name-token spans that the arena stores verbatim in `p0/p1`, so
+// they match the oracle's span exactly. VALUE-type-level codes whose oracle span
+// is a COMPOSITE range (E0703 mismatch, E0706 arg-count, E0107 field, E0108/E0605
+// enum, E0709 literal-range) are OUT OF SUBSET this slice: the span-lean slice-2
+// arena (spans excluded by design) does not carry the enclosing-expression spans
+// they need. Recorded in OBL-SELFHOST-ERGO.
+//
+// CONTEXT: every pass threads the tuple (read P arena, [u8] src, write C state).
+// `src` cannot live in a struct field (0001 3.4 / the ratified friction #1), and
+// the arena `P` and checker state `C` are distinct objects, so three threaded
+// views is the irreducible context for a checker over a borrow-view source.
+
+use lexer::{Buf, span_eq, emit_num, emit_sp, emit_nl};
+use parser::{Node, P, nnew, parse_program, emit_lit, T_USE, T_FN, T_STRUCT, T_ENUM, T_STATIC, T_NAMED, T_APP, T_ARRAY, T_SLICE, T_SLICEMUT, T_RAWPTR, T_BOX, T_BOXRESULT, T_BORROW, T_BORROWMUT, T_FNPTR, T_LET, T_ASSIGN, T_INT, T_NEGINT, T_STR, T_BYTES, T_BOOL, T_ID, T_UNARY, T_PREFIX, T_BIN, T_CALL, T_OUT, T_FIELD, T_INDEX, T_CONV, T_ARRAYLIT, T_ARRAYREP, T_STRUCTLIT, T_ENUMCTOR, T_BLOCK, T_IF, T_MATCH, T_LOOP, T_WHILE, T_RETURN, T_BREAK, T_CONTINUE, T_ASSERT, T_PANIC, T_RESULT, T_PAREN, T_TRY, T_UNSAFE, T_WRAPPING, T_SATURATING, T_SIZEOF, T_ALIGNOF, T_OFFSETOF, T_FIELDPTR, T_CASTPTR, T_ADDRTOPTR, T_PTRNULL, T_BIND, T_PVARIANT};
+
+// ---- allocator prelude (to obtain the `Alloc` handle the symbol-table `Map`s
+// require). A bump arena over a reserved flat-memory window, identical in shape
+// to the analyses slice's prelude; module qualification keeps it distinct from
+// `analyses::Alloc` when both modules share a tree.
+struct AllocVtable {
+    alloc: fn(rawptr u8, usize, usize) -> rawptr u8,
+    free: fn(rawptr u8, rawptr u8, usize, usize) -> unit,
+}
+struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize }
+
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live Bump whose [next,end) window is reserved to this arena alone; the carved block stays inside the window" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let aligned: usize = (b.next + align - 1usize) / align * align;
+        if aligned + size > b.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    return;
+}
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free };
+fn mk_alloc(state: write Bump) -> Alloc {
+    unsafe "the Bump window and BUMP_VT outlive every Map key copy this handle serves for the whole check run" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) };
+    }
+}
+
+// ---- checker state ----------------------------------------------------------
+struct C {
+    head: u32,
+    uhead: u32,
+    loc_p0: [512]usize,
+    loc_p1: [512]usize,
+    loc_n: usize,
+    dcode: [512]i32,
+    ds: [512]usize,
+    de: [512]usize,
+    dn: usize,
+    // Map-backed symbol tables (SET semantics; value is an unused 0 sentinel).
+    // `known_types` = imported names + declared struct/enum names; `known_values`
+    // = imported names + declared fn/static names. O(1) `contains` replaces the
+    // former linear item-table + import-chain scans on every name occurrence.
+    known_types: Map[i64],
+    known_values: Map[i64],
+}
+
+// ---- small helpers ----------------------------------------------------------
+
+// Byte-equality of two name spans of the same source buffer.
+fn name_eq(src: [u8], a0: usize, a1: usize, b0: usize, b1: usize) -> bool {
+    if a1 - a0 != b1 - b0 {
+        return false;
+    }
+    let mut i: usize = 0usize;
+    let n: usize = a1 - a0;
+    while i < n {
+        if src[a0 + i] != src[b0 + i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+fn push_diag(c: write C, code: i32, s: usize, e: usize) -> unit {
+    let i: usize = c.dn;
+    c.*.dcode[i] = code;
+    c.*.ds[i] = s;
+    c.*.de[i] = e;
+    c.*.dn = i + 1usize;
+    return;
+}
+
+fn loc_push(c: write C, s: usize, e: usize) -> unit {
+    let i: usize = c.loc_n;
+    c.*.loc_p0[i] = s;
+    c.*.loc_p1[i] = e;
+    c.*.loc_n = i + 1usize;
+    return;
+}
+
+// A compiler-known callee (`check_builtin` in the oracle): known ONLY as a call
+// callee, never as a bare value — mirrors the oracle, which routes builtins
+// through `check_call` before the E0103 place lookup.
+fn is_builtin(src: [u8], s: usize, e: usize) -> bool {
+    if span_eq(src, s, e, b"addr_of") { return true; }
+    if span_eq(src, s, e, b"addr_of_mut") { return true; }
+    if span_eq(src, s, e, b"append") { return true; }
+    if span_eq(src, s, e, b"as_bytes") { return true; }
+    if span_eq(src, s, e, b"as_str") { return true; }
+    if span_eq(src, s, e, b"box") { return true; }
+    if span_eq(src, s, e, b"cancelled") { return true; }
+    if span_eq(src, s, e, b"contains") { return true; }
+    if span_eq(src, s, e, b"get") { return true; }
+    if span_eq(src, s, e, b"insert") { return true; }
+    if span_eq(src, s, e, b"is_null") { return true; }
+    if span_eq(src, s, e, b"len") { return true; }
+    if span_eq(src, s, e, b"map_new") { return true; }
+    if span_eq(src, s, e, b"ptr_offset") { return true; }
+    if span_eq(src, s, e, b"ptr_read") { return true; }
+    if span_eq(src, s, e, b"ptr_to_addr") { return true; }
+    if span_eq(src, s, e, b"ptr_write") { return true; }
+    if span_eq(src, s, e, b"push") { return true; }
+    if span_eq(src, s, e, b"set") { return true; }
+    if span_eq(src, s, e, b"slice_of") { return true; }
+    if span_eq(src, s, e, b"slice_of_mut") { return true; }
+    if span_eq(src, s, e, b"split_mut") { return true; }
+    if span_eq(src, s, e, b"str") { return true; }
+    if span_eq(src, s, e, b"str_from") { return true; }
+    if span_eq(src, s, e, b"str_from_unchecked") { return true; }
+    if span_eq(src, s, e, b"string_new") { return true; }
+    if span_eq(src, s, e, b"subslice") { return true; }
+    if span_eq(src, s, e, b"substr") { return true; }
+    if span_eq(src, s, e, b"trace") { return true; }
+    if span_eq(src, s, e, b"unbox") { return true; }
+    if span_eq(src, s, e, b"vec_new") { return true; }
+    return false;
+}
+
+// Populate the Map-backed symbol tables in ONE setup pass, before the item
+// passes run. An imported name (a `use` binding) registers as BOTH a known type
+// and a known value: this slice's arena does not record which module the name is
+// a type or value in, and over-registering is sound for the no-false-positive
+// goal (a clean module never over-flags) -- exactly the union the former
+// `is_imported` linear chain scan answered. Declared struct/enum names register
+// as known types; declared fn/static names as known values. Duplicate names are
+// idempotent under the SET semantics (a re-insert overwrites the same 0
+// sentinel), matching the linear scan's "any match => true".
+fn build_symbols(pp: read P, src: [u8], c: write C) alloc -> unit {
+    let mut u: u32 = c.uhead;
+    while u != 0u32 {
+        let un: Node = pp.nodes[conv usize u];
+        let mut nm: u32 = un.a;
+        while nm != 0u32 {
+            let nn: Node = pp.nodes[conv usize nm];
+            insert(write c.known_types, subslice(src, nn.p0, nn.p1), 0);
+            insert(write c.known_values, subslice(src, nn.p0, nn.p1), 0);
+            nm = nn.nx;
+        }
+        u = un.nx;
+    }
+    let mut cur: u32 = c.head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_STRUCT || nd.tag == T_ENUM {
+            insert(write c.known_types, subslice(src, nd.p0, nd.p1), 0);
+        }
+        if nd.tag == T_FN || nd.tag == T_STATIC {
+            insert(write c.known_values, subslice(src, nd.p0, nd.p1), 0);
+        }
+        cur = nd.nx;
+    }
+    return;
+}
+
+// A known TYPE name: the compiler-known types + any declared struct/enum.
+fn is_type_known(src: [u8], c: write C, s: usize, e: usize) -> bool {
+    if span_eq(src, s, e, b"str") { return true; }
+    if span_eq(src, s, e, b"Cancel") { return true; }
+    if span_eq(src, s, e, b"Utf8Res") { return true; }
+    if span_eq(src, s, e, b"String") { return true; }
+    return contains(read c.known_types, subslice(src, s, e));
+}
+
+// A known VALUE name: an in-scope local/param, or any declared fn/static.
+fn is_value_known(src: [u8], c: write C, s: usize, e: usize) -> bool {
+    let mut i: usize = 0usize;
+    while i < c.loc_n {
+        if name_eq(src, s, e, c.loc_p0[i], c.loc_p1[i]) {
+            return true;
+        }
+        i = i + 1usize;
+    }
+    return contains(read c.known_values, subslice(src, s, e));
+}
+
+// ---- E0102: resolve a TYPE node, flagging unknown Named types ---------------
+fn resolve_type(pp: read P, src: [u8], c: write C, i: u32) -> unit {
+    if i == 0u32 {
+        return;
+    }
+    let nd: Node = pp.nodes[conv usize i];
+    let tg: i32 = nd.tag;
+    if tg == T_NAMED {
+        if !is_type_known(src, c, nd.p0, nd.p1) {
+            push_diag(c, 102, nd.p0, nd.p1);
+        }
+        return;
+    }
+    if tg == T_APP {
+        // The head of a generic application is not E0102-checked by the oracle;
+        // only its type arguments are resolved.
+        let mut cur: u32 = nd.a;
+        while cur != 0u32 {
+            let sub: Node = pp.nodes[conv usize cur];
+            resolve_type(pp, src, c, cur);
+            cur = sub.nx;
+        }
+        return;
+    }
+    if tg == T_ARRAY {
+        resolve_type(pp, src, c, nd.a);
+        return;
+    }
+    if tg == T_SLICE || tg == T_SLICEMUT || tg == T_RAWPTR || tg == T_BOX || tg == T_BOXRESULT || tg == T_BORROW || tg == T_BORROWMUT {
+        resolve_type(pp, src, c, nd.a);
+        return;
+    }
+    if tg == T_FNPTR {
+        let mut cur: u32 = nd.a;
+        while cur != 0u32 {
+            let sub: Node = pp.nodes[conv usize cur];
+            resolve_type(pp, src, c, sub.a);
+            cur = sub.nx;
+        }
+        resolve_type(pp, src, c, nd.b);
+        return;
+    }
+    // T_SC (scalar) and T_PROJ carry no unknown-type obligation here.
+    return;
+}
+
+// Bind the value names a match-arm pattern introduces (T_BIND leaves).
+fn bind_pattern(pp: read P, src: [u8], c: write C, i: u32) -> unit {
+    if i == 0u32 {
+        return;
+    }
+    let nd: Node = pp.nodes[conv usize i];
+    if nd.tag == T_BIND {
+        loc_push(c, nd.p0, nd.p1);
+        return;
+    }
+    if nd.tag == T_PVARIANT {
+        let mut cur: u32 = nd.b;
+        while cur != 0u32 {
+            let sub: Node = pp.nodes[conv usize cur];
+            if sub.tag == T_BIND {
+                loc_push(c, sub.p0, sub.p1);
+            }
+            cur = sub.nx;
+        }
+        return;
+    }
+    return;
+}
+
+// ---- E0103: walk an expression, flagging unknown value identifiers ----------
+fn chk_expr(pp: read P, src: [u8], c: write C, i: u32) -> unit {
+    if i == 0u32 {
+        return;
+    }
+    let nd: Node = pp.nodes[conv usize i];
+    let tg: i32 = nd.tag;
+    if tg == T_ID {
+        if !is_value_known(src, c, nd.p0, nd.p1) {
+            push_diag(c, 103, nd.p0, nd.p1);
+        }
+        return;
+    }
+    if tg == T_INT || tg == T_NEGINT || tg == T_STR || tg == T_BYTES || tg == T_BOOL || tg == T_RESULT || tg == T_BREAK || tg == T_CONTINUE {
+        return;
+    }
+    if tg == T_UNARY || tg == T_PREFIX || tg == T_OUT || tg == T_PAREN || tg == T_TRY || tg == T_ASSERT || tg == T_PANIC || tg == T_FIELD || tg == T_FIELDPTR {
+        chk_expr(pp, src, c, nd.a);
+        return;
+    }
+    if tg == T_BIN || tg == T_INDEX || tg == T_ARRAYREP {
+        chk_expr(pp, src, c, nd.a);
+        chk_expr(pp, src, c, nd.b);
+        return;
+    }
+    if tg == T_CALL {
+        let callee: Node = pp.nodes[conv usize nd.a];
+        if callee.tag == T_ID && is_builtin(src, callee.p0, callee.p1) {
+            // known builtin callee: no E0103 on the callee itself
+        } else {
+            chk_expr(pp, src, c, nd.a);
+        }
+        let mut cur: u32 = nd.b;
+        while cur != 0u32 {
+            let sub: Node = pp.nodes[conv usize cur];
+            chk_expr(pp, src, c, cur);
+            cur = sub.nx;
+        }
+        return;
+    }
+    if tg == T_CONV {
+        chk_expr(pp, src, c, nd.b);
+        return;
+    }
+    if tg == T_SIZEOF || tg == T_ALIGNOF || tg == T_OFFSETOF || tg == T_PTRNULL {
+        resolve_type(pp, src, c, nd.a);
+        return;
+    }
+    if tg == T_CASTPTR || tg == T_ADDRTOPTR {
+        resolve_type(pp, src, c, nd.a);
+        let mut cur: u32 = nd.b;
+        while cur != 0u32 {
+            let sub: Node = pp.nodes[conv usize cur];
+            chk_expr(pp, src, c, cur);
+            cur = sub.nx;
+        }
+        return;
+    }
+    if tg == T_ARRAYLIT {
+        let mut cur: u32 = nd.a;
+        while cur != 0u32 {
+            let sub: Node = pp.nodes[conv usize cur];
+            chk_expr(pp, src, c, cur);
+            cur = sub.nx;
+        }
+        return;
+    }
+    if tg == T_STRUCTLIT {
+        // The struct name is assumed declared (an unknown one is E0102 with a
+        // COMPOSITE span, out of subset); only the field-init values are walked.
+        let mut cur: u32 = nd.a;
+        while cur != 0u32 {
+            let fi: Node = pp.nodes[conv usize cur];
+            chk_expr(pp, src, c, fi.a);
+            cur = fi.nx;
+        }
+        return;
+    }
+    if tg == T_ENUMCTOR {
+        let mut cur: u32 = nd.b;
+        while cur != 0u32 {
+            let sub: Node = pp.nodes[conv usize cur];
+            chk_expr(pp, src, c, cur);
+            cur = sub.nx;
+        }
+        return;
+    }
+    if tg == T_BLOCK {
+        chk_block(pp, src, c, nd.a);
+        return;
+    }
+    if tg == T_IF {
+        chk_expr(pp, src, c, nd.a);
+        chk_expr(pp, src, c, nd.b);
+        if nd.c != 0u32 {
+            chk_expr(pp, src, c, nd.c);
+        }
+        return;
+    }
+    if tg == T_WHILE {
+        chk_expr(pp, src, c, nd.a);
+        chk_expr(pp, src, c, nd.b);
+        return;
+    }
+    if tg == T_LOOP || tg == T_WRAPPING || tg == T_SATURATING || tg == T_UNSAFE {
+        chk_expr(pp, src, c, nd.a);
+        return;
+    }
+    if tg == T_MATCH {
+        chk_expr(pp, src, c, nd.a);
+        let mut cur: u32 = nd.b;
+        while cur != 0u32 {
+            let arm: Node = pp.nodes[conv usize cur];
+            let saved: usize = c.loc_n;
+            bind_pattern(pp, src, c, arm.a);
+            chk_expr(pp, src, c, arm.b);
+            c.*.loc_n = saved;
+            cur = arm.nx;
+        }
+        return;
+    }
+    if tg == T_RETURN {
+        if nd.a != 0u32 {
+            chk_expr(pp, src, c, nd.a);
+        }
+        return;
+    }
+    return;
+}
+
+// A statement inside a block: `let`/`assign` or a bare expression statement.
+fn chk_stmt(pp: read P, src: [u8], c: write C, i: u32) -> unit {
+    let nd: Node = pp.nodes[conv usize i];
+    if nd.tag == T_LET {
+        if nd.a != 0u32 {
+            resolve_type(pp, src, c, nd.a);
+        }
+        if nd.b != 0u32 {
+            chk_expr(pp, src, c, nd.b);
+        }
+        loc_push(c, nd.p0, nd.p1);
+        return;
+    }
+    if nd.tag == T_ASSIGN {
+        chk_expr(pp, src, c, nd.a);
+        chk_expr(pp, src, c, nd.b);
+        return;
+    }
+    chk_expr(pp, src, c, i);
+    return;
+}
+
+// A block introduces a lexical scope over its statement chain.
+fn chk_block(pp: read P, src: [u8], c: write C, head: u32) -> unit {
+    let saved: usize = c.loc_n;
+    let mut cur: u32 = head;
+    while cur != 0u32 {
+        let sub: Node = pp.nodes[conv usize cur];
+        chk_stmt(pp, src, c, cur);
+        cur = sub.nx;
+    }
+    c.*.loc_n = saved;
+    return;
+}
+
+// ---- item passes ------------------------------------------------------------
+
+// Phase 1: resolve the types appearing in DECLARATIONS (fields, variant payloads,
+// parameter + return types, static types) -> E0102.
+fn resolve_decl_types(pp: read P, src: [u8], c: write C) -> unit {
+    let mut cur: u32 = c.head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_FN {
+            let mut pcur: u32 = nd.c;
+            while pcur != 0u32 {
+                let pm: Node = pp.nodes[conv usize pcur];
+                resolve_type(pp, src, c, pm.a);
+                pcur = pm.nx;
+            }
+            if nd.e != 0u32 {
+                let rt: Node = pp.nodes[conv usize nd.e];
+                resolve_type(pp, src, c, rt.a);
+            }
+        }
+        if nd.tag == T_STRUCT {
+            let mut fcur: u32 = nd.b;
+            while fcur != 0u32 {
+                let fm: Node = pp.nodes[conv usize fcur];
+                resolve_type(pp, src, c, fm.a);
+                fcur = fm.nx;
+            }
+        }
+        if nd.tag == T_ENUM {
+            let mut vcur: u32 = nd.b;
+            while vcur != 0u32 {
+                let vm: Node = pp.nodes[conv usize vcur];
+                let mut tcur: u32 = vm.a;
+                while tcur != 0u32 {
+                    let tm: Node = pp.nodes[conv usize tcur];
+                    resolve_type(pp, src, c, tcur);
+                    tcur = tm.nx;
+                }
+                vcur = vm.nx;
+            }
+        }
+        if nd.tag == T_STATIC {
+            resolve_type(pp, src, c, nd.a);
+        }
+        cur = nd.nx;
+    }
+    return;
+}
+
+// Phase 2: check function bodies + static initializers -> E0103 (and body-local
+// E0102 for `let` annotations / `conv`/`sizeof` targets).
+fn check_bodies(pp: read P, src: [u8], c: write C) -> unit {
+    let mut cur: u32 = c.head;
+    while cur != 0u32 {
+        let nd: Node = pp.nodes[conv usize cur];
+        if nd.tag == T_FN {
+            c.*.loc_n = 0usize;
+            let mut pcur: u32 = nd.c;
+            while pcur != 0u32 {
+                let pm: Node = pp.nodes[conv usize pcur];
+                loc_push(c, pm.p0, pm.p1);
+                pcur = pm.nx;
+            }
+            chk_expr(pp, src, c, nd.d);
+            c.*.loc_n = 0usize;
+        }
+        if nd.tag == T_STATIC {
+            c.*.loc_n = 0usize;
+            chk_expr(pp, src, c, nd.b);
+        }
+        cur = nd.nx;
+    }
+    return;
+}
+
+// ---- diagnostic dump --------------------------------------------------------
+
+// Sort diagnostics by (code, start, end) for a deterministic canonical dump.
+fn sort_diags(c: write C) -> unit {
+    let n: usize = c.dn;
+    let mut i: usize = 1usize;
+    while i < n {
+        let kc: i32 = c.dcode[i];
+        let ks: usize = c.ds[i];
+        let ke: usize = c.de[i];
+        let mut j: usize = i;
+        loop {
+            if j == 0usize {
+                break;
+            }
+            let pc: i32 = c.dcode[j - 1usize];
+            let ps: usize = c.ds[j - 1usize];
+            let pe: usize = c.de[j - 1usize];
+            let mut gt: bool = false;
+            if pc > kc {
+                gt = true;
+            } else if pc == kc {
+                if ps > ks {
+                    gt = true;
+                } else if ps == ks {
+                    if pe > ke {
+                        gt = true;
+                    }
+                }
+            }
+            if !gt {
+                break;
+            }
+            c.*.dcode[j] = pc;
+            c.*.ds[j] = ps;
+            c.*.de[j] = pe;
+            j = j - 1usize;
+        }
+        c.*.dcode[j] = kc;
+        c.*.ds[j] = ks;
+        c.*.de[j] = ke;
+        i = i + 1usize;
+    }
+    return;
+}
+
+fn emit_code(code: i32) -> unit {
+    emit_lit(b"E010");
+    trace(48 + conv i64 (code - 100));
+    return;
+}
+
+fn dump_diags(c: write C) -> unit {
+    let mut i: usize = 0usize;
+    while i < c.dn {
+        emit_code(c.dcode[i]);
+        emit_sp();
+        emit_num(conv u64 c.ds[i]);
+        emit_sp();
+        emit_num(conv u64 c.de[i]);
+        emit_nl();
+        i = i + 1usize;
+    }
+    return;
+}
+
+// ---- entry ------------------------------------------------------------------
+pub fn check_dump(src: [u8], buf: read Buf) alloc -> unit {
+    let mut bump: Bump = Bump { next: 100663296usize, end: 251658240usize };
+    let al: Alloc = mk_alloc(write bump);
+    let mut p: P = P { nodes: [nnew(0); 49152], n: 1u32, pos: 0usize, no_struct: 0, dreg: 0u32, dtp: 0u32, mmode: 0, mreg: 0u32, mty: 0u32, uses: 0u32 };
+    let head: u32 = parse_program(write p, src, buf);
+    let uh: u32 = p.uses;
+    let mut c: C = C {
+        head: head,
+        uhead: uh,
+        loc_p0: [0usize; 512],
+        loc_p1: [0usize; 512],
+        loc_n: 0usize,
+        dcode: [0; 512],
+        ds: [0usize; 512],
+        de: [0usize; 512],
+        dn: 0usize,
+        known_types: map_new(read al),
+        known_values: map_new(read al),
+    };
+    build_symbols(read p, src, write c);
+    resolve_decl_types(read p, src, write c);
+    check_bodies(read p, src, write c);
+    sort_diags(write c);
+    dump_diags(write c);
+    return;
+}
