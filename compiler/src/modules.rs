@@ -1201,6 +1201,9 @@ impl<'a> Rewriter<'a> {
                     self.rewrite_ty(a);
                 }
                 self.rewrite_ty(&mut im.target);
+                if let Some((_, ty)) = &mut im.assoc_binding {
+                    self.rewrite_ty(ty);
+                }
                 for m in &mut im.methods {
                     let mut locals = vec![std::collections::HashSet::new()];
                     for p in &mut m.params {

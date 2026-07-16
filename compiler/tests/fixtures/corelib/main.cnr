@@ -11,7 +11,7 @@ use std::bump::{Bump, with_window, mk_alloc};
 use std::list::{List, Popped, Grow, Cell, CellRes, push_front, pop_front, length, cell, cell_get, collect};
 use core::cmp::{Ord, Ordering};
 use core::iter_terminals::{last};
-use core::iter_adapters::{TakeN, take_n};
+use core::iter_adapters::{TakeN, take_n, Enumerate, enumerate, Pair};
 use std::str::{starts_with, contains, split, join};
 
 // a named fn threaded to `map` capture-free (design 0009 §5.2): the call site
@@ -221,6 +221,42 @@ fn main() alloc -> i64 {
         },
         Opt::None => {
             return -29;
+        },
+    }
+
+    // core/iter_adapters: `enumerate` yields a COMPOUND `Pair[usize, i64]` item —
+    // its `type Item` binds a NAMED generic (`Pair`), qualified in the module tree
+    // now (was E1004). `last` drives the adapter to its final pair; inspect both
+    // projections. A guard check, so the sentinel stays STABLE.
+    let mut len2: List[i64] = List::Nil;
+    match push_front(read al, len2, 5) {
+        Grow::Grown(nl) => {
+            len2 = nl;
+        },
+        Grow::GrowOom => {
+            return -30;
+        },
+    }
+    match push_front(read al, len2, 6) {
+        Grow::Grown(nl) => {
+            len2 = nl;
+        },
+        Grow::GrowOom => {
+            return -30;
+        },
+    }
+    let enumd: Enumerate[List[i64]] = enumerate(len2);
+    match last(enumd) {
+        Opt::Some(pv) => {
+            if pv.first != 1usize {
+                return -31;
+            }
+            if pv.second != 5 {
+                return -31;
+            }
+        },
+        Opt::None => {
+            return -31;
         },
     }
 

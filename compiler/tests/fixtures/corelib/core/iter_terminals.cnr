@@ -7,12 +7,11 @@
 //
 // The lazy ADAPTERS live in `core::iter_adapters`: generic
 // `impl[I: Iter] Iter for Adapter[I]` blocks whose method bodies call the inner
-// iterator's `next` through the impl's `[I: Iter]` bound. `build_tree` now
-// qualifies an impl's type-param bounds (it only did so for `Item::Fn` before, so
-// `Iter` on `[I: Iter]` stayed unqualified and the call missed — E1002), so
-// `take_n`/`skip_n`/`take_while`/`skip_while` promote there. `enumerate`/`zip`
-// stay single-file for now: their `type Item` binds a named generic (`Pair[..]`),
-// which the impl arm still fails to qualify (E1004) — see `iter_adapters`.
+// iterator's `next` through the impl's `[I: Iter]` bound. `build_tree` qualifies
+// both an impl's type-param bounds (so `Iter` on `[I: Iter]` resolves — was E1002)
+// and its associated-type binding (so a named-generic `type Item = Pair[..]`
+// resolves — was E1004), so all six adapters
+// (`take_n`/`skip_n`/`take_while`/`skip_while`/`enumerate`/`zip`) promote there.
 use core::iter::{Iter, IterStep};
 use core::opt::{Opt};
 

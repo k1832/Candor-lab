@@ -16,15 +16,12 @@
 // type-param bounds but not an `Item::Impl`'s, so `Iter` on `[I: Iter]` stayed
 // unqualified and the lookup failed. With that gap closed these promote unchanged.
 //
-// NOT PROMOTED YET — `Enumerate`/`Zip` (and their `Pair` item): their `type Item`
-// binds a NAMED generic type (`Pair[usize, I::Item]` / `Pair[A::Item, B::Item]`)
-// rather than a bare projection. The `Item::Impl` qualification arm rewrites the
-// impl's iface/target/method types but NEVER its associated-type binding, so `Pair`
-// there stays unqualified in a module tree and the checker reports E1004 (`Pair`
-// is not a generic type). That is a SECOND, independent module-tree qualification
-// gap (the `im.assoc_binding` type is never `rewrite_ty`'d) beyond the `[I: Iter]`
-// bound gap fixed here; the four projection-`Item` adapters below are unaffected.
-// They remain the single-file `tests/iteration.rs` fixtures until that gap closes.
+// `Enumerate`/`Zip` bind a NAMED generic as their `type Item`
+// (`Pair[usize, I::Item]` / `Pair[A::Item, B::Item]`) rather than a bare
+// projection. That named type is now qualified in a module tree: `build_tree`
+// rewrites an `Item::Impl`'s associated-type binding alongside its iface/target/
+// method types, so `Pair` resolves here (it used to report E1004 — `Pair` is not
+// a generic type). `Pair` is the two-element item both adapters yield.
 use core::iter::{Iter, IterStep};
 
 // `take`/`skip` are reserved words, hence the `TakeN`/`take_n` naming.
@@ -141,6 +138,61 @@ impl[I: Iter] Iter for SkipWhile[I] {
                     }
                 },
             }
+        }
+    }
+}
+
+pub struct Pair[A, B] {
+    first: A,
+    second: B,
+}
+
+pub struct Enumerate[I] {
+    inner: I,
+    idx: usize,
+}
+pub fn enumerate[I: Iter](it: I) -> Enumerate[I] {
+    return Enumerate { inner: it, idx: 0usize };
+}
+impl[I: Iter] Iter for Enumerate[I] {
+    type Item = Pair[usize, I::Item];
+    fn next(self) alloc -> IterStep[Pair[usize, I::Item], Enumerate[I]] {
+        let i: usize = self.idx;
+        match self.inner.next() {
+            IterStep::Done => {
+                return IterStep::Done;
+            },
+            IterStep::More(x, rest) => {
+                return IterStep::More(Pair { first: i, second: x }, Enumerate { inner: rest, idx: i + 1usize });
+            },
+        }
+    }
+}
+
+pub struct Zip[A, B] {
+    a: A,
+    b: B,
+}
+pub fn zip[A: Iter, B: Iter](x: A, y: B) -> Zip[A, B] {
+    return Zip { a: x, b: y };
+}
+impl[A: Iter, B: Iter] Iter for Zip[A, B] {
+    type Item = Pair[A::Item, B::Item];
+    fn next(self) alloc -> IterStep[Pair[A::Item, B::Item], Zip[A, B]] {
+        match self.a.next() {
+            IterStep::Done => {
+                return IterStep::Done;
+            },
+            IterStep::More(xa, ra) => {
+                match self.b.next() {
+                    IterStep::Done => {
+                        return IterStep::Done;
+                    },
+                    IterStep::More(xb, rb) => {
+                        return IterStep::More(Pair { first: xa, second: xb }, Zip { a: ra, b: rb });
+                    },
+                }
+            },
         }
     }
 }
