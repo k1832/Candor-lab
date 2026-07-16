@@ -1,0 +1,483 @@
+// Std string utilities over the design-0013 `str`/`String` surface: byte-scan
+// predicates (`starts_with`/`ends_with`/`contains`/`find`), a view-returning
+// `trim`, and the two allocating builders `split` (OWNED `String` pieces into a
+// `Vec[String]`) and `join`. Every result is decided against a known-good literal
+// inside `main`, tracing 1 per passing check; the return is the passing-check
+// count, so all five engines — the tree-walking oracle, the MIR interpreter, and
+// the Cranelift / LLVM native backends — must agree byte-for-byte on both the
+// all-ones trace and the total.
+//
+// UTF-8 safety (P5): every byte offset fed to `substr` lands on a char boundary.
+// A VALID `str` needle cannot match straddling a boundary — its first byte is
+// either ASCII (< 0x80) or a lead byte (>= 0xC0), never a continuation byte
+// (0x80..0xBF) — so a byte-search match position is always boundary-aligned, and
+// the piece cut points in `split` never fault. `trim` only skips ASCII whitespace
+// (all single-byte), so its cut points are boundaries too. The multi-byte cases
+// below ("héllo,wörld") exercise this: had an offset landed mid-char, `substr`
+// would FAULT and the run would diverge from the oracle.
+
+enum Opt[T] { Some(T), None }
+
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+    realloc: fn(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) alloc -> rawptr u8,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+
+struct FreeList { next: usize, end: usize, head: rawptr u8 }
+struct FreeBlock { next: rawptr u8, size: usize }
+
+fn with_window(base: usize, size: usize) -> FreeList {
+    unsafe "the empty free list starts with a null head; no block is threaded yet" {
+        return FreeList { next: base, end: base + size, head: ptr_null[u8]() };
+    }
+}
+
+fn block_span(size: usize, align: usize) -> usize {
+    let mut need: usize = size;
+    if need < 16usize {
+        need = 16usize;
+    }
+    return (need + align - 1usize) / align * align;
+}
+
+fn freelist_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live FreeList whose [next, end) window and address-ordered free chain are reserved to this arena alone; every carved block stays inside [next, end) and is >= header-sized, and a split remainder (kept only when >= MIN_SPLIT) is written into the block's own tail" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let need: usize = block_span(size, align);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) {
+            let blk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if blk.size >= need {
+                if blk.size - need >= 32usize {
+                    let rem: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(cur) + need);
+                    ptr_write(cast_ptr[FreeBlock](rem), FreeBlock { next: blk.next, size: blk.size - need });
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: rem });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: rem, size: pblk.size });
+                    }
+                } else {
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: blk.next });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: blk.next, size: pblk.size });
+                    }
+                }
+                return cur;
+            }
+            prev = cur;
+            cur = blk.next;
+        }
+        let aligned: usize = (st.next + align - 1usize) / align * align;
+        if aligned + need > st.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: aligned + need, end: st.end, head: st.head });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+
+fn freelist_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    unsafe "the free list is kept ADDRESS-ORDERED; the freed block's own storage (>= header-sized, guaranteed by block_span in alloc) holds its FreeBlock header {next, size}, and a merge joins two blocks ONLY when their byte spans are exactly adjacent (addr + size == neighbour addr), so a merge can never overlap live memory nor bridge a gap" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let mut cap: usize = block_span(size, align);
+        let a: usize = ptr_to_addr(ptr);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) && ptr_to_addr(cur) < a {
+            let cblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            prev = cur;
+            cur = cblk.next;
+        }
+        let mut link: rawptr u8 = cur;
+        if !is_null(cur) {
+            let nblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if a + cap == ptr_to_addr(cur) {
+                cap = cap + nblk.size;
+                link = nblk.next;
+            }
+        }
+        if !is_null(prev) {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            if ptr_to_addr(prev) + pblk.size == a {
+                ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: link, size: pblk.size + cap });
+                return;
+            }
+        }
+        ptr_write(cast_ptr[FreeBlock](ptr), FreeBlock { next: link, size: cap });
+        if is_null(prev) {
+            ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: ptr });
+        } else {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: ptr, size: pblk.size });
+        }
+    }
+}
+
+fn freelist_realloc(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live FreeList; [ptr, ptr+old_span) is the block carved for old_size (block_span rounds identically on alloc/free). Growing in place either extends the bump frontier inside [next, end) or absorbs the physically-adjacent free block beginning exactly at ptr+old_span (splitting its tail when the remainder is >= MIN_SPLIT); the fallback carves a fresh block, copies old_size bytes into it, and frees the old block" {
+        let old_span: usize = block_span(old_size, align);
+        let new_span: usize = block_span(new_size, align);
+        if new_span <= old_span {
+            return ptr;
+        }
+        let a: usize = ptr_to_addr(ptr);
+        let tail: usize = a + old_span;
+        let extra: usize = new_span - old_span;
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        if tail == st.next {
+            if tail + extra <= st.end {
+                ptr_write(cast_ptr[FreeList](ctx), FreeList { next: tail + extra, end: st.end, head: st.head });
+                return ptr;
+            }
+        } else {
+            let mut prev: rawptr u8 = ptr_null[u8]();
+            let mut cur: rawptr u8 = st.head;
+            while !is_null(cur) && ptr_to_addr(cur) < tail {
+                let cblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+                prev = cur;
+                cur = cblk.next;
+            }
+            if !is_null(cur) && ptr_to_addr(cur) == tail {
+                let fblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+                if fblk.size >= extra {
+                    let mut link: rawptr u8 = fblk.next;
+                    if fblk.size - extra >= 32usize {
+                        let rem: rawptr u8 = addr_to_ptr[u8](tail + extra);
+                        ptr_write(cast_ptr[FreeBlock](rem), FreeBlock { next: fblk.next, size: fblk.size - extra });
+                        link = rem;
+                    }
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: link });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: link, size: pblk.size });
+                    }
+                    return ptr;
+                }
+            }
+        }
+        let newp: rawptr u8 = freelist_alloc(ctx, new_size, align);
+        if is_null(newp) {
+            return newp;
+        }
+        let mut i: usize = 0usize;
+        while i < old_size {
+            let s: rawptr u8 = addr_to_ptr[u8](a + i);
+            let d: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(newp) + i);
+            let v: u8 = ptr_read(s);
+            ptr_write(d, v);
+            i = i + 1usize;
+        }
+        freelist_free(ctx, ptr, old_size, align);
+        return newp;
+    }
+}
+
+static FREELIST_VT: AllocVtable = AllocVtable { alloc: freelist_alloc, free: freelist_free, realloc: freelist_realloc };
+
+fn mk_alloc(state: write FreeList) -> Alloc {
+    unsafe "ctx (the caller's FreeList local) and vt (the static FREELIST_VT) outlive every String this handle serves; the caller keeps the window and FREELIST_VT alive for the whole run and drops every String before the window dies" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(FREELIST_VT) };
+    }
+}
+
+// ---- the utilities under test ----------------------------------------------
+
+fn starts_with(s: str, prefix: str) -> bool {
+    let sb: [u8] = as_bytes(s);
+    let pb: [u8] = as_bytes(prefix);
+    let n: usize = len(pb);
+    if n > len(sb) { return false; }
+    let mut i: usize = 0usize;
+    while i < n {
+        if sb[i] != pb[i] { return false; }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+fn ends_with(s: str, suffix: str) -> bool {
+    let sb: [u8] = as_bytes(s);
+    let fb: [u8] = as_bytes(suffix);
+    let n: usize = len(fb);
+    let m: usize = len(sb);
+    if n > m { return false; }
+    let off: usize = m - n;
+    let mut i: usize = 0usize;
+    while i < n {
+        if sb[off + i] != fb[i] { return false; }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+// Full byte-wise `str` equality. `str == str` is a tree-walker-only op (the MIR
+// `Cmp` path treats operands as scalars), so the cross-engine tests compare via
+// this scalar byte loop instead.
+fn str_eq(a: str, b: str) -> bool {
+    let ab: [u8] = as_bytes(a);
+    let bb: [u8] = as_bytes(b);
+    let n: usize = len(ab);
+    if n != len(bb) { return false; }
+    let mut i: usize = 0usize;
+    while i < n {
+        if ab[i] != bb[i] { return false; }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+// First byte-offset of `needle` in `s`, or None. Empty needle is found at 0. A
+// match position is always char-boundary-aligned (see the file header), so the
+// returned offset is safe to feed to `substr`/`str_from`.
+fn find(s: str, needle: str) -> Opt[usize] {
+    let sb: [u8] = as_bytes(s);
+    let nb: [u8] = as_bytes(needle);
+    let n: usize = len(nb);
+    let m: usize = len(sb);
+    if n == 0usize { return Opt::Some(0usize); }
+    if n > m { return Opt::None; }
+    let last: usize = m - n;
+    let mut i: usize = 0usize;
+    loop {
+        if i > last { break; }
+        let mut j: usize = 0usize;
+        let mut matched: bool = true;
+        while j < n {
+            if sb[i + j] != nb[j] { matched = false; break; }
+            j = j + 1usize;
+        }
+        if matched { return Opt::Some(i); }
+        i = i + 1usize;
+    }
+    return Opt::None;
+}
+
+fn contains(s: str, needle: str) -> bool {
+    let r: Opt[usize] = find(s, needle);
+    match r {
+        Opt::Some(i) => { return true; }
+        Opt::None => { return false; }
+    }
+}
+
+fn is_ascii_ws(b: u8) -> bool {
+    return b == 32u8 || b == 9u8 || b == 10u8 || b == 13u8;
+}
+
+// Strip leading/trailing ASCII whitespace, returning a `substr` VIEW (no alloc).
+// Whitespace bytes are all single-byte ASCII, so the trimmed [start, end) cut
+// points are char boundaries and `substr` never faults.
+fn trim(s: str) -> str {
+    let sb: [u8] = as_bytes(s);
+    let m: usize = len(sb);
+    let mut start: usize = 0usize;
+    while start < m && is_ascii_ws(sb[start]) { start = start + 1usize; }
+    let mut end: usize = m;
+    while end > start && is_ascii_ws(sb[end - 1usize]) { end = end - 1usize; }
+    return substr(s, start, end);
+}
+
+fn matches_at(sb: [u8], i: usize, nb: [u8]) -> bool {
+    let n: usize = len(nb);
+    let mut j: usize = 0usize;
+    while j < n {
+        if sb[i + j] != nb[j] { return false; }
+        j = j + 1usize;
+    }
+    return true;
+}
+
+// Split `s` on a NON-EMPTY separator into OWNED `String` pieces. Empty-piece
+// rule (Rust `str::split`): a separator at the start, end, or immediately after
+// another separator yields an empty piece, so the result always has one more
+// piece than the number of separators (>= 1 piece even for the empty string).
+// Each piece is `substr(s, start, cut)` copied into its own `String`; both cut
+// points are char boundaries (a valid needle only matches on a boundary), so
+// `substr` never faults across a multi-byte char.
+fn split(a: read Alloc, s: str, sep: str) alloc -> Vec[String] {
+    let sb: [u8] = as_bytes(s);
+    let nb: [u8] = as_bytes(sep);
+    let total: usize = len(sb);
+    let seplen: usize = len(nb);
+    let mut res: Vec[String] = vec_new(a);
+    let mut start: usize = 0usize;
+    let mut i: usize = 0usize;
+    loop {
+        if i + seplen > total { break; }
+        if matches_at(sb, i, nb) {
+            let mut piece: String = string_new(a);
+            append(write piece, substr(s, start, i));
+            push(write res, piece);
+            start = i + seplen;
+            i = i + seplen;
+        } else {
+            i = i + 1usize;
+        }
+    }
+    let mut last: String = string_new(a);
+    append(write last, substr(s, start, total));
+    push(write res, last);
+    return res;
+}
+
+// Concatenate `parts` with `sep` between adjacent pieces, into an owned `String`.
+fn join(a: read Alloc, parts: read Vec[String], sep: str) alloc -> String {
+    let mut res: String = string_new(a);
+    let n: usize = len(read parts);
+    let mut i: usize = 0usize;
+    loop {
+        if i >= n { break; }
+        if i > 0usize { append(write res, sep); }
+        let piece_view: str = as_str(read get(read parts, i).*);
+        append(write res, piece_view);
+        i = i + 1usize;
+    }
+    return res;
+}
+
+// ---- checks -----------------------------------------------------------------
+
+fn chk(cond: bool) -> i64 { if cond { return 1; } return 0; }
+
+fn piece_eq(v: read Vec[String], i: usize, e: str) -> bool {
+    let got: str = as_str(read get(read v, i).*);
+    return str_eq(got, e);
+}
+
+fn find_is(s: str, needle: str, expect: usize) -> bool {
+    let r: Opt[usize] = find(s, needle);
+    match r {
+        Opt::Some(off) => { return off == expect; }
+        Opt::None => { return false; }
+    }
+}
+
+fn find_none(s: str, needle: str) -> bool {
+    let r: Opt[usize] = find(s, needle);
+    match r {
+        Opt::Some(off) => { return false; }
+        Opt::None => { return true; }
+    }
+}
+
+fn main() alloc -> i64 {
+    let mut st: FreeList = with_window(16777216usize, 1048576usize);
+    let a: Alloc = mk_alloc(write st);
+    let mut acc: i64 = 0;
+
+    // starts_with: match, no-match, empty prefix, prefix longer than s.
+    let c: i64 = chk(starts_with("hello", "he")); trace(c); acc = acc + c;
+    let c: i64 = chk(!starts_with("hello", "lo")); trace(c); acc = acc + c;
+    let c: i64 = chk(starts_with("hello", "")); trace(c); acc = acc + c;
+    let c: i64 = chk(!starts_with("hi", "hello")); trace(c); acc = acc + c;
+
+    // ends_with: match, no-match, empty suffix.
+    let c: i64 = chk(ends_with("hello", "lo")); trace(c); acc = acc + c;
+    let c: i64 = chk(!ends_with("hello", "he")); trace(c); acc = acc + c;
+    let c: i64 = chk(ends_with("hello", "")); trace(c); acc = acc + c;
+
+    // contains: found, not-found, empty needle.
+    let c: i64 = chk(contains("hello", "ell")); trace(c); acc = acc + c;
+    let c: i64 = chk(!contains("hello", "xyz")); trace(c); acc = acc + c;
+    let c: i64 = chk(contains("hello", "")); trace(c); acc = acc + c;
+
+    // find: single byte, multi-byte needle, not-found, empty needle at 0.
+    let c: i64 = chk(find_is("hello", "l", 2usize)); trace(c); acc = acc + c;
+    let c: i64 = chk(find_is("hello", "lo", 3usize)); trace(c); acc = acc + c;
+    let c: i64 = chk(find_none("hello", "z")); trace(c); acc = acc + c;
+    let c: i64 = chk(find_is("hello", "", 0usize)); trace(c); acc = acc + c;
+
+    // find over a multi-byte string: "héllo,wörld" — the ',' sits at byte 6
+    // (h=0, é=1..2, l=3, l=4, o=5, ,=6); 'l' first appears at byte 3 (past é).
+    let c: i64 = chk(find_is("héllo,wörld", ",", 6usize)); trace(c); acc = acc + c;
+    let c: i64 = chk(find_is("héllo", "l", 3usize)); trace(c); acc = acc + c;
+
+    // trim: both ends (spaces), leading tab+newline / trailing space, a carriage
+    // return (byte 13, built via push since `\r` is not a source escape), an
+    // all-whitespace string, and a string with no whitespace to strip.
+    let t1: str = trim("  hi  ");
+    let c: i64 = chk(str_eq(t1, "hi")); trace(c); acc = acc + c;
+    let t2: str = trim("\t\nx ");
+    let c: i64 = chk(str_eq(t2, "x")); trace(c); acc = acc + c;
+    let mut crs: String = string_new(read a);
+    push(write crs, 13);
+    push(write crs, 120);
+    push(write crs, 13);
+    let crsv: str = as_str(read crs);
+    let t3: str = trim(crsv);
+    let c: i64 = chk(str_eq(t3, "x")); trace(c); acc = acc + c;
+    let t4: str = trim("   ");
+    let c: i64 = chk(len(t4) == 0usize); trace(c); acc = acc + c;
+    let t5: str = trim("none");
+    let c: i64 = chk(str_eq(t5, "none")); trace(c); acc = acc + c;
+
+    // split: multiple pieces.
+    let v1: Vec[String] = split(read a, "a,b,c", ",");
+    let c: i64 = chk(len(read v1) == 3usize); trace(c); acc = acc + c;
+    let c: i64 = chk(piece_eq(read v1, 0usize, "a")); trace(c); acc = acc + c;
+    let c: i64 = chk(piece_eq(read v1, 1usize, "b")); trace(c); acc = acc + c;
+    let c: i64 = chk(piece_eq(read v1, 2usize, "c")); trace(c); acc = acc + c;
+
+    // split: adjacent separator -> interior empty piece.
+    let v2: Vec[String] = split(read a, "a,,b", ",");
+    let c: i64 = chk(len(read v2) == 3usize); trace(c); acc = acc + c;
+    let c: i64 = chk(piece_eq(read v2, 1usize, "")); trace(c); acc = acc + c;
+
+    // split: leading separator -> leading empty piece.
+    let v3: Vec[String] = split(read a, ",a", ",");
+    let c: i64 = chk(len(read v3) == 2usize); trace(c); acc = acc + c;
+    let c: i64 = chk(piece_eq(read v3, 0usize, "")); trace(c); acc = acc + c;
+    let c: i64 = chk(piece_eq(read v3, 1usize, "a")); trace(c); acc = acc + c;
+
+    // split: trailing separator -> trailing empty piece.
+    let v4: Vec[String] = split(read a, "a,", ",");
+    let c: i64 = chk(len(read v4) == 2usize); trace(c); acc = acc + c;
+    let c: i64 = chk(piece_eq(read v4, 0usize, "a")); trace(c); acc = acc + c;
+    let c: i64 = chk(piece_eq(read v4, 1usize, "")); trace(c); acc = acc + c;
+
+    // split: no separator present -> a single piece equal to the whole string.
+    let v5: Vec[String] = split(read a, "abc", ",");
+    let c: i64 = chk(len(read v5) == 1usize); trace(c); acc = acc + c;
+    let c: i64 = chk(piece_eq(read v5, 0usize, "abc")); trace(c); acc = acc + c;
+
+    // split: multi-BYTE separator "::".
+    let v6: Vec[String] = split(read a, "a::b::c", "::");
+    let c: i64 = chk(len(read v6) == 3usize); trace(c); acc = acc + c;
+    let c: i64 = chk(piece_eq(read v6, 1usize, "b")); trace(c); acc = acc + c;
+
+    // split over MULTI-BYTE UTF-8 text: "héllo,wörld" on "," -> ["héllo","wörld"].
+    // Each piece is 6 bytes; the cut at byte 6 lands cleanly between the two
+    // valid words — no mid-char `substr` fault.
+    let v7: Vec[String] = split(read a, "héllo,wörld", ",");
+    let c: i64 = chk(len(read v7) == 2usize); trace(c); acc = acc + c;
+    let c: i64 = chk(piece_eq(read v7, 0usize, "héllo")); trace(c); acc = acc + c;
+    let c: i64 = chk(piece_eq(read v7, 1usize, "wörld")); trace(c); acc = acc + c;
+    let p7v: str = as_str(read get(read v7, 0usize).*);
+    let c: i64 = chk(len(p7v) == 6usize); trace(c); acc = acc + c;
+
+    // join: several parts, single part, empty list.
+    let j1: String = join(read a, read v1, ",");
+    let j1v: str = as_str(read j1);
+    let c: i64 = chk(str_eq(j1v, "a,b,c")); trace(c); acc = acc + c;
+    let j2: String = join(read a, read v5, ",");
+    let j2v: str = as_str(read j2);
+    let c: i64 = chk(str_eq(j2v, "abc")); trace(c); acc = acc + c;
+    let empty: Vec[String] = vec_new(read a);
+    let j3: String = join(read a, read empty, ",");
+    let j3v: str = as_str(read j3);
+    let c: i64 = chk(len(j3v) == 0usize); trace(c); acc = acc + c;
+
+    // Round-trip on multi-byte text: join(split(s, sep), sep) == s.
+    let j4: String = join(read a, read v7, ",");
+    let j4v: str = as_str(read j4);
+    let c: i64 = chk(str_eq(j4v, "héllo,wörld")); trace(c); acc = acc + c;
+
+    return acc;
+}
