@@ -16,6 +16,11 @@ use crate::types::*;
 
 use super::{Checker, Use};
 
+/// Recursion bound for transitive associated-type projection resolution
+/// (design 0009 §2.2): a malformed cyclic `type Item = ..` binding stops here
+/// with the projection unresolved (cleanly rejected) instead of looping.
+const MAX_PROJ_DEPTH: usize = 64;
+
 impl<'a> Checker<'a> {
     /// Record a reached instantiation (unless we are checking a generic body at
     /// its definition site, where argument types are still opaque).
@@ -214,19 +219,21 @@ impl<'a> Checker<'a> {
         if let Some((aname, aty)) = &im.assoc {
             let mut am = impl_map.clone();
             am.insert("Self".to_string(), self_ty.clone());
-            smap.insert(format!("Self::{aname}"), subst(aty, &am));
+            smap.insert(format!("Self::{aname}"), self.reduce_projs(&subst(aty, &am), &am, 0));
         }
         smap
     }
 
     /// Resolve `ty::assoc` through the impl of `iface` for `ty` (design 0009
-    /// §2.2): the impl's associated-type binding substituted with its parameters.
-    pub(super) fn resolve_assoc(&self, ty: &Type, iface: &str) -> Option<Type> {
+    /// §2.2): the impl's associated-type binding substituted with its parameters,
+    /// then reduced transitively to the concrete leaf. `depth` bounds the
+    /// adapter-over-adapter recursion (see [`Self::reduce_projs`]).
+    fn resolve_assoc_depth(&self, ty: &Type, iface: &str, depth: usize) -> Option<Type> {
         let (idx, impl_map) = self.resolve_impl_for(ty, iface)?;
         let (_, aty) = self.items.impls[idx].assoc.as_ref()?;
         let mut m = impl_map.clone();
         m.insert("Self".to_string(), ty.clone());
-        Some(subst(aty, &m))
+        Some(self.reduce_projs(&subst(aty, &m), &m, depth))
     }
 
     /// Resolve a projection `Base::assoc` to a concrete type when `Base` is bound
@@ -235,14 +242,66 @@ impl<'a> Checker<'a> {
     /// member name selects the interface, so a projection over a concrete base
     /// resolves without the projection itself naming its interface.
     pub(super) fn resolve_proj(&self, base: &Type, assoc: &str) -> Option<Type> {
+        self.resolve_proj_depth(base, assoc, 0)
+    }
+
+    fn resolve_proj_depth(&self, base: &Type, assoc: &str, depth: usize) -> Option<Type> {
+        if depth > MAX_PROJ_DEPTH {
+            return None;
+        }
         for iface in self.items.interfaces.values() {
             if iface.assoc_type.as_deref() == Some(assoc) {
-                if let Some(t) = self.resolve_assoc(base, &iface.name) {
+                if let Some(t) = self.resolve_assoc_depth(base, &iface.name, depth) {
                     return Some(t);
                 }
             }
         }
         None
+    }
+
+    /// Reduce residual associated-type projections in `t` to their concrete leaf
+    /// (design 0009 §2.2, transitive). After substituting an impl's associated
+    /// binding, a residual `Base::Assoc` can remain when `Base` mapped to a
+    /// concrete `App` (an adapter whose `type Item = I::Item`): concretize the
+    /// base through `m` and resolve again, so an adapter-over-adapter chain
+    /// reaches the underlying leaf item. A base still opaque (a `Param`, at a
+    /// def-site) is left symbolic. `depth` bounds the recursion so a malformed,
+    /// cyclic binding terminates with the projection unresolved (cleanly
+    /// rejected) rather than looping.
+    fn reduce_projs(&self, t: &Type, m: &HashMap<String, Type>, depth: usize) -> Type {
+        match t {
+            Type::Proj(b, a) => match m.get(b) {
+                Some(c) if !matches!(c, Type::Param(_) | Type::Error) => {
+                    let c = c.clone();
+                    self.resolve_proj_depth(&c, a, depth + 1)
+                        .unwrap_or_else(|| t.clone())
+                }
+                _ => t.clone(),
+            },
+            Type::App(n, args) => Type::App(
+                n.clone(),
+                args.iter().map(|x| self.reduce_projs(x, m, depth)).collect(),
+            ),
+            Type::Array(e, l) => Type::Array(Box::new(self.reduce_projs(e, m, depth)), l.clone()),
+            Type::Slice(e) => Type::Slice(Box::new(self.reduce_projs(e, m, depth))),
+            Type::SliceMut(e) => Type::SliceMut(Box::new(self.reduce_projs(e, m, depth))),
+            Type::RawPtr(e) => Type::RawPtr(Box::new(self.reduce_projs(e, m, depth))),
+            Type::Box(e) => Type::Box(Box::new(self.reduce_projs(e, m, depth))),
+            Type::BoxResult(e) => Type::BoxResult(Box::new(self.reduce_projs(e, m, depth))),
+            Type::Borrow(e) => Type::Borrow(Box::new(self.reduce_projs(e, m, depth))),
+            Type::BorrowMut(e) => Type::BorrowMut(Box::new(self.reduce_projs(e, m, depth))),
+            Type::FnPtr(f) => Type::FnPtr(crate::types::FnPtrTy {
+                foreign: f.foreign,
+                params: f
+                    .params
+                    .iter()
+                    .map(|(mode, t)| (*mode, self.reduce_projs(t, m, depth)))
+                    .collect(),
+                alloc: f.alloc,
+                ret: Box::new(self.reduce_projs(&f.ret, m, depth)),
+            }),
+            _ => t.clone(),
+        }
     }
 
     /// Inject a resolution for every associated-type projection `Base::Assoc`

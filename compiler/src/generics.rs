@@ -15,6 +15,11 @@ use crate::resolve::{lower_param, GenericFnSig, IfaceInfo, IfaceMethod, ImplInfo
 use crate::span::Span;
 use crate::types::*;
 
+/// Recursion bound for transitive associated-type projection resolution
+/// (design 0009 §2.2): a malformed cyclic `type Item = ..` binding stops here
+/// (returns the unresolved projection) instead of looping forever.
+const MAX_PROJ_DEPTH: usize = 64;
+
 /// Documented monomorphization depth limit (design 0007 §5.1.1): a deterministic
 /// resource backstop for the undecidable instantiation tail.
 pub const MONO_DEPTH_LIMIT: usize = 64;
@@ -1237,6 +1242,13 @@ impl<'a> Monomorphizer<'a> {
     /// monomorphization (design 0009 §2.2): find the impl whose target unifies
     /// with `C` and substitute its parameters into the `assoc` binding.
     fn resolve_proj(&self, c: &Type, assoc: &str) -> Type {
+        self.resolve_proj_depth(c, assoc, 0)
+    }
+
+    fn resolve_proj_depth(&self, c: &Type, assoc: &str, depth: usize) -> Type {
+        if depth > MAX_PROJ_DEPTH {
+            return Type::Error;
+        }
         for (head, targs, _pnames, aname, aty) in &self.assoc_impls {
             if aname != assoc {
                 continue;
@@ -1252,10 +1264,58 @@ impl<'a> Monomorphizer<'a> {
                 _ => false,
             };
             if matched {
-                return subst(aty, &map);
+                return self.reduce_projs(&subst(aty, &map), &map, depth);
             }
         }
         Type::Error
+    }
+
+    /// Reduce residual associated-type projections in `t` to their concrete leaf
+    /// (design 0009 §2.2, transitive). An impl whose `type Item = I::Item` leaves
+    /// a residual `I::Item` after `subst` (its base maps to a concrete `App`, not
+    /// a `Param`); concretize the base through the impl's `map` and resolve again,
+    /// so an adapter-over-adapter chain reaches the underlying leaf item. A base
+    /// that stays opaque is left symbolic; a residual that fails to resolve keeps
+    /// its projection (unchanged one-hop behavior). `depth` bounds the recursion
+    /// so a malformed cyclic binding terminates instead of looping.
+    fn reduce_projs(&self, t: &Type, map: &HashMap<String, Type>, depth: usize) -> Type {
+        match t {
+            Type::Proj(b, a) => match map.get(b) {
+                Some(c) if !matches!(c, Type::Param(_) | Type::Error) => {
+                    let c = c.clone();
+                    let r = self.resolve_proj_depth(&c, a, depth + 1);
+                    if matches!(r, Type::Error) {
+                        t.clone()
+                    } else {
+                        r
+                    }
+                }
+                _ => t.clone(),
+            },
+            Type::App(n, args) => Type::App(
+                n.clone(),
+                args.iter().map(|x| self.reduce_projs(x, map, depth)).collect(),
+            ),
+            Type::Array(e, l) => Type::Array(Box::new(self.reduce_projs(e, map, depth)), l.clone()),
+            Type::Slice(e) => Type::Slice(Box::new(self.reduce_projs(e, map, depth))),
+            Type::SliceMut(e) => Type::SliceMut(Box::new(self.reduce_projs(e, map, depth))),
+            Type::RawPtr(e) => Type::RawPtr(Box::new(self.reduce_projs(e, map, depth))),
+            Type::Box(e) => Type::Box(Box::new(self.reduce_projs(e, map, depth))),
+            Type::BoxResult(e) => Type::BoxResult(Box::new(self.reduce_projs(e, map, depth))),
+            Type::Borrow(e) => Type::Borrow(Box::new(self.reduce_projs(e, map, depth))),
+            Type::BorrowMut(e) => Type::BorrowMut(Box::new(self.reduce_projs(e, map, depth))),
+            Type::FnPtr(f) => Type::FnPtr(crate::types::FnPtrTy {
+                foreign: f.foreign,
+                params: f
+                    .params
+                    .iter()
+                    .map(|(mode, t)| (*mode, self.reduce_projs(t, map, depth)))
+                    .collect(),
+                alloc: f.alloc,
+                ret: Box::new(self.reduce_projs(&f.ret, map, depth)),
+            }),
+            _ => t.clone(),
+        }
     }
 
     /// Inject the resolution of every associated-type projection `Param::Assoc`

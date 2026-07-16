@@ -591,3 +591,318 @@ fn collect_to_concrete_list_from_opaque_item_rejected() {
     );
     assert!(errors(&src).contains(&"E0703".to_string()), "want E0703, got {:?}", errors(&src));
 }
+
+
+// ---------------------------------------------------------------------------
+// Transitive associated-type projection resolution over ADAPTER stacks (design
+// 0009 section 2.2, extended). An adapter's `impl Iter` binds `type Item =
+// I::Item` — a projection over its OWN inner param. Resolving the adapter's
+// `Item` at a terminal call site must not stop at that residual projection: it
+// continues through the inner impl (and, for an adapter-over-adapter stack,
+// again) until the concrete leaf. Before the transitive fix, composing an
+// adapter with an item-observing terminal (`find`/`collect`, whose signature
+// mentions `I::Item`) failed E0703 because the adapter's `I::Item` resolved to
+// another projection instead of the leaf. These lock in leaf resolution AND
+// byte-exact agreement across all five engines.
+
+// The five iterator adapters (design 0009 combinator slice): each a by-value
+// struct owning its inner iterator(s), itself `impl Iter`, whose `type Item` is
+// a projection over the adapter's own inner param(s). `Pair` carries the
+// two-element items (`Enumerate`, `Zip`). `take`/`skip` are reserved, hence the
+// `TakeN`/`take_n` naming.
+const ADAPTERS: &str = r#"
+struct Pair[A, B] { first: A, second: B }
+struct TakeN[I] { inner: I, n: usize }
+fn take_n[I: Iter](it: I, n: usize) -> TakeN[I] { return TakeN { inner: it, n: n }; }
+impl[I: Iter] Iter for TakeN[I] {
+    type Item = I::Item;
+    fn next(take self) alloc -> IterStep[I::Item, TakeN[I]] {
+        if self.n == 0usize { return IterStep::Done; }
+        match self.inner.next() {
+            IterStep::Done => { return IterStep::Done; }
+            IterStep::More(x, rest) => { return IterStep::More(x, TakeN { inner: rest, n: self.n - 1usize }); }
+        }
+    }
+}
+struct SkipN[I] { inner: I, n: usize }
+fn skip_n[I: Iter](it: I, n: usize) -> SkipN[I] { return SkipN { inner: it, n: n }; }
+impl[I: Iter] Iter for SkipN[I] {
+    type Item = I::Item;
+    fn next(take self) alloc -> IterStep[I::Item, SkipN[I]] {
+        let mut k: usize = self.n;
+        let mut cur: I = self.inner;
+        loop {
+            match cur.next() {
+                IterStep::Done => { return IterStep::Done; }
+                IterStep::More(x, rest) => {
+                    if k == 0usize { return IterStep::More(x, SkipN { inner: rest, n: 0usize }); }
+                    k = k - 1usize;
+                    cur = rest;
+                }
+            }
+        }
+    }
+}
+struct Enumerate[I] { inner: I, idx: usize }
+fn enumerate[I: Iter](it: I) -> Enumerate[I] { return Enumerate { inner: it, idx: 0usize }; }
+impl[I: Iter] Iter for Enumerate[I] {
+    type Item = Pair[usize, I::Item];
+    fn next(take self) alloc -> IterStep[Pair[usize, I::Item], Enumerate[I]] {
+        let i: usize = self.idx;
+        match self.inner.next() {
+            IterStep::Done => { return IterStep::Done; }
+            IterStep::More(x, rest) => { return IterStep::More(Pair { first: i, second: x }, Enumerate { inner: rest, idx: i + 1usize }); }
+        }
+    }
+}
+struct Zip[A, B] { a: A, b: B }
+fn zip[A: Iter, B: Iter](x: A, y: B) -> Zip[A, B] { return Zip { a: x, b: y }; }
+impl[A: Iter, B: Iter] Iter for Zip[A, B] {
+    type Item = Pair[A::Item, B::Item];
+    fn next(take self) alloc -> IterStep[Pair[A::Item, B::Item], Zip[A, B]] {
+        match self.a.next() {
+            IterStep::Done => { return IterStep::Done; }
+            IterStep::More(xa, ra) => {
+                match self.b.next() {
+                    IterStep::Done => { return IterStep::Done; }
+                    IterStep::More(xb, rb) => { return IterStep::More(Pair { first: xa, second: xb }, Zip { a: ra, b: rb }); }
+                }
+            }
+        }
+    }
+}
+struct TakeWhile[I] { inner: I, pred: fn(read I::Item) -> bool, done: bool }
+fn take_while[I: Iter](it: I, p: fn(read I::Item) -> bool) -> TakeWhile[I] { return TakeWhile { inner: it, pred: p, done: false }; }
+impl[I: Iter] Iter for TakeWhile[I] {
+    type Item = I::Item;
+    fn next(take self) alloc -> IterStep[I::Item, TakeWhile[I]] {
+        if self.done { return IterStep::Done; }
+        let p: fn(read I::Item) -> bool = self.pred;
+        match self.inner.next() {
+            IterStep::Done => { return IterStep::Done; }
+            IterStep::More(x, rest) => {
+                if (p)(read x) { return IterStep::More(x, TakeWhile { inner: rest, pred: p, done: false }); }
+                return IterStep::Done;
+            }
+        }
+    }
+}
+struct SkipWhile[I] { inner: I, pred: fn(read I::Item) -> bool, skipping: bool }
+fn skip_while[I: Iter](it: I, p: fn(read I::Item) -> bool) -> SkipWhile[I] { return SkipWhile { inner: it, pred: p, skipping: true }; }
+impl[I: Iter] Iter for SkipWhile[I] {
+    type Item = I::Item;
+    fn next(take self) alloc -> IterStep[I::Item, SkipWhile[I]] {
+        let p: fn(read I::Item) -> bool = self.pred;
+        let mut skipping: bool = self.skipping;
+        let mut cur: I = self.inner;
+        loop {
+            match cur.next() {
+                IterStep::Done => { return IterStep::Done; }
+                IterStep::More(x, rest) => {
+                    if skipping {
+                        if (p)(read x) { cur = rest; }
+                        else { return IterStep::More(x, SkipWhile { inner: rest, pred: p, skipping: false }); }
+                    } else {
+                        return IterStep::More(x, SkipWhile { inner: rest, pred: p, skipping: false });
+                    }
+                }
+            }
+        }
+    }
+}
+"#;
+
+// Predicates and pair-unwrappers used by the item-observing adapter tests.
+const ADAPTER_OBS: &str = r#"
+fn is_gt_two(x: read i64) -> bool { if x.* > 2 { return true; } return false; }
+fn at_idx_two(p: read Pair[usize, i64]) -> bool { if p.first == 2usize { return true; } return false; }
+fn snd(o: Opt[Pair[usize, i64]], d: i64) -> i64 { match o { Opt::Some(v) => { return v.second; } Opt::None => { return d; } } }
+"#;
+
+#[test]
+fn find_over_take_n_adapter_all_engines() {
+    // THE nested repro: `find` (whose `pred: fn(read I::Item) -> bool` and return
+    // `Opt[I::Item]` mention the projection) over a `TakeN[List[i64]]`. The
+    // adapter's `type Item = I::Item` must resolve transitively to the leaf `i64`,
+    // not stop at `List[i64]::Item`. Before the fix: E0703. Found element is 3.
+    let src = format!(
+        "{ITER}{TERMINALS}{ADAPTERS}\n\
+         fn main() alloc -> i64 {{\n\
+             let mut bs: Bump = with_window(16777216, 1048576);\n\
+             let al: Alloc = mk_alloc(write bs);\n\
+             let r: i64 = unwrap_i64(find(take_n(mklist(read al), 3usize), is_three), 0 - 1);\n\
+             trace(r);\n\
+             return r;\n\
+         }}"
+    );
+    let (ret, trace) = all_engines(&src, "find_take_n");
+    assert_eq!(ret, 3);
+    assert_eq!(trace, vec![3]);
+}
+
+#[test]
+fn collect_over_take_n_adapter_all_engines() {
+    // `collect[I: Iter] -> List[I::Item]` over a `TakeN[List[i64]]`: the return
+    // type, the accumulator, and the `prepend_g` call all carry `I::Item`, which
+    // must resolve through the adapter to `i64`. take_n 2 of [4,3,2,1] = [4,3];
+    // their sum is 7.
+    let src = format!(
+        "{ITER}{TERMINALS}{ADAPTERS}\n\
+         fn collect[I: Iter](it: I, a: read Alloc) alloc -> List[I::Item] {{\n\
+             let mut acc: List[I::Item] = List::Nil;\n\
+             let mut cur: I = it;\n\
+             loop {{ match cur.next() {{ IterStep::More(x, rest) => {{ acc = prepend_g(a, x, acc); cur = rest; }} IterStep::Done => {{ break; }} }} }}\n\
+             return acc;\n\
+         }}\n\
+         fn sumlist(l: List[i64]) alloc -> i64 {{ let mut acc: i64 = 0; let mut cur: List[i64] = l; loop {{ match cur.next() {{ IterStep::More(x, rest) => {{ acc = acc + x; cur = rest; }} IterStep::Done => {{ break; }} }} }} return acc; }}\n\
+         fn main() alloc -> i64 {{\n\
+             let mut bs: Bump = with_window(16777216, 1048576);\n\
+             let al: Alloc = mk_alloc(write bs);\n\
+             let c: List[i64] = collect(take_n(mklist(read al), 2usize), read al);\n\
+             let s: i64 = sumlist(c);\n\
+             trace(s);\n\
+             return s;\n\
+         }}"
+    );
+    let (ret, trace) = all_engines(&src, "collect_take_n");
+    assert_eq!(ret, 7);
+    assert_eq!(trace, vec![7]);
+}
+
+#[test]
+fn find_over_two_adapter_stack_all_engines() {
+    // Multi-hop: `find` over `TakeN[SkipN[List[i64]]]`. `TakeN`'s `Item` resolves
+    // to `SkipN`'s `Item`, which resolves again to the `List` leaf `i64` — two
+    // transitive hops. skip 1 of [4,3,2,1] = [3,2,1]; take 2 = [3,2]; find 3.
+    let src = format!(
+        "{ITER}{TERMINALS}{ADAPTERS}\n\
+         fn main() alloc -> i64 {{\n\
+             let mut bs: Bump = with_window(16777216, 1048576);\n\
+             let al: Alloc = mk_alloc(write bs);\n\
+             let r: i64 = unwrap_i64(find(take_n(skip_n(mklist(read al), 1usize), 2usize), is_three), 0 - 1);\n\
+             trace(r);\n\
+             return r;\n\
+         }}"
+    );
+    let (ret, trace) = all_engines(&src, "find_two_stack");
+    assert_eq!(ret, 3);
+    assert_eq!(trace, vec![3]);
+}
+
+#[test]
+fn skip_n_adapter_all_engines() {
+    // `SkipN` yields the tail after dropping the first n. count(skip_n([4,3,2,1],1)) = 3.
+    let src = format!(
+        "{ITER}{TERMINALS}{ADAPTERS}\n\
+         fn main() alloc -> i64 {{\n\
+             let mut bs: Bump = with_window(16777216, 1048576);\n\
+             let al: Alloc = mk_alloc(write bs);\n\
+             let r: i64 = count(skip_n(mklist(read al), 1usize));\n\
+             trace(r);\n\
+             return r;\n\
+         }}"
+    );
+    let (ret, trace) = all_engines(&src, "skip_n");
+    assert_eq!(ret, 3);
+    assert_eq!(trace, vec![3]);
+}
+
+#[test]
+fn enumerate_adapter_all_engines() {
+    // `Enumerate` yields `Pair[usize, I::Item]` and carries a `usize` counter; its
+    // `Item` is a COMPOUND type embedding the projection. count(enumerate) = 4
+    // (item-agnostic terminal over the adapter).
+    let src = format!(
+        "{ITER}{TERMINALS}{ADAPTERS}\n\
+         fn main() alloc -> i64 {{\n\
+             let mut bs: Bump = with_window(16777216, 1048576);\n\
+             let al: Alloc = mk_alloc(write bs);\n\
+             let r: i64 = count(enumerate(mklist(read al)));\n\
+             trace(r);\n\
+             return r;\n\
+         }}"
+    );
+    let (ret, trace) = all_engines(&src, "enumerate");
+    assert_eq!(ret, 4);
+    assert_eq!(trace, vec![4]);
+}
+
+#[test]
+fn find_over_enumerate_yields_pair_all_engines() {
+    // Item-observing terminal over `Enumerate`: `find`'s `pred` sees the compound
+    // `Pair[usize, i64]` item, so the adapter's compound `Item` must resolve to
+    // `Pair[usize, i64]` (the projection inside the pair reduced to the leaf). The
+    // element at index 2 of [4,3,2,1] has value 2.
+    let src = format!(
+        "{ITER}{TERMINALS}{ADAPTERS}{ADAPTER_OBS}\n\
+         fn main() alloc -> i64 {{\n\
+             let mut bs: Bump = with_window(16777216, 1048576);\n\
+             let al: Alloc = mk_alloc(write bs);\n\
+             let r: i64 = snd(find(enumerate(mklist(read al)), at_idx_two), 0 - 1);\n\
+             trace(r);\n\
+             return r;\n\
+         }}"
+    );
+    let (ret, trace) = all_engines(&src, "find_enumerate");
+    assert_eq!(ret, 2);
+    assert_eq!(trace, vec![2]);
+}
+
+#[test]
+fn zip_adapter_all_engines() {
+    // `Zip` owns BOTH inner iterators and is `Done` when either is. Its `Item` is
+    // `Pair[A::Item, B::Item]` — two independent projections, over two params.
+    // count(zip([4,3,2,1], take_n([4,3,2,1],2))) = min(4,2) = 2.
+    let src = format!(
+        "{ITER}{TERMINALS}{ADAPTERS}\n\
+         fn main() alloc -> i64 {{\n\
+             let mut bs: Bump = with_window(16777216, 1048576);\n\
+             let al: Alloc = mk_alloc(write bs);\n\
+             let r: i64 = count(zip(mklist(read al), take_n(mklist(read al), 2usize)));\n\
+             trace(r);\n\
+             return r;\n\
+         }}"
+    );
+    let (ret, trace) = all_engines(&src, "zip");
+    assert_eq!(ret, 2);
+    assert_eq!(trace, vec![2]);
+}
+
+#[test]
+fn take_while_adapter_all_engines() {
+    // `TakeWhile` stores a `fn(read I::Item) -> bool` predicate FIELD (a fn-pointer
+    // whose parameter type is the projection) and yields until it first fails.
+    // take_while([4,3,2,1], >2) = [4,3]; count = 2.
+    let src = format!(
+        "{ITER}{TERMINALS}{ADAPTERS}{ADAPTER_OBS}\n\
+         fn main() alloc -> i64 {{\n\
+             let mut bs: Bump = with_window(16777216, 1048576);\n\
+             let al: Alloc = mk_alloc(write bs);\n\
+             let r: i64 = count(take_while(mklist(read al), is_gt_two));\n\
+             trace(r);\n\
+             return r;\n\
+         }}"
+    );
+    let (ret, trace) = all_engines(&src, "take_while");
+    assert_eq!(ret, 2);
+    assert_eq!(trace, vec![2]);
+}
+
+#[test]
+fn skip_while_adapter_all_engines() {
+    // `SkipWhile` drops the leading run satisfying its predicate FIELD, then yields
+    // the rest. skip_while([4,3,2,1], >2) drops 4,3 and yields [2,1]; count = 2.
+    let src = format!(
+        "{ITER}{TERMINALS}{ADAPTERS}{ADAPTER_OBS}\n\
+         fn main() alloc -> i64 {{\n\
+             let mut bs: Bump = with_window(16777216, 1048576);\n\
+             let al: Alloc = mk_alloc(write bs);\n\
+             let r: i64 = count(skip_while(mklist(read al), is_gt_two));\n\
+             trace(r);\n\
+             return r;\n\
+         }}"
+    );
+    let (ret, trace) = all_engines(&src, "skip_while");
+    assert_eq!(ret, 2);
+    assert_eq!(trace, vec![2]);
+}
