@@ -147,6 +147,9 @@ const OK: &[(&str, bool)] = &[
     ("fn fib(n: i64) -> i64 { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); } fn main() -> i64 { let r: i64 = fib(10); trace(r); return r; }", false),
     ("fn main() -> i64 { let mut s: i64 = 0; let mut i: i64 = 0; while i < 5 { s = s + i; trace(i); i = i + 1; } trace(s); return s; }", false),
     ("fn main() -> i64 { let a: u8 = 12u8; let b: u8 = 10u8; trace(conv i64 (a & b)); trace(conv i64 (a | b)); trace(conv i64 (a ^ b)); return 0; }", true),
+    // `str ==` / `!=` byte-wise (design 0013 §3): equal, unequal same-length,
+    // different-length, empty, and multibyte-UTF-8 pairs. Trace = 1,0,0,1,1,1.
+    ("fn main() -> i64 { if \"abc\" == \"abc\" { trace(1); } else { trace(0); } if \"abc\" == \"abd\" { trace(1); } else { trace(0); } if \"ab\" == \"abc\" { trace(1); } else { trace(0); } if \"\" == \"\" { trace(1); } else { trace(0); } if \"héllo\" == \"héllo\" { trace(1); } else { trace(0); } if \"héllo\" != \"hello\" { trace(1); } else { trace(0); } return 0; }", true),
 ];
 
 #[test]

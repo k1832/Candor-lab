@@ -1854,6 +1854,12 @@ impl<'a> Lowerer<'a> {
         use BinOp::*;
         match op {
             And | Or => self.lower_short_circuit(op, lhs, rhs),
+            // `str` equality is byte-wise (same length AND identical bytes), not
+            // fat-pointer identity — the tree-walker oracle (`eval_binary` +
+            // `str_byte_cmp`, design 0013 §3). Lower it into a length check and a
+            // byte-compare loop over existing MIR ops so all backends inherit the
+            // same semantics from one place.
+            Eq | Ne if self.is_str_ty(lhs) => self.lower_str_eq(op, lhs, rhs, span),
             Eq | Ne | Lt | Le | Gt | Ge => {
                 let (l, lty) = self.lower_value(lhs, None)?;
                 let ot = self.concretize(&lty);
@@ -1889,6 +1895,125 @@ impl<'a> Lowerer<'a> {
                 Ok((Operand::Local(id), Type::Scalar(sty)))
             }
         }
+    }
+
+    /// Whether `e` has type `str`, mirroring the oracle's `eval_ty_probe`: a
+    /// string literal and the `str`-returning text builtins are `str` before any
+    /// binding exists to look up; everything else falls back to `static_ty`.
+    fn is_str_ty(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::StrLit(_) => true,
+            ExprKind::Paren(i) => self.is_str_ty(i),
+            _ => matches!(self.static_ty(e), Some(Type::Str)),
+        }
+    }
+
+    /// Lower `str == str` / `str != str` into a byte-wise comparison matching the
+    /// tree-walker oracle (`str_byte_cmp`): equal iff same byte length AND
+    /// identical bytes. Both operands are materialized as `{ptr@0, len@8}` fat
+    /// pointers (the existing `str` representation); the length word and per-byte
+    /// `str[i]` reads reuse the slice-header index lowering, so the MIR interpreter
+    /// and both native backends inherit the same behavior from this one place.
+    fn lower_str_eq(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, span: Span) -> LR<(Operand, Type)> {
+        let u8t = Type::Scalar(ScalarTy::U8);
+        let usizet = Type::usize();
+        let lp = self.materialize_place(lhs, &Type::Str)?;
+        let rp = self.materialize_place(rhs, &Type::Str)?;
+
+        let result = self.new_local(Type::bool(), None);
+        let i = self.new_local(usizet.clone(), None);
+        self.emit(
+            StatementKind::Assign(i, Rvalue::Use(Operand::Const(0, ScalarTy::Usize))),
+            span,
+            false,
+        );
+
+        let len_of = |b: &mut Self, base: &Place| {
+            let mut lp = base.clone();
+            lp.proj.push(Proj::Field { offset: 8, ty: usizet.clone() });
+            b.emit_temp(usizet.clone(), Rvalue::Load { place: lp, ty: usizet.clone() }, span)
+        };
+        let len_l = len_of(self, &lp);
+        let len_r = len_of(self, &rp);
+        let len_eq = self.emit_temp(
+            Type::bool(),
+            Rvalue::Cmp { op: BinOp::Eq, l: Operand::Local(len_l), r: Operand::Local(len_r) },
+            span,
+        );
+
+        let loop_bb = self.new_block();
+        let body_bb = self.new_block();
+        let incr_bb = self.new_block();
+        let eq_bb = self.new_block();
+        let neq_bb = self.new_block();
+        let join = self.new_block();
+
+        // Equal lengths -> scan bytes; unequal lengths -> not equal.
+        self.terminate(Terminator::Branch { cond: Operand::Local(len_eq), then_bb: loop_bb, else_bb: neq_bb });
+
+        // Loop header: all bytes consumed (i >= len) -> equal; else compare byte i.
+        self.switch_to(loop_bb);
+        let done = self.emit_temp(
+            Type::bool(),
+            Rvalue::Cmp { op: BinOp::Ge, l: Operand::Local(i), r: Operand::Local(len_l) },
+            span,
+        );
+        self.terminate(Terminator::Branch { cond: Operand::Local(done), then_bb: eq_bb, else_bb: body_bb });
+
+        // Body: `str[i]` reuses the slice-index header read; `i < len` here holds,
+        // so the INV-CHECK bounds edge it carries is dead.
+        self.switch_to(body_bb);
+        let byte_at = |b: &mut Self, base: &Place| {
+            let mut pl = base.clone();
+            pl.proj.push(Proj::Index { index: Operand::Local(i), stride: 1, len: 0, span, slice: true });
+            b.emit_temp(u8t.clone(), Rvalue::Load { place: pl, ty: u8t.clone() }, span)
+        };
+        let lbyte = byte_at(self, &lp);
+        let rbyte = byte_at(self, &rp);
+        let byte_eq = self.emit_temp(
+            Type::bool(),
+            Rvalue::Cmp { op: BinOp::Eq, l: Operand::Local(lbyte), r: Operand::Local(rbyte) },
+            span,
+        );
+        self.terminate(Terminator::Branch { cond: Operand::Local(byte_eq), then_bb: incr_bb, else_bb: neq_bb });
+
+        // Increment: `i < len <= u64::MAX`, so a wrapping add never wraps.
+        self.switch_to(incr_bb);
+        let next = self.emit_temp(
+            usizet.clone(),
+            Rvalue::Bin {
+                op: BinOp::Add,
+                regime: Regime::Wrapping,
+                ty: ScalarTy::Usize,
+                l: Operand::Local(i),
+                r: Operand::Const(1, ScalarTy::Usize),
+                span,
+                fault: None,
+            },
+            span,
+        );
+        self.emit(StatementKind::Assign(i, Rvalue::Use(Operand::Local(next))), span, false);
+        self.terminate(Terminator::Goto(loop_bb));
+
+        // `==` is true on the equal edge; `!=` is true on the not-equal edge.
+        self.switch_to(eq_bb);
+        self.emit(
+            StatementKind::Assign(result, Rvalue::Use(Operand::Const((op == BinOp::Eq) as i128, ScalarTy::Bool))),
+            span,
+            false,
+        );
+        self.terminate(Terminator::Goto(join));
+
+        self.switch_to(neq_bb);
+        self.emit(
+            StatementKind::Assign(result, Rvalue::Use(Operand::Const((op == BinOp::Ne) as i128, ScalarTy::Bool))),
+            span,
+            false,
+        );
+        self.terminate(Terminator::Goto(join));
+
+        self.switch_to(join);
+        Ok((Operand::Local(result), Type::bool()))
     }
 
     fn lower_short_circuit(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> LR<(Operand, Type)> {

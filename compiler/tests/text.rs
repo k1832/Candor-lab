@@ -557,3 +557,75 @@ fn char_at_where_bytes_expected_rejected() {
     // `char_at` takes a `str`, not `[u8]` — no coercion (P2).
     assert!(!errors("fn main() -> i64 { let b: [u8] = b\"hi\"; let s: CharStep = char_at(b, 0); return 0; }").is_empty());
 }
+
+
+// ---- `str ==` / `str !=` lowering (byte-wise, design 0013 §3) ---------------
+// The equality operator on `str` is lowered to a length check plus a byte-compare
+// loop in the MIR builder, so the MIR interpreter and both native backends inherit
+// the tree-walker oracle's semantics: equal iff same length AND identical bytes.
+// Each case is byte-exact across the oracle, MIR interp, and Cranelift no-opt/opt
+// (`run_ret_all`); the LLVM fifth engine covers `str ==` through `tests/llvm.rs`'s
+// full-corpus gate.
+
+#[test]
+fn str_eq_equal_is_true() {
+    let src = "fn main() -> i64 { if \"abc\" == \"abc\" { return 1; } return 0; }";
+    assert_eq!(run_ret_all(src), 1);
+}
+
+#[test]
+fn str_eq_unequal_same_length_is_false() {
+    let src = "fn main() -> i64 { if \"abc\" == \"abd\" { return 1; } return 0; }";
+    assert_eq!(run_ret_all(src), 0);
+}
+
+#[test]
+fn str_eq_unequal_different_length_is_false() {
+    // A prefix is not equal even though every shared byte matches — the length
+    // guard rejects it before the byte loop can run off the shorter operand.
+    let src = "fn main() -> i64 { if \"ab\" == \"abc\" { return 1; } return 0; }";
+    assert_eq!(run_ret_all(src), 0);
+}
+
+#[test]
+fn str_eq_empty_vs_empty_is_true() {
+    let src = "fn main() -> i64 { if \"\" == \"\" { return 1; } return 0; }";
+    assert_eq!(run_ret_all(src), 1);
+}
+
+#[test]
+fn str_eq_empty_vs_nonempty_is_false() {
+    let src = "fn main() -> i64 { if \"\" == \"x\" { return 1; } return 0; }";
+    assert_eq!(run_ret_all(src), 0);
+}
+
+#[test]
+fn str_ne_is_the_inverse_of_eq() {
+    let eq = "fn main() -> i64 { if \"abc\" != \"abc\" { return 1; } return 0; }";
+    let ne = "fn main() -> i64 { if \"abc\" != \"abd\" { return 1; } return 0; }";
+    assert_eq!(run_ret_all(eq), 0);
+    assert_eq!(run_ret_all(ne), 1);
+}
+
+#[test]
+fn str_eq_multibyte_utf8_is_byte_wise() {
+    // `é` is two bytes; equality is over the raw byte run, so equal multibyte
+    // strings match and a same-char-count differing pair does not.
+    let same = "fn main() -> i64 { if \"héllo\" == \"héllo\" { return 1; } return 0; }";
+    let diff = "fn main() -> i64 { if \"héllo\" == \"hello\" { return 1; } return 0; }";
+    assert_eq!(run_ret_all(same), 1);
+    assert_eq!(run_ret_all(diff), 0);
+}
+
+#[test]
+fn str_eq_over_bindings_and_substr() {
+    // Non-literal `str` operands: a binding compared against a `substr` view.
+    let src = "fn main() -> i64 {\n\
+                 let s: str = \"hello\";\n\
+                 let head: str = substr(s, 0, 3);\n\
+                 let c: i64 = 0;\n\
+                 if head == \"hel\" { return 1; }\n\
+                 return c;\n\
+               }";
+    assert_eq!(run_ret_all(src), 1);
+}
