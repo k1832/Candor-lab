@@ -68,6 +68,17 @@ fn module_of(name: &str) -> String {
 // Generic-aware AST-type resolution (param scope)
 // ---------------------------------------------------------------------------
 
+/// Arity of a compiler-known builtin generic type constructor, or `None` if
+/// `name` is not one. The recognized set mirrors monomorphization's `rewrite_ty`
+/// (`Vec`/`Map`); `Map[V]` is single-arg because keys are byte-strings
+/// (design 0013 §1.3), not a `Map[K, V]`.
+fn builtin_generic_arity(name: &str) -> Option<usize> {
+    match name {
+        "Vec" | "Map" => Some(1),
+        _ => None,
+    }
+}
+
 /// Resolve an AST type to a semantic `Type` with a set of in-scope type-parameter
 /// names mapped to `Type::Param`, and generic applications to `Type::App`.
 pub fn resolve_gty(
@@ -110,6 +121,21 @@ pub fn resolve_gty(
                 .iter()
                 .map(|a| resolve_gty(a, params, known_types, generic_types, diags))
                 .collect();
+            // Compiler-known builtin generic constructors (`Vec[T]`, `Map[V]`)
+            // resolve in a generic context exactly as monomorphization's
+            // `rewrite_ty` treats them: a `Type::App` that survives to lowering.
+            // Their arity is fixed, so a wrong-arity application still errors.
+            if let Some(arity) = builtin_generic_arity(name) {
+                if ra.len() != arity {
+                    diags.push(Diag::error(
+                        "E1004",
+                        format!("`{name}` expects {arity} type argument(s), found {}", ra.len()),
+                        ty.span,
+                    ));
+                    return Type::Error;
+                }
+                return Type::App(name.clone(), ra);
+            }
             if !generic_types.contains(name) && !params.contains(name) {
                 diags.push(Diag::error(
                     "E1004",
