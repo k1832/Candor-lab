@@ -41,6 +41,9 @@
 #include <sys/mman.h>
 #include <pthread.h>
 #include <dirent.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <unistd.h>
 
 /* Must match src/interp/mem.rs and src/backend/object.rs MEM_BASE. */
 #define MEM_BASE    0x0000200000000000UL
@@ -121,6 +124,47 @@ int64_t listdir(const char *path, char *dst, uint64_t dcap) {
     }
     closedir(d);
     return (int64_t)needed;
+}
+
+/* ------------------------------------------------------------------------- */
+/* std::net TCP client (design 0013 std net over the 0011 boundary).         */
+/* ------------------------------------------------------------------------- */
+
+/* `sys_tcp_connect` binds here (there is no libc `tcp_connect`): resolve the
+ * `host_len`-byte `host` (numeric like "127.0.0.1" or a name) + `port` via
+ * getaddrinfo, then socket/connect the first address that accepts. Returns the
+ * connected fd (>= 0) — an ORDINARY descriptor, so libc read/write/close (the
+ * sys_read/sys_write/sys_close externs) drive send/recv/close — or -1 on failure
+ * (unresolvable host, or every address refused/unreachable). `host` arrives already
+ * translated to a real host pointer at the boundary (backend::lower::host_addr) and
+ * is NOT NUL-terminated, so it is copied into a bounded local first. */
+int64_t tcp_connect(const char *host, uint64_t host_len, int32_t port) {
+    char hbuf[256];
+    if (host_len >= sizeof(hbuf)) return -1;
+    memcpy(hbuf, host, (size_t)host_len);
+    hbuf[host_len] = '\0';
+
+    char pbuf[16];
+    snprintf(pbuf, sizeof(pbuf), "%d", (int)port);
+
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(hbuf, pbuf, &hints, &res) != 0) return -1;
+
+    int fd = -1;
+    for (struct addrinfo *ai = res; ai != NULL; ai = ai->ai_next) {
+        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) continue;
+        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+    return (int64_t)fd;
 }
 
 /* ------------------------------------------------------------------------- */

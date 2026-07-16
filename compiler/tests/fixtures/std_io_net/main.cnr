@@ -1,0 +1,146 @@
+boundary
+// std::net TCP client — a POSIX socket boundary module over the 0011 foreign
+// boundary (companion to the file I/O in std_io/main.cnr). Sockets ARE file
+// descriptors: the ONLY new extern is `sys_tcp_connect`, which returns a connected
+// descriptor; send/recv/close REUSE the std::io `sys_write`/`sys_read`/`sys_close`
+// externs on that fd. The externs carry the C-boundary TRUST; the pub wrappers
+// carry the ENFORCED value contracts and discharge the `foreign` effect, so the
+// module's public surface is ordinary safe Candor — audit-clean.
+//
+// The extern symbols are `sys_*` (the edition's extern-name -> C-symbol rule strips
+// the prefix): `sys_read`/`sys_write`/`sys_close` bind to libc read/write/close;
+// `sys_tcp_connect` binds to the runtime's `tcp_connect` shim (there is no libc
+// `tcp_connect`) — a getaddrinfo/socket/connect client the interpreter shim mirrors
+// with `std::net::TcpStream::connect`.
+
+extern "C" {
+    fn sys_tcp_connect(host: rawptr u8, host_len: usize, port: i32) foreign -> i32
+        trust "TCP client connect (getaddrinfo/socket/connect): reads at most host_len bytes of the host name, retains no pointer, thread-confined to this call; returns a connected descriptor (>= 0) or a negative error" {
+            valid_for(host, host_len),
+            no_retain(host),
+            thread_confined(host),
+        };
+    fn sys_close(fd: i32) foreign -> i32
+        trust "POSIX close(2): closes a descriptor; touches no Candor memory" {
+        };
+    fn sys_read(fd: i32, buf: rawptr u8, count: usize) foreign -> isize
+        trust "POSIX read(2): writes at most count bytes into buf, retains no pointer, thread-confined" {
+            valid_for(buf, count),
+            no_retain(buf),
+            thread_confined(buf),
+        };
+    fn sys_write(fd: i32, buf: rawptr u8, count: usize) foreign -> isize
+        trust "POSIX write(2): reads at most count bytes from buf, retains no pointer, thread-confined" {
+            valid_for(buf, count),
+            no_retain(buf),
+            thread_confined(buf),
+        };
+}
+
+pub enum IoError {
+    Errno(i32),
+}
+
+pub enum IoResult {
+    ok Ok(usize),
+    Err(IoError),
+}
+
+// The connect result carries the connected fd on success. Native-safe (LLVM S2
+// scalar enum; no String/allocator), like the sibling `IoResult`. The audited
+// module stays NON-generic so `candor audit` keeps its foreign-discharge report.
+pub enum TcpResult {
+    ok Ok(i32),
+    Err(IoError),
+}
+
+// Connect a TCP client to `host`:`port`, returning the connected fd. `host` is a
+// live `[u8]` view (e.g. the bytes of "127.0.0.1"); its length bounds what the
+// extern reads. On a refused/unreachable connection or an unresolvable host the
+// extern returns a negative value, surfaced as the `Err` arm — never a crash.
+pub fn tcp_connect(host: read [u8], port: i32) -> TcpResult {
+    unsafe "sys_tcp_connect trust discharged: host is a live [u8] view valid for len(host) bytes; connect reads only those bytes and retains nothing, thread-confined" {
+        let fd: i32 = sys_tcp_connect(addr_of(host[0]), len(host), port);
+        if fd < 0i32 {
+            return TcpResult::Err(IoError::Errno(fd));
+        }
+        return TcpResult::Ok(fd);
+    }
+}
+
+// close/read_into/write_all reused verbatim from std::io: a socket fd is an
+// ordinary descriptor, so send/recv/close are the same syscalls.
+pub fn close(fd: i32) -> IoResult {
+    unsafe "sys_close trust discharged: fd is a descriptor; close touches no Candor memory" {
+        let r: i32 = sys_close(fd);
+        if r < 0i32 {
+            return IoResult::Err(IoError::Errno(r));
+        }
+        return IoResult::Ok(0usize);
+    }
+}
+
+pub fn read_into(fd: i32, buf: write [u8]) -> IoResult {
+    unsafe "sys_read trust discharged: buf is a live [u8] view valid for len(buf) bytes; read retains nothing (POSIX), thread-confined" {
+        let n: isize = sys_read(fd, addr_of_mut(buf[0]), len(buf));
+        if n < 0isize {
+            return IoResult::Err(IoError::Errno(conv i32 n));
+        }
+        return IoResult::Ok(conv usize n);
+    }
+}
+
+pub fn write_all(fd: i32, s: read [u8]) -> IoResult {
+    let total: usize = len(s);
+    if total == 0usize {
+        return IoResult::Ok(0usize);
+    }
+    unsafe "sys_write trust discharged: s is a live [u8] view valid for len(s) bytes; write retains nothing (POSIX), thread-confined" {
+        let n: isize = sys_write(fd, addr_of(s[0]), total);
+        if n < 0isize {
+            return IoResult::Err(IoError::Errno(conv i32 n));
+        }
+        if conv usize n < total {
+            return IoResult::Err(IoError::Errno(0i32 - 1i32));
+        }
+        return IoResult::Ok(total);
+    }
+}
+
+// Demonstrator: connect to 127.0.0.1:PORT, write a "PING" request, drain the whole
+// response (looping read_into to EOF so a short read never truncates the datum),
+// close, and return `total_bytes * 1000 + checksum(bytes)` — a value the harness
+// derives from the server's response and asserts byte-exact. The port literal is
+// substituted by the test harness with the loopback server's ephemeral port.
+fn main() -> i64 {
+    let host: [9]u8 = [49u8, 50u8, 55u8, 46u8, 48u8, 46u8, 48u8, 46u8, 49u8];
+    let port: i32 = 12345i32;
+    let fd: i32 = match tcp_connect(slice_of(host), port) {
+        TcpResult::Ok(f) => f,
+        TcpResult::Err(e) => { return 0i64 - 1i64; },
+    };
+    let req: [4]u8 = [80u8, 73u8, 78u8, 71u8];
+    match write_all(fd, slice_of(req)) {
+        IoResult::Ok(c) => { },
+        IoResult::Err(e) => { return 0i64 - 2i64; },
+    }
+    let mut buf: [64]u8 = [0u8; 64];
+    let mut total: i64 = 0i64;
+    let mut checksum: i64 = 0i64;
+    loop {
+        let n: usize = match read_into(fd, slice_of_mut(buf)) {
+            IoResult::Ok(c) => c,
+            IoResult::Err(e) => { return 0i64 - 3i64; },
+        };
+        if n == 0usize { break; }
+        let mut i: usize = 0usize;
+        loop {
+            if i >= n { break; }
+            checksum = checksum + conv i64 buf[i];
+            i = i + 1usize;
+        }
+        total = total + conv i64 n;
+    }
+    let cr: IoResult = close(fd);
+    return total * 1000i64 + checksum;
+}

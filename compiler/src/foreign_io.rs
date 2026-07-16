@@ -23,6 +23,7 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
@@ -35,9 +36,34 @@ const O_CREAT: i128 = 0x40;
 const O_TRUNC: i128 = 0x200;
 const O_APPEND: i128 = 0x400;
 
+/// A backing handle for an open fd (>= 3): a real file or a connected TCP socket.
+/// Both `std::fs::File` and `std::net::TcpStream` implement `Read`/`Write`, so the
+/// shared `sys_read`/`sys_write`/`sys_close` shims dispatch through this enum
+/// uniformly — a socket fd lives in the same fd table as a file fd (design 0013
+/// std net over the 0011 boundary: sockets ARE file descriptors).
+enum Handle {
+    File(File),
+    Tcp(TcpStream),
+}
+
+impl Handle {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Handle::File(f) => f.read(buf),
+            Handle::Tcp(s) => s.read(buf),
+        }
+    }
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Handle::File(f) => f.write(data),
+            Handle::Tcp(s) => s.write(data),
+        }
+    }
+}
+
 struct IoState {
     root: PathBuf,
-    files: HashMap<i32, File>,
+    files: HashMap<i32, Handle>,
     next_fd: i32,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
@@ -112,6 +138,19 @@ pub fn unregister_std_io() {
     }
 }
 
+/// Register the std/net shim (`sys_tcp_connect`) into the foreign registry. The
+/// socket fd it returns lives in the SAME fd table as file fds, so the std/io
+/// `sys_read`/`sys_write`/`sys_close` shims (registered by `register_std_io`)
+/// operate on the socket — register both for a network client. Idempotent.
+pub fn register_std_net() {
+    crate::foreign::register("sys_tcp_connect", shim_tcp_connect);
+}
+
+/// Remove the std/net shim, restoring `no_foreign_runtime` for its symbol.
+pub fn unregister_std_net() {
+    crate::foreign::unregister("sys_tcp_connect");
+}
+
 // ---- test-only shim overrides (fault-injection) ----------------------------
 
 /// Override `sys_write` with a shim that reports it wrote exactly `n` bytes
@@ -177,7 +216,7 @@ fn shim_open(args: &[i128], mem: &mut Mem) -> i128 {
         Ok(f) => {
             let fd = s.next_fd;
             s.next_fd += 1;
-            s.files.insert(fd, f);
+            s.files.insert(fd, Handle::File(f));
             fd as i128
         }
         Err(_) => -1,
@@ -303,4 +342,33 @@ fn shim_listdir(args: &[i128], mem: &mut Mem) -> i128 {
         }
     }
     needed as i128
+}
+
+/// `sys_tcp_connect(host: rawptr u8, host_len: usize, port: i32) -> i32` — resolve
+/// `host` (a `host_len`-byte view, e.g. `127.0.0.1`) + `port` via
+/// `std::net::TcpStream::connect`, insert the connected stream into the SHARED fd
+/// table, and return its fd (>= 3). The returned fd is an ordinary entry alongside
+/// file fds, so `sys_read`/`sys_write`/`sys_close` operate on the socket. Returns
+/// -1 on any failure (host parse or a refused/unreachable connection), the
+/// POSIX-shaped convention the safe wrapper turns into its `Err` arm.
+fn shim_tcp_connect(args: &[i128], mem: &mut Mem) -> i128 {
+    let host_addr = args[0] as u64;
+    let host_len = args[1] as u64;
+    let port = args[2] as u16;
+    let host = match mem.read(host_addr, host_len, false) {
+        Ok(b) => match String::from_utf8(b) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        },
+        Err(_) => return -1,
+    };
+    let stream = match TcpStream::connect((host.as_str(), port)) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let mut s = state().lock().unwrap();
+    let fd = s.next_fd;
+    s.next_fd += 1;
+    s.files.insert(fd, Handle::Tcp(stream));
+    fd as i128
 }

@@ -475,6 +475,84 @@ fn gate_aot_native_list_dir() {
     assert_eq!(exp_ret, 3, "three entries listed");
 }
 
+// ---------------------------------------------------------------------------
+// std::net TCP client (design 0013 std net over the 0011 boundary): the fixture
+// compiled to a REAL native binary calling the linked `tcp_connect` runtime shim
+// (getaddrinfo/socket/connect) + real libc read/write/close. A loopback server
+// thread accepts one connection and returns a fixed response; the binary is a
+// SEPARATE process connecting over 127.0.0.1, so the ephemeral port threads in
+// cleanly via source substitution. The exit byte must equal the shim-backed
+// interpreter oracle's, and a refused connection is the Err arm (no crash).
+// ---------------------------------------------------------------------------
+fn serve_fixed_once(response: &'static [u8]) -> (u16, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().unwrap().port();
+    let h = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut scratch = [0u8; 64];
+            let _ = stream.read(&mut scratch);
+            let _ = stream.write_all(response);
+        }
+    });
+    (port, h)
+}
+
+#[test]
+fn gate_aot_native_tcp_connect() {
+    assert!(cc_available(), "cc/linker unavailable: cannot build runnable executables");
+    let _g = io_guard();
+    let base = std::fs::read_to_string(fixtures_dir().join("std_io_net/main.cnr")).expect("read net fixture");
+
+    // Oracle: the shim-backed interpreter (real std::net::TcpStream) against a
+    // loopback server returning a fixed "PONG\n".
+    let (port, srv) = serve_fixed_once(b"PONG\n");
+    let src = base.replace("12345i32", &format!("{port}i32"));
+    foreign_io::reset();
+    foreign_io::register_std_io();
+    foreign_io::register_std_net();
+    let exp_ret = match run_source_real(&src) {
+        RunResult::Ok(r) => r.ret,
+        _ => {
+            foreign_io::unregister_std_net();
+            foreign_io::unregister_std_io();
+            srv.join().unwrap();
+            panic!("shim-backed interpreter should run the tcp client");
+        }
+    };
+    foreign_io::unregister_std_net();
+    foreign_io::unregister_std_io();
+    srv.join().unwrap();
+    assert_eq!(exp_ret, 5318, "\"PONG\\n\": 5 bytes * 1000 + checksum 318");
+
+    // Native: a linked binary calling the real `tcp_connect`/read/write/close, run
+    // as a process against a fresh loopback server on its own ephemeral port.
+    let work = std::env::temp_dir().join(format!("candor-aot-net-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    let (port, srv) = serve_fixed_once(b"PONG\n");
+    let srcpath = work.join("prog.cnr");
+    std::fs::write(&srcpath, base.replace("12345i32", &format!("{port}i32"))).unwrap();
+    let out = work.join("prog");
+    candor::compile_path(&srcpath, &out).expect("compile tcp client demonstrator");
+    let output = Command::new(&out).output().expect("run compiled tcp client binary");
+    srv.join().unwrap();
+    assert_eq!(output.status.code(), Some(exp_ret as u8 as i32), "native exit byte vs shim run");
+
+    // Refused connection (nothing listening): the Err arm -> main returns -1, not a
+    // crash. A bind-then-drop yields a free port; connect(2) is refused.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let refused_port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let rpath = work.join("refused.cnr");
+    std::fs::write(&rpath, base.replace("12345i32", &format!("{refused_port}i32"))).unwrap();
+    let rout = work.join("refused");
+    candor::compile_path(&rpath, &rout).expect("compile refused-connection program");
+    let routput = Command::new(&rout).output().expect("run compiled refused binary");
+    let _ = std::fs::remove_dir_all(&work);
+    assert_eq!(routput.status.code(), Some((-1i64) as u8 as i32), "refused -> Err arm -> -1 exit byte");
+}
+
 #[test]
 fn gate_aot_native_read_file_string() {
     assert!(cc_available(), "cc/linker unavailable: cannot build runnable executables");

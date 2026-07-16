@@ -666,6 +666,74 @@ fn gate_llvm_native_list_dir() {
     assert_eq!(exp_ret, 3, "three entries listed");
 }
 
+// ---------------------------------------------------------------------------
+// std::net TCP client (design 0013 std net over the 0011 boundary): the fixture
+// built by clang -O2 into a real binary calling the linked `tcp_connect` runtime
+// shim (getaddrinfo/socket/connect) + real libc read/write/close. A loopback
+// server thread returns a fixed response; the binary is a SEPARATE process
+// connecting over 127.0.0.1, so the ephemeral port threads in via source
+// substitution. The exit byte must equal the shim-backed interpreter oracle's.
+// ---------------------------------------------------------------------------
+fn serve_fixed_once(response: &'static [u8]) -> (u16, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().unwrap().port();
+    let h = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut scratch = [0u8; 64];
+            let _ = stream.read(&mut scratch);
+            let _ = stream.write_all(response);
+        }
+    });
+    (port, h)
+}
+
+#[test]
+fn gate_llvm_native_tcp_connect() {
+    assert!(clang_available(), "clang unavailable");
+    let _g = io_guard();
+    let base = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/std_io_net/main.cnr"),
+    )
+    .expect("read net fixture");
+
+    // Oracle: the shim-backed interpreter (real std::net::TcpStream) vs a loopback
+    // server returning a fixed "PONG\n".
+    let (port, srv) = serve_fixed_once(b"PONG\n");
+    let src = base.replace("12345i32", &format!("{port}i32"));
+    candor::foreign_io::reset();
+    candor::foreign_io::register_std_io();
+    candor::foreign_io::register_std_net();
+    let exp_ret = match run_source_real(&src) {
+        RunResult::Ok(r) => r.ret,
+        _ => {
+            candor::foreign_io::unregister_std_net();
+            candor::foreign_io::unregister_std_io();
+            srv.join().unwrap();
+            panic!("shim-backed interpreter should run the tcp client");
+        }
+    };
+    candor::foreign_io::unregister_std_net();
+    candor::foreign_io::unregister_std_io();
+    srv.join().unwrap();
+    assert_eq!(exp_ret, 5318, "\"PONG\\n\": 5 bytes * 1000 + checksum 318");
+
+    // Native: a clang -O2 binary calling the real `tcp_connect`/read/write/close,
+    // run as a process against a fresh loopback server on its own ephemeral port.
+    let work = std::env::temp_dir().join(format!("candor-llvm-net-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    let (port, srv) = serve_fixed_once(b"PONG\n");
+    let srcpath = work.join("prog.cnr");
+    std::fs::write(&srcpath, base.replace("12345i32", &format!("{port}i32"))).unwrap();
+    let out = work.join("prog");
+    candor::compile_path_llvm(&srcpath, &out).expect("compile tcp client via clang -O2");
+    let output = Command::new(&out).output().expect("run compiled tcp client binary");
+    srv.join().unwrap();
+    let _ = std::fs::remove_dir_all(&work);
+    assert_eq!(output.status.code(), Some(exp_ret as u8 as i32), "native exit byte vs shim run");
+}
+
 #[test]
 fn gate_llvm_native_read_file_string() {
     assert!(clang_available(), "clang unavailable");
