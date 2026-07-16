@@ -11,6 +11,7 @@ use std::bump::{Bump, with_window, mk_alloc};
 use std::list::{List, Popped, Grow, Cell, CellRes, push_front, pop_front, length, cell, cell_get, collect};
 use core::cmp::{Ord, Ordering};
 use core::iter_terminals::{last};
+use core::iter_adapters::{TakeN, take_n};
 use std::str::{starts_with, contains, split, join};
 
 // a named fn threaded to `map` capture-free (design 0009 §5.2): the call site
@@ -186,6 +187,40 @@ fn main() alloc -> i64 {
         },
         Opt::None => {
             return -22;
+        },
+    }
+
+    // core/iter_adapters: a lazy adapter over a `List`, consumed by a terminal —
+    // `take_n` bounds the walk to the first item, `last` drives it to exhaustion.
+    // The adapter's `[I: Iter]` bound is qualified in the module tree now, so its
+    // `self.inner.next()` resolves (was E1002). The un-yielded tail is freed when
+    // the exhausted `TakeN` drops (alloc-on-drop), so `main` stays `alloc`.
+    let mut lad: List[i64] = List::Nil;
+    match push_front(read al, lad, 5) {
+        Grow::Grown(nl) => {
+            lad = nl;
+        },
+        Grow::GrowOom => {
+            return -28;
+        },
+    }
+    match push_front(read al, lad, 6) {
+        Grow::Grown(nl) => {
+            lad = nl;
+        },
+        Grow::GrowOom => {
+            return -28;
+        },
+    }
+    let capped: TakeN[List[i64]] = take_n(lad, 1usize);
+    match last(capped) {
+        Opt::Some(av) => {
+            if av != 6 {
+                return -29;
+            }
+        },
+        Opt::None => {
+            return -29;
         },
     }
 

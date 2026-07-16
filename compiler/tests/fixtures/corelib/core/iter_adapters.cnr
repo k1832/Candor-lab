@@ -1,0 +1,146 @@
+// core layer (design 0009): the lazy iterator ADAPTERS built on the
+// `core::iter::Iter` consuming protocol. Each is a by-value struct owning its
+// inner iterator, itself an `impl[I: Iter] Iter for Adapter[I]` whose `type Item`
+// is the inner projection `I::Item` — so an adapter composes with any `Iter` and,
+// chained, with another adapter. Every `next` is `alloc`-marked because it drives
+// the inner `Iter::next` (which is `alloc`: consuming iteration unboxes each
+// cell), exactly like the terminals.
+//
+// These live in `core` (not `std`) because they touch no allocator: an adapter
+// only rewraps the items its inner iterator yields. A terminal
+// (`core::iter_terminals` or `std::list::collect`) closes the chain.
+//
+// The bound-interface method call inside each generic impl body
+// (`self.inner.next()`, resolved through the impl's `[I: Iter]` bound) is what the
+// module-tree checker used to miss (E1002): `build_tree` qualified an `Item::Fn`'s
+// type-param bounds but not an `Item::Impl`'s, so `Iter` on `[I: Iter]` stayed
+// unqualified and the lookup failed. With that gap closed these promote unchanged.
+//
+// NOT PROMOTED YET — `Enumerate`/`Zip` (and their `Pair` item): their `type Item`
+// binds a NAMED generic type (`Pair[usize, I::Item]` / `Pair[A::Item, B::Item]`)
+// rather than a bare projection. The `Item::Impl` qualification arm rewrites the
+// impl's iface/target/method types but NEVER its associated-type binding, so `Pair`
+// there stays unqualified in a module tree and the checker reports E1004 (`Pair`
+// is not a generic type). That is a SECOND, independent module-tree qualification
+// gap (the `im.assoc_binding` type is never `rewrite_ty`'d) beyond the `[I: Iter]`
+// bound gap fixed here; the four projection-`Item` adapters below are unaffected.
+// They remain the single-file `tests/iteration.rs` fixtures until that gap closes.
+use core::iter::{Iter, IterStep};
+
+// `take`/`skip` are reserved words, hence the `TakeN`/`take_n` naming.
+pub struct TakeN[I] {
+    inner: I,
+    n: usize,
+}
+pub fn take_n[I: Iter](it: I, n: usize) -> TakeN[I] {
+    return TakeN { inner: it, n: n };
+}
+impl[I: Iter] Iter for TakeN[I] {
+    type Item = I::Item;
+    fn next(self) alloc -> IterStep[I::Item, TakeN[I]] {
+        if self.n == 0usize {
+            return IterStep::Done;
+        }
+        match self.inner.next() {
+            IterStep::Done => {
+                return IterStep::Done;
+            },
+            IterStep::More(x, rest) => {
+                return IterStep::More(x, TakeN { inner: rest, n: self.n - 1usize });
+            },
+        }
+    }
+}
+
+pub struct SkipN[I] {
+    inner: I,
+    n: usize,
+}
+pub fn skip_n[I: Iter](it: I, n: usize) -> SkipN[I] {
+    return SkipN { inner: it, n: n };
+}
+impl[I: Iter] Iter for SkipN[I] {
+    type Item = I::Item;
+    fn next(self) alloc -> IterStep[I::Item, SkipN[I]] {
+        let mut k: usize = self.n;
+        let mut cur: I = self.inner;
+        loop {
+            match cur.next() {
+                IterStep::Done => {
+                    return IterStep::Done;
+                },
+                IterStep::More(x, rest) => {
+                    if k == 0usize {
+                        return IterStep::More(x, SkipN { inner: rest, n: 0usize });
+                    }
+                    k = k - 1usize;
+                    cur = rest;
+                },
+            }
+        }
+    }
+}
+
+pub struct TakeWhile[I] {
+    inner: I,
+    pred: fn(read I::Item) -> bool,
+    done: bool,
+}
+pub fn take_while[I: Iter](it: I, p: fn(read I::Item) -> bool) -> TakeWhile[I] {
+    return TakeWhile { inner: it, pred: p, done: false };
+}
+impl[I: Iter] Iter for TakeWhile[I] {
+    type Item = I::Item;
+    fn next(self) alloc -> IterStep[I::Item, TakeWhile[I]] {
+        if self.done {
+            return IterStep::Done;
+        }
+        let p: fn(read I::Item) -> bool = self.pred;
+        match self.inner.next() {
+            IterStep::Done => {
+                return IterStep::Done;
+            },
+            IterStep::More(x, rest) => {
+                if (p)(read x) {
+                    return IterStep::More(x, TakeWhile { inner: rest, pred: p, done: false });
+                }
+                return IterStep::Done;
+            },
+        }
+    }
+}
+
+pub struct SkipWhile[I] {
+    inner: I,
+    pred: fn(read I::Item) -> bool,
+    skipping: bool,
+}
+pub fn skip_while[I: Iter](it: I, p: fn(read I::Item) -> bool) -> SkipWhile[I] {
+    return SkipWhile { inner: it, pred: p, skipping: true };
+}
+impl[I: Iter] Iter for SkipWhile[I] {
+    type Item = I::Item;
+    fn next(self) alloc -> IterStep[I::Item, SkipWhile[I]] {
+        let p: fn(read I::Item) -> bool = self.pred;
+        let mut skipping: bool = self.skipping;
+        let mut cur: I = self.inner;
+        loop {
+            match cur.next() {
+                IterStep::Done => {
+                    return IterStep::Done;
+                },
+                IterStep::More(x, rest) => {
+                    if skipping {
+                        if (p)(read x) {
+                            cur = rest;
+                        } else {
+                            return IterStep::More(x, SkipWhile { inner: rest, pred: p, skipping: false });
+                        }
+                    } else {
+                        return IterStep::More(x, SkipWhile { inner: rest, pred: p, skipping: false });
+                    }
+                },
+            }
+        }
+    }
+}

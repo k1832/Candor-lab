@@ -1191,6 +1191,9 @@ impl<'a> Rewriter<'a> {
                 }
             }
             Item::Impl(im) => {
+                for tp in &mut im.type_params {
+                    self.qualify_bounds(&mut tp.bounds);
+                }
                 if let Some(g) = self.scope.type_scope.get(&im.iface) {
                     im.iface = g.clone();
                 }
