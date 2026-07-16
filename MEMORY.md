@@ -1206,3 +1206,27 @@ once you add the literal node). Key design/impl facts worth reusing:
   the 0001 §11 demo `.cnr` are migrator output of committed `.cn` (migrate.rs pins
   them) with golden item-counts (golden.rs) — they're grow-free, so leave their
   vtables two-slot rather than churn `.cn`/goldens. (2026-07-16).
+
+- **Interface impls for builtin scalars (`impl Ord for i64`): five target-string
+  derivation sites must all learn `Type::Scalar`, keyed by `scalar_name(s)` (=
+  `mangle_ty(Scalar)`), and the orphan rule is REUSED (not extended).** The gap was
+  `resolve_impl` (generics.rs) only accepting `TyKind::Named`/`App` for the target
+  head. Fixing dispatch end-to-end needs the SAME scalar arm in: (1) `resolve_impl`
+  head + skip the `known` nominal check for scalars; (2) `emit_impl` (mono) — keep
+  `kept.target = im.target.clone()` (stays `Scalar`) and substitute `Self` with the
+  scalar `Ty` via `subst_self_ty`, NOT `subst_self_fndecl` (which would make `Self`
+  a bogus `Named("i64")`); (3) `mir/build.rs build_impl_tables` + `dispatch_nominal`
+  (new, beside `strip_to_nominal`, used only by `static_nominal`); (4) `interp/eval
+  .rs` impl-table build + `dispatch_nominal`; (5) checker `resolve_impl_for`,
+  `impl_covers`, `try_method_call`'s concrete arm, `stmt.rs` borrow-return arm. The
+  orphan rule needed NO logic change: `module_of("i64") == ""`, so the existing
+  "home == target_mod OR iface_mod" already gives "single-file root OR interface
+  owner" — sound (one owner per interface => at most one blessed scalar impl;
+  duplicates caught by the E1009 overlap check). Module-tree root home is `"main"`
+  (not ""), so a module-tree non-owner root is conservatively rejected — fine, the
+  corelib puts scalar impls in the interface's own module. GOTCHA that shaped the
+  library shape: an interface method's non-self `read Self` param is DOUBLE-borrowed
+  (E0703 `borrow borrow T`) — `lower_param` folds the borrow into the stored type
+  AND `check_iface_method_call` re-wraps by mode; the corelib never exercised a
+  read/write non-self iface param. So `Ord` uses `fn cmp(read self, other: Self)`
+  (by-value `Self`, natural for copy scalars), not `read Self`. (2026-07-17).

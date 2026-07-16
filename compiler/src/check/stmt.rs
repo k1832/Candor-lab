@@ -253,7 +253,7 @@ impl<'a> Checker<'a> {
                 .iter()
                 .find_map(|i| self.iface_method(i, field))
                 .map(|m| m.ret),
-            Type::Named(_) | Type::App(_, _) => (0..self.items.impls.len())
+            Type::Named(_) | Type::App(_, _) | Type::Scalar(_) => (0..self.items.impls.len())
                 .find(|&i| {
                     self.items.impls[i].methods.contains_key(field) && self.impl_covers(i, &recv_ty)
                 })

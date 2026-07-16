@@ -178,6 +178,11 @@ impl<'a> Checker<'a> {
                         return Some((i, HashMap::new()));
                     }
                 }
+                Type::Scalar(s) => {
+                    if im.target == scalar_name(*s) && im.target_args.is_empty() {
+                        return Some((i, HashMap::new()));
+                    }
+                }
                 Type::App(n, args) => {
                     if im.target == *n && im.target_args.len() == args.len() {
                         let mut map = HashMap::new();
@@ -1001,9 +1006,10 @@ impl<'a> Checker<'a> {
                 );
                 Some(Type::Error)
             }
-            Type::Named(_) | Type::App(_, _) => {
+            Type::Named(_) | Type::App(_, _) | Type::Scalar(_) => {
                 // Concrete: find the impl providing the method for this type (a bare
-                // nominal or a generic application matching a generic impl head).
+                // nominal, a builtin scalar, or a generic application matching a
+                // generic impl head).
                 let found = (0..self.items.impls.len()).find(|&i| {
                     let im = &self.items.impls[i];
                     im.methods.contains_key(method) && self.impl_covers(i, &recv_ty)
@@ -1033,6 +1039,7 @@ impl<'a> Checker<'a> {
         let im = &self.items.impls[idx];
         match ty {
             Type::Named(n) => im.target == *n && im.target_args.is_empty(),
+            Type::Scalar(s) => im.target == scalar_name(*s) && im.target_args.is_empty(),
             Type::App(n, args) => {
                 im.target == *n && im.target_args.len() == args.len() && {
                     let mut map = std::collections::HashMap::new();

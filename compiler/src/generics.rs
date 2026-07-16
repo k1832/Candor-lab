@@ -435,7 +435,10 @@ fn resolve_impl(
     let pset: HashSet<String> = type_params.iter().map(|(n, _)| n.clone()).collect();
 
     // Resolve the target head + (parametric) arguments. A generic impl's target is
-    // an application `List[T]`; a concrete impl's is a bare nominal.
+    // an application `List[T]`; a concrete impl's is a bare nominal or a builtin
+    // scalar (`i64`). A scalar target is keyed by its spelling (design 0007 §2.3);
+    // the orphan check below confines it to interfaces you own.
+    let mut scalar_target = false;
     let (target, target_args): (String, Vec<Type>) = match &im.target.kind {
         TyKind::Named(n) => (n.clone(), Vec::new()),
         TyKind::App { name, args } => {
@@ -445,12 +448,17 @@ fn resolve_impl(
                 .collect();
             (name.clone(), ta)
         }
+        TyKind::Scalar(s) => {
+            scalar_target = true;
+            (scalar_name(*s).to_string(), Vec::new())
+        }
         _ => {
-            diags.push(Diag::error("E1012", "an impl target must be a nominal type".to_string(), im.target.span));
+            diags.push(Diag::error("E1012", "an impl target must be a nominal or scalar type".to_string(), im.target.span));
             return;
         }
     };
-    if !known.contains(&target) {
+    // A builtin scalar has no declared nominal; it is always a valid target head.
+    if !scalar_target && !known.contains(&target) {
         diags.push(Diag::error("E0102", format!("unknown type `{target}`"), im.target.span));
         return;
     }
@@ -510,7 +518,16 @@ fn resolve_impl(
         return;
     }
     // Orphan rule at module granularity (design 0007 §2.3): the impl must live in
-    // the target head's module or the interface's declaration module.
+    // the target head's module or the interface's declaration module. A builtin
+    // scalar has no home module (`module_of` yields ""), so a scalar impl is legal
+    // only where `home` is "" (the single-file root program, untagged by the module
+    // driver) or equals the interface's module — i.e. you may impl an interface for a
+    // scalar only if you own the interface (or you are the single root program).
+    // Every other module (any dependency, and even a module-tree's non-owner root)
+    // is rejected. Since an interface is owned by exactly one module, at most one
+    // legal `impl Ord for i64` can exist per linked program; two packages cannot each
+    // bless a divergent one, and any duplicate that still reaches the same program is
+    // caught as an overlap (E1009 above). This reuses the nominal machinery unchanged.
     let target_mod = module_of(&target);
     let iface_mod = module_of(&im.iface);
     let home = im.home.clone().unwrap_or_default();
@@ -1083,8 +1100,11 @@ impl<'a> Monomorphizer<'a> {
         if !im.type_params.is_empty() {
             return;
         }
-        let target = match &im.target.kind {
-            TyKind::Named(n) => n.clone(),
+        // A scalar target (`i64`) keeps its `Self` bound to the scalar type, not a
+        // nominal; a nominal target substitutes `Self` -> the nominal name.
+        let (target, self_ty): (String, Option<Ty>) = match &im.target.kind {
+            TyKind::Named(n) => (n.clone(), None),
+            TyKind::Scalar(s) => (scalar_name(*s).to_string(), Some(im.target.clone())),
             _ => return,
         };
         let iface_args: Vec<Type> = im
@@ -1098,17 +1118,23 @@ impl<'a> Monomorphizer<'a> {
         for m in &im.methods {
             let mut fm = m.clone();
             fm.name = impl_method_fn_name(&im.iface, &iface_args, &target, &m.name);
-            subst_self_fndecl(&mut fm, &target);
+            match &self_ty {
+                Some(ty) => subst_self_ty(&mut fm, ty),
+                None => subst_self_fndecl(&mut fm, &target),
+            }
             self.rewrite_fn(&mut fm, &empty);
             self.out.push(Item::Fn(fm));
             // Keep a signature-only stub in the impl block so the interpreter can
             // recover the method's name, self mode, and mangled target.
             let mut stub = m.clone();
-            subst_self_fndecl(&mut stub, &target);
+            match &self_ty {
+                Some(ty) => subst_self_ty(&mut stub, ty),
+                None => subst_self_fndecl(&mut stub, &target),
+            }
             stub.body = Block { stmts: Vec::new(), span: m.span };
             kept.methods.push(stub);
         }
-        kept.target = Ty { kind: TyKind::Named(target.clone()), span: im.target.span };
+        kept.target = im.target.clone();
         self.out.push(Item::Impl(kept));
     }
 

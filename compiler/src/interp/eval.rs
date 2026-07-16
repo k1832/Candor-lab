@@ -8,7 +8,7 @@ use crate::check::dataflow::{Place, Proj};
 use crate::resolve::Items;
 use crate::span::Span;
 use crate::token::ScalarTy;
-use crate::types::{is_copy, needs_drop, ArrayLen, ItemEnv, Type};
+use crate::types::{is_copy, needs_drop, scalar_name, ArrayLen, ItemEnv, Type};
 
 use super::layout::Layout;
 use super::mem::Mem;
@@ -144,6 +144,18 @@ fn resolve_impl_ty(ty: &Ty) -> Type {
 }
 
 /// Strip borrow/box layers to the underlying nominal type name.
+/// The interface-dispatch key for a receiver type: a nominal name or a builtin
+/// scalar's spelling (`i64`), stripping borrows/box. Like `strip_to_nominal` but
+/// also keys scalars, so `impl I for i64` dispatches (design 0007 §2.3).
+fn dispatch_nominal(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Scalar(s) => Some(scalar_name(*s).to_string()),
+        Type::Named(n) => Some(n.clone()),
+        Type::Borrow(e) | Type::BorrowMut(e) | Type::Box(e) => dispatch_nominal(e),
+        _ => None,
+    }
+}
+
 fn strip_to_nominal(ty: &Type) -> Option<String> {
     match ty {
         Type::Named(n) => Some(n.clone()),
@@ -196,16 +208,21 @@ impl<'a> Interp<'a> {
         let mut impls_full = Vec::new();
         for item in &program.items {
             if let Item::Impl(im) = item {
-                if let TyKind::Named(target) = &im.target.kind {
-                    let iface_args: Vec<Type> = im.iface_args.iter().map(resolve_impl_ty).collect();
-                    let mut methods = HashMap::new();
-                    for m in &im.methods {
-                        let fnname = crate::generics::impl_method_fn_name(&im.iface, &iface_args, target, &m.name);
-                        impl_dispatch.insert((target.clone(), m.name.clone()), fnname.clone());
-                        methods.insert(m.name.clone(), fnname);
-                    }
-                    impls_full.push((im.iface.clone(), iface_args, target.clone(), methods));
+                // A scalar impl target (`i64`) dispatches under its spelling, keyed
+                // exactly as a nominal target is (design 0007 §2.3).
+                let target = match &im.target.kind {
+                    TyKind::Named(n) => n.clone(),
+                    TyKind::Scalar(s) => scalar_name(*s).to_string(),
+                    _ => continue,
+                };
+                let iface_args: Vec<Type> = im.iface_args.iter().map(resolve_impl_ty).collect();
+                let mut methods = HashMap::new();
+                for m in &im.methods {
+                    let fnname = crate::generics::impl_method_fn_name(&im.iface, &iface_args, &target, &m.name);
+                    impl_dispatch.insert((target.clone(), m.name.clone()), fnname.clone());
+                    methods.insert(m.name.clone(), fnname);
                 }
+                impls_full.push((im.iface.clone(), iface_args, target.clone(), methods));
             }
         }
         for item in &program.items {
@@ -1670,7 +1687,7 @@ impl<'a> Interp<'a> {
     /// The receiver's static nominal type name (stripping borrows/box), for
     /// interface method dispatch. Handles the place shapes a receiver can take.
     fn expr_static_nominal(&self, e: &Expr) -> Option<String> {
-        strip_to_nominal(&self.expr_static_ty(e)?)
+        dispatch_nominal(&self.expr_static_ty(e)?)
     }
 
     /// The static type of a place expression (local, field, dereference), for

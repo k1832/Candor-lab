@@ -1,0 +1,8 @@
+use cmp::{Ord, Ordering};
+// Orphan: this module owns neither the interface `Ord` (that is `cmp`) nor the
+// scalar `i64` (a builtin, no home module), so it may not impl `Ord for i64`.
+impl Ord for i64 {
+    fn cmp(read self, other: Self) -> Ordering {
+        return Ordering::Equal;
+    }
+}

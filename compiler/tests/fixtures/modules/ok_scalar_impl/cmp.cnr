@@ -1,0 +1,20 @@
+// The interface owns the scalar impl: `impl Ord for i64` lives in the same module
+// as `Ord`, so the orphan rule (design 0007 §2.3) admits it (home == iface module).
+pub enum Ordering { Less, Equal, Greater }
+pub interface Ord {
+    fn cmp(read self, other: Self) -> Ordering;
+}
+impl Ord for i64 {
+    fn cmp(read self, other: Self) -> Ordering {
+        if self.* < other { return Ordering::Less; }
+        if self.* > other { return Ordering::Greater; }
+        return Ordering::Equal;
+    }
+}
+pub fn min2[T: Ord + copy](a: T, b: T) -> T {
+    match a.cmp(b) {
+        Ordering::Greater => { return b; },
+        Ordering::Less => { return a; },
+        Ordering::Equal => { return a; },
+    }
+}

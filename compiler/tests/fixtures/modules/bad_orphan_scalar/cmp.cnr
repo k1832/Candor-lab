@@ -1,0 +1,4 @@
+pub enum Ordering { Less, Equal, Greater }
+pub interface Ord {
+    fn cmp(read self, other: Self) -> Ordering;
+}

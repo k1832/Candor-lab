@@ -26,7 +26,7 @@ use crate::span::Span;
 use crate::token::ScalarTy;
 use crate::interp::layout::Layout;
 use crate::interp::mem::round_up;
-use crate::types::{is_copy, needs_drop, ArrayLen, Type};
+use crate::types::{is_copy, needs_drop, scalar_name, ArrayLen, Type};
 
 use super::{
     check_invariants, BasicBlock, BlockId, CollOp, FaultEdge, LocalDecl, LocalId, MirFn,
@@ -68,16 +68,21 @@ fn build_impl_tables(program: &Program) -> ImplTables {
     let mut t = ImplTables::default();
     for it in &program.items {
         if let Item::Impl(im) = it {
-            if let TyKind::Named(target) = &im.target.kind {
-                let iface_args: Vec<Type> = im.iface_args.iter().map(resolve_impl_ty).collect();
-                let mut methods = HashMap::new();
-                for m in &im.methods {
-                    let fnname = crate::generics::impl_method_fn_name(&im.iface, &iface_args, target, &m.name);
-                    t.dispatch.insert((target.clone(), m.name.clone()), fnname.clone());
-                    methods.insert(m.name.clone(), fnname);
-                }
-                t.from_impls.push((crate::generics::base_name(&im.iface).to_string(), iface_args, target.clone(), methods));
+            // A scalar impl target (`i64`) dispatches under its spelling, keyed the
+            // same way a nominal target is (design 0007 §2.3).
+            let target = match &im.target.kind {
+                TyKind::Named(n) => n.clone(),
+                TyKind::Scalar(s) => scalar_name(*s).to_string(),
+                _ => continue,
+            };
+            let iface_args: Vec<Type> = im.iface_args.iter().map(resolve_impl_ty).collect();
+            let mut methods = HashMap::new();
+            for m in &im.methods {
+                let fnname = crate::generics::impl_method_fn_name(&im.iface, &iface_args, &target, &m.name);
+                t.dispatch.insert((target.clone(), m.name.clone()), fnname.clone());
+                methods.insert(m.name.clone(), fnname);
             }
+            t.from_impls.push((crate::generics::base_name(&im.iface).to_string(), iface_args, target.clone(), methods));
         }
     }
     t
@@ -2556,7 +2561,7 @@ impl<'a> Lowerer<'a> {
         Some(ty)
     }
     fn static_nominal(&self, e: &Expr) -> Option<String> {
-        strip_to_nominal(&self.static_ty(e)?)
+        dispatch_nominal(&self.static_ty(e)?)
     }
     fn resolve_method(&self, base: &Expr, field: &str, args: &[Expr], span: Span) -> Option<(String, Vec<Expr>)> {
         let nominal = self.static_nominal(base)?;
@@ -3208,6 +3213,18 @@ fn strip_to_nominal(ty: &Type) -> Option<String> {
     match ty {
         Type::Named(n) => Some(n.clone()),
         Type::Borrow(e) | Type::BorrowMut(e) | Type::Box(e) => strip_to_nominal(e),
+        _ => None,
+    }
+}
+
+/// The interface-dispatch key for a receiver type: a nominal name or a builtin
+/// scalar's spelling (`i64`), stripping borrows/box. Like `strip_to_nominal` but
+/// also keys scalars, so `impl I for i64` dispatches (design 0007 §2.3).
+fn dispatch_nominal(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Scalar(s) => Some(scalar_name(*s).to_string()),
+        Type::Named(n) => Some(n.clone()),
+        Type::Borrow(e) | Type::BorrowMut(e) | Type::Box(e) => dispatch_nominal(e),
         _ => None,
     }
 }
