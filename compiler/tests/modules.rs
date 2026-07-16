@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use candor_proto::{check_dir, run_dir, RunResult};
+use candor::{check_dir, run_dir, RunResult};
 
 fn dir(name: &str) -> PathBuf {
     PathBuf::from(format!("{}/tests/fixtures/modules/{name}", env!("CARGO_MANIFEST_DIR")))

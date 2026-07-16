@@ -4,9 +4,9 @@
 //! extern call identically on both engines, the `no_foreign_runtime` fault
 //! identity, and the `candor audit` golden output.
 
-use candor_proto::diag::Severity;
-use candor_proto::interp::FaultKind;
-use candor_proto::{
+use candor::diag::Severity;
+use candor::interp::FaultKind;
+use candor::{
     check_source_real, run_source_real, run_source_real_mir, MirRunResult, RunResult,
 };
 
@@ -239,7 +239,7 @@ fn main() -> i64 {
 
 #[test]
 fn shim_extern_call_runs_equal_on_both_engines() {
-    candor_proto::foreign::register("shim_double", |args, _mem| args[0] * 2);
+    candor::foreign::register("shim_double", |args, _mem| args[0] * 2);
 
     let tree = match run_source_real(SHIM_PROG) {
         RunResult::Ok(r) => r,
@@ -250,7 +250,7 @@ fn shim_extern_call_runs_equal_on_both_engines() {
         other => panic!("mir engine did not run: {:?}", debug_mir(&other)),
     };
 
-    candor_proto::foreign::unregister("shim_double");
+    candor::foreign::unregister("shim_double");
 
     assert_eq!(tree.ret, 42);
     assert_eq!(mir.ret, 42);
@@ -293,7 +293,7 @@ fn no_foreign_runtime_fault_identical_across_engines() {
 #[test]
 fn audit_golden_over_boundary_tree() {
     let dir = format!("{}/tests/fixtures/ffi_audit", env!("CARGO_MANIFEST_DIR"));
-    let got = candor_proto::audit::audit_path(std::path::Path::new(&dir))
+    let got = candor::audit::audit_path(std::path::Path::new(&dir))
         .expect("audit succeeds");
     let golden_path = format!("{}/tests/fixtures/ffi_audit.golden.json", env!("CARGO_MANIFEST_DIR"));
     let golden = std::fs::read_to_string(&golden_path).expect("read golden");
@@ -310,7 +310,7 @@ fn audit_golden_over_boundary_tree() {
 #[test]
 fn audit_generic_boundary_keeps_effect_reach() {
     let dir = format!("{}/tests/fixtures/ffi_audit_generic", env!("CARGO_MANIFEST_DIR"));
-    let got = candor_proto::audit::audit_path(std::path::Path::new(&dir))
+    let got = candor::audit::audit_path(std::path::Path::new(&dir))
         .expect("audit succeeds");
 
     // Externs and every trust predicate survive the generic path.
@@ -346,7 +346,7 @@ fn audit_generic_boundary_keeps_effect_reach() {
 #[test]
 fn audit_enumerates_unsafe_regions() {
     let dir = format!("{}/tests/fixtures/ffi_audit", env!("CARGO_MANIFEST_DIR"));
-    let got = candor_proto::audit::audit_path(std::path::Path::new(&dir))
+    let got = candor::audit::audit_path(std::path::Path::new(&dir))
         .expect("audit succeeds");
     let doc: serde_json::Value = serde_json::from_str(&got).expect("audit emits JSON");
 
@@ -389,7 +389,7 @@ fn audit_enumerates_unsafe_regions() {
 #[test]
 fn audit_lists_unsafe_regions_in_corpus_allocator() {
     let file = format!("{}/tests/fixtures/corelib/std/bump.cnr", env!("CARGO_MANIFEST_DIR"));
-    let got = candor_proto::audit::audit_path(std::path::Path::new(&file))
+    let got = candor::audit::audit_path(std::path::Path::new(&file))
         .expect("audit succeeds");
     let doc: serde_json::Value = serde_json::from_str(&got).expect("audit emits JSON");
 

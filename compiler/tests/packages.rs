@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use candor_proto::{check_dir, run_dir, RunResult};
+use candor::{check_dir, run_dir, RunResult};
 
 fn dir(name: &str) -> PathBuf {
     PathBuf::from(format!("{}/tests/fixtures/packages/{name}", env!("CARGO_MANIFEST_DIR")))
@@ -72,7 +72,7 @@ fn describe(r: RunResult) -> String {
 // ---------------------------------------------------------------------------
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use candor_proto::{build, compile_path, modules, resolve_pkg, run_dir_mir, run_dir_native, MirRunResult};
+use candor::{build, compile_path, modules, resolve_pkg, run_dir_mir, run_dir_native, MirRunResult};
 
 static STAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -467,7 +467,7 @@ fn add_unsafe_region_to_b(pkg_dir: &std::path::Path) {
 fn audit_aggregates_dependency_trust_surface_across_graph() {
     let root = stage(&["audit_app", "audit_b", "audit_c"]);
     let app = root.join("audit_app");
-    let got = candor_proto::audit::audit_path(&app).expect("graph audit succeeds");
+    let got = candor::audit::audit_path(&app).expect("graph audit succeeds");
     let doc: serde_json::Value = serde_json::from_str(&got).expect("audit emits JSON");
 
     let packages = doc["packages"].as_array().expect("packages array");
@@ -517,7 +517,7 @@ fn audit_aggregates_dependency_trust_surface_across_graph() {
 #[test]
 fn audit_of_dependency_free_package_is_single_package_shape() {
     let root = stage(&["audit_c"]);
-    let got = candor_proto::audit::audit_path(&root.join("audit_c")).expect("audit succeeds");
+    let got = candor::audit::audit_path(&root.join("audit_c")).expect("audit succeeds");
     let doc: serde_json::Value = serde_json::from_str(&got).expect("audit emits JSON");
     assert!(doc.get("packages").is_none(), "no graph layer for a dep-free package:\n{got}");
     assert_eq!(doc["summary"]["externs"], 1);
@@ -750,7 +750,7 @@ fn git_dependency_audit_surfaces_trust_surface() {
     .unwrap();
     std::fs::write(app.join("src/main.cnr"), "fn main() -> i64 {\n    return 0;\n}\n").unwrap();
 
-    let got = candor_proto::audit::audit_path(&app).expect("git-dep graph audit succeeds");
+    let got = candor::audit::audit_path(&app).expect("git-dep graph audit succeeds");
     let doc: serde_json::Value = serde_json::from_str(&got).expect("audit emits JSON");
     let packages = doc["packages"].as_array().expect("packages array");
     let c = packages
@@ -777,7 +777,7 @@ fn git_dependency_audit_surfaces_trust_surface() {
 /// The hard error a failed resolution/composition raises (its `Err` diagnostic),
 /// or `None` if the package resolved and checked. Only a resolver-level failure
 /// (E0935 here) surfaces as `Err`; per-module check diagnostics surface as `Ok`.
-fn resolve_error(dir: &std::path::Path) -> Option<candor_proto::diag::Diag> {
+fn resolve_error(dir: &std::path::Path) -> Option<candor::diag::Diag> {
     check_dir(dir).err()
 }
 

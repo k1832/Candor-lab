@@ -11,10 +11,10 @@
 
 use std::collections::HashMap;
 
-use candor_proto::ast;
-use candor_proto::mir::{self, serial};
-use candor_proto::resolve::Items;
-use candor_proto::{check, generics, resolve, run_source_real, RunResult};
+use candor::ast;
+use candor::mir::{self, serial};
+use candor::resolve::Items;
+use candor::{check, generics, resolve, run_source_real, RunResult};
 
 mod selfhost_modtree;
 use selfhost_modtree::{dump_fault, dump_ok, on_big_stack, run_module_tree, trace_text};
@@ -44,7 +44,7 @@ fn oracle_dump(src: &str) -> String {
 
 /// The runtime `items`/`consts` for `src` (from SOURCE; the wire carries neither).
 fn items_and_consts(src: &str) -> (Items, HashMap<String, u64>) {
-    let parsed = candor_proto::real::parse_source(src).expect("parse");
+    let parsed = candor::real::parse_source(src).expect("parse");
     // For a generic fixture, the concrete `items` (struct/enum layouts, mangled
     // instance names) come from the MONOMORPHIZED program -- the same pre-pass the
     // self-hosted lowering runs -- exactly as the oracle's `run_generic` does.

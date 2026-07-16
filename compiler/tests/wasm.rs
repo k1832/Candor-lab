@@ -12,8 +12,8 @@
 //! the M0 module is asserted byte-identical to the spec's bytes, and larger
 //! (multi-byte, negative) operands round-trip too — nothing is hardcoded to 42.
 
-use candor_proto::interp::FaultKind;
-use candor_proto::{
+use candor::interp::FaultKind;
+use candor::{
     run_source_real, run_source_real_mir, run_source_real_native, run_source_real_native_opt,
     MirRunResult, RunResult,
 };
@@ -874,7 +874,7 @@ fn memory_size_and_grow() {
 //      the results asserted EQUAL — values AND trap-equivalence. Upgrades the gate
 //      from "matches a hand-written value" to "matches an independent spec impl".
 
-use candor_proto::foreign_io;
+use candor::foreign_io;
 use std::sync::{Mutex, MutexGuard};
 
 // foreign_io state is process-global; serialize the file-run tests (plain

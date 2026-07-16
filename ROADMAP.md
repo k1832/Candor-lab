@@ -38,10 +38,17 @@ ground), its largest P19 corpus, and its credibility proof — gated on std, not
     to a top-level `selfhost/` (was `prototype/selfhost/`), so the Rust reference compiler and the
     Candor self-host are visibly peers. `git mv` preserved history (453 renames); build + full
     suite unchanged (927 green); no build-output change (NN#16 unaffected — a path rename doesn't
-    alter emitted artifacts). **Still outstanding here:** the crate/binary rename `candor-proto →
-    candor` (a larger, independent change — the crate name has no `prototype` substring, so it was
-    left as a separate follow-up), and removing the committed absolute build paths from the
-    `candor.lock` example fixtures (a pre-existing reproducibility smell, unrelated to the rename).
+    alter emitted artifacts).
+  - **Crate rename `candor-proto → candor` — DONE (2026-07-16).** The Cargo package + lib crate
+    (was `candor-proto`/`candor_proto`) is now `candor`, matching the directory and the `candor`
+    binary; ~279 `candor_proto::` Rust references and the `candor-lsp` path-dep were rewritten,
+    Cargo.lock regenerated. Scoped to the code artifact: the frozen Bet-5 measurement identity is
+    preserved — `DEFAULT_TOOLCHAIN_VERSION = "candor-proto 0.1.0 (Bet 5 prototype)"` stays, because
+    `corpus-gen` self-checks against that exact stamp in its frozen seed manifest, as do the frozen
+    eval records. Build + full suite unchanged (928 green), clippy clean, all dependent tools build.
+  - **`candor.lock` reproducibility — DONE (2026-07-16).** The resolver was leaking absolute build
+    paths into `[package.source]` (surfaced by the rename); path-dep sources are now recorded
+    relative to the root package, gated by a two-absolute-roots byte-identical test (NN#16).
 - Text-type budget design (P3's named obligation; gates self-hosting and real std growth).
 - I/O boundary module (gates self-hosting).
 - Bare-metal target (blocked locally on qemu; the freestanding proof stands meanwhile).

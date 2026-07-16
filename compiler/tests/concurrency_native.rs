@@ -26,7 +26,7 @@
 //! split buffer would. On a FAULTING run only the fault IDENTITY is compared (not
 //! `θ`): side-effect/trace *extent* is declared-nondeterministic (§3.1/§3.2).
 
-use candor_proto::{run_source_real, run_source_real_native, MirRunResult, RunResult};
+use candor::{run_source_real, run_source_real_native, MirRunResult, RunResult};
 
 #[derive(PartialEq, Debug, Clone)]
 enum Out {

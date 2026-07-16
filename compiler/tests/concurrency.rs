@@ -4,8 +4,8 @@
 //! delivery, and tree-walker == MIR engine equality on scalar concurrency
 //! fixtures (extending the Stage-A gate set).
 
-use candor_proto::interp::{Fault, FaultKind};
-use candor_proto::{
+use candor::interp::{Fault, FaultKind};
+use candor::{
     check_source_real, run_source_real, run_source_real_mir, MirRunResult, RunResult,
 };
 

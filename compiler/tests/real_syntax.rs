@@ -3,8 +3,8 @@
 //! set of parser/checker negatives for the spec's error clauses, and a parity
 //! test asserting a program written in both syntaxes runs identically.
 
-use candor_proto::diag::Severity;
-use candor_proto::{
+use candor::diag::Severity;
+use candor::{
     check_source_real, parse_source_real, run_source, run_source_real, RunResult,
 };
 

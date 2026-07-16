@@ -6,8 +6,8 @@
 //! reference. Out-of-subset programs surface as `Unsupported` (reported, never a
 //! silent skip). Runs on at least one hosted target (x86-64/aarch64 Linux).
 
-use candor_proto::interp::{Fault, Run};
-use candor_proto::{run_source, run_source_real, MirRunResult, RunResult};
+use candor::interp::{Fault, Run};
+use candor::{run_source, run_source_real, MirRunResult, RunResult};
 
 /// The comparable semantic outcome: `(k, s, θ)` + exit status.
 #[derive(Debug, PartialEq, Eq)]
@@ -36,9 +36,9 @@ fn oracle(src: &str, real: bool) -> Option<Outcome> {
 /// The native (Cranelift JIT) engine's outcome. `Ok(None)` = out-of-subset; `Err` = a non-run result.
 fn native(src: &str, real: bool) -> Result<Option<Outcome>, ()> {
     let r = if real {
-        candor_proto::run_source_real_native(src)
+        candor::run_source_real_native(src)
     } else {
-        candor_proto::run_source_native(src)
+        candor::run_source_native(src)
     };
     match r {
         MirRunResult::Ok(run) => Ok(Some(ok(run))),
@@ -288,7 +288,7 @@ fn gate_native_full_corpus_equality() {
         if !d.is_dir() {
             continue;
         }
-        let o = match candor_proto::run_dir(&d) {
+        let o = match candor::run_dir(&d) {
             RunResult::Ok(r) => Some(ok(r)),
             RunResult::Fault(f) => Some(faulted(f)),
             _ => None,
@@ -300,7 +300,7 @@ fn gate_native_full_corpus_equality() {
                 continue;
             }
         };
-        match candor_proto::run_dir_native(&d) {
+        match candor::run_dir_native(&d) {
             MirRunResult::Ok(r) => {
                 if ok(r) == o { equal += 1; } else { diffs.push(format!("{name}: DIFF")); }
             }

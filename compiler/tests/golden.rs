@@ -1,7 +1,7 @@
 //! Golden tests: every design 0001 §11 worked example must parse successfully.
 //! Parsing only — undefined names are fine (no symbol table, NN#13).
 
-use candor_proto::parse_source;
+use candor::parse_source;
 
 fn assert_parses(name: &str) {
     let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));

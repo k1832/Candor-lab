@@ -3,8 +3,8 @@
 //! orphan / termination rule. Single-file programs use the `.cnr` front-end;
 //! the orphan and cross-module cases use the module-tree driver (design 0008).
 
-use candor_proto::diag::Severity;
-use candor_proto::{
+use candor::diag::Severity;
+use candor::{
     check_dir, check_source_real, run_dir, run_dir_mir, run_dir_native, run_dir_native_opt,
     run_source_real, MirRunResult, RunResult,
 };

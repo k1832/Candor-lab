@@ -6,7 +6,7 @@
 //! (a literal-only int match is rejected without a catch-all); the duplicate-
 //! literal diagnostic; and pattern-kind coherence with the scrutinee.
 
-use candor_proto::{
+use candor::{
     run_source_real, run_source_real_mir, run_source_real_native, run_source_real_native_opt,
     MirRunResult, RunResult,
 };
@@ -182,8 +182,8 @@ fn out_of_range_literal_rejected() {
 #[test]
 fn formatter_roundtrips_int_patterns() {
     let src = "fn f(b: u8) -> i64 {\n    return match b {\n        0x41u8 => 1,\n        -5i32 => 2,\n        _ => 0,\n    };\n}\n";
-    let once = candor_proto::format_source_real(src).expect("format ok");
-    let twice = candor_proto::format_source_real(&once).expect("format idempotent");
+    let once = candor::format_source_real(src).expect("format ok");
+    let twice = candor::format_source_real(&once).expect("format idempotent");
     assert_eq!(once, twice, "formatter must be idempotent on int patterns");
     assert!(once.contains("0x41u8") || once.contains("65u8"), "literal preserved: {once}");
     assert!(once.contains("-5i32"), "negative literal preserved: {once}");

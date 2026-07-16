@@ -13,7 +13,7 @@
 //! deferred to the real Candor toolchain; this layer exists so an editor can
 //! surface the prototype checker's errors inline while that toolchain is built.
 //!
-//! The check pipeline runs IN-PROCESS by depending on the `candor_proto` library
+//! The check pipeline runs IN-PROCESS by depending on the `candor` library
 //! crate (path dependency) — never by shelling out. `.cnr` files use the real
 //! surface syntax entry point (`check_source_real`); any other extension is
 //! treated as throwaway `.cn` (`check_source`). Byte-offset spans from
@@ -28,8 +28,8 @@ use std::io::{self, BufRead, Write};
 
 use serde_json::{json, Value};
 
-use candor_proto::diag::{Diag, Severity};
-use candor_proto::span::Span;
+use candor::diag::{Diag, Severity};
+use candor::span::Span;
 
 fn main() {
     let stdin = io::stdin();
@@ -105,7 +105,7 @@ fn severity_code(sev: Severity) -> u8 {
     }
 }
 
-/// Map one `candor_proto` `Diag` to an LSP `Diagnostic` JSON object. Notes that
+/// Map one `candor` `Diag` to an LSP `Diagnostic` JSON object. Notes that
 /// carry a span become `relatedInformation` (pointing back into the same
 /// document); span-less notes are appended to the message.
 fn diag_to_lsp(uri: &str, src: &str, idx: &LineIndex, d: &Diag) -> Value {
@@ -146,9 +146,9 @@ pub fn diagnostics(uri: &str, src: &str) -> Vec<Value> {
     let owned = src.to_string();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if is_real {
-            candor_proto::check_source_real(&owned)
+            candor::check_source_real(&owned)
         } else {
-            candor_proto::check_source(&owned)
+            candor::check_source(&owned)
         }
     }));
     let diags: Vec<Diag> = match outcome {

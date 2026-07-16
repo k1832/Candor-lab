@@ -1,8 +1,8 @@
 //! Stage 4 runtime tests: faults, regimes, conv, bounds, contracts, drop order,
 //! partial moves, Box lifecycle, raw-pointer pools, container_of, slices.
 
-use candor_proto::interp::{Fault, FaultKind, Run};
-use candor_proto::{run_source, RunResult};
+use candor::interp::{Fault, FaultKind, Run};
+use candor::{run_source, RunResult};
 
 fn run(src: &str) -> Run {
     match run_source(src) {

@@ -10,8 +10,8 @@
 //! fifth-engine corpus gate. The out-of-bounds `get`/`set` faults must deliver the
 //! identical `Bounds` kind AND span across every engine.
 
-use candor_proto::interp::{Fault, FaultKind, Run};
-use candor_proto::{
+use candor::interp::{Fault, FaultKind, Run};
+use candor::{
     run_source_real, run_source_real_mir, run_source_real_native, run_source_real_native_opt,
     MirRunResult, RunResult,
 };

@@ -28,8 +28,8 @@
 //! These tests share process-global state (the shim registry and captured I/O
 //! buffers), so they serialize on `GUARD`, exactly like `tests/std_io.rs`.
 
-use candor_proto::foreign_io;
-use candor_proto::{run_source_real, run_source_real_mir, MirRunResult, RunResult};
+use candor::foreign_io;
+use candor::{run_source_real, run_source_real_mir, MirRunResult, RunResult};
 use std::sync::{Mutex, MutexGuard};
 
 static GUARD: Mutex<()> = Mutex::new(());
@@ -115,10 +115,10 @@ const SPEC_MAIN: &str = "  let _a: IoResult = println_i64(al, 0);\n\
 fn print_image_checks_clean() {
     let _g = lock();
     let src = image(&print_main("  let _r: IoResult = println_i64(al, 0);"));
-    let diags = candor_proto::check_source_real(&src).unwrap_or_else(|p| panic!("parse: {}", p.to_json()));
+    let diags = candor::check_source_real(&src).unwrap_or_else(|p| panic!("parse: {}", p.to_json()));
     let errs: Vec<_> = diags
         .iter()
-        .filter(|d| d.severity == candor_proto::diag::Severity::Error)
+        .filter(|d| d.severity == candor::diag::Severity::Error)
         .map(|d| d.code.clone())
         .collect();
     assert!(errs.is_empty(), "print image should check clean, got {errs:?}");

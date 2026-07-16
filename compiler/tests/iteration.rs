@@ -4,8 +4,8 @@
 //! consumption, and the E1002 completion (`Opt::map`). Single-file (the real
 //! `.cnr` front-end), so each program is self-contained.
 
-use candor_proto::diag::Severity;
-use candor_proto::{check_source_real, run_source_real, run_source_real_mir, MirRunResult, RunResult};
+use candor::diag::Severity;
+use candor::{check_source_real, run_source_real, run_source_real_mir, MirRunResult, RunResult};
 
 fn errors(src: &str) -> Vec<String> {
     match check_source_real(src) {

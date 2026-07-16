@@ -2,7 +2,7 @@
 name = "candor-lsp"
 version = "0.1.0"
 edition = "2021"
-description = "Minimal diagnostics-only LSP server for the Candor language (layer 2). Runs the candor_proto check pipeline in-process and publishes diagnostics. No hover/completion/go-to-def (deferred to the real toolchain per P16)."
+description = "Minimal diagnostics-only LSP server for the Candor language (layer 2). Runs the candor check pipeline in-process and publishes diagnostics. No hover/completion/go-to-def (deferred to the real toolchain per P16)."
 
 [[bin]]
 name = "candor-lsp"
@@ -12,4 +12,4 @@ path = "src/main.rs"
 serde_json = "1"
 # In-process consumption of the prototype front end (lib crate). We depend on the
 # library only; we never shell out and never modify compiler/src.
-candor-proto = { path = "../../compiler" }
+candor = { path = "../../compiler" }

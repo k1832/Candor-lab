@@ -17,8 +17,8 @@
 //! (dogfooding the module system) and the dump reconstructed from `Run.trace`,
 //! compared to the filtered+sorted oracle rendering.
 
-use candor_proto::check_source_real;
-use candor_proto::RunResult;
+use candor::check_source_real;
+use candor::RunResult;
 
 mod selfhost_modtree;
 use selfhost_modtree::{check_module_tree, on_big_stack, run_module_tree, trace_text};

@@ -1,7 +1,7 @@
 //! Golden run tests: every runnable §11 basket fixture must parse + fully check +
 //! execute to completion, returning its asserted sentinel value.
 
-use candor_proto::{run_source, RunResult};
+use candor::{run_source, RunResult};
 
 fn run_ret(name: &str) -> i64 {
     let path = format!("{}/tests/fixtures/run/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -41,7 +41,7 @@ fn run_11_5_arena() {
 // ---- migrated real-syntax (`.cnr`) siblings (design 0006 §5; dual-suite) ----
 // Each P15-migrated runnable fixture must run to the SAME sentinel as its `.cn`.
 
-use candor_proto::run_source_real;
+use candor::run_source_real;
 
 fn run_real_ret(name: &str) -> i64 {
     let path = format!("{}/tests/fixtures/run/{name}", env!("CARGO_MANIFEST_DIR"));

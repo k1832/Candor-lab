@@ -81,9 +81,9 @@ fn run_parse(path: &str) -> ExitCode {
         Err(c) => return c,
     };
     let parsed = if is_real(path) {
-        candor_proto::parse_source_real(&src)
+        candor::parse_source_real(&src)
     } else {
-        candor_proto::parse_source(&src)
+        candor::parse_source(&src)
     };
     match parsed {
         Ok(program) => {
@@ -99,16 +99,16 @@ fn run_parse(path: &str) -> ExitCode {
 
 fn run_check(path: &str) -> ExitCode {
     if std::path::Path::new(path).is_dir() {
-        return report_diags(candor_proto::check_dir(std::path::Path::new(path)));
+        return report_diags(candor::check_dir(std::path::Path::new(path)));
     }
     let src = match read(path) {
         Ok(s) => s,
         Err(c) => return c,
     };
     let checked = if is_real(path) {
-        candor_proto::check_source_real(&src)
+        candor::check_source_real(&src)
     } else {
-        candor_proto::check_source(&src)
+        candor::check_source(&src)
     };
     match checked {
         Ok(diags) => {
@@ -129,7 +129,7 @@ fn run_check(path: &str) -> ExitCode {
 }
 
 /// Print a diagnostics result (used by both single-file and module-tree check).
-fn report_diags(checked: Result<Vec<candor_proto::diag::Diag>, candor_proto::diag::Diag>) -> ExitCode {
+fn report_diags(checked: Result<Vec<candor::diag::Diag>, candor::diag::Diag>) -> ExitCode {
     match checked {
         Ok(diags) => {
             for d in &diags {
@@ -178,34 +178,34 @@ fn run_run(rest: &[String]) -> ExitCode {
         return run_run_native(path);
     }
     if std::path::Path::new(path).is_dir() {
-        return report_run(candor_proto::run_dir(std::path::Path::new(path)));
+        return report_run(candor::run_dir(std::path::Path::new(path)));
     }
     let src = match read(path) {
         Ok(s) => s,
         Err(c) => return c,
     };
     let outcome = if is_real(path) {
-        candor_proto::run_source_real(&src)
+        candor::run_source_real(&src)
     } else {
-        candor_proto::run_source(&src)
+        candor::run_source(&src)
     };
     report_run(outcome)
 }
 
 /// `run --engine=mir <file>` — the Stage-A precise MIR interpreter.
 fn run_run_mir(path: &str) -> ExitCode {
-    use candor_proto::MirRunResult;
+    use candor::MirRunResult;
     let outcome = if std::path::Path::new(path).is_dir() {
-        candor_proto::run_dir_mir(std::path::Path::new(path))
+        candor::run_dir_mir(std::path::Path::new(path))
     } else {
         let src = match read(path) {
             Ok(s) => s,
             Err(c) => return c,
         };
         if is_real(path) {
-            candor_proto::run_source_real_mir(&src)
+            candor::run_source_real_mir(&src)
         } else {
-            candor_proto::run_source_mir(&src)
+            candor::run_source_mir(&src)
         }
     };
     match outcome {
@@ -215,7 +215,7 @@ fn run_run_mir(path: &str) -> ExitCode {
         }
         MirRunResult::Fault(f) => {
             eprintln!("{}", f.to_json());
-            ExitCode::from(candor_proto::interp::FAULT_EXIT)
+            ExitCode::from(candor::interp::FAULT_EXIT)
         }
         MirRunResult::CheckErrors(diags) => {
             for d in &diags {
@@ -236,18 +236,18 @@ fn run_run_mir(path: &str) -> ExitCode {
 
 /// `run --engine=native <file>` — the Stage-B Cranelift JIT engine.
 fn run_run_native(path: &str) -> ExitCode {
-    use candor_proto::MirRunResult;
+    use candor::MirRunResult;
     let outcome = if std::path::Path::new(path).is_dir() {
-        candor_proto::run_dir_native(std::path::Path::new(path))
+        candor::run_dir_native(std::path::Path::new(path))
     } else {
         let src = match read(path) {
             Ok(s) => s,
             Err(c) => return c,
         };
         if is_real(path) {
-            candor_proto::run_source_real_native(&src)
+            candor::run_source_real_native(&src)
         } else {
-            candor_proto::run_source_native(&src)
+            candor::run_source_native(&src)
         }
     };
     match outcome {
@@ -257,7 +257,7 @@ fn run_run_native(path: &str) -> ExitCode {
         }
         MirRunResult::Fault(f) => {
             eprintln!("{}", f.to_json());
-            ExitCode::from(candor_proto::interp::FAULT_EXIT)
+            ExitCode::from(candor::interp::FAULT_EXIT)
         }
         MirRunResult::CheckErrors(diags) => {
             for d in &diags {
@@ -277,9 +277,9 @@ fn run_run_native(path: &str) -> ExitCode {
 }
 
 /// Print a run outcome (shared by single-file and module-tree run).
-fn report_run(outcome: candor_proto::RunResult) -> ExitCode {
+fn report_run(outcome: candor::RunResult) -> ExitCode {
     match outcome {
-        candor_proto::RunResult::Ok(run) => {
+        candor::RunResult::Ok(run) => {
             // trace() output is the program's observable θ; show it on the tree-walking
             // `run` path so a newcomer sees what their program emitted, then the return
             // value. Suppressed when CANDOR_QUIET is set (test harnesses parse bare ret).
@@ -291,17 +291,17 @@ fn report_run(outcome: candor_proto::RunResult) -> ExitCode {
             println!("{}", run.ret);
             ExitCode::SUCCESS
         }
-        candor_proto::RunResult::Fault(f) => {
+        candor::RunResult::Fault(f) => {
             eprintln!("{}", f.to_json());
-            ExitCode::from(candor_proto::interp::FAULT_EXIT)
+            ExitCode::from(candor::interp::FAULT_EXIT)
         }
-        candor_proto::RunResult::CheckErrors(diags) => {
+        candor::RunResult::CheckErrors(diags) => {
             for d in &diags {
                 println!("{}", d.to_json());
             }
             ExitCode::FAILURE
         }
-        candor_proto::RunResult::ParseError(d) => {
+        candor::RunResult::ParseError(d) => {
             println!("{}", d.to_json());
             ExitCode::FAILURE
         }
@@ -317,7 +317,7 @@ fn run_build(path: &str) -> ExitCode {
         eprintln!("error: `build` takes a module-tree directory");
         return ExitCode::from(2);
     }
-    match candor_proto::build::build_dir(dir) {
+    match candor::build::build_dir(dir) {
         Ok(report) => {
             println!("{}", report.to_json());
             if report.ok() {
@@ -335,7 +335,7 @@ fn run_build(path: &str) -> ExitCode {
 
 /// `audit <dir_or_file>` — the boundary-module audit surface (design 0011 §6).
 fn run_audit(path: &str) -> ExitCode {
-    match candor_proto::audit::audit_path(std::path::Path::new(path)) {
+    match candor::audit::audit_path(std::path::Path::new(path)) {
         Ok(json) => {
             println!("{json}");
             ExitCode::SUCCESS
@@ -413,11 +413,11 @@ fn run_compile(rest: &[String]) -> ExitCode {
     };
     let (inp, outp) = (std::path::Path::new(input), std::path::Path::new(out));
     let r = if llvm {
-        candor_proto::compile_path_llvm(inp, outp)
+        candor::compile_path_llvm(inp, outp)
     } else if freestanding {
-        candor_proto::compile_path_freestanding(inp, outp)
+        candor::compile_path_freestanding(inp, outp)
     } else {
-        candor_proto::compile_path(inp, outp)
+        candor::compile_path(inp, outp)
     };
     match r {
         Ok(()) => ExitCode::SUCCESS,
@@ -434,9 +434,9 @@ fn run_count(path: &str) -> ExitCode {
         Err(c) => return c,
     };
     let counted = if is_real(path) {
-        candor_proto::count_source_real(&src)
+        candor::count_source_real(&src)
     } else {
-        candor_proto::count_source(&src)
+        candor::count_source(&src)
     };
     match counted {
         Ok(counts) => {
@@ -458,7 +458,7 @@ fn run_count(path: &str) -> ExitCode {
 fn run_manifest(path: &str) -> ExitCode {
     let p = std::path::Path::new(path);
     let parsed = if p.is_dir() {
-        match candor_proto::manifest::load_manifest(p) {
+        match candor::manifest::load_manifest(p) {
             Ok(Some(m)) => Ok(m),
             Ok(None) => {
                 eprintln!("error: no `candor.toml` in `{path}` (a manifest-less directory is the degenerate package)");
@@ -471,7 +471,7 @@ fn run_manifest(path: &str) -> ExitCode {
             Ok(s) => s,
             Err(c) => return c,
         };
-        candor_proto::manifest::parse_manifest(&src)
+        candor::manifest::parse_manifest(&src)
     };
     match parsed {
         Ok(manifest) => {
@@ -510,7 +510,7 @@ fn run_migrate(path: &str, rest: &[String]) -> ExitCode {
         Ok(s) => s,
         Err(c) => return c,
     };
-    match candor_proto::migrate_source(&src) {
+    match candor::migrate_source(&src) {
         Ok(real) => match out {
             Some(o) => match std::fs::write(o, real) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -576,7 +576,7 @@ fn run_fmt(path: &str, rest: &[String]) -> ExitCode {
                 continue;
             }
         };
-        match candor_proto::format_source_real(&src) {
+        match candor::format_source_real(&src) {
             Ok(out) => {
                 if stdout {
                     print!("{out}");

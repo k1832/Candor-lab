@@ -1,11 +1,11 @@
 [package]
-name = "candor-proto"
+name = "candor"
 version = "0.1.0"
 edition = "2021"
 description = "Candor Bet 5 validation prototype: lexer, AST and parser (Stage 1)"
 
 [lib]
-name = "candor_proto"
+name = "candor"
 path = "src/lib.rs"
 
 [[bin]]

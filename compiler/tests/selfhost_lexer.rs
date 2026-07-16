@@ -13,9 +13,9 @@
 //! oracle's byte-identical rendering. Loading (via `run_dir`) dogfoods the
 //! stage-1 module system (design 0008) instead of string-concatenating sources.
 
-use candor_proto::real::token::{RTok, RToken};
-use candor_proto::token::ScalarTy;
-use candor_proto::RunResult;
+use candor::real::token::{RTok, RToken};
+use candor::token::ScalarTy;
+use candor::RunResult;
 
 mod selfhost_modtree;
 use selfhost_modtree::{run_module_tree, trace_text};
@@ -85,7 +85,7 @@ fn punct_code(k: &RTok) -> u32 {
 /// Render the oracle's token stream in the canonical dump form the .cnr lexer
 /// produces (see the .cnr header for the format).
 fn oracle_dump(src: &str) -> String {
-    let toks: Vec<RToken> = candor_proto::real::lexer::lex(src).expect("oracle lexes the fixture");
+    let toks: Vec<RToken> = candor::real::lexer::lex(src).expect("oracle lexes the fixture");
     let bytes = src.as_bytes();
     let mut out = String::new();
     for t in &toks {

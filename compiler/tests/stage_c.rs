@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use candor_proto::build::{self, BuildReport};
+use candor::build::{self, BuildReport};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 

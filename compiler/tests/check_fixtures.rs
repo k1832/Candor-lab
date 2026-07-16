@@ -1,7 +1,7 @@
 //! Golden: every design 0001 §11 example, in its self-contained CHECKABLE form,
 //! must pass the Stage 2 checker with zero diagnostics.
 
-use candor_proto::check_source;
+use candor::check_source;
 
 fn assert_checks(name: &str) {
     let path = format!("{}/tests/fixtures/check/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -38,7 +38,7 @@ fn check_11_5_arena() {
 // ---- migrated real-syntax (`.cnr`) siblings (design 0006 §5; dual-suite) ----
 // The P15-migrated fixtures must also check clean under the real front-end.
 
-use candor_proto::check_source_real;
+use candor::check_source_real;
 
 fn assert_checks_real(name: &str) {
     let path = format!("{}/tests/fixtures/check/{name}", env!("CARGO_MANIFEST_DIR"));

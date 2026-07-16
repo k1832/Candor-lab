@@ -7,8 +7,8 @@
 //! native engine (no-opt + opt). The LLVM `clang -O2` engine covers this fixture
 //! transitively through `tests/llvm.rs`'s full-corpus fifth-engine gate.
 
-use candor_proto::interp::{Fault, FaultKind, Run};
-use candor_proto::{
+use candor::interp::{Fault, FaultKind, Run};
+use candor::{
     run_source_real, run_source_real_mir, run_source_real_native, run_source_real_native_opt,
     MirRunResult, RunResult,
 };

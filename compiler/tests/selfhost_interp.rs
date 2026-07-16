@@ -13,7 +13,7 @@
 //! system) and the dump reconstructed from `Run.trace`, compared to the oracle
 //! rendering from `run_source_real`.
 
-use candor_proto::{run_source_real, RunResult};
+use candor::{run_source_real, RunResult};
 
 mod selfhost_modtree;
 use selfhost_modtree::{fault_code, on_big_stack, run_module_tree, trace_text};

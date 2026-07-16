@@ -16,7 +16,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use candor_proto::{
+use candor::{
     compile_path_llvm, run_source_real, run_source_real_mir, run_source_real_native,
     run_source_real_native_opt, MirRunResult, RunResult,
 };

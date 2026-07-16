@@ -15,10 +15,10 @@
 //! `run_dir` (dogfooding the module system), and the text is reconstructed from
 //! `Run.trace` and compared.
 
-use candor_proto::ast::*;
-use candor_proto::real::parser::parse_format;
-use candor_proto::token::ScalarTy;
-use candor_proto::RunResult;
+use candor::ast::*;
+use candor::real::parser::parse_format;
+use candor::token::ScalarTy;
+use candor::RunResult;
 
 mod selfhost_modtree;
 use selfhost_modtree::{on_big_stack, run_module_tree, trace_text};
@@ -737,7 +737,7 @@ fn binop_name(op: BinOp) -> &'static str {
 }
 
 fn oracle_dump(src: &str) -> String {
-    let toks = candor_proto::real::lexer::lex(src).expect("oracle lexes the fixture");
+    let toks = candor::real::lexer::lex(src).expect("oracle lexes the fixture");
     let (prog, _uses, _vis, _boundary) = parse_format(toks).expect("oracle parses the fixture");
     let mut r = R { s: String::new() };
     r.program(&prog);

@@ -13,8 +13,8 @@
 //! line ("a\nb\n" -> ["a","b"]); an interior empty line IS preserved
 //! ("a\n\nb" -> ["a","","b"]); the empty string yields an EMPTY Vec.
 
-use candor_proto::interp::Run;
-use candor_proto::{
+use candor::interp::Run;
+use candor::{
     run_source_real, run_source_real_mir, run_source_real_native, run_source_real_native_opt,
     MirRunResult, RunResult,
 };

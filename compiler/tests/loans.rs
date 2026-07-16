@@ -2,7 +2,7 @@
 //! the mandated negative illustrations (each asserting its error code) and the
 //! NLL / region positives that must be accepted.
 
-use candor_proto::check_source;
+use candor::check_source;
 
 const PREAMBLE: &str = "
 struct S { n: i64 }
@@ -315,7 +315,7 @@ fn use_i(v: i64) -> unit { }
 
 fn str_codes(src: &str) -> Vec<String> {
     let full = format!("{STR_PREAMBLE}{src}");
-    let diags = candor_proto::check_source_real(&full).expect("parse ok");
+    let diags = candor::check_source_real(&full).expect("parse ok");
     diags.into_iter().map(|d| d.code).collect()
 }
 

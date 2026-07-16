@@ -1,8 +1,8 @@
 //! Bet 5 Candor counter tests (frozen unit table, table_version 1).
 //! Each asserts exact counts on a small `.cn` snippet.
 
-use candor_proto::count::Counts;
-use candor_proto::count_source;
+use candor::count::Counts;
+use candor::count_source;
 
 fn counts(src: &str) -> Counts {
     count_source(src).expect("parse ok")

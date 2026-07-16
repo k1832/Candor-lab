@@ -25,8 +25,8 @@
 //! rendering. The generated `main` is `alloc` because the analysis's growable
 //! diagnostic buffer is a `Vec` (its first self-hosting customer).
 
-use candor_proto::check_source_real;
-use candor_proto::RunResult;
+use candor::check_source_real;
+use candor::RunResult;
 
 mod selfhost_modtree;
 use selfhost_modtree::{check_module_tree, on_big_stack, run_module_tree, trace_text};

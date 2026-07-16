@@ -8,8 +8,8 @@
 //! loop's `read` loan freezes the collection — rejects mutation-during-iteration
 //! and any escape of the borrowed yield, by the inherited loan machinery.
 
-use candor_proto::diag::Severity;
-use candor_proto::{
+use candor::diag::Severity;
+use candor::{
     check_source_real, run_source_real, run_source_real_mir, run_source_real_native,
     run_source_real_native_opt, MirRunResult, RunResult,
 };
@@ -19,7 +19,7 @@ fn fixture() -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 
-fn oracle(src: &str) -> candor_proto::interp::Run {
+fn oracle(src: &str) -> candor::interp::Run {
     match run_source_real(src) {
         RunResult::Ok(r) => r,
         RunResult::Fault(f) => panic!("oracle faulted: {}", f.to_json()),
@@ -30,7 +30,7 @@ fn oracle(src: &str) -> candor_proto::interp::Run {
     }
 }
 
-fn mir_run(r: MirRunResult, label: &str) -> candor_proto::interp::Run {
+fn mir_run(r: MirRunResult, label: &str) -> candor::interp::Run {
     match r {
         MirRunResult::Ok(run) => run,
         MirRunResult::Fault(f) => panic!("{label} faulted: {}", f.to_json()),

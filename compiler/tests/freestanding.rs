@@ -16,8 +16,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use candor_proto::interp::{Fault, FaultKind};
-use candor_proto::{run_source, run_source_real, RunResult};
+use candor::interp::{Fault, FaultKind};
+use candor::{run_source, run_source_real, RunResult};
 
 /// The comparable observable outcome of a run (oracle or freestanding process).
 #[derive(Debug, PartialEq, Eq)]
@@ -79,7 +79,7 @@ fn fixtures_dir() -> PathBuf {
 /// Compile `path` freestanding to a temp ELF; return its path (caller removes it).
 fn compile_fs(path: &Path, tag: &str) -> PathBuf {
     let out = scratch(tag);
-    candor_proto::compile_path_freestanding(path, &out)
+    candor::compile_path_freestanding(path, &out)
         .unwrap_or_else(|e| panic!("freestanding compile of {} failed: {e}", path.display()));
     out
 }

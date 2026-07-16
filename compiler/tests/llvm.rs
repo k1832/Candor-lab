@@ -14,8 +14,8 @@
 use std::path::Path;
 use std::process::Command;
 
-use candor_proto::interp::{Fault, FaultKind};
-use candor_proto::{run_source, run_source_real, RunResult};
+use candor::interp::{Fault, FaultKind};
+use candor::{run_source, run_source_real, RunResult};
 
 #[derive(Debug, PartialEq, Eq)]
 enum Outcome {
@@ -70,7 +70,7 @@ fn field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
 /// The compiled (clang -O2) process's outcome for a source file.
 fn llvm_outcome(path: &Path, tag: &str) -> Result<Outcome, String> {
     let out = std::env::temp_dir().join(format!("candor-llvm-gate-{}-{}", std::process::id(), tag));
-    candor_proto::compile_path_llvm(path, &out)?;
+    candor::compile_path_llvm(path, &out)?;
     let output = Command::new(&out)
         .output()
         .map_err(|e| format!("could not run compiled `{}`: {e}", out.display()))?;
@@ -172,7 +172,7 @@ fn perf_mem2reg_promotes_locals() {
     let srcpath =
         std::env::temp_dir().join(format!("candor-llvm-perf-{}.cn", std::process::id()));
     std::fs::write(&srcpath, src).unwrap();
-    let ll = candor_proto::emit_llvm_ir(&srcpath).expect("emit .ll");
+    let ll = candor::emit_llvm_ir(&srcpath).expect("emit .ll");
 
     // The unoptimized emission is the alloca-per-local model.
     assert!(ll.contains("alloca i64"), "expected alloca-per-local IR, got:\n{ll}");
@@ -525,22 +525,22 @@ fn gate_llvm_native_io_real_libc() {
 
     // Expected observable: the shim-backed interpreter (real std::fs + captured
     // stdout via foreign_io), rooted at the fixture dir.
-    candor_proto::foreign_io::reset();
-    candor_proto::foreign_io::set_root(&dir);
-    candor_proto::foreign_io::register_std_io();
+    candor::foreign_io::reset();
+    candor::foreign_io::set_root(&dir);
+    candor::foreign_io::register_std_io();
     let (exp_ret, exp_out) = match run_source_real(&src) {
-        RunResult::Ok(r) => (r.ret, candor_proto::foreign_io::take_stdout()),
+        RunResult::Ok(r) => (r.ret, candor::foreign_io::take_stdout()),
         _ => {
-            candor_proto::foreign_io::unregister_std_io();
+            candor::foreign_io::unregister_std_io();
             panic!("shim-backed interpreter should run the io demonstrator");
         }
     };
-    candor_proto::foreign_io::unregister_std_io();
+    candor::foreign_io::unregister_std_io();
 
     // The milestone: a clang -O2 native binary calling real libc directly, run
     // with the fixture dir as cwd (so `open("input.txt")` resolves).
     let out = std::env::temp_dir().join(format!("candor-llvm-io-ok-{}", std::process::id()));
-    candor_proto::compile_path_llvm(&main_cnr, &out).expect("compile io demonstrator via clang -O2");
+    candor::compile_path_llvm(&main_cnr, &out).expect("compile io demonstrator via clang -O2");
     let output = Command::new(&out)
         .current_dir(&dir)
         .output()
@@ -577,24 +577,24 @@ fn gate_llvm_native_io_open_error() {
     std::fs::create_dir_all(&empty).unwrap();
 
     // Expected: the shim-backed interpreter, rooted at the (empty) dir -> -1.
-    candor_proto::foreign_io::reset();
-    candor_proto::foreign_io::set_root(&empty);
-    candor_proto::foreign_io::register_std_io();
+    candor::foreign_io::reset();
+    candor::foreign_io::set_root(&empty);
+    candor::foreign_io::register_std_io();
     let exp_ret = match run_source_real(&src) {
         RunResult::Ok(r) => r.ret,
         _ => {
-            candor_proto::foreign_io::unregister_std_io();
+            candor::foreign_io::unregister_std_io();
             panic!("shim-backed interpreter should run the open-error program");
         }
     };
-    candor_proto::foreign_io::unregister_std_io();
+    candor::foreign_io::unregister_std_io();
     assert!(exp_ret < 0, "open of a missing file should be the Fail arm (got {exp_ret})");
 
     // The native binary: real libc open of a missing file -> the same error value.
     let srcpath = empty.join("prog.cnr");
     std::fs::write(&srcpath, &src).unwrap();
     let out = std::env::temp_dir().join(format!("candor-llvm-io-err-{}", std::process::id()));
-    candor_proto::compile_path_llvm(&srcpath, &out).expect("compile open-error program via clang -O2");
+    candor::compile_path_llvm(&srcpath, &out).expect("compile open-error program via clang -O2");
     let output = Command::new(&out)
         .current_dir(&empty)
         .output()
@@ -622,23 +622,23 @@ fn gate_llvm_native_read_file_string() {
     std::fs::write(work.join("rt.txt"), content.as_bytes()).unwrap();
 
     // Oracle: the shim-backed interpreter rooted at the work dir.
-    candor_proto::foreign_io::reset();
-    candor_proto::foreign_io::set_root(&work);
-    candor_proto::foreign_io::register_std_io();
+    candor::foreign_io::reset();
+    candor::foreign_io::set_root(&work);
+    candor::foreign_io::register_std_io();
     let (exp_ret, exp_out) = match run_source_real(&src) {
-        RunResult::Ok(r) => (r.ret, candor_proto::foreign_io::take_stdout()),
+        RunResult::Ok(r) => (r.ret, candor::foreign_io::take_stdout()),
         _ => {
-            candor_proto::foreign_io::unregister_std_io();
+            candor::foreign_io::unregister_std_io();
             panic!("shim-backed interpreter should run the read-path demonstrator");
         }
     };
-    candor_proto::foreign_io::unregister_std_io();
+    candor::foreign_io::unregister_std_io();
 
     // Native: clang -O2 binary calling real libc, run with the work dir as cwd.
     let srcpath = work.join("prog.cnr");
     std::fs::write(&srcpath, &src).unwrap();
     let out = std::env::temp_dir().join(format!("candor-llvm-readfile-bin-{}", std::process::id()));
-    candor_proto::compile_path_llvm(&srcpath, &out).expect("compile read-path demonstrator via clang -O2");
+    candor::compile_path_llvm(&srcpath, &out).expect("compile read-path demonstrator via clang -O2");
     let output = Command::new(&out)
         .current_dir(&work)
         .output()
@@ -669,23 +669,23 @@ fn gate_llvm_native_read_lines() {
     std::fs::write(work.join("rt.txt"), content.as_bytes()).unwrap();
 
     // Oracle: the shim-backed interpreter rooted at the work dir.
-    candor_proto::foreign_io::reset();
-    candor_proto::foreign_io::set_root(&work);
-    candor_proto::foreign_io::register_std_io();
+    candor::foreign_io::reset();
+    candor::foreign_io::set_root(&work);
+    candor::foreign_io::register_std_io();
     let (exp_ret, exp_out) = match run_source_real(&src) {
-        RunResult::Ok(r) => (r.ret, candor_proto::foreign_io::take_stdout()),
+        RunResult::Ok(r) => (r.ret, candor::foreign_io::take_stdout()),
         _ => {
-            candor_proto::foreign_io::unregister_std_io();
+            candor::foreign_io::unregister_std_io();
             panic!("shim-backed interpreter should run the read-lines demonstrator");
         }
     };
-    candor_proto::foreign_io::unregister_std_io();
+    candor::foreign_io::unregister_std_io();
 
     // Native: clang -O2 binary calling real libc, run with the work dir as cwd.
     let srcpath = work.join("prog.cnr");
     std::fs::write(&srcpath, &src).unwrap();
     let out = std::env::temp_dir().join(format!("candor-llvm-readlines-bin-{}", std::process::id()));
-    candor_proto::compile_path_llvm(&srcpath, &out).expect("compile read-lines demonstrator via clang -O2");
+    candor::compile_path_llvm(&srcpath, &out).expect("compile read-lines demonstrator via clang -O2");
     let output = Command::new(&out)
         .current_dir(&work)
         .output()
@@ -726,7 +726,7 @@ fn gate_llvm_native_read_lines() {
 /// SAME oracle tests/stage_d.rs and tests/aot.rs compare against.
 fn oracle_path(path: &Path) -> Option<Outcome> {
     if path.is_dir() {
-        return match candor_proto::run_dir(path) {
+        return match candor::run_dir(path) {
             RunResult::Ok(run) => Some(Outcome::Ok { exit: run.ret as u8, trace: run.trace }),
             RunResult::Fault(f) => Some(oracle_fault(&f)),
             _ => None,
@@ -740,7 +740,7 @@ fn oracle_path(path: &Path) -> Option<Outcome> {
 /// The LLVM (clang -O2) process's outcome for a source file or module-tree dir.
 fn llvm_outcome_path(path: &Path, tag: &str) -> Result<Outcome, String> {
     let out = std::env::temp_dir().join(format!("candor-llvm-corpus-{}-{}", std::process::id(), tag));
-    candor_proto::compile_path_llvm(path, &out)?;
+    candor::compile_path_llvm(path, &out)?;
     let output = Command::new(&out)
         .output()
         .map_err(|e| format!("could not run compiled `{}`: {e}", out.display()))?;
@@ -850,22 +850,22 @@ fn gate_llvm_native_buf_io() {
     assert!(content.len() > 4096, "must cross the BufWriter flush threshold");
     std::fs::write(work.join("rt.txt"), content.as_bytes()).unwrap();
 
-    candor_proto::foreign_io::reset();
-    candor_proto::foreign_io::set_root(&work);
-    candor_proto::foreign_io::register_std_io();
+    candor::foreign_io::reset();
+    candor::foreign_io::set_root(&work);
+    candor::foreign_io::register_std_io();
     let (exp_ret, exp_out) = match run_source_real(&src) {
-        RunResult::Ok(r) => (r.ret, candor_proto::foreign_io::take_stdout()),
+        RunResult::Ok(r) => (r.ret, candor::foreign_io::take_stdout()),
         _ => {
-            candor_proto::foreign_io::unregister_std_io();
+            candor::foreign_io::unregister_std_io();
             panic!("shim-backed interpreter should run the buf-io demonstrator");
         }
     };
-    candor_proto::foreign_io::unregister_std_io();
+    candor::foreign_io::unregister_std_io();
 
     let srcpath = work.join("prog.cnr");
     std::fs::write(&srcpath, &src).unwrap();
     let out = std::env::temp_dir().join(format!("candor-llvm-bufio-bin-{}", std::process::id()));
-    candor_proto::compile_path_llvm(&srcpath, &out).expect("compile buf-io demonstrator via clang -O2");
+    candor::compile_path_llvm(&srcpath, &out).expect("compile buf-io demonstrator via clang -O2");
     let output = Command::new(&out)
         .current_dir(&work)
         .output()
@@ -896,23 +896,23 @@ fn gate_llvm_native_wasm_file_off_disk() {
     std::fs::write(work.join("mod.wasm"), &module).unwrap();
 
     // Oracle: the shim-backed interpreter rooted at the work dir.
-    candor_proto::foreign_io::reset();
-    candor_proto::foreign_io::set_root(&work);
-    candor_proto::foreign_io::register_std_io();
+    candor::foreign_io::reset();
+    candor::foreign_io::set_root(&work);
+    candor::foreign_io::register_std_io();
     let exp_ret = match run_source_real(&src) {
         RunResult::Ok(r) => r.ret,
         _ => {
-            candor_proto::foreign_io::unregister_std_io();
+            candor::foreign_io::unregister_std_io();
             panic!("shim-backed interpreter should run the wasm file-run demonstrator");
         }
     };
-    candor_proto::foreign_io::unregister_std_io();
+    candor::foreign_io::unregister_std_io();
 
     // Native: clang -O2 binary calling real libc, run with the work dir as cwd.
     let srcpath = work.join("prog.cnr");
     std::fs::write(&srcpath, &src).unwrap();
     let out = std::env::temp_dir().join(format!("candor-llvm-wasmfile-bin-{}", std::process::id()));
-    candor_proto::compile_path_llvm(&srcpath, &out).expect("compile wasm file-run demonstrator via clang -O2");
+    candor::compile_path_llvm(&srcpath, &out).expect("compile wasm file-run demonstrator via clang -O2");
     let output = Command::new(&out)
         .current_dir(&work)
         .output()
@@ -942,24 +942,24 @@ fn gate_llvm_native_wasm_print_off_disk() {
     std::fs::write(work.join("mod.wasm"), &module).unwrap();
 
     // Oracle: the shim-backed interpreter rooted at the work dir, capturing stdout.
-    candor_proto::foreign_io::reset();
-    candor_proto::foreign_io::set_root(&work);
-    candor_proto::foreign_io::register_std_io();
+    candor::foreign_io::reset();
+    candor::foreign_io::set_root(&work);
+    candor::foreign_io::register_std_io();
     let exp_ret = match run_source_real(&src) {
         RunResult::Ok(r) => r.ret,
         _ => {
-            candor_proto::foreign_io::unregister_std_io();
+            candor::foreign_io::unregister_std_io();
             panic!("shim-backed interpreter should run the wasm print demonstrator");
         }
     };
-    let exp_out = candor_proto::foreign_io::take_stdout();
-    candor_proto::foreign_io::unregister_std_io();
+    let exp_out = candor::foreign_io::take_stdout();
+    candor::foreign_io::unregister_std_io();
 
     // Native: clang -O2 binary calling real libc, run with the work dir as cwd.
     let srcpath = work.join("prog.cnr");
     std::fs::write(&srcpath, &src).unwrap();
     let out = std::env::temp_dir().join(format!("candor-llvm-wasmprint-bin-{}", std::process::id()));
-    candor_proto::compile_path_llvm(&srcpath, &out).expect("compile wasm print demonstrator via clang -O2");
+    candor::compile_path_llvm(&srcpath, &out).expect("compile wasm print demonstrator via clang -O2");
     let output = Command::new(&out)
         .current_dir(&work)
         .output()

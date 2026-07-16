@@ -13,9 +13,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use candor_proto::interp::{Fault, FaultKind};
-use candor_proto::foreign_io;
-use candor_proto::{run_source, run_source_real, RunResult};
+use candor::interp::{Fault, FaultKind};
+use candor::foreign_io;
+use candor::{run_source, run_source_real, RunResult};
 
 /// The comparable observable outcome of a run (oracle or compiled process).
 #[derive(Debug, PartialEq, Eq)]
@@ -60,7 +60,7 @@ fn oracle_src(src: &str, real: bool) -> Option<Outcome> {
 /// The tree-walking oracle's outcome for a file or module-tree directory.
 fn oracle_path(path: &Path) -> Option<Outcome> {
     if path.is_dir() {
-        return match candor_proto::run_dir(path) {
+        return match candor::run_dir(path) {
             RunResult::Ok(run) => Some(Outcome::Ok { exit: run.ret as u8, trace: run.trace }),
             RunResult::Fault(f) => Some(oracle_fault(&f)),
             _ => None,
@@ -93,7 +93,7 @@ fn aot_outcome(path: &Path, tag: &str) -> Result<Outcome, String> {
         std::process::id(),
         tag
     ));
-    candor_proto::compile_path(path, &out)?;
+    candor::compile_path(path, &out)?;
     let output = Command::new(&out)
         .output()
         .map_err(|e| format!("could not run compiled `{}`: {e}", out.display()))?;
@@ -353,7 +353,7 @@ fn gate_aot_native_io_real_libc() {
     // The milestone: a linked native binary that calls real libc directly, run as
     // a process with the fixture dir as cwd (so `open("input.txt")` resolves).
     let out = std::env::temp_dir().join(format!("candor-aot-io-ok-{}", std::process::id()));
-    candor_proto::compile_path(&main_cnr, &out).expect("compile io demonstrator");
+    candor::compile_path(&main_cnr, &out).expect("compile io demonstrator");
     let output = std::process::Command::new(&out)
         .current_dir(&dir)
         .output()
@@ -405,7 +405,7 @@ fn gate_aot_native_io_open_error() {
     let srcpath = empty.join("prog.cnr");
     std::fs::write(&srcpath, &src).unwrap();
     let out = std::env::temp_dir().join(format!("candor-aot-io-err-{}", std::process::id()));
-    candor_proto::compile_path(&srcpath, &out).expect("compile open-error program");
+    candor::compile_path(&srcpath, &out).expect("compile open-error program");
     let output = std::process::Command::new(&out)
         .current_dir(&empty)
         .output()
@@ -452,7 +452,7 @@ fn gate_aot_native_read_file_string() {
     let srcpath = work.join("prog.cnr");
     std::fs::write(&srcpath, &src).unwrap();
     let out = std::env::temp_dir().join(format!("candor-aot-readfile-bin-{}", std::process::id()));
-    candor_proto::compile_path(&srcpath, &out).expect("compile read-path demonstrator");
+    candor::compile_path(&srcpath, &out).expect("compile read-path demonstrator");
     let output = std::process::Command::new(&out)
         .current_dir(&work)
         .output()
@@ -502,7 +502,7 @@ fn gate_aot_native_read_lines() {
     let srcpath = work.join("prog.cnr");
     std::fs::write(&srcpath, &src).unwrap();
     let out = std::env::temp_dir().join(format!("candor-aot-readlines-bin-{}", std::process::id()));
-    candor_proto::compile_path(&srcpath, &out).expect("compile read-lines demonstrator");
+    candor::compile_path(&srcpath, &out).expect("compile read-lines demonstrator");
     let output = std::process::Command::new(&out)
         .current_dir(&work)
         .output()
@@ -560,7 +560,7 @@ fn gate_aot_native_buf_io() {
     let srcpath = work.join("prog.cnr");
     std::fs::write(&srcpath, &src).unwrap();
     let out = std::env::temp_dir().join(format!("candor-aot-bufio-bin-{}", std::process::id()));
-    candor_proto::compile_path(&srcpath, &out).expect("compile buf-io demonstrator");
+    candor::compile_path(&srcpath, &out).expect("compile buf-io demonstrator");
     let output = std::process::Command::new(&out)
         .current_dir(&work)
         .output()
@@ -607,7 +607,7 @@ fn gate_aot_native_wasm_file_off_disk() {
     let srcpath = work.join("prog.cnr");
     std::fs::write(&srcpath, &src).unwrap();
     let out = std::env::temp_dir().join(format!("candor-aot-wasmfile-bin-{}", std::process::id()));
-    candor_proto::compile_path(&srcpath, &out).expect("compile wasm file-run demonstrator");
+    candor::compile_path(&srcpath, &out).expect("compile wasm file-run demonstrator");
     let output = Command::new(&out)
         .current_dir(&work)
         .output()
@@ -654,7 +654,7 @@ fn gate_aot_native_wasm_print_off_disk() {
     let srcpath = work.join("prog.cnr");
     std::fs::write(&srcpath, &src).unwrap();
     let out = std::env::temp_dir().join(format!("candor-aot-wasmprint-bin-{}", std::process::id()));
-    candor_proto::compile_path(&srcpath, &out).expect("compile wasm print demonstrator");
+    candor::compile_path(&srcpath, &out).expect("compile wasm print demonstrator");
     let output = Command::new(&out)
         .current_dir(&work)
         .output()
@@ -705,7 +705,7 @@ fn gate_aot_native_wasi_off_disk() {
     let srcpath = work.join("prog.cnr");
     std::fs::write(&srcpath, &src).unwrap();
     let out = std::env::temp_dir().join(format!("candor-aot-wasihello-bin-{}", std::process::id()));
-    candor_proto::compile_path(&srcpath, &out).expect("compile WASI demonstrator");
+    candor::compile_path(&srcpath, &out).expect("compile WASI demonstrator");
     let output = Command::new(&out)
         .current_dir(&work)
         .output()

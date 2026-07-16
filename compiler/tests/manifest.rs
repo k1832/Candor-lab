@@ -1,6 +1,6 @@
 //! `candor.toml` manifest parser + closed-schema validation (design 0017 §2/§3/§4).
 
-use candor_proto::manifest::{parse_manifest, Source, Version};
+use candor::manifest::{parse_manifest, Source, Version};
 
 const FULL: &str = r#"
 [package]
@@ -151,7 +151,7 @@ fn rejects_missing_required_fields() {
 
 // --- Dependency sources ----------------------------------------------------
 
-fn dep_err(dep: &str) -> candor_proto::manifest::ManifestError {
+fn dep_err(dep: &str) -> candor::manifest::ManifestError {
     let src = format!("[package]\nname=\"a\"\nversion=\"1.0.0\"\nedition=\"2026\"\n[dependencies]\nd = {dep}\n");
     parse_manifest(&src).unwrap_err()
 }

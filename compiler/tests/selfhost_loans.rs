@@ -37,8 +37,8 @@
 //! from `Run.trace` compared to the filtered+sorted oracle rendering. The
 //! generated `main` is `alloc` (the analysis's Vecs).
 
-use candor_proto::check_source_real;
-use candor_proto::RunResult;
+use candor::check_source_real;
+use candor::RunResult;
 
 mod selfhost_modtree;
 use selfhost_modtree::{on_big_stack, run_module_tree, trace_text};

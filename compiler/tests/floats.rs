@@ -16,7 +16,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use candor_proto::{
+use candor::{
     compile_path_llvm, run_source_real, run_source_real_mir, run_source_real_native,
     run_source_real_native_opt, MirRunResult, RunResult,
 };
@@ -315,7 +315,7 @@ fn floats_fixture_runs() {
 // 8. Negative checks — no implicit int<->float, no float `%`, no float suffix.
 // ---------------------------------------------------------------------------
 
-use candor_proto::check_source_real;
+use candor::check_source_real;
 
 fn check_codes(src: &str) -> Vec<String> {
     match check_source_real(src) {

@@ -10,8 +10,8 @@
 //! Any optimization that changes an observable trace is a soundness bug that BLOCKS
 //! the stage (design 0010 §5) — never a tolerated perf win.
 
-use candor_proto::interp::{Fault, Run};
-use candor_proto::{
+use candor::interp::{Fault, Run};
+use candor::{
     run_dir, run_dir_native, run_dir_native_opt, run_source, run_source_mir, run_source_native,
     run_source_native_opt, run_source_real, run_source_real_mir, run_source_real_native,
     run_source_real_native_opt, MirRunResult, RunResult,
@@ -195,7 +195,7 @@ fn gate_full_corpus_four_engine() {
             None => continue,
         };
         let engines: [(&str, MirRunResult); 3] = [
-            ("mir", candor_proto::run_dir_mir(&d)),
+            ("mir", candor::run_dir_mir(&d)),
             ("noopt", run_dir_native(&d)),
             ("opt", run_dir_native_opt(&d)),
         ];
@@ -227,11 +227,11 @@ fn gate_full_corpus_four_engine() {
 // removed. Replay stays Precise (no R3 batching introduced) — replay vacuous.
 // ---------------------------------------------------------------------------
 
-fn lower(src: &str) -> candor_proto::mir::MirProgram {
-    let program = candor_proto::parse_source(src).expect("parse");
+fn lower(src: &str) -> candor::mir::MirProgram {
+    let program = candor::parse_source(src).expect("parse");
     let mut diags = Vec::new();
-    let items = candor_proto::resolve::resolve_program(&program, &mut diags);
-    candor_proto::mir::lower_checked(&program, &items).expect("lower")
+    let items = candor::resolve::resolve_program(&program, &mut diags);
+    candor::mir::lower_checked(&program, &items).expect("lower")
 }
 
 #[test]
@@ -239,9 +239,9 @@ fn r1_rewrite_fires_and_validates() {
     // A function with an obviously-dead pure temp (`d` computed, never read).
     let src = "fn main() -> i64 { let a: i64 = 5; let b: i64 = 6; let d: bool = a < b; let e: i64 = a; return a + b; }";
     let mp = lower(src);
-    let before = candor_proto::mir::opt::stmt_count(&mp);
-    let opt = candor_proto::mir::opt::optimize(mp);
-    let after = candor_proto::mir::opt::stmt_count(&opt.prog);
+    let before = candor::mir::opt::stmt_count(&mp);
+    let opt = candor::mir::opt::optimize(mp);
+    let after = candor::mir::opt::stmt_count(&opt.prog);
     assert!(!opt.rewrites.is_empty(), "R1 dead-local elimination should have fired");
     assert!(after < before, "the pass should have removed at least one statement ({before} -> {after})");
     // Every recorded rewrite is a validated R1 removal of a pure τ-step.
@@ -255,7 +255,7 @@ fn r1_rewrite_fires_and_validates() {
     // Post-pass, replay stays Precise on every fn (no R3 batching introduced, so
     // the f★-replay obligation stays vacuous — design 0010 §2 INV-FAULT-ID).
     for f in &opt.prog.fns {
-        assert_eq!(f.replay, candor_proto::mir::ReplayPolicy::Precise);
+        assert_eq!(f.replay, candor::mir::ReplayPolicy::Precise);
     }
 }
 
@@ -264,14 +264,14 @@ fn r1_never_removes_observables_or_faults() {
     // The MMIO fixture: rawptr write/read are observable — the pass must NOT touch
     // them, and a checked add's fault edge must survive.
     let src = "fn main() -> i64 { unsafe \"mmio\" { let p: rawptr u32 = addr_to_ptr[u32](3145728); ptr_write(p, 7u32); let v: u32 = ptr_read(p); return conv i64 v; } }";
-    let program = candor_proto::real::parse_source(src).expect("parse");
+    let program = candor::real::parse_source(src).expect("parse");
     let mut diags = Vec::new();
-    let items = candor_proto::resolve::resolve_program(&program, &mut diags);
-    let mp = candor_proto::mir::lower_checked(&program, &items).expect("lower");
+    let items = candor::resolve::resolve_program(&program, &mut diags);
+    let mp = candor::mir::lower_checked(&program, &items).expect("lower");
     // Count observable statements before/after; none may be removed.
     let obs_before: usize = mp.fns.iter().flat_map(|f| f.blocks.iter()).flat_map(|b| b.stmts.iter()).filter(|s| s.observable).count();
     assert!(obs_before >= 2, "expected the rawptr write+read to be marked observable, got {obs_before}");
-    let opt = candor_proto::mir::opt::optimize(mp);
+    let opt = candor::mir::opt::optimize(mp);
     let obs_after: usize = opt.prog.fns.iter().flat_map(|f| f.blocks.iter()).flat_map(|b| b.stmts.iter()).filter(|s| s.observable).count();
     assert_eq!(obs_before, obs_after, "R1 must never eliminate an observable");
     // No rewrite ever targeted an observable statement.

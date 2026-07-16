@@ -5,9 +5,9 @@
 //! `Indexed` desugar, and the std `String` builder (`push`/`append`/`as_str`).
 //! Single-file, real (`.cnr`) front-end.
 
-use candor_proto::diag::Severity;
-use candor_proto::interp::FaultKind;
-use candor_proto::{
+use candor::diag::Severity;
+use candor::interp::FaultKind;
+use candor::{
     check_source_real, run_source_real, run_source_real_mir, run_source_real_native,
     run_source_real_native_opt, MirRunResult, RunResult,
 };

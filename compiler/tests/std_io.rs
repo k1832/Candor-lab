@@ -8,8 +8,8 @@
 //! These tests share process-global state (the shim registry and the captured
 //! I/O buffers), so they serialize on `GUARD`.
 
-use candor_proto::foreign_io;
-use candor_proto::{run_source_real, run_source_real_mir, MirRunResult, RunResult};
+use candor::foreign_io;
+use candor::{run_source_real, run_source_real_mir, MirRunResult, RunResult};
 use std::sync::{Mutex, MutexGuard};
 
 static GUARD: Mutex<()> = Mutex::new(());
@@ -58,10 +58,10 @@ fn run_ok(src: &str) -> i64 {
 #[test]
 fn io_module_checks_clean() {
     let _g = lock();
-    let diags = candor_proto::check_source_real(&fixture()).expect("parses");
+    let diags = candor::check_source_real(&fixture()).expect("parses");
     let errs: Vec<_> = diags
         .iter()
-        .filter(|d| d.severity == candor_proto::diag::Severity::Error)
+        .filter(|d| d.severity == candor::diag::Severity::Error)
         .map(|d| d.code.clone())
         .collect();
     assert!(errs.is_empty(), "io module should check clean, got {errs:?}");
@@ -246,7 +246,7 @@ fn no_foreign_runtime_when_unregistered() {
     foreign_io::unregister_std_io(); // ensure no shims
     match run_source_real(&fixture()) {
         RunResult::Fault(f) => {
-            assert_eq!(f.kind, candor_proto::interp::FaultKind::NoForeignRuntime);
+            assert_eq!(f.kind, candor::interp::FaultKind::NoForeignRuntime);
         }
         other => panic!("expected no_foreign_runtime, got ok={}", matches!(other, RunResult::Ok(_))),
     }
@@ -256,7 +256,7 @@ fn no_foreign_runtime_when_unregistered() {
 #[test]
 fn audit_enumerates_io_externs_trust_and_discharge() {
     let _g = lock();
-    let json = candor_proto::audit::audit_path(std::path::Path::new(&dir())).expect("audit");
+    let json = candor::audit::audit_path(std::path::Path::new(&dir())).expect("audit");
     for name in ["sys_open", "sys_close", "sys_read", "sys_write"] {
         assert!(json.contains(&format!("\"name\": \"{name}\"")), "extern {name} missing from audit");
     }

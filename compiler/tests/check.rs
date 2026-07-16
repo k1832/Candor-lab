@@ -1,7 +1,7 @@
 //! Stage 2 checker tests: negative snippets asserting a specific diagnostic
 //! code, and positive snippets asserting a clean check.
 
-use candor_proto::check_source;
+use candor::check_source;
 
 fn codes(src: &str) -> Vec<String> {
     let diags = check_source(src).expect("parse ok");
@@ -1218,7 +1218,7 @@ free: fn(rawptr u8, rawptr u8, usize, usize) -> unit } \
 copy struct Handle { ctx: rawptr u8, vt: rawptr Vt } ";
 
 fn real_codes(src: &str) -> Vec<String> {
-    let diags = candor_proto::check_source_real(src).expect("parse ok");
+    let diags = candor::check_source_real(src).expect("parse ok");
     diags.into_iter().map(|d| d.code).collect()
 }
 

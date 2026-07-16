@@ -11,7 +11,7 @@
 //! interface/impl is deferred to later slices), so this is the verification that
 //! the parse support works.
 
-use candor_proto::RunResult;
+use candor::RunResult;
 
 mod selfhost_modtree;
 use selfhost_modtree::{on_big_stack, run_module_tree};

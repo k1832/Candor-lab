@@ -6,8 +6,8 @@
 //! the LLVM `clang -O2` engine covers the same fixtures transitively through
 //! `tests/llvm.rs`'s full-corpus fifth-engine gate (they live in `fixtures/run/`).
 
-use candor_proto::interp::Run;
-use candor_proto::{
+use candor::interp::Run;
+use candor::{
     run_source_real, run_source_real_mir, run_source_real_native, run_source_real_native_opt,
     MirRunResult, RunResult,
 };

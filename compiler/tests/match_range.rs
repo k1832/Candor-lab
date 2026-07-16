@@ -8,7 +8,7 @@
 //! overlapping arms (E0602: literal-in-range, range-in-range), and the
 //! non-exhaustive rejection of a range-only match with no catch-all (E0601).
 
-use candor_proto::{
+use candor::{
     run_source_real, run_source_real_mir, run_source_real_native, run_source_real_native_opt,
     MirRunResult, RunResult,
 };
@@ -203,8 +203,8 @@ fn out_of_range_endpoint_rejected() {
 #[test]
 fn formatter_roundtrips_range_patterns() {
     let src = "fn f(b: u8) -> i64 {\n    return match b {\n        0x28u8..=0x3eu8 => 1,\n        0u8..10u8 => 2,\n        _ => 0,\n    };\n}\n";
-    let once = candor_proto::format_source_real(src).expect("format ok");
-    let twice = candor_proto::format_source_real(&once).expect("format idempotent");
+    let once = candor::format_source_real(src).expect("format ok");
+    let twice = candor::format_source_real(&once).expect("format idempotent");
     assert_eq!(once, twice, "formatter must be idempotent on range patterns");
     assert!(once.contains("..="), "inclusive range preserved: {once}");
     assert!(once.contains(".."), "half-open range preserved: {once}");

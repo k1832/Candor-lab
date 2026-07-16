@@ -42,7 +42,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "candor-proto"
+name = "candor"
 version = "0.1.0"
 dependencies = [
  "cranelift-codegen",

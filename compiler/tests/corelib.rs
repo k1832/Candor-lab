@@ -17,8 +17,8 @@
 //!       Cross-type `?` (design 0007 §7.1) is therefore demonstrated
 //!       single-file (`cross_type_question_works_single_file`).
 
-use candor_proto::diag::Severity;
-use candor_proto::{
+use candor::diag::Severity;
+use candor::{
     check_dir, check_source_real, run_dir, run_source_real, run_source_real_mir,
     run_source_real_native, run_source_real_native_opt, MirRunResult, RunResult,
 };
@@ -354,7 +354,7 @@ fn main() -> i64 {
         other => panic!("and_then did not run on the tree-walker: {}", describe(other)),
     }
     assert!(
-        matches!(candor_proto::run_source_real_mir(src), MirRunResult::Unsupported(_)),
+        matches!(candor::run_source_real_mir(src), MirRunResult::Unsupported(_)),
         "aggregate-returning indirect call is a known MIR/native lowering gap"
     );
 }

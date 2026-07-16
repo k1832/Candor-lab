@@ -8,7 +8,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use candor_proto::{check_dir, diag::Diag, run_dir, RunResult};
+use candor::{check_dir, diag::Diag, run_dir, RunResult};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -51,12 +51,12 @@ pub fn check_module_tree(modules: &[(&str, &str)], main_cnr: &str) -> Result<Vec
 
 /// Reconstruct the canonical dump text a self-host slice emits through the
 /// built-in `trace` sink (each traced value is one output byte).
-pub fn trace_text(run: &candor_proto::interp::Run) -> String {
+pub fn trace_text(run: &candor::interp::Run) -> String {
     let bytes: Vec<u8> = run.trace.iter().map(|&v| v as u8).collect();
     String::from_utf8(bytes).expect("dump is ASCII")
 }
 
-use candor_proto::interp::{Fault, FaultKind, Run};
+use candor::interp::{Fault, FaultKind, Run};
 
 /// Canonical fault kind-code map — the schema every self-host differential gate
 /// renders `FAULT kind span` with. Total over `FaultKind` (codes 0..=9, matching

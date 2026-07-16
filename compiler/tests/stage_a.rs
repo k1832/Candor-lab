@@ -12,8 +12,8 @@
 //! silent pass. Aggregates/boxes/rawptr/slices/generics (and thus the §11 basket
 //! run fixtures, corelib, and generics fixtures) are out of this subset.
 
-use candor_proto::interp::{Fault, Run};
-use candor_proto::{
+use candor::interp::{Fault, Run};
+use candor::{
     check, mir, resolve, run_source, run_source_real, MirRunResult, RunResult,
 };
 
@@ -44,9 +44,9 @@ fn oracle(src: &str, real: bool) -> Option<Outcome> {
 /// The MIR engine's outcome. `Ok(None)` = out-of-subset; `Err` = a non-run result.
 fn mir(src: &str, real: bool) -> Result<Option<Outcome>, ()> {
     let r = if real {
-        candor_proto::run_source_real_mir(src)
+        candor::run_source_real_mir(src)
     } else {
-        candor_proto::run_source_mir(src)
+        candor::run_source_mir(src)
     };
     match r {
         MirRunResult::Ok(run) => Ok(Some(ok(run))),
@@ -296,7 +296,7 @@ fn gate_full_corpus_equality() {
         if !d.is_dir() {
             continue;
         }
-        let o = match candor_proto::run_dir(&d) {
+        let o = match candor::run_dir(&d) {
             RunResult::Ok(r) => Some(ok(r)),
             RunResult::Fault(f) => Some(faulted(f)),
             _ => None,
@@ -308,7 +308,7 @@ fn gate_full_corpus_equality() {
                 continue;
             }
         };
-        match candor_proto::run_dir_mir(&d) {
+        match candor::run_dir_mir(&d) {
             MirRunResult::Ok(r) => {
                 if ok(r) == o { equal += 1; } else { diffs.push(format!("{name}: DIFF")); }
             }
@@ -340,7 +340,7 @@ fn gate_full_corpus_equality() {
 // ---------------------------------------------------------------------------
 
 fn lower(src: &str) -> mir::MirProgram {
-    let program = candor_proto::parse_source(src).expect("parse");
+    let program = candor::parse_source(src).expect("parse");
     let mut diags = Vec::new();
     let _ = check::check_program(&program);
     let items = resolve::resolve_program(&program, &mut diags);
@@ -359,7 +359,7 @@ fn inv_check_default_arith_carries_fault_edge_wrapping_does_not() {
     let mut wrapping_without_edge = 0;
     for b in &f.blocks {
         for s in &b.stmts {
-            if let mir::StatementKind::Assign(_, mir::Rvalue::Bin { op: candor_proto::ast::BinOp::Add, regime, fault, .. }) = &s.kind {
+            if let mir::StatementKind::Assign(_, mir::Rvalue::Bin { op: candor::ast::BinOp::Add, regime, fault, .. }) = &s.kind {
                 match regime {
                     mir::Regime::Checked => {
                         assert!(fault.is_some(), "checked add must carry its fault edge");

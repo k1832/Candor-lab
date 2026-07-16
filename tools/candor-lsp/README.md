@@ -8,7 +8,7 @@ editor. That is the whole feature set.
 
 **No hover. No completion. No go-to-definition.** Those are semantic-analysis
 features that belong to the real Candor toolchain and are deferred per **P16**.
-This server exists only so an editor can surface the `candor_proto` checker's
+This server exists only so an editor can surface the `candor` checker's
 errors inline while that toolchain is built. It implements exactly:
 
 - `initialize` / `initialized`
@@ -23,13 +23,13 @@ errors inline while that toolchain is built. It implements exactly:
   diagnostics loop does not justify an async runtime, and a synchronous
   read/dispatch/write loop stays auditable. (`tower-lsp` was the alternative; it
   is the heavier choice here.)
-- **In-process check pipeline.** The server depends on the `candor_proto`
+- **In-process check pipeline.** The server depends on the `candor`
   **library** crate by path (`../../compiler`) and calls it directly — it never
   shells out to the `candor-proto` binary. `compiler/src` is consumed, never
   modified.
-  - `.cnr` → `candor_proto::check_source_real` (real surface syntax; generics
+  - `.cnr` → `candor::check_source_real` (real surface syntax; generics
     are handled inside `check_program_real`).
-  - anything else → `candor_proto::check_source` (throwaway `.cn`).
+  - anything else → `candor::check_source` (throwaway `.cn`).
 - **Full-document sync.** `didChange` carries the whole document (LSP
   `TextDocumentSyncKind.Full`) and is rechecked immediately. The check is cheap
   for single files, so there is no debounce timer.
@@ -48,7 +48,7 @@ char boundary so the server never panics.
 
 ### Diagnostic mapping
 
-| `candor_proto` `Diag` | LSP `Diagnostic` |
+| `candor` `Diag` | LSP `Diagnostic` |
 |---|---|
 | `Severity::Error` / `Warning` | `severity` `1` / `2` |
 | `code` | `code` |

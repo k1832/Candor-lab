@@ -14,8 +14,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use candor_proto::interp::{Fault, FaultKind};
-use candor_proto::{run_source, run_source_real, RunResult};
+use candor::interp::{Fault, FaultKind};
+use candor::{run_source, run_source_real, RunResult};
 
 mod selfhost_modtree;
 use selfhost_modtree::{on_big_stack, run_module_tree, trace_text};

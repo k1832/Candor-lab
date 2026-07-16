@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use candor_proto::build::build_dir;
+use candor::build::build_dir;
 
 fn manifest() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
@@ -129,9 +129,9 @@ fn main() {
     let mut check_ms = Vec::new();
     for _ in 0..15 {
         let t = Instant::now();
-        let diags = candor_proto::check_dir(&work).expect("check");
+        let diags = candor::check_dir(&work).expect("check");
         check_ms.push(ms(t));
-        assert!(!diags.iter().any(|d| d.severity == candor_proto::diag::Severity::Error));
+        assert!(!diags.iter().any(|d| d.severity == candor::diag::Severity::Error));
     }
     let check_med = median(check_ms);
     let lines_per_sec = (n_lines as f64) / (check_med / 1000.0);

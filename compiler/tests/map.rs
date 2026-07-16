@@ -3,9 +3,9 @@
 //! probing, alloc-copy-rehash-free growth. The map OWNS a heap byte-copy of each
 //! key; drop frees every key copy, drops every live value, and frees the buckets.
 
-use candor_proto::diag::Severity;
-use candor_proto::interp::FaultKind;
-use candor_proto::{check_source_real, run_source_real, RunResult};
+use candor::diag::Severity;
+use candor::interp::FaultKind;
+use candor::{check_source_real, run_source_real, RunResult};
 
 fn errors(src: &str) -> Vec<String> {
     match check_source_real(src) {

@@ -11,7 +11,7 @@
 //! `tests/llvm.rs`'s full-corpus fifth-engine gate (the fixtures live in
 //! `tests/fixtures/run/`, which that gate scans).
 
-use candor_proto::{
+use candor::{
     run_source_real, run_source_real_mir, run_source_real_native, run_source_real_native_opt,
     MirRunResult, RunResult,
 };

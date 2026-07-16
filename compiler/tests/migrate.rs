@@ -8,7 +8,7 @@
 //! It also pins the committed `.cnr` fixtures to the migrator's deterministic
 //! output and spot-checks the `// MIGRATE:` markers and mechanical rewrites.
 
-use candor_proto::{
+use candor::{
     check_source, check_source_real, migrate_source, parse_source_real, run_source,
     run_source_real, RunResult,
 };

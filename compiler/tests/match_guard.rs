@@ -8,7 +8,7 @@
 //! a match exhaustive); and guard typing/scope (a non-bool guard is rejected, a
 //! pattern binding resolves inside the guard).
 
-use candor_proto::{
+use candor::{
     run_source_real, run_source_real_mir, run_source_real_native, run_source_real_native_opt,
     MirRunResult, RunResult,
 };
@@ -219,8 +219,8 @@ fn binding_in_guard_resolves() {
 #[test]
 fn formatter_roundtrips_guard() {
     let src = "fn f(n: i64) -> i64 {\n    return match n {\n        x if x < 0 => 1,\n        _ => 0,\n    };\n}\n";
-    let once = candor_proto::format_source_real(src).expect("format ok");
-    let twice = candor_proto::format_source_real(&once).expect("format idempotent");
+    let once = candor::format_source_real(src).expect("format ok");
+    let twice = candor::format_source_real(&once).expect("format idempotent");
     assert_eq!(once, twice, "formatter must be idempotent on guarded arms");
     assert!(once.contains("x if x < 0 =>"), "guard preserved: {once}");
 }

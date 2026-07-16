@@ -7,8 +7,8 @@
 //! corpus — see that file's header). These tests append a `main` to those
 //! definitions and OBSERVE the produced `String` at runtime.
 
-use candor_proto::diag::Severity;
-use candor_proto::{check_source_real, run_source_real, RunResult};
+use candor::diag::Severity;
+use candor::{check_source_real, run_source_real, RunResult};
 
 fn source() -> String {
     let path = format!("{}/tests/fixtures/std_fmt.cnr", env!("CARGO_MANIFEST_DIR"));

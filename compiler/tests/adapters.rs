@@ -22,9 +22,9 @@
 //! iterator, not just its element type. See `generic_inner_adapter_over_any_iter`
 //! and design 0009 §9 / OBL-GENERICS-ITER.
 
-use candor_proto::{run_source_real, run_source_real_mir, run_source_real_native};
-use candor_proto::{check_source_real, MirRunResult, RunResult};
-use candor_proto::diag::Severity;
+use candor::{run_source_real, run_source_real_mir, run_source_real_native};
+use candor::{check_source_real, MirRunResult, RunResult};
+use candor::diag::Severity;
 
 // The `Iter` protocol prelude with a real bump allocator (List consumption),
 // verbatim from `iteration.rs` plus a `prepend` builder. Each test appends its

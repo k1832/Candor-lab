@@ -17,10 +17,10 @@
 
 use std::collections::HashMap;
 
-use candor_proto::ast;
-use candor_proto::mir::{self, serial};
-use candor_proto::resolve::Items;
-use candor_proto::{check, diag, generics, real, resolve, run_source_real, RunResult};
+use candor::ast;
+use candor::mir::{self, serial};
+use candor::resolve::Items;
+use candor::{check, diag, generics, real, resolve, run_source_real, RunResult};
 
 mod selfhost_modtree;
 use selfhost_modtree::{dump_fault, dump_ok, on_big_stack};
