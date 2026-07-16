@@ -5,7 +5,12 @@
 //! `.cnr` front-end), so each program is self-contained.
 
 use candor::diag::Severity;
-use candor::{check_source_real, run_source_real, run_source_real_mir, MirRunResult, RunResult};
+use candor::{
+    check_source_real, compile_path_llvm, run_source_real, run_source_real_mir,
+    run_source_real_native, run_source_real_native_opt, MirRunResult, RunResult,
+};
+use std::path::Path;
+use std::process::Command;
 
 fn errors(src: &str) -> Vec<String> {
     match check_source_real(src) {
@@ -378,4 +383,211 @@ fn main() -> i64 {
     // agree that `U` is inferred through `f`'s return type and `map` runs.
     assert_eq!(run_ret(src), 42);
     assert_eq!(run_ret_mir(src), 42);
+}
+
+// ---------------------------------------------------------------------------
+// Associated-type projection over a bounded parameter bound to a CONCRETE type
+// (design 0009 section 2.2). A generic-over-`Iter` body records shapes carrying
+// a projection like `IterStep[I::Item, ..]`; monomorphizing an instance whose
+// `I` binds to a concrete `List[i64]` must NORMALIZE `I::Item` to the impl's
+// `Item` (`i64`) before mangling the instance name. Before the fix the
+// monomorphizer's `subst` left the projection opaque (its base substitutes to a
+// concrete `App`, not another `Param`), so the enum instance name embedded an
+// unresolved `I_Item` and the five engines disagreed (an oracle divergence / MIR
+// panic / native segfault from well-typed safe code). These lock in agreement.
+// ---------------------------------------------------------------------------
+
+fn mir_ret_trace(r: MirRunResult, label: &str, src: &str) -> (i64, Vec<i64>) {
+    match r {
+        MirRunResult::Ok(run) => (run.ret, run.trace),
+        MirRunResult::Fault(f) => panic!("{label} faulted: {}\n{src}", f.to_json()),
+        MirRunResult::Unsupported(e) => panic!("{label} unsupported: {e}\n{src}"),
+        MirRunResult::CheckErrors(d) => panic!("{label} check errors: {:?}\n{src}", d.iter().map(|x| &x.code).collect::<Vec<_>>()),
+        MirRunResult::ParseError(d) => panic!("{label} parse error: {}\n{src}", d.to_json()),
+    }
+}
+
+fn clang_available() -> bool {
+    Command::new("clang").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// The LLVM `-O2` process's traced theta, or `None` when clang is absent.
+fn llvm_trace(src: &str, tag: &str) -> Option<Vec<i64>> {
+    if !clang_available() {
+        return None;
+    }
+    let dir = std::env::temp_dir();
+    let srcp = dir.join(format!("candor-iter-{}-{}.cnr", std::process::id(), tag));
+    let outp = dir.join(format!("candor-iter-{}-{}", std::process::id(), tag));
+    std::fs::write(&srcp, src).unwrap();
+    compile_path_llvm(Path::new(&srcp), &outp).expect("LLVM compile should succeed");
+    let output = Command::new(&outp).output().expect("run compiled program");
+    let _ = std::fs::remove_file(&srcp);
+    let _ = std::fs::remove_file(&outp);
+    let trace = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.trim().parse::<i64>().expect("trace line is an integer"))
+        .collect();
+    Some(trace)
+}
+
+/// Run `src` through all five engines and assert byte-exact agreement: `ret`
+/// across the four in-process engines, and the `trace` theta-channel across all
+/// five (LLVM is observed only through `trace`, since its process exit code is a
+/// single truncated byte). Returns the oracle's `(ret, trace)`.
+fn all_engines(src: &str, tag: &str) -> (i64, Vec<i64>) {
+    assert_clean(src);
+    let (o_ret, o_trace) = run_trace(src);
+    let (m_ret, m_trace) = mir_ret_trace(run_source_real_mir(src), "mir", src);
+    let (n_ret, n_trace) = mir_ret_trace(run_source_real_native(src), "native-noopt", src);
+    let (p_ret, p_trace) = mir_ret_trace(run_source_real_native_opt(src), "native-opt", src);
+    for (label, ret, trace) in [
+        ("mir", m_ret, &m_trace),
+        ("native-noopt", n_ret, &n_trace),
+        ("native-opt", p_ret, &p_trace),
+    ] {
+        assert_eq!(ret, o_ret, "{label} ret diverged from oracle for:\n{src}");
+        assert_eq!(trace, &o_trace, "{label} trace diverged from oracle for:\n{src}");
+    }
+    if let Some(l_trace) = llvm_trace(src, tag) {
+        assert_eq!(l_trace, o_trace, "llvm trace diverged from oracle for:\n{src}");
+    }
+    (o_ret, o_trace)
+}
+
+// The `Opt` type and the generic-over-`Iter` terminals used by the tests below.
+const TERMINALS: &str = r#"
+enum Opt[T] { ok Some(T), None }
+fn find[I: Iter](it: I, pred: fn(read I::Item) -> bool) alloc -> Opt[I::Item] {
+    let mut cur: I = it;
+    loop { match cur.next() { IterStep::More(x, rest) => { if (pred)(read x) { return Opt::Some(x); } cur = rest; } IterStep::Done => { return Opt::None; } } }
+}
+fn nth[I: Iter](it: I, n: usize) alloc -> Opt[I::Item] {
+    let mut k: usize = n;
+    let mut cur: I = it;
+    loop { match cur.next() { IterStep::More(x, rest) => { if k == 0usize { return Opt::Some(x); } k = k - 1usize; cur = rest; } IterStep::Done => { return Opt::None; } } }
+}
+fn count[I: Iter](it: I) alloc -> i64 { let mut c: i64 = 0; let mut cur: I = it; loop { match cur.next() { IterStep::More(x, rest) => { c = c + 1; cur = rest; } IterStep::Done => { break; } } } return c; }
+fn prepend(a: read Alloc, v: i64, rest: List[i64]) alloc -> List[i64] { match box(a, rest) { BoxResult::oom => { return List::Nil; } BoxResult::boxed(b) => { return List::Cons(v, b); } } }
+fn prepend_g[T](a: read Alloc, v: T, rest: List[T]) alloc -> List[T] { match box(a, rest) { BoxResult::oom => { return List::Nil; } BoxResult::boxed(b) => { return List::Cons(v, b); } } }
+fn is_three(x: read i64) -> bool { if x.* == 3 { return true; } return false; }
+fn unwrap_i64(o: Opt[i64], d: i64) -> i64 { match o { Opt::Some(v) => { return v; } Opt::None => { return d; } } }
+fn mklist(a: read Alloc) alloc -> List[i64] { return prepend(a, 4, prepend(a, 3, prepend(a, 2, prepend(a, 1, List::Nil)))); }
+"#;
+
+#[test]
+fn find_terminal_over_iter_agrees_all_engines() {
+    // `find[I: Iter]` returning `Opt[I::Item]`, instantiated at `I = List[i64]`
+    // so `I::Item` normalizes to `i64`. Traces the found element (3).
+    let src = format!(
+        "{ITER}{TERMINALS}\n\
+         fn main() alloc -> i64 {{\n\
+             let mut bs: Bump = with_window(16777216, 1048576);\n\
+             let al: Alloc = mk_alloc(write bs);\n\
+             let r: i64 = unwrap_i64(find(mklist(read al), is_three), 0 - 1);\n\
+             trace(r);\n\
+             return r;\n\
+         }}"
+    );
+    let (ret, trace) = all_engines(&src, "find");
+    assert_eq!(ret, 3);
+    assert_eq!(trace, vec![3]);
+}
+
+#[test]
+fn nth_terminal_over_iter_agrees_all_engines() {
+    // `nth[I: Iter]` returning `Opt[I::Item]`; element at index 2 of [4,3,2,1] is 2.
+    let src = format!(
+        "{ITER}{TERMINALS}\n\
+         fn main() alloc -> i64 {{\n\
+             let mut bs: Bump = with_window(16777216, 1048576);\n\
+             let al: Alloc = mk_alloc(write bs);\n\
+             let r: i64 = unwrap_i64(nth(mklist(read al), 2usize), 0 - 1);\n\
+             trace(r);\n\
+             return r;\n\
+         }}"
+    );
+    let (ret, trace) = all_engines(&src, "nth");
+    assert_eq!(ret, 2);
+    assert_eq!(trace, vec![2]);
+}
+
+#[test]
+fn collect_over_iter_returns_list_of_item_all_engines() {
+    // `collect[I: Iter]` returning `List[I::Item]` — the projection appears in the
+    // return type, the local `acc`, and the `prepend_g` call; every occurrence must
+    // normalize to `i64`. Sum of the collected list is 1+2+3+4 = 10.
+    let src = format!(
+        "{ITER}{TERMINALS}\n\
+         fn collect[I: Iter](it: I, a: read Alloc) alloc -> List[I::Item] {{\n\
+             let mut acc: List[I::Item] = List::Nil;\n\
+             let mut cur: I = it;\n\
+             loop {{ match cur.next() {{ IterStep::More(x, rest) => {{ acc = prepend_g(a, x, acc); cur = rest; }} IterStep::Done => {{ break; }} }} }}\n\
+             return acc;\n\
+         }}\n\
+         fn sumlist(l: List[i64]) alloc -> i64 {{ let mut acc: i64 = 0; let mut cur: List[i64] = l; loop {{ match cur.next() {{ IterStep::More(x, rest) => {{ acc = acc + x; cur = rest; }} IterStep::Done => {{ break; }} }} }} return acc; }}\n\
+         fn main() alloc -> i64 {{\n\
+             let mut bs: Bump = with_window(16777216, 1048576);\n\
+             let al: Alloc = mk_alloc(write bs);\n\
+             let c: List[i64] = collect(mklist(read al), read al);\n\
+             let s: i64 = sumlist(c);\n\
+             trace(s);\n\
+             return s;\n\
+         }}"
+    );
+    let (ret, trace) = all_engines(&src, "collect");
+    assert_eq!(ret, 10);
+    assert_eq!(trace, vec![10]);
+}
+
+#[test]
+fn composed_adapter_chain_over_iter_all_engines() {
+    // A `TakeN[I]` adapter generic over an inner `Iter`, itself `impl Iter` with
+    // `type Item = I::Item`. Its method body (an impl instance) must normalize
+    // `I::Item` too - exercised by `count(take_n(list, 2))` = 2.
+    let src = format!(
+        "{ITER}{TERMINALS}\n\
+         struct TakeN[I] {{ inner: I, n: usize }}\n\
+         fn take_n[I: Iter](it: I, n: usize) -> TakeN[I] {{ return TakeN {{ inner: it, n: n }}; }}\n\
+         impl[I: Iter] Iter for TakeN[I] {{\n\
+             type Item = I::Item;\n\
+             fn next(take self) alloc -> IterStep[I::Item, TakeN[I]] {{\n\
+                 if self.n == 0usize {{ return IterStep::Done; }}\n\
+                 match self.inner.next() {{\n\
+                     IterStep::Done => {{ return IterStep::Done; }}\n\
+                     IterStep::More(x, rest) => {{ return IterStep::More(x, TakeN {{ inner: rest, n: self.n - 1usize }}); }}\n\
+                 }}\n\
+             }}\n\
+         }}\n\
+         fn main() alloc -> i64 {{\n\
+             let mut bs: Bump = with_window(16777216, 1048576);\n\
+             let al: Alloc = mk_alloc(write bs);\n\
+             let r: i64 = count(take_n(mklist(read al), 2usize));\n\
+             trace(r);\n\
+             return r;\n\
+         }}"
+    );
+    let (ret, trace) = all_engines(&src, "adapter");
+    assert_eq!(ret, 2);
+    assert_eq!(trace, vec![2]);
+}
+
+#[test]
+fn collect_to_concrete_list_from_opaque_item_rejected() {
+    // A generic-over-`Iter` body cannot build a `List[i64]` from `I::Item` values:
+    // at the definition site `I` is opaque, so `I::Item` is not known to be `i64`.
+    // The checker rejects the mismatch (E0703) rather than admitting code that
+    // would only be well-typed for some instantiations (design 0009 section 2.2).
+    let src = format!(
+        "{ITER}{TERMINALS}\n\
+         fn collect_i64[I: Iter](it: I, a: read Alloc) alloc -> List[i64] {{\n\
+             let mut acc: List[i64] = List::Nil;\n\
+             let mut cur: I = it;\n\
+             loop {{ match cur.next() {{ IterStep::More(x, rest) => {{ acc = prepend_g(a, x, acc); cur = rest; }} IterStep::Done => {{ break; }} }} }}\n\
+             return acc;\n\
+         }}\n\
+         fn main() -> i64 {{ return 0; }}"
+    );
+    assert!(errors(&src).contains(&"E0703".to_string()), "want E0703, got {:?}", errors(&src));
 }

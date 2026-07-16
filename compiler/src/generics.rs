@@ -1005,7 +1005,8 @@ impl<'a> Monomorphizer<'a> {
         self.cur_item = self.generic_item[name];
         let decl = self.generic_fns_ast.get(name).unwrap().clone();
         let pnames: Vec<String> = decl.type_params.iter().map(|p| p.name.clone()).collect();
-        let map = Self::param_map(&pnames, args);
+        let mut map = Self::param_map(&pnames, args);
+        self.inject_assoc_bindings(&pnames, &mut map);
         let mut f2 = decl;
         f2.name = inst_fn_name(name, args);
         f2.type_params = Vec::new();
@@ -1089,7 +1090,8 @@ impl<'a> Monomorphizer<'a> {
         let ai = &self.app_impls[idx];
         let im = ai.decl.clone();
         let pnames = ai.param_names.clone();
-        let map = Self::param_map(&pnames, cargs);
+        let mut map = Self::param_map(&pnames, cargs);
+        self.inject_assoc_bindings(&pnames, &mut map);
         let ctarget_args: Vec<Type> = ai.target_args.iter().map(|t| subst(t, &map)).collect();
         let target = inst_type_name(&ai.target_head, &ctarget_args);
         let ciface_args: Vec<Type> = ai.iface_args.iter().map(|t| subst(t, &map)).collect();
@@ -1234,27 +1236,59 @@ impl<'a> Monomorphizer<'a> {
     /// Resolve an associated-type projection `C::assoc` to its concrete type at
     /// monomorphization (design 0009 §2.2): find the impl whose target unifies
     /// with `C` and substitute its parameters into the `assoc` binding.
-    fn resolve_proj(&mut self, c: &Type, assoc: &str) -> Type {
-        for (head, targs, pnames, aname, aty) in self.assoc_impls.clone() {
+    fn resolve_proj(&self, c: &Type, assoc: &str) -> Type {
+        for (head, targs, _pnames, aname, aty) in &self.assoc_impls {
             if aname != assoc {
                 continue;
             }
             let mut map: HashMap<String, Type> = HashMap::new();
             let matched = match c {
-                Type::Named(n) => *n == head && targs.is_empty(),
+                Type::Named(n) => n == head && targs.is_empty(),
                 Type::App(n, args) => {
-                    *n == head
+                    n == head
                         && targs.len() == args.len()
                         && targs.iter().zip(args).all(|(d, a)| unify_inst(d, a, &mut map))
                 }
                 _ => false,
             };
             if matched {
-                let _ = &pnames;
-                return subst(&aty, &map);
+                return subst(aty, &map);
             }
         }
         Type::Error
+    }
+
+    /// Inject the resolution of every associated-type projection `Param::Assoc`
+    /// whose `Param` is now bound to a concrete type in `map` (design 0009 §2.2).
+    /// A shape argument recorded at a generic body node can carry a projection
+    /// over a bounded type parameter (e.g. `IterStep[I::Item, ..]`); `subst`
+    /// leaves such a projection opaque because its base substitutes to a concrete
+    /// `App`, not another `Param`. Seeding the fully-keyed `"Param::Assoc"` entry
+    /// lets `subst` normalize it to the impl's binding, so the instance name and
+    /// every engine agree — the same normalization the checker performs for
+    /// `Self::Item` (`check::generics::iface_method_subst`), generalized to every
+    /// bounded parameter at instantiation.
+    fn inject_assoc_bindings(&self, pnames: &[String], map: &mut HashMap<String, Type>) {
+        let mut assoc_names: Vec<&str> = self.assoc_impls.iter().map(|a| a.3.as_str()).collect();
+        assoc_names.sort_unstable();
+        assoc_names.dedup();
+        let concretes: Vec<(String, Type)> = pnames
+            .iter()
+            .filter_map(|p| map.get(p).map(|c| (p.clone(), c.clone())))
+            .filter(|(_, c)| !matches!(c, Type::Param(_) | Type::Error))
+            .collect();
+        for (pname, c) in concretes {
+            for assoc in &assoc_names {
+                let key = format!("{pname}::{assoc}");
+                if map.contains_key(&key) {
+                    continue;
+                }
+                let resolved = self.resolve_proj(&c, assoc);
+                if !matches!(resolved, Type::Error) {
+                    map.insert(key, resolved);
+                }
+            }
+        }
     }
 
     /// Semantic concrete `Type` -> AST `TyKind`, lowering generic apps to nominals.
