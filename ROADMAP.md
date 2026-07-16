@@ -455,10 +455,16 @@ MIR and mirroring the Cranelift backend op-for-op. Emitter landed ~2100 lines.
    ergonomics papercuts. Then native FILE I/O on top of native String: whole-file
    read_to_string/read_file/write_str and read_lines/split_lines, plus a streaming BufReader
    (read_line assembling lines across buffer refills) and a BufWriter -- all byte-exact
-   interp==native on both backends over the P17 std_io boundary. REMAINING: a streaming
-   Lines: Iter (needs the 0009 RefIndexed borrowed-yield DESIGN); realloc / in-place
-   string_clear (the one allocator ABI DECISION); best-fit; richer std (dir/network I/O, more
-   combinators). The two remaining items are deciding-authority forks, not additive work.*
+   interp==native on both backends over the P17 std_io boundary. FORKS RULED (2026-07-16):
+   (A) streaming `Lines` yields an OWNED `String` per line as the terminal answer — RefIndexed
+   (the "0009 borrowed-yield design") is already done (5-engine byte-exact, 2026-07-14) and 0015
+   §7 Q4 confirms it does not serve streaming (a stream is not `usize`-indexable); a borrowed-
+   streaming `Iter` would be a fresh basket-grade design re-solving the borrow-field wall, and the
+   per-line alloc+copy is an efficiency footnote, not a soundness gap — so owned-`String` is
+   ratified, no new design. (B) the allocator ABI GAINS a `realloc` slot (ratified; the ABI is the
+   one thing expensive to retrofit, and copy-on-grow is a real present cost). REMAINING (additive,
+   no fork): best-fit (an internal freelist strategy); richer std (dir/network I/O, more
+   combinators). A capacity-keeping `clear()` needs no ABI change (just `len=0`).*
 3. **Stability + packaging.** The 1.0 gate (editions/migrator exist via P15), a package manager,
    dependency handling. What lets OTHERS build on it.
 4. **Reach.** More platforms (ARM/macOS/Windows/bare-metal; today x86-64 Linux), richer

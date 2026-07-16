@@ -566,6 +566,15 @@ parts least nailed down.
    whether a separate borrowed-streaming protocol is eventually needed (a second
    basket-grade case, per 0007 §1.1's bar).
 
+   **RULED (deciding authority, 2026-07-16): owned-`String` per line is the TERMINAL
+   answer; no borrowed-streaming protocol is commissioned.** `RefIndexed` already serves
+   the common non-`copy` *indexed* walk; a streaming borrowed yield would be a fresh
+   basket-grade design (re-solving the borrow-field wall and advance-vs-live-view
+   freezing) for the rarer case, and the per-line alloc+copy is an efficiency footnote,
+   not a soundness gap. `read_line`/`Lines` yield an owned `String`; the borrowed-
+   streaming protocol is closed, not deferred. If a future profile shows the per-line
+   copy is a real bottleneck, this ruling has a falsifiable re-open trigger.
+
 5. **`count`/`get_ref` consistency is an unchecked impl contract.** Nothing forces
    `get_ref(i)` to be valid for all `i < count()`, nor `count()` to be stable across
    the loop (it is called once, so a mutating `count` cannot even be observed — but an
