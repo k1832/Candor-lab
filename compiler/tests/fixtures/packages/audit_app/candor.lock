@@ -13,7 +13,7 @@ externs = 0
 unsafe_regions = 0
 
 [package.source]
-path = "/home/k1832/Candor/compiler/tests/fixtures/packages/audit_app"
+path = "."
 
 [[package]]
 name = "b"
@@ -27,7 +27,7 @@ externs = 1
 unsafe_regions = 1
 
 [package.source]
-path = "/home/k1832/Candor/compiler/tests/fixtures/packages/audit_b"
+path = "../audit_b"
 
 [[package]]
 name = "c"
@@ -41,4 +41,4 @@ externs = 1
 unsafe_regions = 1
 
 [package.source]
-path = "/home/k1832/Candor/compiler/tests/fixtures/packages/audit_c"
+path = "../audit_c"

@@ -13,7 +13,7 @@ externs = 0
 unsafe_regions = 0
 
 [package.source]
-path = "/home/k1832/Candor/compiler/tests/fixtures/packages/app"
+path = "."
 
 [[package]]
 name = "b"
@@ -27,4 +27,4 @@ externs = 0
 unsafe_regions = 0
 
 [package.source]
-path = "/home/k1832/Candor/compiler/tests/fixtures/packages/b"
+path = "../b"

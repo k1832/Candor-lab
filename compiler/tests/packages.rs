@@ -178,6 +178,35 @@ fn pkgid_is_path_independent() {
 }
 
 // ---------------------------------------------------------------------------
+// NN#16 for candor.lock's `[package.source]`: a path-dependency source is
+// recorded RELATIVE to the root package dir (design 0017 §6), never as an
+// absolute machine path. Byte-identical source staged under two different
+// absolute roots must produce a byte-identical lock — moving the tree preserves
+// every path. This fails against the old absolute-path recording.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lock_source_is_path_independent() {
+    let root_a = stage(&["app", "b"]);
+    let root_b = stage(&["app", "b"]);
+    assert_ne!(root_a, root_b, "the two stagings must occupy different paths");
+
+    resolve_pkg::resolve(&root_a.join("app")).unwrap();
+    resolve_pkg::resolve(&root_b.join("app")).unwrap();
+
+    let lock_a = std::fs::read_to_string(root_a.join("app/candor.lock")).unwrap();
+    let lock_b = std::fs::read_to_string(root_b.join("app/candor.lock")).unwrap();
+    assert_eq!(lock_a, lock_b, "identical source at different paths must produce a byte-identical candor.lock (NN#16)");
+
+    // No absolute machine path leaks into the lock's `[package.source]`.
+    assert!(!lock_a.contains("/home/"), "lock must embed no absolute path: {lock_a}");
+    assert!(!lock_a.contains(root_a.to_str().unwrap()), "lock must not embed the temp-root prefix");
+    // The root package is `"."`; the sibling path dep is `../b` (relative to root).
+    assert!(lock_a.contains(r#"path = ".""#), "the root package's source is recorded as \".\": {lock_a}");
+    assert!(lock_a.contains(r#"path = "../b""#), "the sibling path dep is recorded relative to root: {lock_a}");
+}
+
+// ---------------------------------------------------------------------------
 // The incremental build resolves cross-package dependencies (design 0017
 // Open-Q4): `candor build` on a package-with-deps discovers EVERY package's
 // modules under its pkgid — the same multi-package universe check/run/compile

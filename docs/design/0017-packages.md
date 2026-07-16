@@ -344,10 +344,16 @@ solver (§Rejected) — those solve a problem 0.x does not have.
 
 - **The lockfile: `candor.lock`** (TOML, formatter-canonical), written at the
   **root (buildable) package**. For each resolved package it records: `name`,
-  `version`, `edition`, the **exact source** (canonicalized path, or git URL +
-  resolved commit sha), and a **content hash** of the package's sources
+  `version`, `edition`, the **exact source** (for a path dependency, the source
+  directory **relative to the root package** — the root package's own source is
+  `"."`, a sibling is `"../<dir>"` — so moving the whole tree preserves every
+  path and the lock never leaks an absolute machine path; for a git dependency,
+  the URL + resolved commit sha), and a **content hash** of the package's sources
   (reproducibility + provenance, P16/NN#16). **Same source + same lock + same
-  toolchain ⇒ bit-identical artifacts** (NN#16, verbatim).
+  toolchain ⇒ bit-identical artifacts** (NN#16, verbatim). *(Path sources made
+  root-relative 2026-07-16: an absolute path in `[package.source]` made a
+  committed lock non-portable and broke NN#16 when the tree was checked out at a
+  different location; the resolver now derives the path relative to the root dir.)*
 
 - **When written.** The lock is created/updated only by resolution triggered by a
   manifest change or an explicit update action — **never silently re-resolved on
