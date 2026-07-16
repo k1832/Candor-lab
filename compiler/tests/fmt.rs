@@ -257,3 +257,47 @@ fn show_float_composes_through_bound() {
         1
     );
 }
+
+// ---- formatter must NOT collapse `read <write-borrow>.*` (semantics gate) -----
+
+#[test]
+fn fmt_preserves_read_reborrow_of_write_borrow() {
+    // `read (c.*)` over a `write c` borrow is a non-moving read-reborrow, while
+    // bare `c` MOVES the write borrow (a later use then fails E0301). Lacking a
+    // type table, the formatter cannot tell a read borrow (collapse safe) from a
+    // write borrow (collapse unsound), so it must keep `read c.*` verbatim -- only
+    // the redundant parens drop. This is the exact case the old reborrow collapse
+    // silently broke.
+    let src = "\
+struct Cell { val: i64 }
+fn peek(c: read Cell) -> i64 {
+    return c.val;
+}
+fn bump(c: write Cell) -> i64 {
+    let x: i64 = peek(read c.*);
+    c.*.val = x + 1;
+    return c.*.val;
+}
+fn main() -> i64 {
+    let mut cell: Cell = Cell { val: 5 };
+    return bump(write cell);
+}
+";
+    let formatted = candor::format_source_real(src).expect("format ok");
+    assert!(
+        formatted.contains("peek(read c.*)"),
+        "reborrow of a write borrow must not collapse to a move:\n{formatted}"
+    );
+    // Idempotent, and the formatted output still type-checks and runs correctly.
+    let twice = candor::format_source_real(&formatted).expect("format idempotent");
+    assert_eq!(twice, formatted, "formatter must be idempotent");
+    match run_source_real(&formatted) {
+        RunResult::Ok(r) => assert_eq!(r.ret, 6, "formatted output must run correctly"),
+        RunResult::Fault(f) => panic!("formatted output faulted: {}", f.to_json()),
+        RunResult::CheckErrors(d) => panic!(
+            "formatted output failed to check: {:?}",
+            d.iter().map(|x| &x.code).collect::<Vec<_>>()
+        ),
+        RunResult::ParseError(d) => panic!("formatted output parse error: {}", d.to_json()),
+    }
+}

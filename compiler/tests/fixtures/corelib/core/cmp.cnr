@@ -145,7 +145,7 @@ pub fn sort[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool) alloc ->
         let mut j: usize = i;
         while j > 0usize {
             let prev: T = get(read v.*, j - 1usize).*;
-            if (less)(read key, read prev) {
+            if less(read key, read prev) {
                 set(write v.*, j, prev);
                 j = j - 1usize;
             } else {

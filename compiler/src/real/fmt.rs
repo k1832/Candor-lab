@@ -1119,22 +1119,21 @@ impl Fmt<'_> {
     }
 
     /// A `read`/`write` borrow *operator*. The design-0005 reborrow collapse
-    /// (`read (deref b)` -> bare `b`, spec 02 §9.3) is **type-aware** and must not
-    /// rewrite a `take`-mode borrow argument or a non-place operand. The formatter
-    /// has no type table, so it collapses only the provably-safe syntactic shape:
-    /// `read (b.*)` / `write (b.*)` where `b` is a **bare identifier** (a borrow-
-    /// typed local place). A deref of anything compound (`read (tail.*.*)`, a
-    /// field/index/Box unbox) is *not* a matching reborrow and is preserved
-    /// verbatim (only its redundant parens drop, since `.*` binds tighter than the
-    /// borrow operator). Each surviving collapse is proven behaviour-preserving by
-    /// the corpus semantic gate (`tests/fmt.rs`).
+    /// (`read (b.*)` -> bare `b`, spec 02 §9.3) is **type-aware**: it is only sound
+    /// when `b` is a *read* (shared/copy) borrow, where `read (b.*)` and bare `b`
+    /// denote the same non-moving reborrow. When `b` is a *write* (exclusive, non-
+    /// copy) borrow, `read (b.*)` is a non-moving read-reborrow while bare `b`
+    /// **moves** the write borrow -- so the collapse changes semantics (a later use
+    /// of `b` then fails E0301 "use of moved value"). The formatter has no type
+    /// table and cannot tell a read borrow (collapse safe) from a write borrow
+    /// (collapse unsound), so it must NOT collapse: the keyword and `.*` are always
+    /// preserved. Redundant parens still drop, since `.*` binds tighter than the
+    /// borrow operator (`read (b.*)` prints as `read b.*`).
+    ///
+    /// Follow-up: a future *type-aware* fmt (with a type table) could restore the
+    /// collapse for the read-borrow-only case, which is genuinely behaviour-
+    /// preserving. Do not reintroduce it without that type information.
     fn emit_borrow_op(&mut self, kw: &str, operand: &Expr) {
-        if let Some(inner) = as_deref_inner(operand) {
-            if matches!(inner.kind, ExprKind::Ident(_)) {
-                self.emit_expr(inner, BP_MIN, false);
-                return;
-            }
-        }
         self.push(kw);
         self.push(" ");
         self.emit_expr(operand, BP_PREFIX, false);
