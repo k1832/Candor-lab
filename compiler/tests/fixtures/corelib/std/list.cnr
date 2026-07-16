@@ -135,3 +135,32 @@ impl[T] Iter for List[T] {
         }
     }
 }
+
+// core/iter terminal that materializes any `Iter` into a `List`. It consumes the
+// iterator, prepending each yielded item through `push_front` (so the result is
+// in reverse yield order), and short-circuits to the empty list on OOM. Lives in
+// `std` (not beside the `core::iter` terminals) because it builds a `List` over
+// the real `Alloc` — a std concern.
+pub fn collect[I: Iter](it: I, a: read Alloc) alloc -> List[I::Item] {
+    let mut acc: List[I::Item] = List::Nil;
+    let mut cur: I = it;
+    loop {
+        match cur.next() {
+            IterStep::More(x, rest) => {
+                match push_front(a, acc, x) {
+                    Grow::Grown(nl) => {
+                        acc = nl;
+                    },
+                    Grow::GrowOom => {
+                        return List::Nil;
+                    },
+                }
+                cur = rest;
+            },
+            IterStep::Done => {
+                break;
+            },
+        }
+    }
+    return acc;
+}

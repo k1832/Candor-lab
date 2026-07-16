@@ -1,0 +1,182 @@
+// std layer: string utilities over the design-0013 `str`/`String` surface. The
+// byte-scan predicates (`starts_with`/`ends_with`/`contains`/`find`) and the
+// view-returning `trim` allocate nothing; the two builders `split` (OWNED
+// `String` pieces into a `Vec[String]`) and `join` allocate through the real
+// `Alloc`, so they carry `alloc`.
+//
+// UTF-8 safety (P5): every byte offset fed to `substr` lands on a char boundary.
+// A valid `str` needle cannot match straddling a boundary — its first byte is
+// either ASCII (< 0x80) or a lead byte (>= 0xC0), never a continuation byte — so a
+// byte-search match position is always boundary-aligned and the piece cut points
+// in `split` never fault. `trim` only skips ASCII whitespace (all single-byte), so
+// its cut points are boundaries too.
+use core::opt::{Opt};
+use std::alloc::{Alloc};
+
+pub fn starts_with(s: str, prefix: str) -> bool {
+    let sb: [u8] = as_bytes(s);
+    let pb: [u8] = as_bytes(prefix);
+    let n: usize = len(pb);
+    if n > len(sb) {
+        return false;
+    }
+    let mut i: usize = 0usize;
+    while i < n {
+        if sb[i] != pb[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+pub fn ends_with(s: str, suffix: str) -> bool {
+    let sb: [u8] = as_bytes(s);
+    let fb: [u8] = as_bytes(suffix);
+    let n: usize = len(fb);
+    let m: usize = len(sb);
+    if n > m {
+        return false;
+    }
+    let off: usize = m - n;
+    let mut i: usize = 0usize;
+    while i < n {
+        if sb[off + i] != fb[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+// First byte-offset of `needle` in `s`, or `None`. An empty needle is found at 0.
+// A match position is always char-boundary-aligned, so the returned offset is safe
+// to feed to `substr`/`str_from`.
+pub fn find(s: str, needle: str) -> Opt[usize] {
+    let sb: [u8] = as_bytes(s);
+    let nb: [u8] = as_bytes(needle);
+    let n: usize = len(nb);
+    let m: usize = len(sb);
+    if n == 0usize {
+        return Opt::Some(0usize);
+    }
+    if n > m {
+        return Opt::None;
+    }
+    let last: usize = m - n;
+    let mut i: usize = 0usize;
+    loop {
+        if i > last {
+            break;
+        }
+        let mut j: usize = 0usize;
+        let mut matched: bool = true;
+        while j < n {
+            if sb[i + j] != nb[j] {
+                matched = false;
+                break;
+            }
+            j = j + 1usize;
+        }
+        if matched {
+            return Opt::Some(i);
+        }
+        i = i + 1usize;
+    }
+    return Opt::None;
+}
+
+pub fn contains(s: str, needle: str) -> bool {
+    match find(s, needle) {
+        Opt::Some(i) => {
+            return true;
+        },
+        Opt::None => {
+            return false;
+        },
+    }
+}
+
+fn is_ascii_ws(b: u8) -> bool {
+    return b == 32u8 || b == 9u8 || b == 10u8 || b == 13u8;
+}
+
+// Strip leading/trailing ASCII whitespace, returning a `substr` VIEW (no alloc).
+// Whitespace bytes are all single-byte ASCII, so the trimmed [start, end) cut
+// points are char boundaries and `substr` never faults.
+pub fn trim(s: str) -> str {
+    let sb: [u8] = as_bytes(s);
+    let m: usize = len(sb);
+    let mut start: usize = 0usize;
+    while start < m && is_ascii_ws(sb[start]) {
+        start = start + 1usize;
+    }
+    let mut end: usize = m;
+    while end > start && is_ascii_ws(sb[end - 1usize]) {
+        end = end - 1usize;
+    }
+    return substr(s, start, end);
+}
+
+fn matches_at(sb: [u8], i: usize, nb: [u8]) -> bool {
+    let n: usize = len(nb);
+    let mut j: usize = 0usize;
+    while j < n {
+        if sb[i + j] != nb[j] {
+            return false;
+        }
+        j = j + 1usize;
+    }
+    return true;
+}
+
+// Split `s` on a NON-EMPTY separator into OWNED `String` pieces. Empty-piece rule
+// (Rust `str::split`): a separator at the start, end, or immediately after another
+// separator yields an empty piece, so the result always has one more piece than
+// the number of separators (>= 1 piece even for the empty string).
+pub fn split(a: read Alloc, s: str, sep: str) alloc -> Vec[String] {
+    let sb: [u8] = as_bytes(s);
+    let nb: [u8] = as_bytes(sep);
+    let total: usize = len(sb);
+    let seplen: usize = len(nb);
+    let mut res: Vec[String] = vec_new(a);
+    let mut start: usize = 0usize;
+    let mut i: usize = 0usize;
+    loop {
+        if i + seplen > total {
+            break;
+        }
+        if matches_at(sb, i, nb) {
+            let mut piece: String = string_new(a);
+            append(write piece, substr(s, start, i));
+            push(write res, piece);
+            start = i + seplen;
+            i = i + seplen;
+        } else {
+            i = i + 1usize;
+        }
+    }
+    let mut last: String = string_new(a);
+    append(write last, substr(s, start, total));
+    push(write res, last);
+    return res;
+}
+
+// Concatenate `parts` with `sep` between adjacent pieces, into an owned `String`.
+pub fn join(a: read Alloc, parts: read Vec[String], sep: str) alloc -> String {
+    let mut res: String = string_new(a);
+    let n: usize = len(read parts);
+    let mut i: usize = 0usize;
+    loop {
+        if i >= n {
+            break;
+        }
+        if i > 0usize {
+            append(write res, sep);
+        }
+        let piece_view: str = as_str(read get(read parts, i).*);
+        append(write res, piece_view);
+        i = i + 1usize;
+    }
+    return res;
+}

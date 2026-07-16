@@ -8,7 +8,10 @@ use core::arena::{Arena, new, push, get, reset, count};
 use core::iter::{IterStep};
 use std::alloc::{Alloc};
 use std::bump::{Bump, with_window, mk_alloc};
-use std::list::{List, Popped, Grow, Cell, CellRes, push_front, pop_front, length, cell, cell_get};
+use std::list::{List, Popped, Grow, Cell, CellRes, push_front, pop_front, length, cell, cell_get, collect};
+use core::cmp::{Ord, Ordering};
+use core::iter_terminals::{last};
+use std::str::{starts_with, contains, split, join};
 
 // a named fn threaded to `map` capture-free (design 0009 §5.2): the call site
 // the seed could not previously write (E1002).
@@ -142,6 +145,85 @@ fn main() alloc -> i64 {
     // --- core/opt::map: the higher-order op, capture-free + E1002-inferred ----
     let mapped: Opt[i64] = map(Opt::Some(20), inc);
     let mv: i64 = unwrap_or(mapped, 0); // 21
+
+    // --- promoted session utilities: exercised as guard checks so the sentinel
+    // --- stays STABLE (each fails to a distinct negative, else falls through) --
+    // core/cmp: `Ord` dispatch on a scalar (Ordering + the i64 impl).
+    let cmp_probe: i64 = 10;
+    match cmp_probe.cmp(20) {
+        Ordering::Less => {},
+        Ordering::Equal => {
+            return -20;
+        },
+        Ordering::Greater => {
+            return -20;
+        },
+    }
+
+    // core/iter_terminals: consume a `List` through the `last` terminal.
+    let mut lt: List[i64] = List::Nil;
+    match push_front(read al, lt, 5) {
+        Grow::Grown(nl) => {
+            lt = nl;
+        },
+        Grow::GrowOom => {
+            return -21;
+        },
+    }
+    match push_front(read al, lt, 6) {
+        Grow::Grown(nl) => {
+            lt = nl;
+        },
+        Grow::GrowOom => {
+            return -21;
+        },
+    }
+    match last(lt) {
+        Opt::Some(lv) => {
+            if lv != 5 {
+                return -22;
+            }
+        },
+        Opt::None => {
+            return -22;
+        },
+    }
+
+    // std/list: materialize a `List` from the `Iter` protocol via `collect`.
+    let mut lc: List[i64] = List::Nil;
+    match push_front(read al, lc, 7) {
+        Grow::Grown(nl) => {
+            lc = nl;
+        },
+        Grow::GrowOom => {
+            return -23;
+        },
+    }
+    match push_front(read al, lc, 8) {
+        Grow::Grown(nl) => {
+            lc = nl;
+        },
+        Grow::GrowOom => {
+            return -23;
+        },
+    }
+    let collected: List[i64] = collect(lc, read al);
+    if length(read collected) != 2u32 {
+        return -24;
+    }
+
+    // std/str: byte-scan predicates + a split/join round-trip.
+    if !starts_with("hello", "he") {
+        return -25;
+    }
+    if !contains("hello", "ell") {
+        return -26;
+    }
+    let parts: Vec[String] = split(read al, "a,b,c", ",");
+    let joined: String = join(read al, read parts, ",");
+    if len(as_str(read joined)) != 5usize {
+        return -27;
+    }
 
     // rst (a List) drops here -> structural Box free -> alloc (main is alloc).
     return asum + conv i64 acount + conv i64 acount2 + ob + ov + dok + ib + conv i64 ln + popped_val + conv i64 rest_len + cv + arsum + listsum + mv;

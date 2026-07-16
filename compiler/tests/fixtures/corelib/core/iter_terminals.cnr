@@ -1,0 +1,167 @@
+// core layer (design 0009): the eager iterator TERMINALS built on the
+// `core::iter::Iter` consuming protocol. Each drives `Iter::next` to exhaustion
+// (or short-circuits) over any `Iter`, so a `for`-style walk is replaced by a
+// named, composable consumer. Every terminal is `alloc`-marked because it drives
+// `Iter::next`, which is `alloc` (consuming iteration unboxes each cell) — off the
+// ground floor, exactly like `core::res`'s discarding combinators.
+//
+// The lazy ADAPTERS (`take_n`/`skip_n`/`enumerate`/`zip`/`take_while`/
+// `skip_while`) are NOT promoted here: they are generic `impl Iter for Adapter[I]`
+// blocks whose method bodies call the inner iterator's `I::Iter::next`, and the
+// module-tree checker does not resolve a bound-interface method inside a generic
+// impl method body (the impl's `[I: Iter]` bound is not qualified by `build_tree`,
+// so the lookup misses — E1002). They remain the single-file `tests/iteration.rs`
+// fixtures until that gap closes.
+use core::iter::{Iter, IterStep};
+use core::opt::{Opt};
+
+// The first item satisfying `pred`, or `None`. Non-matching items are dropped as
+// the scan advances (the §3.4 opaque-drop tax, already covered by `alloc`).
+pub fn find[I: Iter](it: I, pred: fn(read I::Item) -> bool) alloc -> Opt[I::Item] {
+    let mut cur: I = it;
+    loop {
+        match cur.next() {
+            IterStep::More(x, rest) => {
+                if (pred)(read x) {
+                    return Opt::Some(x);
+                }
+                cur = rest;
+            },
+            IterStep::Done => {
+                return Opt::None;
+            },
+        }
+    }
+}
+
+// The `n`-th item (0-based), or `None` if the iterator is shorter.
+pub fn nth[I: Iter](it: I, n: usize) alloc -> Opt[I::Item] {
+    let mut k: usize = n;
+    let mut cur: I = it;
+    loop {
+        match cur.next() {
+            IterStep::More(x, rest) => {
+                if k == 0usize {
+                    return Opt::Some(x);
+                }
+                k = k - 1usize;
+                cur = rest;
+            },
+            IterStep::Done => {
+                return Opt::None;
+            },
+        }
+    }
+}
+
+// The number of items the iterator yields.
+pub fn count[I: Iter](it: I) alloc -> i64 {
+    let mut c: i64 = 0;
+    let mut cur: I = it;
+    loop {
+        match cur.next() {
+            IterStep::More(x, rest) => {
+                c = c + 1;
+                cur = rest;
+            },
+            IterStep::Done => {
+                break;
+            },
+        }
+    }
+    return c;
+}
+
+// The final item, or `None` for an empty iterator.
+pub fn last[I: Iter](it: I) alloc -> Opt[I::Item] {
+    let mut cur: I = it;
+    let mut acc: Opt[I::Item] = Opt::None;
+    loop {
+        match cur.next() {
+            IterStep::More(x, rest) => {
+                acc = Opt::Some(x);
+                cur = rest;
+            },
+            IterStep::Done => {
+                break;
+            },
+        }
+    }
+    return acc;
+}
+
+// True if ANY item satisfies `pred` (short-circuits on the first match).
+pub fn any[I: Iter](it: I, pred: fn(read I::Item) -> bool) alloc -> bool {
+    let mut cur: I = it;
+    loop {
+        match cur.next() {
+            IterStep::More(x, rest) => {
+                if (pred)(read x) {
+                    return true;
+                }
+                cur = rest;
+            },
+            IterStep::Done => {
+                return false;
+            },
+        }
+    }
+}
+
+// True if EVERY item satisfies `pred` (short-circuits on the first failure).
+pub fn all[I: Iter](it: I, pred: fn(read I::Item) -> bool) alloc -> bool {
+    let mut cur: I = it;
+    loop {
+        match cur.next() {
+            IterStep::More(x, rest) => {
+                if (pred)(read x) {
+                    cur = rest;
+                } else {
+                    return false;
+                }
+            },
+            IterStep::Done => {
+                return true;
+            },
+        }
+    }
+}
+
+// The index of the first item satisfying `pred`, or `None`.
+pub fn position[I: Iter](it: I, pred: fn(read I::Item) -> bool) alloc -> Opt[usize] {
+    let mut idx: usize = 0usize;
+    let mut cur: I = it;
+    loop {
+        match cur.next() {
+            IterStep::More(x, rest) => {
+                if (pred)(read x) {
+                    return Opt::Some(idx);
+                }
+                idx = idx + 1usize;
+                cur = rest;
+            },
+            IterStep::Done => {
+                return Opt::None;
+            },
+        }
+    }
+}
+
+// Left fold: thread `acc` through the capture-free `fn(A, I::Item) -> A` over
+// every item, returning the final accumulator.
+pub fn fold[I: Iter, A](it: I, init: A, f: fn(A, I::Item) -> A) alloc -> A {
+    let mut acc: A = init;
+    let mut cur: I = it;
+    loop {
+        match cur.next() {
+            IterStep::More(x, rest) => {
+                acc = f(acc, x);
+                cur = rest;
+            },
+            IterStep::Done => {
+                break;
+            },
+        }
+    }
+    return acc;
+}

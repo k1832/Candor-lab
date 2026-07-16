@@ -1,0 +1,158 @@
+// core layer: an `Ord` comparison interface impl'd for the builtin scalar types,
+// with the generic consumers (`min`/`max`/`sort_ord`) built on it, plus a
+// comparator-driven `sort`. `Ord` is impl'd for `i64`/`u8`/`usize`/`u32` in the
+// interface's own module — the scalar orphan rule (design 0007 §2.3): a scalar
+// has no home module, so its impls live where the interface is defined.
+//
+// `min`/`max` are non-`alloc` (`T: copy` keeps the scanned elements drop-inert);
+// `sort_ord`/`sort` are `alloc`-marked because they rebuild a `Vec[T]` in place.
+use core::opt::{Opt};
+
+pub enum Ordering {
+    Less,
+    Equal,
+    Greater,
+}
+
+pub interface Ord {
+    fn cmp(read self, other: Self) -> Ordering;
+}
+
+impl Ord for i64 {
+    fn cmp(read self, other: Self) -> Ordering {
+        if self.* < other {
+            return Ordering::Less;
+        }
+        if self.* > other {
+            return Ordering::Greater;
+        }
+        return Ordering::Equal;
+    }
+}
+
+impl Ord for u8 {
+    fn cmp(read self, other: Self) -> Ordering {
+        if self.* < other {
+            return Ordering::Less;
+        }
+        if self.* > other {
+            return Ordering::Greater;
+        }
+        return Ordering::Equal;
+    }
+}
+
+impl Ord for usize {
+    fn cmp(read self, other: Self) -> Ordering {
+        if self.* < other {
+            return Ordering::Less;
+        }
+        if self.* > other {
+            return Ordering::Greater;
+        }
+        return Ordering::Equal;
+    }
+}
+
+impl Ord for u32 {
+    fn cmp(read self, other: Self) -> Ordering {
+        if self.* < other {
+            return Ordering::Less;
+        }
+        if self.* > other {
+            return Ordering::Greater;
+        }
+        return Ordering::Equal;
+    }
+}
+
+pub fn min[T: Ord + copy](v: read Vec[T]) -> Opt[T] {
+    let n: usize = len(read v.*);
+    if n == 0usize {
+        return Opt::None;
+    }
+    let mut best: T = get(read v.*, 0usize).*;
+    let mut i: usize = 1usize;
+    while i < n {
+        let cur: T = get(read v.*, i).*;
+        match cur.cmp(best) {
+            Ordering::Less => {
+                best = cur;
+            },
+            Ordering::Equal => {},
+            Ordering::Greater => {},
+        }
+        i = i + 1usize;
+    }
+    return Opt::Some(best);
+}
+
+pub fn max[T: Ord + copy](v: read Vec[T]) -> Opt[T] {
+    let n: usize = len(read v.*);
+    if n == 0usize {
+        return Opt::None;
+    }
+    let mut best: T = get(read v.*, 0usize).*;
+    let mut i: usize = 1usize;
+    while i < n {
+        let cur: T = get(read v.*, i).*;
+        match cur.cmp(best) {
+            Ordering::Greater => {
+                best = cur;
+            },
+            Ordering::Less => {},
+            Ordering::Equal => {},
+        }
+        i = i + 1usize;
+    }
+    return Opt::Some(best);
+}
+
+pub fn sort_ord[T: Ord + copy](v: write Vec[T]) alloc -> unit {
+    let n: usize = len(read v.*);
+    let mut i: usize = 1usize;
+    while i < n {
+        let key: T = get(read v.*, i).*;
+        let mut j: usize = i;
+        while j > 0usize {
+            let prev: T = get(read v.*, j - 1usize).*;
+            match key.cmp(prev) {
+                Ordering::Less => {
+                    set(write v.*, j, prev);
+                    j = j - 1usize;
+                },
+                Ordering::Equal => {
+                    break;
+                },
+                Ordering::Greater => {
+                    break;
+                },
+            }
+        }
+        set(write v.*, j, key);
+        i = i + 1usize;
+    }
+}
+
+// A comparator-driven insertion sort: the SAME `Vec` sorts ascending or
+// descending purely by which `less` comparator is passed (design: the order is
+// comparator-driven, not hard-coded).
+pub fn sort[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool) alloc -> unit {
+    let n: usize = len(read v.*);
+    let mut i: usize = 1usize;
+    while i < n {
+        let key: T = get(read v.*, i).*;
+        let mut j: usize = i;
+        while j > 0usize {
+            let prev: T = get(read v.*, j - 1usize).*;
+            if (less)(read key, read prev) {
+                set(write v.*, j, prev);
+                j = j - 1usize;
+            } else {
+                break;
+            }
+        }
+        set(write v.*, j, key);
+        i = i + 1usize;
+    }
+}
