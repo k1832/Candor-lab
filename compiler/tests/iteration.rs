@@ -469,6 +469,7 @@ fn nth[I: Iter](it: I, n: usize) alloc -> Opt[I::Item] {
     loop { match cur.next() { IterStep::More(x, rest) => { if k == 0usize { return Opt::Some(x); } k = k - 1usize; cur = rest; } IterStep::Done => { return Opt::None; } } }
 }
 fn count[I: Iter](it: I) alloc -> i64 { let mut c: i64 = 0; let mut cur: I = it; loop { match cur.next() { IterStep::More(x, rest) => { c = c + 1; cur = rest; } IterStep::Done => { break; } } } return c; }
+fn last[I: Iter](it: I) alloc -> Opt[I::Item] { let mut cur: I = it; let mut acc: Opt[I::Item] = Opt::None; loop { match cur.next() { IterStep::More(x, rest) => { acc = Opt::Some(x); cur = rest; } IterStep::Done => { break; } } } return acc; }
 fn prepend(a: read Alloc, v: i64, rest: List[i64]) alloc -> List[i64] { match box(a, rest) { BoxResult::oom => { return List::Nil; } BoxResult::boxed(b) => { return List::Cons(v, b); } } }
 fn prepend_g[T](a: read Alloc, v: T, rest: List[T]) alloc -> List[T] { match box(a, rest) { BoxResult::oom => { return List::Nil; } BoxResult::boxed(b) => { return List::Cons(v, b); } } }
 fn is_three(x: read i64) -> bool { if x.* == 3 { return true; } return false; }
@@ -511,6 +512,28 @@ fn nth_terminal_over_iter_agrees_all_engines() {
     let (ret, trace) = all_engines(&src, "nth");
     assert_eq!(ret, 2);
     assert_eq!(trace, vec![2]);
+}
+
+#[test]
+fn last_terminal_over_iter_agrees_all_engines() {
+    // `last[I: Iter]` returning `Opt[I::Item]` — item-agnostic (it never inspects
+    // an item, only keeps the final one), so it falls out cleanly exactly like
+    // `nth`/`find`. The last element of [4,3,2,1] is 1. (`sum`/`min`/`max` do NOT
+    // fall out: they need arithmetic on the opaque `I::Item`, which is E0703 with
+    // no numeric bound / `Item = i64` equality constraint.)
+    let src = format!(
+        "{ITER}{TERMINALS}\n\
+         fn main() alloc -> i64 {{\n\
+             let mut bs: Bump = with_window(16777216, 1048576);\n\
+             let al: Alloc = mk_alloc(write bs);\n\
+             let r: i64 = unwrap_i64(last(mklist(read al)), 0 - 1);\n\
+             trace(r);\n\
+             return r;\n\
+         }}"
+    );
+    let (ret, trace) = all_engines(&src, "last");
+    assert_eq!(ret, 1);
+    assert_eq!(trace, vec![1]);
 }
 
 #[test]
