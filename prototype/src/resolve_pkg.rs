@@ -577,6 +577,12 @@ fn lock_from(packages: &[ResolvedPackage], summaries: &[crate::audit::TrustSumma
 /// consistent with the freshly resolved set is reused verbatim (not rewritten, so
 /// its bytes are stable); an absent or manifest-diverged lock is (re)written.
 /// Returns whether the on-disk lock was reused.
+///
+/// Before overwriting a diverged-but-parseable lock, the **trust-delta gate**
+/// (design 0017 §8, Open-Q1) runs: a lock update that grows any dependency's
+/// foreign/`unsafe` surface is a hard error (`E0936`) unless the user accepts it
+/// via `CANDOR_ACCEPT_TRUST_DELTA` — the committed lock's trust surface is not
+/// silently expanded.
 fn write_or_verify_lock(
     root_dir: &Path,
     packages: &[ResolvedPackage],
@@ -593,9 +599,94 @@ fn write_or_verify_lock(
             if parsed == lock {
                 return Ok(true);
             }
+            // Trust-delta gate (design 0017 §8, Open-Q1): the fresh set diverged
+            // from the reviewed lock; refuse to overwrite if the divergence *grows*
+            // a dependency's foreign/`unsafe` surface. Initial creation (no or
+            // unparseable lock) and a no-change rebuild (returned above) never
+            // reach here, so establishing a baseline and a stable rebuild are
+            // never gated.
+            let root_name = packages.iter().find(|p| p.is_root).map(|p| p.name.as_str());
+            if let Some(delta) = trust_delta_growth(&parsed, &lock, root_name) {
+                if !accept_trust_delta() {
+                    return Err(diag(
+                        "E0936",
+                        format!(
+                            "candor.lock update introduces new dependency trust surface (design 0017 §8):\n{delta}\n\
+                             a lock update must not silently grow the foreign/`unsafe` surface the committed lock vouched for.\n\
+                             review the delta above, then re-run with CANDOR_ACCEPT_TRUST_DELTA=1 to accept it and update the lock.",
+                        ),
+                    ));
+                }
+                eprintln!(
+                    "note: CANDOR_ACCEPT_TRUST_DELTA set; accepting the grown dependency trust surface and updating candor.lock:\n{delta}",
+                );
+            }
         }
     }
     std::fs::write(&path, text)
         .map_err(|e| diag("E0929", format!("cannot write `{}`: {e}", path.display())))?;
     Ok(false)
+}
+
+/// Detect a **growth** of dependency trust surface between the on-disk lock `old`
+/// and the freshly resolved `fresh` (design 0017 §8, Open-Q1). Returns a
+/// per-dependency delta description when any dependency's foreign/`unsafe` count
+/// (`boundary_modules` / `externs` / `unsafe_regions`) increased, or a **new**
+/// dependency appears carrying nonzero surface; `None` when the surface only
+/// shrank, stayed equal, or a new dependency is pure. The `root` package's own
+/// surface is the author's code, not a supply-chain delta, so it is never gated.
+///
+/// `assumed-proven` is not gated separately: this edition has no distinct
+/// `assumed-proven` construct — its surface is the boundary `trust` clauses plus
+/// `unsafe` justifications already counted (design 0017 §8) — so gating the
+/// three recorded counts covers it; a dedicated count is a follow-up.
+fn trust_delta_growth(
+    old: &LockFile,
+    fresh: &LockFile,
+    root: Option<&str>,
+) -> Option<String> {
+    let prior: BTreeMap<&str, &crate::audit::TrustSummary> =
+        old.package.iter().map(|e| (e.name.as_str(), &e.trust)).collect();
+    let mut grown: Vec<String> = Vec::new();
+    for entry in &fresh.package {
+        if Some(entry.name.as_str()) == root {
+            continue;
+        }
+        let now = &entry.trust;
+        match prior.get(entry.name.as_str()) {
+            Some(was) => {
+                let mut deltas = Vec::new();
+                if now.boundary_modules > was.boundary_modules {
+                    deltas.push(format!("boundary_modules {} -> {}", was.boundary_modules, now.boundary_modules));
+                }
+                if now.externs > was.externs {
+                    deltas.push(format!("externs {} -> {}", was.externs, now.externs));
+                }
+                if now.unsafe_regions > was.unsafe_regions {
+                    deltas.push(format!("unsafe_regions {} -> {}", was.unsafe_regions, now.unsafe_regions));
+                }
+                if !deltas.is_empty() {
+                    grown.push(format!("  {}: {}", entry.name, deltas.join(", ")));
+                }
+            }
+            None if now.boundary_modules > 0 || now.externs > 0 || now.unsafe_regions > 0 => {
+                grown.push(format!(
+                    "  {} (new dependency): boundary_modules 0 -> {}, externs 0 -> {}, unsafe_regions 0 -> {}",
+                    entry.name, now.boundary_modules, now.externs, now.unsafe_regions,
+                ));
+            }
+            None => {}
+        }
+    }
+    (!grown.is_empty()).then(|| grown.join("\n"))
+}
+
+/// Whether the user opted to accept a grown dependency trust surface, letting a
+/// gated lock update proceed (design 0017 §8, Open-Q1). An env var rather
+/// than a CLI flag because `write_or_verify_lock` sits behind `build_tree`'s many
+/// callers plus the `build`/`audit` entries: threading a flag through every
+/// re-resolving command is far more invasive than reading it here, mirroring the
+/// `CANDOR_LINKER` precedent (an env var read at its point of use).
+fn accept_trust_delta() -> bool {
+    std::env::var_os("CANDOR_ACCEPT_TRUST_DELTA").is_some_and(|v| !v.is_empty())
 }

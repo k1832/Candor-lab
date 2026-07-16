@@ -503,8 +503,9 @@ stages 3–4), not a prerequisite for the first working multi-package build.
   lock without it stays reusable). Gate: `prototype/tests/packages.rs`
   (`lock_records_per_package_trust_summary_and_tracks_the_delta` asserts the
   recorded counts and that adding one `unsafe` region to a dependency increments its
-  recorded count — the visible supply-chain delta). Enumerate-only; the **gating**
-  trust-delta check on lock updates remains the first-1.0 need (Open-Q1). The
+  recorded count — the visible supply-chain delta). The **gating** trust-delta
+  check that hard-fails a lock update growing this surface is now implemented
+  (Open-Q1, CLOSED 2026-07-16; see the Open-Q1 ledger entry below). The
   `assumed-proven` count is not a separate field: this edition has no distinct
   `assumed-proven` construct, so that surface is exactly the boundary `trust` clauses
   plus `unsafe` justifications already counted (see `prototype/src/audit.rs`).
@@ -625,15 +626,41 @@ following are no longer open:*
 Open-Q2 (the editions invariant) and Open-Q3 (`src/`) are resolved above; the
 identifiers Open-Q1/Q4/Q5 are kept stable.*
 
-1. **Trust-delta *gating* for the supply chain — a first-1.0 need, not 0.x
-   (Open-Q1).** §8's 0.x policy is settled as **enumerate-only** with a visible
-   per-dependency trust delta in the lock; the open item is the **gating** upgrade
-   — a hard trust-delta check that fails a lock update introducing new
-   foreign/`unsafe`/`assumed-proven` surface — named as a **first-1.0**
-   requirement. Fetching and building a git dependency's `boundary` module remains
-   the largest new attack surface the package system opens (P17's domain). The
-   `candor audit` extension (F1b) is the first implementation slice this document
-   depends on.
+1. **Trust-delta *gating* for the supply chain (Open-Q1) — CLOSED (2026-07-16),
+   implemented.** §8's 0.x policy was settled as **enumerate-only** with a visible
+   per-dependency trust delta in the lock; the **gating** upgrade named here is now
+   delivered. `write_or_verify_lock` (`prototype/src/resolve_pkg.rs`), reached by
+   every re-resolving command through `resolve()`, runs a **trust-delta gate**
+   before overwriting a diverged-but-parseable lock: it diffs the freshly resolved
+   per-package `[package.trust]` counts against the on-disk lock's and **hard-fails
+   (E0936)** if any dependency's foreign/`unsafe` surface *grew* — a per-dependency
+   count increase (`boundary_modules` / `externs` / `unsafe_regions`), or a **new**
+   dependency carrying nonzero surface. The diagnostic names each offending
+   dependency and shows the delta (`b: unsafe_regions 1 -> 2`) so the reviewer sees
+   exactly what expanded, and the reviewed lock is **left intact** on failure.
+   *Not gated* (lock (re)written as before): initial creation (no/unparseable lock),
+   a no-change rebuild (the lock is reused, never reaching the gate), a shrunk or
+   equal surface, and a new dependency with zero surface; the root package's own
+   surface is the author's code, not a supply-chain delta, and is excluded. The gate
+   diffs the existing trust summaries (impl #6) — no second computation path. An
+   **acceptance override** lets a reviewer intentionally adopt a grown surface: the
+   env var **`CANDOR_ACCEPT_TRUST_DELTA`** (mirroring the `CANDOR_LINKER` precedent —
+   chosen over a CLI flag because the gate sits behind `build_tree`'s many callers
+   plus the `build`/`audit` entries, so threading a flag through every re-resolving
+   command is far more invasive), documented in the diagnostic's help text ("review
+   the delta … then re-run with CANDOR_ACCEPT_TRUST_DELTA=1"). `assumed-proven` is
+   **not** a separate gated field: this edition has no distinct `assumed-proven`
+   construct (its surface is the boundary `trust` clauses + `unsafe` justifications
+   already counted, §8), so gating the three recorded counts covers it; a dedicated
+   `assumed-proven` count is a follow-up if that construct ever ships. Files:
+   `prototype/src/resolve_pkg.rs` (`trust_delta_growth`, `accept_trust_delta`, the
+   gate in `write_or_verify_lock`). Gate: `prototype/tests/packages.rs`
+   (grow-fails-and-lock-untouched [load-bearing], override-rewrites, new-foreign-dep
+   gated, new-pure-dep ungated, shrink ungated, initial-creation + no-change
+   ungated). Fetching and building a git dependency's `boundary` module remains the
+   largest new attack surface the package system opens (P17's domain); this gate is
+   what makes a rev-bump's surface growth a hard review gate rather than only a
+   visible lock diff.
 
 4. **Incremental-build interaction (Open-Q4) — CLOSED (2026-07-15), implemented.**
    §7 makes the package boundary the interface-artifact boundary (0008 §2 stages

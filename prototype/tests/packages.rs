@@ -357,6 +357,10 @@ fn lockfile_is_written_then_reused() {
 
 #[test]
 fn lock_records_per_package_trust_summary_and_tracks_the_delta() {
+    // Growing b's surface trips the trust-delta gate (design 0017 §8, Open-Q1);
+    // accept it so this test can observe the *recorded* delta. Hold the env lock
+    // for the same reason the gate tests below do.
+    let _guard = TRUST_ENV_LOCK.lock().unwrap();
     let root = stage(&["audit_app", "audit_b", "audit_c"]);
     let app = root.join("audit_app");
 
@@ -370,10 +374,14 @@ fn lock_records_per_package_trust_summary_and_tracks_the_delta() {
 
     // The delta is the point: add one `unsafe` region to b, re-resolve, and b's
     // recorded `unsafe_regions` increments (1 -> 2) — the visible supply-chain
-    // delta a reviewer sees in the lock diff.
+    // delta a reviewer sees in the lock diff. The re-resolve grows the surface, so
+    // accept the delta to let the lock update through.
     let (_, _, before) = lock_trust(&app, "b");
     add_unsafe_region_to_b(&root.join("audit_b"));
-    resolve_pkg::resolve(&app).unwrap();
+    std::env::set_var("CANDOR_ACCEPT_TRUST_DELTA", "1");
+    let res = resolve_pkg::resolve(&app);
+    std::env::remove_var("CANDOR_ACCEPT_TRUST_DELTA");
+    res.unwrap();
     let (_, _, after) = lock_trust(&app, "b");
     assert_eq!(after, before + 1, "b's recorded unsafe_regions must track the new region");
 }
@@ -804,4 +812,171 @@ fn non_freestanding_root_over_foreign_dep_is_unaffected() {
         codes_at(&app)
     );
     assert_eq!(native_ret(run_dir_mir(&app)), 0, "non-freestanding root still runs");
+}
+
+// ---- the trust-delta gate on lock updates (design 0017 §8, Open-Q1) ---------
+// A lock update that GROWS a dependency's foreign/`unsafe` surface (a per-dep
+// count increase, or a new dependency carrying nonzero surface) is a hard error
+// (E0936) naming the offending dep + the delta, and must NOT overwrite the
+// reviewed lock. Initial creation, a no-change rebuild, a shrunk/equal surface,
+// and a new pure dependency are not gated. `CANDOR_ACCEPT_TRUST_DELTA` overrides.
+
+// The override is a process-global env var; serialize the gate tests that depend
+// on its state (the grow/new-foreign tests need it UNSET; the override test sets
+// then clears it) so a set_var in one never races another. A no-op under
+// nextest's process-per-test, a guard under the plain `cargo test` harness — the
+// same pattern the git tests use for `CANDOR_CACHE_DIR`.
+static TRUST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// Create a fresh binary `gate_app` package depending on the given `(dep-key,
+/// sibling-dir)` path dependencies; return its directory. Rewriting the manifest
+/// later re-points the graph (adding/removing a dependency between resolves).
+fn scaffold_app(root: &std::path::Path, deps: &[(&str, &str)]) -> PathBuf {
+    let app = root.join("gate_app");
+    std::fs::create_dir_all(app.join("src")).unwrap();
+    std::fs::write(app.join("src/main.cnr"), "fn main() -> i64 {\n    return 0;\n}\n").unwrap();
+    write_app_manifest(&app, deps);
+    app
+}
+
+/// (Re)write `gate_app`'s manifest with the given path dependencies.
+fn write_app_manifest(app: &std::path::Path, deps: &[(&str, &str)]) {
+    let mut s = String::from("[package]\nname = \"gate_app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\n");
+    for (key, sib) in deps {
+        s.push_str(&format!("{key} = {{ path = \"../{sib}\" }}\n"));
+    }
+    std::fs::write(app.join("candor.toml"), s).unwrap();
+}
+
+// LOAD-BEARING: growing a dependency's surface fails the lock update with E0936
+// (naming the dep + the delta) and leaves the reviewed lock byte-for-byte intact.
+#[test]
+fn trust_growth_fails_the_lock_update_and_leaves_the_lock_intact() {
+    let _guard = TRUST_ENV_LOCK.lock().unwrap();
+    let root = stage(&["audit_app", "audit_b", "audit_c"]);
+    let app = root.join("audit_app");
+
+    // Baseline: establish the reviewed lock (b: 1 unsafe region).
+    resolve_pkg::resolve(&app).unwrap();
+    let baseline = std::fs::read_to_string(app.join("candor.lock")).unwrap();
+
+    // Grow b's surface by one `unsafe` region and re-resolve.
+    add_unsafe_region_to_b(&root.join("audit_b"));
+    let err = resolve_pkg::resolve(&app).err().expect("the grown surface must be gated");
+
+    assert_eq!(err.code, "E0936", "want the trust-delta gate code, got {err:?}");
+    assert!(err.message.contains("b:"), "must name the offending dep `b`: {}", err.message);
+    assert!(
+        err.message.contains("unsafe_regions 1 -> 2"),
+        "must show the per-dep delta: {}",
+        err.message,
+    );
+    assert!(
+        err.message.contains("CANDOR_ACCEPT_TRUST_DELTA"),
+        "must document the override in the help text: {}",
+        err.message,
+    );
+    assert_eq!(
+        std::fs::read_to_string(app.join("candor.lock")).unwrap(),
+        baseline,
+        "the gate must NOT overwrite the reviewed lock on failure",
+    );
+}
+
+// Accepting the delta via the override lets the update proceed and rewrites the
+// lock with the grown counts.
+#[test]
+fn accepting_the_trust_delta_rewrites_the_lock() {
+    let _guard = TRUST_ENV_LOCK.lock().unwrap();
+    let root = stage(&["audit_app", "audit_b", "audit_c"]);
+    let app = root.join("audit_app");
+
+    resolve_pkg::resolve(&app).unwrap();
+    add_unsafe_region_to_b(&root.join("audit_b"));
+
+    std::env::set_var("CANDOR_ACCEPT_TRUST_DELTA", "1");
+    let res = resolve_pkg::resolve(&app);
+    std::env::remove_var("CANDOR_ACCEPT_TRUST_DELTA");
+    res.expect("the override must let the grown lock update proceed");
+
+    assert_eq!(lock_trust(&app, "b"), (1, 1, 2), "the grown surface is now recorded in the lock");
+}
+
+// A NEW dependency carrying foreign/`unsafe` surface is gated (more attack
+// surface than the committed lock vouched for).
+#[test]
+fn a_new_dependency_with_foreign_surface_is_gated() {
+    let _guard = TRUST_ENV_LOCK.lock().unwrap();
+    let root = stage(&["purelib", "audit_b", "audit_c"]);
+    let app = scaffold_app(&root, &[("purelib", "purelib")]);
+
+    // Baseline: a pure graph (app + purelib), zero surface.
+    resolve_pkg::resolve(&app).unwrap();
+    let baseline = std::fs::read_to_string(app.join("candor.lock")).unwrap();
+
+    // Add `b` (a foreign extern + an `unsafe` region) as a new dependency.
+    write_app_manifest(&app, &[("purelib", "purelib"), ("b", "audit_b")]);
+    let err = resolve_pkg::resolve(&app).err().expect("a new foreign dep must be gated");
+
+    assert_eq!(err.code, "E0936", "a new foreign dep must be gated, got {err:?}");
+    assert!(err.message.contains("b (new dependency)"), "must name the new dep: {}", err.message);
+    assert_eq!(
+        std::fs::read_to_string(app.join("candor.lock")).unwrap(),
+        baseline,
+        "lock untouched on the gated new-dep update",
+    );
+}
+
+// A NEW dependency with zero foreign/`unsafe` surface is NOT gated — it adds no
+// new trust.
+#[test]
+fn a_new_dependency_with_no_foreign_surface_is_not_gated() {
+    let root = stage(&["purelib", "lib_pkg"]);
+    let app = scaffold_app(&root, &[("purelib", "purelib")]);
+
+    resolve_pkg::resolve(&app).unwrap();
+    write_app_manifest(&app, &[("purelib", "purelib"), ("lib_pkg", "lib_pkg")]);
+    resolve_pkg::resolve(&app).expect("a pure new dependency must not be gated");
+
+    assert_eq!(lock_trust(&app, "lib_pkg"), (0, 0, 0), "the new pure dep is recorded with zero surface");
+}
+
+// A SHRINKING (or equal) surface is not gated: a dependency whose counts drop
+// re-resolves clean and the lock is rewritten with the smaller counts.
+#[test]
+fn a_shrinking_trust_surface_is_not_gated() {
+    let root = stage(&["audit_app", "audit_b", "audit_c"]);
+    let app = root.join("audit_app");
+    let b_src = root.join("audit_b/src/b.cnr");
+    let original = std::fs::read_to_string(&b_src).unwrap();
+
+    // Baseline with a grown surface (b: 2 unsafe regions) — an initial creation,
+    // so writing it is not gated.
+    add_unsafe_region_to_b(&root.join("audit_b"));
+    resolve_pkg::resolve(&app).unwrap();
+    assert_eq!(lock_trust(&app, "b"), (1, 1, 2), "baseline records the grown surface");
+
+    // Shrink b back to one region and re-resolve: a drop is not gated.
+    std::fs::write(&b_src, &original).unwrap();
+    resolve_pkg::resolve(&app).expect("a shrinking surface must not be gated");
+    assert_eq!(lock_trust(&app, "b"), (1, 1, 1), "the shrunk surface is rewritten");
+}
+
+// Regression guards: initial creation (no lock on disk) and a no-change rebuild
+// (fresh == on-disk) never reach the gate.
+#[test]
+fn initial_creation_and_no_change_rebuild_are_not_gated() {
+    let root = stage(&["audit_app", "audit_b", "audit_c"]);
+    let app = root.join("audit_app");
+
+    // Initial creation: the staged copy carries no lock — establishing the
+    // baseline writes it and is not gated.
+    let first = resolve_pkg::resolve(&app).unwrap();
+    assert!(!first.lock_reused, "the initial resolve writes a fresh lock");
+    assert!(app.join("candor.lock").exists(), "the baseline lock is written");
+
+    // No-change rebuild: the fresh set equals the on-disk lock — reused, never
+    // reaching the gate.
+    let second = resolve_pkg::resolve(&app).unwrap();
+    assert!(second.lock_reused, "an unchanged re-resolve reuses the lock");
 }
