@@ -1,0 +1,170 @@
+// Iterators: the consuming `Iter` protocol, its lazy ADAPTERS (`take_n`,
+// `enumerate`), and its eager TERMINALS (`fold`, `count`, `find`). Each adapter
+// is a by-value struct owning its inner iterator via a generic
+// `impl[I: Iter] Iter for Adapter[I]`, so adapters compose with any `Iter` and
+// with each other; a terminal drives the chain to close it. A `Range` here is a
+// non-allocating source. Everything on the chain is `alloc`-marked because
+// consuming iteration is not the no-alloc floor (a `List` cell would unbox).
+//
+// `run`-clean: pure compute, no foreign I/O.
+
+enum Opt[T] {
+    ok Some(T),
+    None,
+}
+enum IterStep[T, S] {
+    ok More(T, S),
+    Done,
+}
+
+interface Iter {
+    type Item;
+    fn next(self) alloc -> IterStep[Item, Self];
+}
+
+struct Range {
+    cur: i64,
+    end: i64,
+}
+fn range(lo: i64, hi: i64) -> Range {
+    return Range { cur: lo, end: hi };
+}
+impl Iter for Range {
+    type Item = i64;
+    fn next(self) alloc -> IterStep[i64, Range] {
+        if self.cur >= self.end {
+            return IterStep::Done;
+        }
+        return IterStep::More(self.cur, Range { cur: self.cur + 1, end: self.end });
+    }
+}
+
+// `take`/`skip` are reserved words, hence `TakeN`/`take_n`.
+struct TakeN[I] {
+    inner: I,
+    n: usize,
+}
+fn take_n[I: Iter](it: I, n: usize) -> TakeN[I] {
+    return TakeN { inner: it, n: n };
+}
+impl[I: Iter] Iter for TakeN[I] {
+    type Item = I::Item;
+    fn next(self) alloc -> IterStep[I::Item, TakeN[I]] {
+        if self.n == 0usize {
+            return IterStep::Done;
+        }
+        match self.inner.next() {
+            IterStep::Done => {
+                return IterStep::Done;
+            },
+            IterStep::More(x, rest) => {
+                return IterStep::More(x, TakeN { inner: rest, n: self.n - 1usize });
+            },
+        }
+    }
+}
+
+struct Pair[A, B] {
+    first: A,
+    second: B,
+}
+struct Enumerate[I] {
+    inner: I,
+    idx: usize,
+}
+fn enumerate[I: Iter](it: I) -> Enumerate[I] {
+    return Enumerate { inner: it, idx: 0usize };
+}
+impl[I: Iter] Iter for Enumerate[I] {
+    type Item = Pair[usize, I::Item];
+    fn next(self) alloc -> IterStep[Pair[usize, I::Item], Enumerate[I]] {
+        let i: usize = self.idx;
+        match self.inner.next() {
+            IterStep::Done => {
+                return IterStep::Done;
+            },
+            IterStep::More(x, rest) => {
+                return IterStep::More(Pair { first: i, second: x }, Enumerate { inner: rest, idx: i + 1usize });
+            },
+        }
+    }
+}
+
+fn count[I: Iter](it: I) alloc -> i64 {
+    let mut c: i64 = 0;
+    let mut cur: I = it;
+    loop {
+        match cur.next() {
+            IterStep::More(x, rest) => {
+                c = c + 1;
+                cur = rest;
+            },
+            IterStep::Done => {
+                break;
+            },
+        }
+    }
+    return c;
+}
+
+fn fold[I: Iter, A](it: I, init: A, f: fn(A, I::Item) -> A) alloc -> A {
+    let mut acc: A = init;
+    let mut cur: I = it;
+    loop {
+        match cur.next() {
+            IterStep::More(x, rest) => {
+                acc = f(acc, x);
+                cur = rest;
+            },
+            IterStep::Done => {
+                break;
+            },
+        }
+    }
+    return acc;
+}
+
+fn find[I: Iter](it: I, pred: fn(read I::Item) -> bool) alloc -> Opt[I::Item] {
+    let mut cur: I = it;
+    loop {
+        match cur.next() {
+            IterStep::More(x, rest) => {
+                if pred(read x) {
+                    return Opt::Some(x);
+                }
+                cur = rest;
+            },
+            IterStep::Done => {
+                return Opt::None;
+            },
+        }
+    }
+}
+
+fn add(acc: i64, x: i64) -> i64 {
+    return acc + x;
+}
+fn is_eleven(p: read Pair[usize, i64]) -> bool {
+    return p.second == 11;
+}
+
+fn main() alloc -> i64 {
+    // range(0, 10) |> take_n(5) -> yields 0, 1, 2, 3, 4
+    let c: i64 = count(take_n(range(0, 10), 5usize)); // 5
+    trace(c);
+
+    let sum: i64 = fold(take_n(range(0, 10), 5usize), 0, add); // 0+1+2+3+4 = 10
+    trace(sum);
+
+    // enumerate(range(10, 13)) -> (0,10), (1,11), (2,12); find second == 11
+    let mut idx: i64 = 0i64 - 1i64;
+    match find(enumerate(range(10, 13)), is_eleven) {
+        Opt::Some(p) => {
+            idx = conv i64 p.first; // 1
+        },
+        Opt::None => {},
+    }
+    trace(idx);
+
+    return c + sum + idx; // 5 + 10 + 1 = 16
+}

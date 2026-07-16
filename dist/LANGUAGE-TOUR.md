@@ -1,9 +1,11 @@
 # A tour of Candor
 
 This is the pitch, not the spec. If you write systems code and you're curious
-what Candor actually feels like, read this top to bottom — every snippet runs on
-the 0.x toolchain (`candor run`). For the normative rules, see the spec that
-ships alongside; for the *why*, see the lab's philosophy and design docs.
+what Candor actually feels like, read this top to bottom. The pure-compute
+snippets run as-is on the 0.x toolchain with `candor run`, and `examples/` carries
+each one whole and runnable; the one I/O section is explicitly *compile-only*, and
+says why. For the normative rules, see the spec that ships alongside; for the
+*why*, see the lab's philosophy and design docs.
 
 Candor's premise: code is now written by a human and an LLM together, and the
 expensive step is no longer writing code but *verifying* it. So every feature is
@@ -106,6 +108,66 @@ let mut sum: i64 = 0;
 for x in read s { sum = sum + x; }   // no allocation, interrupt-callable
 ```
 
+## The standard library: collections, ordering, iterators, strings
+
+Beyond the language there is a small, honest standard library — the `stdlib/`
+module tree in this distribution (`candor run stdlib` builds and runs it
+end-to-end). It is deliberately *pure-compute*: safe Candor over the allocator
+handle, with no I/O (that story is below).
+
+**Collections** are allocator-explicit. `Vec[T]`, the hash `Map[V]` (keyed by a
+byte-string view — `str` or `[u8]`), and the growable `String` are built through
+an `Alloc` handle you pass in; nothing allocates behind your back.
+
+```candor
+let mut v: Vec[i64] = vec_new(read a);   // `a` is an allocator handle
+push(write v, 5);
+push(write v, 3);
+let n: usize = len(read v);
+```
+
+**Ordering** is an ordinary interface. `Ord` is impl'd for the scalar types in
+its own module (a scalar has no home module of its own), so `[T: Ord]` bounds the
+generic reducers and the in-place sort — the comparison dispatches through the
+impl; nothing is compiler-blessed.
+
+```candor
+interface Ord { fn cmp(read self, other: Self) -> Ordering; }
+impl Ord for i64 { /* ... returns Less / Equal / Greater ... */ }
+
+let lo: Opt[i64] = min(read v);   // [T: Ord]
+let hi: Opt[i64] = max(read v);
+sort_ord(write v);                // ascending, dispatched through Ord::cmp
+sort(write v, less);              // or comparator-driven: less: fn(read i64, read i64) -> bool
+```
+
+**Iterators** are two by-value protocols — a consuming `Iter` and a borrow-copy
+`Indexed` — with a surface of lazy *adapters* and eager *terminals*. Each adapter
+(`take_n`/`skip_n`/`enumerate`/`zip`/`take_while`/`skip_while`) owns its inner
+iterator and composes; each terminal (`find`/`nth`/`count`/`any`/`all`/`fold`/
+`collect`) drives the chain to close it.
+
+```candor
+// range(0, 10) |> take_n(5), summed by a terminal:
+let sum: i64 = fold(take_n(range(0, 10), 5), 0, add);   // 0+1+2+3+4 = 10
+// adapters compose: enumerate, then find the pair whose value is 11:
+let hit: Opt[Pair[usize, i64]] = find(enumerate(range(10, 13)), is_eleven);
+```
+
+**Strings** carry the byte-scan utilities: `starts_with`/`ends_with`/`contains`/
+`find` and the view-returning `trim` allocate nothing; `split` (into owned
+`String` pieces) and `join` allocate through the handle.
+
+```candor
+let parts: Vec[String] = split(read a, "a,b,c", ",");   // ["a", "b", "c"]
+let joined: String = join(read a, read parts, "-");      // "a-b-c"
+```
+
+See `examples/08_ordering.cnr`, `examples/09_strings.cnr`, and
+`examples/10_iterators.cnr` — each reduces the relevant stdlib module to a single
+runnable file.
+
+
 ## Effects: what a function may do, in its signature
 
 Capabilities are effects, written on the signature and checked. `alloc` means
@@ -117,6 +179,31 @@ from an interrupt handler. The effect partition is *proven*, not documented: the
 ```candor
 fn push_front[T](a: read Alloc, l: List[T], x: T) alloc -> Grow[T] { /* ... */ }
 ```
+
+## I/O, honestly: interpret vs compile
+
+Files, directories, and TCP reach the host through the `foreign` effect and a
+*boundary* module — the one place `extern "C"` may appear, where each foreign
+function states a `trust` clause the checker cannot verify but records for
+`candor audit` (see `examples/07_boundary`). A safe wrapper discharges the effect,
+so ordinary callers use it without `foreign`.
+
+Where that I/O actually happens depends on how you run the program, and 0.x is
+honest about the difference:
+
+- `candor run` INTERPRETS, and the interpreter registers no host shims. A program
+  that opens a file faults cleanly — `{"kind":"no_foreign_runtime", ...}` — rather
+  than pretending. Interpreted I/O is a test facility, not a shipped one.
+- `candor compile` produces a NATIVE binary linked against a small C runtime that
+  carries the real shims (open/read/write, directory listing, `tcp_connect`). The
+  compiled binary does actual I/O.
+
+So the rule for this preview: the pure-compute surface above runs under
+`candor run`; anything crossing the `foreign` boundary you exercise by
+`candor compile`. The 0.x `stdlib/` seed itself ships no I/O module yet — the
+boundary machinery is in the language, and the shipped runtime backs it when you
+compile.
+
 
 ## Contracts
 
@@ -174,11 +261,14 @@ fn main() -> i64 {
 
 ## Where to go next
 
-- `examples/` — every snippet above, whole and runnable.
+- `examples/` — the snippets above, whole and runnable; `08_ordering`,
+  `09_strings`, and `10_iterators` exercise the collections, ordering, string,
+  and iterator surface end-to-end.
 - `spec/` and `specpack/` — the normative rules and the model-facing
   distillation, both present at the repo root of this standalone distribution.
-- `stdlib/` — the `core`/`std` seed (a module tree); `candor run stdlib`
-  builds and runs it end-to-end.
+- `stdlib/` — the pure-compute `core`/`std` seed (a module tree with the ordering,
+  iterator, and string modules among others); `candor run stdlib` builds and runs
+  it end-to-end and returns its sentinel.
 - The lab repository — the philosophy, the twelve designs (each recording what was
   rejected and why), and the Bet 5 experiment. That is the authority; this preview
   follows it.

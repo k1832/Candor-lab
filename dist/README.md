@@ -85,6 +85,9 @@ this toolchain:
 | `05_modules/` | `candor run` / `candor build` | a small multi-file module tree |
 | `06_concurrency.cnr` | `candor run` | `scope`/`spawn` with race-free disjoint writes |
 | `07_boundary/` | `candor run` / `candor audit` | an FFI boundary module + the audit surface |
+| `08_ordering.cnr` | `candor run` | `Ord` on scalars, `[T: Ord]` bounds, `min`/`max`/`sort_ord` |
+| `09_strings.cnr` | `candor run` | string utilities — `split`/`join`/`contains`/`trim` |
+| `10_iterators.cnr` | `candor run` | iterator adapters + terminals composing (`take_n`/`enumerate`/`fold`/`find`) |
 
 ---
 

@@ -1,0 +1,192 @@
+// String utilities: byte-scan predicates (`contains`) and view-returning `trim`
+// allocate nothing; the two builders `split` (owned `String` pieces into a
+// `Vec[String]`) and `join` allocate through the handle. A split/join round-trip
+// re-forms the input with a new separator.
+//
+// `run`-clean: pure compute, no foreign I/O. `str`/`String`/`Vec` and the
+// primitives `as_bytes`/`substr`/`string_new`/`append`/`as_str` are builtins;
+// the bump allocator below is the std allocator shape reduced to one file.
+
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+    realloc: fn(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) alloc -> rawptr u8,
+}
+copy struct Alloc {
+    ctx: rawptr u8,
+    vt: rawptr AllocVtable,
+}
+struct Bump {
+    next: usize,
+    end: usize,
+}
+fn with_window(base: usize, size: usize) -> Bump {
+    return Bump { next: base, end: base + size };
+}
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live Bump whose [next, end) window is reserved to this arena alone; the carved block stays inside the window" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let a: usize = (b.next + align - 1usize) / align * align;
+        if a + size > b.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: a + size, end: b.end });
+        return addr_to_ptr[u8](a);
+    }
+}
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {}
+fn bump_realloc(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) -> rawptr u8 {
+    unsafe "bump cannot reclaim in place: carve a fresh block, copy old_size bytes across, release the old (a no-op) as bump semantics require" {
+        let newp: rawptr u8 = bump_alloc(ctx, new_size, align);
+        if is_null(newp) {
+            return newp;
+        }
+        let a: usize = ptr_to_addr(ptr);
+        let base: usize = ptr_to_addr(newp);
+        let mut i: usize = 0usize;
+        while i < old_size {
+            let v: u8 = ptr_read(addr_to_ptr[u8](a + i));
+            ptr_write(addr_to_ptr[u8](base + i), v);
+            i = i + 1usize;
+        }
+        return newp;
+    }
+}
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free, realloc: bump_realloc };
+fn mk_alloc(state: write Bump) -> Alloc {
+    unsafe "ctx (the caller's Bump local) and vt (the static BUMP_VT) outlive every String this handle serves" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) };
+    }
+}
+
+enum Opt[T] {
+    ok Some(T),
+    None,
+}
+
+fn is_ascii_ws(b: u8) -> bool {
+    return b == 32u8 || b == 9u8 || b == 10u8 || b == 13u8;
+}
+
+// A view (no alloc): leading/trailing ASCII whitespace stripped. Whitespace is
+// single-byte, so the cut points are char boundaries and `substr` never faults.
+fn trim(s: str) -> str {
+    let sb: [u8] = as_bytes(s);
+    let m: usize = len(sb);
+    let mut start: usize = 0usize;
+    while start < m && is_ascii_ws(sb[start]) {
+        start = start + 1usize;
+    }
+    let mut end: usize = m;
+    while end > start && is_ascii_ws(sb[end - 1usize]) {
+        end = end - 1usize;
+    }
+    return substr(s, start, end);
+}
+
+fn matches_at(sb: [u8], i: usize, nb: [u8]) -> bool {
+    let n: usize = len(nb);
+    let mut j: usize = 0usize;
+    while j < n {
+        if sb[i + j] != nb[j] {
+            return false;
+        }
+        j = j + 1usize;
+    }
+    return true;
+}
+
+fn contains(s: str, needle: str) -> bool {
+    let sb: [u8] = as_bytes(s);
+    let nb: [u8] = as_bytes(needle);
+    let n: usize = len(nb);
+    let m: usize = len(sb);
+    if n == 0usize {
+        return true;
+    }
+    if n > m {
+        return false;
+    }
+    let last: usize = m - n;
+    let mut i: usize = 0usize;
+    loop {
+        if i > last {
+            break;
+        }
+        if matches_at(sb, i, nb) {
+            return true;
+        }
+        i = i + 1usize;
+    }
+    return false;
+}
+
+// Split on a non-empty separator into owned `String` pieces (Rust `str::split`
+// empty-piece rule: always one more piece than separators).
+fn split(a: read Alloc, s: str, sep: str) alloc -> Vec[String] {
+    let sb: [u8] = as_bytes(s);
+    let nb: [u8] = as_bytes(sep);
+    let total: usize = len(sb);
+    let seplen: usize = len(nb);
+    let mut res: Vec[String] = vec_new(a);
+    let mut start: usize = 0usize;
+    let mut i: usize = 0usize;
+    loop {
+        if i + seplen > total {
+            break;
+        }
+        if matches_at(sb, i, nb) {
+            let mut piece: String = string_new(a);
+            append(write piece, substr(s, start, i));
+            push(write res, piece);
+            start = i + seplen;
+            i = i + seplen;
+        } else {
+            i = i + 1usize;
+        }
+    }
+    let mut last: String = string_new(a);
+    append(write last, substr(s, start, total));
+    push(write res, last);
+    return res;
+}
+
+// Concatenate `parts` with `sep` between adjacent pieces into an owned `String`.
+fn join(a: read Alloc, parts: read Vec[String], sep: str) alloc -> String {
+    let mut res: String = string_new(a);
+    let n: usize = len(read parts);
+    let mut i: usize = 0usize;
+    loop {
+        if i >= n {
+            break;
+        }
+        if i > 0usize {
+            append(write res, sep);
+        }
+        append(write res, as_str(read get(read parts, i).*));
+        i = i + 1usize;
+    }
+    return res;
+}
+
+fn main() alloc -> i64 {
+    let mut bs: Bump = with_window(16777216usize, 1048576usize);
+    let al: Alloc = mk_alloc(write bs);
+
+    let parts: Vec[String] = split(read al, "a,b,c", ","); // ["a", "b", "c"]
+    let np: i64 = conv i64 len(read parts); // 3
+    trace(np);
+
+    let joined: String = join(read al, read parts, "-"); // "a-b-c"
+    let jlen: i64 = conv i64 len(as_bytes(as_str(read joined))); // 5
+    trace(jlen);
+
+    if !contains(as_str(read joined), "b") {
+        return 0i64 - 1i64;
+    }
+    if len(as_bytes(trim("  hi  "))) != 2usize {
+        return 0i64 - 2i64;
+    }
+
+    return np + jlen; // 3 + 5 = 8
+}

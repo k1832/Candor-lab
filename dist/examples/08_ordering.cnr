@@ -1,0 +1,193 @@
+// Ordering: the `Ord` interface, implemented on a scalar so `[T: Ord]` bounds
+// `min`/`max`/`sort_ord`. A `Vec[i64]` is built through an allocator handle,
+// sorted in place, then reduced. `Ord` on `i64` is an ordinary user impl — no
+// compiler-blessed comparison — and `sort_ord` dispatches through it.
+//
+// `run`-clean: pure compute, no foreign I/O. The bump allocator below is the
+// std allocator shape reduced to one file (design 0001 §6.1); the collection
+// primitives `vec_new`/`push`/`get`/`set`/`len` are language builtins.
+
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+    realloc: fn(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) alloc -> rawptr u8,
+}
+copy struct Alloc {
+    ctx: rawptr u8,
+    vt: rawptr AllocVtable,
+}
+struct Bump {
+    next: usize,
+    end: usize,
+}
+fn with_window(base: usize, size: usize) -> Bump {
+    return Bump { next: base, end: base + size };
+}
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live Bump whose [next, end) window is reserved to this arena alone; the carved block stays inside the window" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let a: usize = (b.next + align - 1usize) / align * align;
+        if a + size > b.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: a + size, end: b.end });
+        return addr_to_ptr[u8](a);
+    }
+}
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {}
+fn bump_realloc(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) -> rawptr u8 {
+    unsafe "bump cannot reclaim in place: carve a fresh block, copy old_size bytes across, release the old (a no-op) as bump semantics require" {
+        let newp: rawptr u8 = bump_alloc(ctx, new_size, align);
+        if is_null(newp) {
+            return newp;
+        }
+        let a: usize = ptr_to_addr(ptr);
+        let base: usize = ptr_to_addr(newp);
+        let mut i: usize = 0usize;
+        while i < old_size {
+            let v: u8 = ptr_read(addr_to_ptr[u8](a + i));
+            ptr_write(addr_to_ptr[u8](base + i), v);
+            i = i + 1usize;
+        }
+        return newp;
+    }
+}
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free, realloc: bump_realloc };
+fn mk_alloc(state: write Bump) -> Alloc {
+    unsafe "ctx (the caller's Bump local) and vt (the static BUMP_VT) outlive every Vec this handle serves" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) };
+    }
+}
+
+enum Opt[T] {
+    ok Some(T),
+    None,
+}
+
+enum Ordering {
+    Less,
+    Equal,
+    Greater,
+}
+
+// `Ord` is an ordinary interface; the impl for the scalar `i64` lives with the
+// interface (the scalar orphan rule). Every `[T: Ord]` consumer dispatches here.
+interface Ord {
+    fn cmp(read self, other: Self) -> Ordering;
+}
+impl Ord for i64 {
+    fn cmp(read self, other: Self) -> Ordering {
+        if self.* < other {
+            return Ordering::Less;
+        }
+        if self.* > other {
+            return Ordering::Greater;
+        }
+        return Ordering::Equal;
+    }
+}
+
+fn min[T: Ord + copy](v: read Vec[T]) -> Opt[T] {
+    let n: usize = len(read v.*);
+    if n == 0usize {
+        return Opt::None;
+    }
+    let mut best: T = get(read v.*, 0usize).*;
+    let mut i: usize = 1usize;
+    while i < n {
+        let cur: T = get(read v.*, i).*;
+        match cur.cmp(best) {
+            Ordering::Less => {
+                best = cur;
+            },
+            Ordering::Equal => {},
+            Ordering::Greater => {},
+        }
+        i = i + 1usize;
+    }
+    return Opt::Some(best);
+}
+
+fn max[T: Ord + copy](v: read Vec[T]) -> Opt[T] {
+    let n: usize = len(read v.*);
+    if n == 0usize {
+        return Opt::None;
+    }
+    let mut best: T = get(read v.*, 0usize).*;
+    let mut i: usize = 1usize;
+    while i < n {
+        let cur: T = get(read v.*, i).*;
+        match cur.cmp(best) {
+            Ordering::Greater => {
+                best = cur;
+            },
+            Ordering::Less => {},
+            Ordering::Equal => {},
+        }
+        i = i + 1usize;
+    }
+    return Opt::Some(best);
+}
+
+// In-place insertion sort dispatched through `Ord::cmp` — the same routine sorts
+// any `[T: Ord]`; here `T = i64`.
+fn sort_ord[T: Ord + copy](v: write Vec[T]) alloc -> unit {
+    let n: usize = len(read v.*);
+    let mut i: usize = 1usize;
+    while i < n {
+        let key: T = get(read v.*, i).*;
+        let mut j: usize = i;
+        while j > 0usize {
+            let prev: T = get(read v.*, j - 1usize).*;
+            match key.cmp(prev) {
+                Ordering::Less => {
+                    set(write v.*, j, prev);
+                    j = j - 1usize;
+                },
+                Ordering::Equal => {
+                    break;
+                },
+                Ordering::Greater => {
+                    break;
+                },
+            }
+        }
+        set(write v.*, j, key);
+        i = i + 1usize;
+    }
+}
+
+fn unwrap_or(o: Opt[i64], d: i64) -> i64 {
+    match o {
+        Opt::Some(v) => {
+            return v;
+        },
+        Opt::None => {
+            return d;
+        },
+    }
+}
+
+fn main() alloc -> i64 {
+    let mut bs: Bump = with_window(16777216usize, 1048576usize);
+    let al: Alloc = mk_alloc(write bs);
+
+    let mut v: Vec[i64] = vec_new(read al);
+    push(write v, 5);
+    push(write v, 3);
+    push(write v, 8);
+    push(write v, 1);
+
+    let lo: i64 = unwrap_or(min(read v), 0); // 1
+    let hi: i64 = unwrap_or(max(read v), 0); // 8
+    trace(lo);
+    trace(hi);
+
+    sort_ord(write v); // [1, 3, 5, 8]
+    let first: i64 = get(read v, 0usize).*; // 1
+    let last: i64 = get(read v, 3usize).*; // 8
+    trace(first);
+    trace(last);
+
+    return lo + hi + first + last; // 1 + 8 + 1 + 8 = 18
+}
