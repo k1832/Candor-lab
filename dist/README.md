@@ -118,9 +118,19 @@ Tags: **[working]** runs today · **[preview]** works but rough/partial ·
 - **[working]** One canonical `fmt`; machine-readable JSON diagnostics.
 - **[preview]** VS Code support: syntax highlighting + a diagnostics LSP, in
   `editor/` (`editor/vscode/` grammar, `editor/lsp/` server).
-- **[seed]** Standard library: a small `core`/`std` seed in `stdlib/` (`Opt`,
-  `Res`, `Arena`, `List`, iteration, a bump allocator; `candor run stdlib`
-  drives the whole surface). Text handling and an I/O layer are
-  designed-but-not-yet-shipped.
+- **[preview]** Standard library in `stdlib/` (`candor run stdlib` drives the
+  whole surface): `Opt`/`Res`/`Arena`/`List`; allocators (a bump allocator and a
+  reclaiming free-list); a comparison interface (`Ord` implemented for the scalar
+  types, `[T: Ord]` bounds) with `min`/`max`/`sort`/`sort_ord`; a composable
+  iterator surface (adapters `take_n`/`skip_n`/`enumerate`/`zip`/`take_while`/
+  `skip_while` + terminals `find`/`nth`/`collect`/`count`/`fold`/`any`/`all`); and
+  string utilities (`split`/`join`/`trim`/`contains`/`find`/`starts_with`). The
+  builtin collections `Vec`/`Map`/`String` compile to native code on both backends.
+- **[preview]** I/O over the audited foreign boundary (`candor audit` lists the
+  trust surface): files (whole-file read/write + a buffered `BufReader`/
+  `BufWriter`), directory listing, and TCP client sockets. **Compile-only for now:**
+  a `candor compile`d binary does real I/O; `candor run` (the interpreter) does not
+  register the host shims yet, so interpreted programs stay pure-compute.
 
-Nothing here is stable. See the lab's obligations ledger for what 1.0 still owes.
+Nothing here is stable. See `VERSIONING.md` for what 0.x and 1.0 mean, and the
+lab's obligations ledger for what 1.0 still owes.

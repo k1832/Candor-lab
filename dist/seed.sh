@@ -76,11 +76,14 @@ sed -e 's#`../../compiler`#`../../toolchain`#g' \
     "$LAB_ROOT/tools/candor-lsp/README.md" > "$TARGET/editor/lsp/README.md"
 
 # --- 5. dist/ contents become the repo root ----------------------------------
-echo "-> (root)      README.md, INSTALL.md, LANGUAGE-TOUR.md, MANIFEST.md, examples/"
+echo "-> (root)      README.md, INSTALL.md, LANGUAGE-TOUR.md, MANIFEST.md, VERSIONING.md, examples/"
 cp "$DIST_DIR/README.md"        "$TARGET/README.md"
 cp "$DIST_DIR/INSTALL.md"       "$TARGET/INSTALL.md"
 cp "$DIST_DIR/LANGUAGE-TOUR.md" "$TARGET/LANGUAGE-TOUR.md"
 cp "$DIST_DIR/MANIFEST.md"      "$TARGET/MANIFEST.md"
+# VERSIONING.md is a lab-root policy doc (peer to GOVERNANCE.md); ship it so
+# preview users know what 0.x/1.0 and package semver mean.
+cp "$LAB_ROOT/VERSIONING.md"    "$TARGET/VERSIONING.md"
 cp -R "$DIST_DIR/examples"      "$TARGET/examples"
 
 echo
