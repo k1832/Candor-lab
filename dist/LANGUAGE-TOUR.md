@@ -3,8 +3,8 @@
 This is the pitch, not the spec. If you write systems code and you're curious
 what Candor actually feels like, read this top to bottom. The pure-compute
 snippets run as-is on the 0.x toolchain with `candor run`, and `examples/` carries
-each one whole and runnable; the one I/O section is explicitly *compile-only*, and
-says why. For the normative rules, see the spec that ships alongside; for the
+each one whole and runnable; I/O works under both `candor run` and `candor compile`
+(the I/O section says how). For the normative rules, see the spec that ships alongside; for the
 *why*, see the lab's philosophy and design docs.
 
 Candor's premise: code is now written by a human and an LLM together, and the
@@ -180,7 +180,7 @@ from an interrupt handler. The effect partition is *proven*, not documented: the
 fn push_front[T](a: read Alloc, l: List[T], x: T) alloc -> Grow[T] { /* ... */ }
 ```
 
-## I/O, honestly: interpret vs compile
+## I/O over the audited boundary
 
 Files, directories, and TCP reach the host through the `foreign` effect and a
 *boundary* module — the one place `extern "C"` may appear, where each foreign
@@ -188,21 +188,19 @@ function states a `trust` clause the checker cannot verify but records for
 `candor audit` (see `examples/07_boundary`). A safe wrapper discharges the effect,
 so ordinary callers use it without `foreign`.
 
-Where that I/O actually happens depends on how you run the program, and 0.x is
-honest about the difference:
+Both ways of running a program do **real** I/O:
 
-- `candor run` INTERPRETS, and the interpreter registers no host shims. A program
-  that opens a file faults cleanly — `{"kind":"no_foreign_runtime", ...}` — rather
-  than pretending. Interpreted I/O is a test facility, not a shipped one.
+- `candor run` INTERPRETS, backing the boundary's `sys_*` calls with the host's
+  real streams and filesystem — stdout/stderr/stdin, cwd-relative file opens,
+  directory listing, `tcp_connect`.
 - `candor compile` produces a NATIVE binary linked against a small C runtime that
-  carries the real shims (open/read/write, directory listing, `tcp_connect`). The
-  compiled binary does actual I/O.
+  carries the same shims. The compiled binary does the same real I/O with no
+  interpreter in the loop.
 
-So the rule for this preview: the pure-compute surface above runs under
-`candor run`; anything crossing the `foreign` boundary you exercise by
-`candor compile`. The 0.x `stdlib/` seed itself ships no I/O module yet — the
-boundary machinery is in the language, and the shipped runtime backs it when you
-compile.
+Either way the trust surface stays auditable: `candor audit` enumerates every
+foreign extern a program reaches, and a `freestanding = true` package rejects any
+transitive foreign surface. The 0.x `stdlib/` seed itself ships no I/O module yet —
+the boundary machinery is in the language, and both runtimes back it.
 
 
 ## Contracts

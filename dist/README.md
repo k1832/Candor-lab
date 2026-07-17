@@ -128,9 +128,8 @@ Tags: **[working]** runs today · **[preview]** works but rough/partial ·
   builtin collections `Vec`/`Map`/`String` compile to native code on both backends.
 - **[preview]** I/O over the audited foreign boundary (`candor audit` lists the
   trust surface): files (whole-file read/write + a buffered `BufReader`/
-  `BufWriter`), directory listing, and TCP client sockets. **Compile-only for now:**
-  a `candor compile`d binary does real I/O; `candor run` (the interpreter) does not
-  register the host shims yet, so interpreted programs stay pure-compute.
+  `BufWriter`), directory listing, and TCP client sockets — real I/O under both
+  `candor run` (the interpreter) and `candor compile`d native binaries.
 
 Nothing here is stable. See `VERSIONING.md` for what 0.x and 1.0 mean, and the
 lab's obligations ledger for what 1.0 still owes.
