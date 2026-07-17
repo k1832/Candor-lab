@@ -465,7 +465,15 @@ pub enum ExprKind {
     /// `out place` — the mandatory call-site marker for an out-mode argument
     /// (design 0001 §3.1; grammar 0002). Only valid as a call argument.
     OutArg(Box<Expr>),
-    Field { base: Box<Expr>, field: String },
+    /// `base.field` — a struct field access, or the *callee* of a method call
+    /// `recv.m(args)` (which parses as `Call { callee: Field }`). For a method
+    /// call, `iface` records the interface whose method the checker resolved
+    /// (design 0007 §2.3): monomorphization stamps it so dispatch runs exactly
+    /// that interface's impl when one type impls two interfaces that share a
+    /// method name. `None` for a plain field access, and for calls the checker
+    /// did not stamp (a non-generic program), where dispatch falls back to the
+    /// table's coherent first-match — the same impl the checker chose.
+    Field { base: Box<Expr>, field: String, #[serde(default)] iface: Option<String> },
     Index { base: Box<Expr>, index: Box<Expr> },
 
     /// `conv T (e)` — the only integer conversion form (design 0001 §8.1).

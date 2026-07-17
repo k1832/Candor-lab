@@ -32,6 +32,11 @@ pub enum Shape {
     Fn(String, Vec<Type>),
     /// A generic struct literal or enum constructor -> a type instance.
     Type(String, Vec<Type>),
+    /// An interface method call `recv.m(args)` -> the interface the checker
+    /// resolved (design 0007 §2.3). Stamped onto the call's `Field` callee so
+    /// dispatch runs exactly that interface's impl even when the receiver type
+    /// impls two interfaces sharing the method name `m`.
+    Method(String),
 }
 
 /// The key identifying where a monomorphization [`Shape`] was recorded:
@@ -1462,6 +1467,16 @@ impl<'a> Monomorphizer<'a> {
                         ExprKind::EnumCtor { enum_name, .. } => *enum_name = inst,
                         ExprKind::StructLit { name: n, .. } => *n = inst,
                         _ => {}
+                    }
+                }
+                // The interface is a name, invariant under substitution: stamp it
+                // onto the method call's `Field` callee so every instance dispatches
+                // exactly the interface the checker resolved.
+                Shape::Method(iface) => {
+                    if let ExprKind::Call { callee, .. } = &mut e.kind {
+                        if let ExprKind::Field { iface: slot, .. } = &mut callee.kind {
+                            *slot = Some(iface);
+                        }
                     }
                 }
             }

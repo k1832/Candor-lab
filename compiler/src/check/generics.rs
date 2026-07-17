@@ -991,6 +991,13 @@ impl<'a> Checker<'a> {
                 let ifaces = self.param_bound_ifaces(pname);
                 for iface in &ifaces {
                     if let Some(m) = self.iface_method(iface, method) {
+                        // Record which interface resolved this call so monomorphization
+                        // can stamp it onto the callee and dispatch honors the bound
+                        // (design 0007 §2.3), not whichever impl registered last.
+                        self.shapes.insert(
+                            (self.cur_item, span.start),
+                            crate::generics::Shape::Method(iface.clone()),
+                        );
                         let mut smap = std::collections::HashMap::new();
                         smap.insert("Self".to_string(), recv_ty.clone());
                         return Some(self.check_iface_method_call(base, &m, &smap, args, span));
@@ -1016,6 +1023,12 @@ impl<'a> Checker<'a> {
                 });
                 let idx = found?;
                 let iface = self.items.impls[idx].iface.clone();
+                // Record the resolved interface so dispatch runs this exact impl even
+                // when the receiver type impls two interfaces sharing `method`.
+                self.shapes.insert(
+                    (self.cur_item, span.start),
+                    crate::generics::Shape::Method(iface.clone()),
+                );
                 let (_, impl_map) = self.resolve_impl_for(&recv_ty, &iface)?;
                 // Bound conformance for the generic impl's own parameters (§2.1):
                 // a `List[NonShow]` receiver calling a method of an

@@ -58,8 +58,14 @@ enum Hold {
 
 #[derive(Default)]
 struct ImplTables {
-    /// (target nominal, method name) -> the impl method's free-function name.
-    dispatch: HashMap<(String, String), String>,
+    /// (target nominal, interface, method name) -> the impl method's free-function
+    /// name. The interface is part of the key: two interfaces may share a method
+    /// name on one target, and dispatch must run the one the checker resolved.
+    dispatch: HashMap<(String, String, String), String>,
+    /// (target nominal, method name) -> the interface of the *first* impl (in item
+    /// order) providing that method — the coherent default when a call site carries
+    /// no resolved interface, matching the checker's first-match on a direct call.
+    first_iface: HashMap<(String, String), String>,
     /// (iface base, iface args, target, methods) — for `From` resolution in `?`.
     from_impls: Vec<FromImpl>,
 }
@@ -79,7 +85,12 @@ fn build_impl_tables(program: &Program) -> ImplTables {
             let mut methods = HashMap::new();
             for m in &im.methods {
                 let fnname = crate::generics::impl_method_fn_name(&im.iface, &iface_args, &target, &m.name);
-                t.dispatch.insert((target.clone(), m.name.clone()), fnname.clone());
+                t.dispatch
+                    .entry((target.clone(), im.iface.clone(), m.name.clone()))
+                    .or_insert_with(|| fnname.clone());
+                t.first_iface
+                    .entry((target.clone(), m.name.clone()))
+                    .or_insert_with(|| im.iface.clone());
                 methods.insert(m.name.clone(), fnname);
             }
             t.from_impls.push((crate::generics::base_name(&im.iface).to_string(), iface_args, target.clone(), methods));
@@ -405,7 +416,7 @@ impl<'a> Lowerer<'a> {
         match &e.kind {
             ExprKind::Paren(i) | ExprKind::OutArg(i) => self.ast_place_path(i),
             ExprKind::Ident(name) => self.lookup(name).map(|(id, _)| (id, Vec::new())),
-            ExprKind::Field { base, field } => {
+            ExprKind::Field { base, field, .. } => {
                 let (id, mut path) = self.ast_place_path(base)?;
                 path.push(field.clone());
                 Some((id, path))
@@ -983,7 +994,7 @@ impl<'a> Lowerer<'a> {
                 pl.proj.push(Proj::Deref { inner: inner.clone() });
                 Ok((pl, inner))
             }
-            ExprKind::Field { base, field } => {
+            ExprKind::Field { base, field, .. } => {
                 let (mut pl, t) = self.lower_place(base)?;
                 let t = self.peel(&mut pl, t);
                 match &t {
@@ -1108,9 +1119,9 @@ impl<'a> Lowerer<'a> {
                             .ok_or_else(|| LowerError("cannot infer `box` value type".into()))?;
                         Type::BoxResult(Box::new(inner))
                     }
-                    ExprKind::Field { base, field } => {
+                    ExprKind::Field { base, field, iface } => {
                         let (fnname, _) = self
-                            .resolve_method(base, field, args, e.span)
+                            .resolve_method(base, field, iface.as_ref(), args, e.span)
                             .ok_or_else(|| LowerError("match on unresolved method call".into()))?;
                         self.items.fns[fnname.as_str()].ret.clone()
                     }
@@ -1172,8 +1183,8 @@ impl<'a> Lowerer<'a> {
                 ExprKind::Ident(n) if self.items.fns.contains_key(n.as_str()) => {
                     Some(self.items.fns[n.as_str()].ret.clone())
                 }
-                ExprKind::Field { base, field } => {
-                    let (fnname, _) = self.resolve_method(base, field, args, e.span)?;
+                ExprKind::Field { base, field, iface } => {
+                    let (fnname, _) = self.resolve_method(base, field, iface.as_ref(), args, e.span)?;
                     Some(self.items.fns.get(&fnname)?.ret.clone())
                 }
                 _ => None,
@@ -1784,7 +1795,7 @@ impl<'a> Lowerer<'a> {
             ExprKind::Call { callee, args } => {
                 let (fname, all): (String, Vec<Expr>) = match &callee.kind {
                     ExprKind::Ident(n) if self.items.fns.contains_key(n.as_str()) => (n.clone(), args.to_vec()),
-                    ExprKind::Field { base, field } => match self.resolve_method(base, field, args, e.span) {
+                    ExprKind::Field { base, field, iface } => match self.resolve_method(base, field, iface.as_ref(), args, e.span) {
                         Some(m) => m,
                         None => return unsupported("aggregate method call"),
                     },
@@ -2275,8 +2286,8 @@ impl<'a> Lowerer<'a> {
             return unsupported(format!("call to `{name}`"));
         }
         // A method call `recv.m(args)` -> the mono-resolved impl free fn.
-        if let ExprKind::Field { base, field } = &callee.kind {
-            if let Some((fnname, all)) = self.resolve_method(base, field, args, span) {
+        if let ExprKind::Field { base, field, iface } = &callee.kind {
+            if let Some((fnname, all)) = self.resolve_method(base, field, iface.as_ref(), args, span) {
                 let sig = self.items.fns[fnname.as_str()].clone();
                 return self.lower_direct_call(fnname, &sig, &all, span);
             }
@@ -2482,7 +2493,7 @@ impl<'a> Lowerer<'a> {
         match &e.kind {
             ExprKind::Paren(i) | ExprKind::OutArg(i) => self.static_ty(i),
             ExprKind::Ident(name) => self.lookup(name).map(|(_, t)| t),
-            ExprKind::Field { base, field } => {
+            ExprKind::Field { base, field, .. } => {
                 let bt = self.static_ty(base)?;
                 let n = strip_to_nominal(&bt)?;
                 self.lay().field_offset(&n, field).map(|(t, _)| t)
@@ -2563,9 +2574,13 @@ impl<'a> Lowerer<'a> {
     fn static_nominal(&self, e: &Expr) -> Option<String> {
         dispatch_nominal(&self.static_ty(e)?)
     }
-    fn resolve_method(&self, base: &Expr, field: &str, args: &[Expr], span: Span) -> Option<(String, Vec<Expr>)> {
+    fn resolve_method(&self, base: &Expr, field: &str, iface: Option<&String>, args: &[Expr], span: Span) -> Option<(String, Vec<Expr>)> {
         let nominal = self.static_nominal(base)?;
-        let fnname = self.impls.dispatch.get(&(nominal, field.to_string())).cloned()?;
+        let key_iface = match iface {
+            Some(i) => i.clone(),
+            None => self.impls.first_iface.get(&(nominal.clone(), field.to_string()))?.clone(),
+        };
+        let fnname = self.impls.dispatch.get(&(nominal, key_iface, field.to_string())).cloned()?;
         let self_mode = self.items.fns.get(&fnname).and_then(|s| s.params.first().map(|p| p.mode));
         let base_is_borrow = matches!(self.static_ty(base), Some(Type::Borrow(_)) | Some(Type::BorrowMut(_)));
         let recv = match self_mode {

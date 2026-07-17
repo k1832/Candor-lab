@@ -174,9 +174,15 @@ pub struct Interp<'a> {
     fn_names: Vec<String>,
     fn_id_of: HashMap<String, u64>,
     statics: HashMap<String, (u64, Type)>,
-    /// (target nominal, method name) -> the impl method's free-function name
-    /// (design 0007 static dispatch, resolved by the receiver's runtime type).
-    impl_dispatch: HashMap<(String, String), String>,
+    /// (target nominal, interface, method name) -> the impl method's free-function
+    /// name (design 0007 static dispatch, resolved by the receiver's runtime type
+    /// *and* the interface the checker resolved — two interfaces may share a method
+    /// name on one target, so the interface is part of the key).
+    impl_dispatch: HashMap<(String, String, String), String>,
+    /// (target nominal, method name) -> the interface of the *first* impl (in item
+    /// order) providing that method — the coherent default when a call site carries
+    /// no resolved interface, matching the checker's first-match on a direct call.
+    impl_first_iface: HashMap<(String, String), String>,
     /// Full impl records (iface, iface_args, target) -> method free-fn names, for
     /// disambiguating `From[E1]`/`From[E2]` during cross-type `?` (§7.1).
     impls_full: Vec<ImplRec>,
@@ -205,6 +211,7 @@ impl<'a> Interp<'a> {
         let mut fn_id_of = HashMap::new();
         let mut consts = HashMap::new();
         let mut impl_dispatch = HashMap::new();
+        let mut impl_first_iface: HashMap<(String, String), String> = HashMap::new();
         let mut impls_full = Vec::new();
         for item in &program.items {
             if let Item::Impl(im) = item {
@@ -219,7 +226,12 @@ impl<'a> Interp<'a> {
                 let mut methods = HashMap::new();
                 for m in &im.methods {
                     let fnname = crate::generics::impl_method_fn_name(&im.iface, &iface_args, &target, &m.name);
-                    impl_dispatch.insert((target.clone(), m.name.clone()), fnname.clone());
+                    impl_dispatch
+                        .entry((target.clone(), im.iface.clone(), m.name.clone()))
+                        .or_insert_with(|| fnname.clone());
+                    impl_first_iface
+                        .entry((target.clone(), m.name.clone()))
+                        .or_insert_with(|| im.iface.clone());
                     methods.insert(m.name.clone(), fnname);
                 }
                 impls_full.push((im.iface.clone(), iface_args, target.clone(), methods));
@@ -274,6 +286,7 @@ impl<'a> Interp<'a> {
             fn_id_of,
             statics: HashMap::new(),
             impl_dispatch,
+            impl_first_iface,
             impls_full,
             alloc_struct,
             alloc_vtable_struct,
@@ -666,7 +679,7 @@ impl<'a> Interp<'a> {
                 pl.proj.push(Proj::Deref);
                 Ok((ptr, inner, pl))
             }
-            ExprKind::Field { base, field } => {
+            ExprKind::Field { base, field, .. } => {
                 let (a, t, pl) = self.eval_place(base)?;
                 let mut pl = pl;
                 let (a, t) = self.peel_place(a, t, &mut pl)?;
@@ -1690,13 +1703,30 @@ impl<'a> Interp<'a> {
         dispatch_nominal(&self.expr_static_ty(e)?)
     }
 
+    /// Resolve an interface method call to its impl free-function name (design
+    /// 0007 static dispatch). `iface` is the interface the checker resolved,
+    /// carried on the call node by monomorphization; when absent (a non-generic
+    /// program, which mono does not rewrite) the first impl providing the method
+    /// for `nominal` is used — the same coherent first-match the checker made.
+    fn dispatch_method(&self, nominal: &str, field: &str, iface: Option<&String>) -> Option<&String> {
+        let key_iface = match iface {
+            Some(i) => i.clone(),
+            None => self
+                .impl_first_iface
+                .get(&(nominal.to_string(), field.to_string()))?
+                .clone(),
+        };
+        self.impl_dispatch
+            .get(&(nominal.to_string(), key_iface, field.to_string()))
+    }
+
     /// The static type of a place expression (local, field, dereference), for
     /// interface method dispatch on a nested receiver like `self.inner.m()`.
     fn expr_static_ty(&self, e: &Expr) -> Option<Type> {
         match &e.kind {
             ExprKind::Paren(i) | ExprKind::OutArg(i) => self.expr_static_ty(i),
             ExprKind::Ident(name) => self.local_addr_ty(name).map(|(_, t)| t),
-            ExprKind::Field { base, field } => {
+            ExprKind::Field { base, field, .. } => {
                 let bt = self.expr_static_ty(base)?;
                 let n = strip_to_nominal(&bt)?;
                 self.lay().field_offset(&n, field).map(|(t, _)| t)
@@ -1733,9 +1763,9 @@ impl<'a> Interp<'a> {
                 }
                 self.items.externs.get(name.as_str()).map(|es| es.to_fn_sig().ret)
             }
-            ExprKind::Field { base, field } => {
+            ExprKind::Field { base, field, iface } => {
                 let nominal = self.expr_static_nominal(base)?;
-                let fnname = self.impl_dispatch.get(&(nominal, field.clone()))?;
+                let fnname = self.dispatch_method(&nominal, field, iface.as_ref())?;
                 self.items.fns.get(fnname.as_str()).map(|sig| sig.ret.clone())
             }
             _ => None,
@@ -1820,7 +1850,7 @@ impl<'a> Interp<'a> {
         // Byte iteration `s.at(i)` over `str`/`[u8]` (design 0013 §3): the wired
         // ground-floor `Indexed` method yielding `Opt[u8]`. Handled before impl
         // dispatch (str/[u8] host no user impl).
-        if let ExprKind::Field { base, field } = &callee.kind {
+        if let ExprKind::Field { base, field, .. } = &callee.kind {
             if field == "at" {
                 let bt = self.expr_static_ty(base).map(|t| match t {
                     Type::Borrow(e) | Type::BorrowMut(e) => *e,
@@ -1900,9 +1930,9 @@ impl<'a> Interp<'a> {
         }
         // Interface method call `recv.m(args)` (design 0007 static dispatch): the
         // impl is chosen by the receiver's runtime nominal type.
-        if let ExprKind::Field { base, field } = &callee.kind {
+        if let ExprKind::Field { base, field, iface } = &callee.kind {
             if let Some(nominal) = self.expr_static_nominal(base) {
-                if let Some(fnname) = self.impl_dispatch.get(&(nominal, field.clone())).cloned() {
+                if let Some(fnname) = self.dispatch_method(&nominal, field, iface.as_ref()).cloned() {
                     let fnd = self.fns[fnname.as_str()];
                     let sig = self.items.fns[fnname.as_str()].clone();
                     // Pass the receiver per the method's `self` mode: `read`/`write`
