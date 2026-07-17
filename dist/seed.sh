@@ -84,6 +84,9 @@ cp "$DIST_DIR/MANIFEST.md"      "$TARGET/MANIFEST.md"
 # VERSIONING.md is a lab-root policy doc (peer to GOVERNANCE.md); ship it so
 # preview users know what 0.x/1.0 and package semver mean.
 cp "$LAB_ROOT/VERSIONING.md"    "$TARGET/VERSIONING.md"
+# Dual license (MIT OR Apache-2.0), shipped verbatim from the lab root.
+cp "$LAB_ROOT/LICENSE-MIT"      "$TARGET/LICENSE-MIT"
+cp "$LAB_ROOT/LICENSE-APACHE"   "$TARGET/LICENSE-APACHE"
 cp -R "$DIST_DIR/examples"      "$TARGET/examples"
 
 echo
