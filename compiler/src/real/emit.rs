@@ -538,7 +538,7 @@ impl Emitter {
                 self.push("out ");
                 self.emit_expr(place, BP_MIN, false);
             }
-            ExprKind::Field { base, field } => {
+            ExprKind::Field { base, field, .. } => {
                 self.emit_place_base(base, wp);
                 self.push(".");
                 self.push(field);

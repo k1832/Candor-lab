@@ -1487,7 +1487,7 @@ impl RParser {
             } else if self.at(&RTok::Dot) {
                 self.bump();
                 let field = self.expect_ident("a field name")?;
-                expr = Expr { kind: ExprKind::Field { base: Box::new(expr), field }, span: self.span_from(lo) };
+                expr = Expr { kind: ExprKind::Field { base: Box::new(expr), field, iface: None }, span: self.span_from(lo) };
             } else {
                 break;
             }
@@ -1981,7 +1981,7 @@ fn variant_pat(enum_name: &str, variant: &str, sub: Vec<Pattern>, sp: Span) -> P
     Pattern { kind: PatKind::Variant { enum_name: enum_name.to_string(), variant: variant.to_string(), sub }, span: sp }
 }
 fn method_call(recv: Expr, method: &str, args: Vec<Expr>, sp: Span) -> Expr {
-    let callee = Expr { kind: ExprKind::Field { base: Box::new(recv), field: method.to_string() }, span: sp };
+    let callee = Expr { kind: ExprKind::Field { base: Box::new(recv), field: method.to_string(), iface: None }, span: sp };
     Expr { kind: ExprKind::Call { callee: Box::new(callee), args }, span: sp }
 }
 

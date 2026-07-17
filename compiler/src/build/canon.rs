@@ -469,7 +469,7 @@ impl Printer {
                 self.push("out ");
                 self.expr(e);
             }
-            ExprKind::Field { base, field } => {
+            ExprKind::Field { base, field, .. } => {
                 self.expr(base);
                 self.push(".");
                 self.push(field);

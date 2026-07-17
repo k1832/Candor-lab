@@ -257,7 +257,7 @@ impl<'a> Checker<'a> {
                 });
                 (inner, place)
             }
-            ExprKind::Field { base, field } => {
+            ExprKind::Field { base, field, .. } => {
                 let (bt, bp) = self.check_place(base);
                 let (st, mut place) = self.autoderef(bt, bp);
                 match &st {
@@ -420,7 +420,7 @@ impl<'a> Checker<'a> {
                 };
                 (inner, shared)
             }
-            ExprKind::Field { base, field } => {
+            ExprKind::Field { base, field, .. } => {
                 let (bt, mut shared) = self.write_path_probe(base);
                 let st = self.autoderef_probe(bt, &mut shared);
                 let fty = match &st {
@@ -1273,7 +1273,7 @@ impl<'a> Checker<'a> {
                     _ => Type::Error,
                 }
             }
-            ExprKind::Field { base, field } => {
+            ExprKind::Field { base, field, .. } => {
                 let bt = peel_borrow(self.ty_of_place(base));
                 match bt {
                     Type::Named(n) => self
@@ -1402,7 +1402,7 @@ impl<'a> Checker<'a> {
         }
         // A method call: `receiver.method(args)` parses as a call whose callee is a
         // field access. Resolve it against interface impls (design 0007 §2.3).
-        if let ExprKind::Field { base, field } = &callee.kind {
+        if let ExprKind::Field { base, field, .. } = &callee.kind {
             if let Some(t) = self.try_method_call(base, field, args, span) {
                 return t;
             }

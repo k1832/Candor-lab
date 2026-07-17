@@ -787,6 +787,7 @@ impl Parser {
                     kind: ExprKind::Field {
                         base: Box::new(expr),
                         field,
+                        iface: None,
                     },
                     span: self.span_from(lo),
                 };

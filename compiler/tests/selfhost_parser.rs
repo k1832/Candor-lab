@@ -493,7 +493,7 @@ impl R {
                 self.expr(e);
                 self.w(")");
             }
-            ExprKind::Field { base, field } => {
+            ExprKind::Field { base, field, .. } => {
                 self.w("(field ");
                 self.expr(base);
                 self.sp();

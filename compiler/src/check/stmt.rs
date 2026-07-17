@@ -220,7 +220,7 @@ impl<'a> Checker<'a> {
                 // 0015 §4.3/§5; the `get_ref` yield). Without this the `for read` yield,
                 // and any borrow-returning interface method, sheds its source loan and
                 // the escape UAF §5 case (2) forbids slips through.
-                if let ExprKind::Field { base, field } = &callee.kind {
+                if let ExprKind::Field { base, field, .. } = &callee.kind {
                     return self.method_returns_borrow(base, field);
                 }
                 false
