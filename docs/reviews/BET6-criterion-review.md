@@ -14,7 +14,7 @@ The disposition is the deciding authority's; this document records the review pe
 
 ## F1 — Construct validity: the in-context axis measures prompt-conditioning, not manufactured competence. Severity: SINK
 
-P19 (LANG_PHYLOSOPHY.md L79-80, §249) frames "manufactured" competence as competence **built
+P19 (LANG_PHILOSOPHY.md L79-80, §249) frames "manufactured" competence as competence **built
 into the model** via the project's spec-grounded **synthetic corpus and fine-tuning tokens** — the
 counterfactual to competence "awaited from organic corpus accretion," beating the incumbents'
 *training-corpus-scale* barrier (L375). The draft (§3.1, §4.1) instead measures kibitokens of spec

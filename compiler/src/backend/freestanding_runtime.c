@@ -1,4 +1,4 @@
-/* Candor FREESTANDING runtime (design 0010 §5; LANG_PHYLOSOPHY P7/P9/NN#6).
+/* Candor FREESTANDING runtime (design 0010 §5; LANG_PHILOSOPHY P7/P9/NN#6).
  *
  * The no-libc twin of `aot_runtime.c`. It links the SAME emitted Candor object
  * (imports the six `rt_*` shims, exports `candor_entry`) but depends on NO libc

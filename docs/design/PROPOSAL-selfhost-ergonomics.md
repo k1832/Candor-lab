@@ -19,7 +19,7 @@ slice; this works from what is recorded.
 **P6** (small fixed core; add-requires-remove), **P9** (allocator-explicit;
 owning collections in std, never core), **P3** (one canonical way), **P12/Bet 5**
 (value-first, borrows are a gear for passing not storing), **P2/NN#17** (nothing
-crosses a signature by inference). Subordinate to `LANG_PHYLOSOPHY.md` and to
+crosses a signature by inference). Subordinate to `LANG_PHILOSOPHY.md` and to
 designs 0001, 0007, 0009, 0012, 0013. Where they conflict, the higher document
 wins; this proposal has no authority to override any of them.
 

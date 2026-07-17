@@ -23,7 +23,7 @@ this is a third operand/pattern mode of the *existing* `for`, not a new loop),
 **NN#17** (nothing crosses a signature by inference — the yielded borrow is tied
 to the `read self` receiver, not to an inferred lifetime parameter), **P2**
 (local verifiability — the loan that keeps the yield sound is the one already
-visible on the loop). Subordinate to `LANG_PHYLOSOPHY.md` and to designs 0001
+visible on the loop). Subordinate to `LANG_PHILOSOPHY.md` and to designs 0001
 (memory model — respected once, unchanged) and 0007/0009 (the interface and
 iteration systems this extends). Where they conflict, the higher document wins
 and this one changes.

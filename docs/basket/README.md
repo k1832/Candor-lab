@@ -17,7 +17,7 @@ The five specs:
 ## Blindness provenance
 
 These specs were authored in a session that read **only**
-`../../LANG_PHYLOSOPHY.md` and `../BET5_CRITERION.md`. The session never saw any
+`../../LANG_PHILOSOPHY.md` and `../BET5_CRITERION.md`. The session never saw any
 Candor design document, memory-model document, or prototype code. This is the
 `BET5_CRITERION.md` §6.2 finding-8 requirement: the specs must be authored blind
 to the Candor design so they cannot be shaped to advantage Candor, and so that

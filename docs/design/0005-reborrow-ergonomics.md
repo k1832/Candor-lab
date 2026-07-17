@@ -9,7 +9,7 @@ signature), P3 (one canonical way), NN#11 (formatter is the only form), NN#17
 ordering), the v4.2 binding commitment ("call-site reborrow ergonomics in the
 next design round").
 
-Subordinate to `LANG_PHYLOSOPHY.md` and to `docs/design/0001-memory-model.md`,
+Subordinate to `LANG_PHILOSOPHY.md` and to `docs/design/0001-memory-model.md`,
 which this document amends at §2.1. Where they conflict, they win and this
 document changes.
 

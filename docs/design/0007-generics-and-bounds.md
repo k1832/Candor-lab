@@ -13,7 +13,7 @@ growth by default"), **P20** (definition-site checking is a compile-speed
 *architecture* — checked once, instantiation is cached codegen), **P2/NN#17**
 (nothing crosses a signature by inference; effects and bounds are written),
 **NN#13** (the grammar parses without a symbol table — OBL-GENERIC-BRACKET), **P3**
-(one construct per concept). Subordinate to `LANG_PHYLOSOPHY.md` and to designs 0001
+(one construct per concept). Subordinate to `LANG_PHILOSOPHY.md` and to designs 0001
 (the memory model this must respect) and 0006 (the syntax whose deferrals this
 discharges). Where they conflict, the higher document wins and this one changes.
 

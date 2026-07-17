@@ -16,7 +16,7 @@ declared confirmed, refuted, or killed on the external anchors, and *nothing els
 frozen `docs/BET5_CRITERION2.md` for structure, freeze discipline, and pre-registration language.
 **Registration version:** DRAFT-0.
 **Date:** 2026-07-16.
-**Governing document:** `LANG_PHYLOSOPHY.md` v4.2 (normative; Bet 6, P19, P4/P13/P16). This sits at
+**Governing document:** `LANG_PHILOSOPHY.md` v4.2 (normative; Bet 6, P19, P4/P13/P16). This sits at
 the design-document tier under §9 and binds the measurement, not the philosophy.
 **Adjudicating authority:** the single deciding authority in `GOVERNANCE.md` (philosophy §9),
 currently k1832.

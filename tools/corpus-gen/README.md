@@ -2,7 +2,7 @@
 
 The third and final P19 artifact for Candor (after the spec pack and the
 evaluation harness): **spec-grounded synthetic corpus generation, filtered by the
-toolchain, regenerated per edition** (LANG_PHYLOSOPHY.md P19; Bet 6). It produces
+toolchain, regenerated per edition** (LANG_PHILOSOPHY.md P19; Bet 6). It produces
 labelled `(program, expected)` `.cnr` samples for training the project's own model
 authors in the language.
 
@@ -86,7 +86,7 @@ as a regeneration trigger.
 ## Regeneration per edition
 
 Editions cost corpus, and the migrator does not pay that bill (P15;
-LANG_PHYLOSOPHY.md §"Editions cost corpus"). This pipeline is the payer: on every
+LANG_PHILOSOPHY.md §"Editions cost corpus"). This pipeline is the payer: on every
 edition (or any language/toolchain change that moves a diagnostic code or a
 sentinel), **re-run generation against the new toolchain**. Because the filter is
 the toolchain itself, a shape that no longer matches the language starts *rejecting*

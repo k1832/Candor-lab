@@ -5,7 +5,7 @@
 **Philosophy hooks:** P1 (unsafe is explicit/local/auditable), P2 (local
 verifiability), P13 (clarity-density; the reclassification canon), §2 priority
 order, Bet 5 and its v4.2 disposition, P12's concession clause. Subordinate to
-`LANG_PHYLOSOPHY.md` and to design 0001, which it extends (§4.2's op set). Where
+`LANG_PHILOSOPHY.md` and to design 0001, which it extends (§4.2's op set). Where
 they conflict, the higher document wins and this one changes.
 
 **Revision note (2026-07-08).** Amended per adversarial review #1 (`docs/reviews/2026-07-08-design-0004-0005-review-1.md`), findings 1, 5, 6: the `table_version`-bump framing is withdrawn for a §9 philosophy-tier a-priori ruling plus a counter-update / region-rule-preservation requirement; E0510 is named as a new checker rule tied to the 0003 §2.5 edit; and impact is restated in the frozen region metric (≈1 valve statement; the two shrinks metric-invisible).

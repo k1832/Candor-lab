@@ -25,7 +25,7 @@ Paths are given relative to the lab root.
 
 | What | Lab source | Why it stays |
 |---|---|---|
-| **Founding philosophy** | `LANG_PHYLOSOPHY.md`, `GOVERNANCE.md` | The normative authority and its governance — the lab's distinctive asset. Linked, not copied. |
+| **Founding philosophy** | `LANG_PHILOSOPHY.md`, `GOVERNANCE.md` | The normative authority and its governance — the lab's distinctive asset. Linked, not copied. |
 | **Design documents** | `docs/design/` (0001–0012) | The record of what was decided and, per philosophy §8.6, what was rejected and why. |
 | **Adversarial reviews** | `docs/reviews/` | The soundness-hole record. Lab methodology, not product surface. |
 | **Bet 5 experiment record** | `docs/BET5_CRITERION.md`, `docs/BET5_CRITERION2.md`, `docs/BET5_UNIT_TABLE.md`, `docs/RESULTS.md`, `docs/ADJUDICATIONS.md`, `docs/FREEZE_MANIFEST.md`, `docs/basket/`, `docs/proposals/`, `baselines/`, `ports/` | The frozen founding experiment and its measurement basis. |

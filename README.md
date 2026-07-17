@@ -47,7 +47,7 @@ Live records: [docs/RESULTS.md](docs/RESULTS.md), [docs/spec/99-obligations.md](
 
 | Document | Role |
 |---|---|
-| [LANG_PHYLOSOPHY.md](LANG_PHYLOSOPHY.md) | The founding document (v4). Normative; outranks everything else in this repository. |
+| [LANG_PHILOSOPHY.md](LANG_PHILOSOPHY.md) | The founding document (v4). Normative; outranks everything else in this repository. |
 | [GOVERNANCE.md](GOVERNANCE.md) | The deciding authority and amendment mechanics required by philosophy §9. |
 | [docs/BET5_CRITERION.md](docs/BET5_CRITERION.md) | Pre-registered kill criterion for Bet 5 (value-first memory model). |
 | [docs/design/](docs/design/) | Numbered design documents. Each records what was rejected and why, per philosophy §8.6. |
@@ -77,7 +77,7 @@ The project followed the sequencing in philosophy §8, and has walked the whole 
 ## Repository layout
 
 ```
-LANG_PHYLOSOPHY.md   founding document
+LANG_PHILOSOPHY.md   founding document
 GOVERNANCE.md        deciding authority, amendment process
 docs/
   BET5_CRITERION.md  pre-registered kill criterion (FROZEN since the first port commit)

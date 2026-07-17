@@ -1,7 +1,7 @@
 # Governance
 
 This document is the subordinate governance charter required by
-[LANG_PHYLOSOPHY.md](LANG_PHYLOSOPHY.md) §9. It specifies who the deciding
+[LANG_PHILOSOPHY.md](LANG_PHILOSOPHY.md) §9. It specifies who the deciding
 authority is, how amendments are enacted, and how succession works. Where this
 document and the philosophy conflict, the philosophy wins.
 
@@ -21,7 +21,7 @@ Per philosophy §9, an amendment to the philosophy must:
 2. State the evidence or argument that overcame the burden of proof.
 3. Append the change and rationale to the philosophy's Appendix A ledger.
 
-Amendments are enacted as commits touching `LANG_PHYLOSOPHY.md`, authored or
+Amendments are enacted as commits touching `LANG_PHILOSOPHY.md`, authored or
 approved by the deciding authority. Silent reinterpretation is forbidden; a
 conflict discovered in a lower-tier artifact (design doc, implementation)
 resolves upward — the lower artifact changes or the philosophy is amended.

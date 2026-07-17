@@ -14,13 +14,13 @@ core and its spec skeleton — P18's models are cheapest before code exists").
     (P18, NN#20).
 
 1.2 The specification **binds the compiler absolutely**. Per the philosophy §9
-    hierarchy (`LANG_PHYLOSOPHY.md` > design documents > implementation >
+    hierarchy (`LANG_PHILOSOPHY.md` > design documents > implementation >
     compiler behavior), the specification sits at the design-document tier and
     the implementation is its subject. Where the compiler and this document
     disagree, the **compiler is wrong** by definition; "the compiler is the
     spec" is explicitly rejected (P18).
 
-1.3 This document is **subordinate to `LANG_PHYLOSOPHY.md`**. Where the
+1.3 This document is **subordinate to `LANG_PHILOSOPHY.md`**. Where the
     philosophy and this specification conflict, the philosophy wins and this
     document is the artifact that changes.
 

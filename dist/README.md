@@ -25,7 +25,7 @@ language is founded on — lives in the lab repository. This preview ships *from
 that lab; the lab is the authority. 1.0 is a stability *gate*, not a date.
 
 > Lab / design record: **the Candor lab repository** (this preview was staged
-> from it). Read `LANG_PHYLOSOPHY.md` and `docs/design/` there for the why behind
+> from it). Read `LANG_PHILOSOPHY.md` and `docs/design/` there for the why behind
 > every decision, and `docs/BET5_CRITERION.md` for the frozen founding bet.
 
 ---

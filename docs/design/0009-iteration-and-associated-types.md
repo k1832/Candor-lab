@@ -16,7 +16,7 @@ effect marker like any method and adds no coloring, §3.3), **P3** (one loop
 family; iteration reuses `Opt` and the `loop` desugar target), **NN#13** (`for` /
 `type` / `I::Item` tokenize and parse without a symbol table, §4.4), **P12/Bet 5**
 (value-first: by-value/by-copy iteration first; capturing closures refused this
-edition, §5). Subordinate to `LANG_PHYLOSOPHY.md` and to designs 0001 (the memory
+edition, §5). Subordinate to `LANG_PHILOSOPHY.md` and to designs 0001 (the memory
 model respected once, for every instantiation) and 0007 (the interface system this
 extends). Where they conflict, the higher document wins and this one changes.
 

@@ -1,4 +1,4 @@
-//! Freestanding gate (design 0010 §5; LANG_PHYLOSOPHY P7/P9/NN#6): the NN#6 proof
+//! Freestanding gate (design 0010 §5; LANG_PHILOSOPHY P7/P9/NN#6): the NN#6 proof
 //! that Candor has "no mandatory runtime; freestanding targets are first-class".
 //!
 //! `candor compile --freestanding` emits an ELF linked `-nostdlib -static

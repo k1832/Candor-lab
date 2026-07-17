@@ -13,7 +13,7 @@ constraint on the backend and every optimization), **P11/NN#10** (definition-sit
 generics: instantiation is cached codegen, never re-analysis), **P4** (structured
 diagnostics and traces are a codegen output, not an afterthought), **P9/NN#6**
 (freestanding targets are first-class — a backend constraint). Subordinate to
-`LANG_PHYLOSOPHY.md`, to the fault-window formalization
+`LANG_PHILOSOPHY.md`, to the fault-window formalization
 (`docs/spec/drafts/fault-window-formalization.md`, R1–R3 below), and to designs
 0001 (the semantics to preserve), 0007 (what monomorphizes), and 0008 (the
 interface artifact this doc's compiler emits). Where they conflict the higher

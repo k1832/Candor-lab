@@ -10,7 +10,7 @@ only form — NN#11), NN#13 (the grammar parses without a symbol table), P2
 (value-first rendered in syntax: omitted mode = `take`; borrows wear keywords),
 P7 (errors are values with a lightweight propagation operator), P6 (small core;
 adding requires removing), P16 (one blessed formatter). Subordinate to
-`LANG_PHYLOSOPHY.md` and to designs 0001/0004/0005, whose *semantics* this
+`LANG_PHILOSOPHY.md` and to designs 0001/0004/0005, whose *semantics* this
 document re-spells and does not change. Where they conflict, the higher document
 wins and this one changes.
 
