@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use crate::interp::mem::Mem;
@@ -151,6 +151,25 @@ pub fn unregister_std_net() {
     crate::foreign::unregister("sys_tcp_connect");
 }
 
+/// Register the PRODUCTION std I/O + net shims for the `candor run` CLI. Unlike
+/// [`register_std_io`]/[`register_std_net`] (the harness path, which buffers
+/// stdout/stderr and resolves `open`/`listdir` against a test-set `root`), these
+/// do REAL host I/O: fd 1/2 write to the process's stdout/stderr (flushed), fd 0
+/// reads its stdin, and `open` resolves the path exactly as given (cwd-relative or
+/// absolute). fd >= 3 file/socket read/write/close, `sys_listdir` (over the default
+/// `.`-rooted `read_dir`, i.e. as-given), and `sys_tcp_connect` reuse the SAME real
+/// implementations as the harness path. Idempotent; intended for the CLI process
+/// only (the test harness registers its own buffer/root shims). Do NOT mix with the
+/// harness registration in one process.
+pub fn register_std_io_production() {
+    crate::foreign::register("sys_open", shim_open_production);
+    crate::foreign::register("sys_close", shim_close);
+    crate::foreign::register("sys_read", shim_read_production);
+    crate::foreign::register("sys_write", shim_write_production);
+    crate::foreign::register("sys_listdir", shim_listdir);
+    crate::foreign::register("sys_tcp_connect", shim_tcp_connect);
+}
+
 // ---- test-only shim overrides (fault-injection) ----------------------------
 
 /// Override `sys_write` with a shim that reports it wrote exactly `n` bytes
@@ -183,17 +202,9 @@ fn read_cstr(mem: &mut Mem, addr: u64) -> Vec<u8> {
     out
 }
 
-/// `sys_open(path: rawptr u8, flags: i32, mode: i32) -> i32` — real `std::fs`.
-fn shim_open(args: &[i128], mem: &mut Mem) -> i128 {
-    let path_addr = args[0] as u64;
-    let flags = args[1];
-    let name = read_cstr(mem, path_addr);
-    let rel = match String::from_utf8(name) {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-    let mut s = state().lock().unwrap();
-    let full = s.root.join(rel);
+/// Build an `OpenOptions` from the POSIX `open(2)` flag bits (shared by the test
+/// and production `open` shims — only the path resolution differs between them).
+fn open_options_from_flags(flags: i128) -> OpenOptions {
     let mut oo = OpenOptions::new();
     let writing = flags & O_WRONLY != 0 || flags & O_RDWR != 0;
     if flags & O_RDWR != 0 {
@@ -212,13 +223,115 @@ fn shim_open(args: &[i128], mem: &mut Mem) -> i128 {
     if flags & O_APPEND != 0 {
         oo.append(true);
     }
-    match oo.open(&full) {
+    oo
+}
+
+/// Open `path` with `oo`, insert the real file into the shared fd table, and
+/// return its fd (>= 3); `-1` on failure. Shared by the test and production shims.
+fn insert_open(s: &mut IoState, oo: OpenOptions, path: &Path) -> i128 {
+    match oo.open(path) {
         Ok(f) => {
             let fd = s.next_fd;
             s.next_fd += 1;
             s.files.insert(fd, Handle::File(f));
             fd as i128
         }
+        Err(_) => -1,
+    }
+}
+
+/// `sys_open(path: rawptr u8, flags: i32, mode: i32) -> i32` — real `std::fs`,
+/// path resolved against the test `root` (harness path).
+fn shim_open(args: &[i128], mem: &mut Mem) -> i128 {
+    let path_addr = args[0] as u64;
+    let flags = args[1];
+    let name = read_cstr(mem, path_addr);
+    let rel = match String::from_utf8(name) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let mut s = state().lock().unwrap();
+    let full = s.root.join(rel);
+    let oo = open_options_from_flags(flags);
+    insert_open(&mut s, oo, &full)
+}
+
+/// Production `sys_open`: resolve the path bytes exactly as given (cwd-relative or
+/// absolute), NOT joined to the test root. Otherwise identical to [`shim_open`].
+fn shim_open_production(args: &[i128], mem: &mut Mem) -> i128 {
+    let path_addr = args[0] as u64;
+    let flags = args[1];
+    let name = read_cstr(mem, path_addr);
+    let path = match String::from_utf8(name) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let oo = open_options_from_flags(flags);
+    let mut s = state().lock().unwrap();
+    insert_open(&mut s, oo, Path::new(&path))
+}
+
+/// Production `sys_read`: fd 0 reads the process's real stdin; fd >= 3 reads the
+/// real file/socket in the shared fd table (reused from the harness path).
+fn shim_read_production(args: &[i128], mem: &mut Mem) -> i128 {
+    let fd = args[0] as i32;
+    let buf = args[1] as u64;
+    let count = args[2] as usize;
+    let mut tmp = vec![0u8; count];
+    let n = if fd == 0 {
+        // stdin read must not run under the IoState lock (it may block).
+        match std::io::stdin().read(&mut tmp) {
+            Ok(n) => n,
+            Err(_) => return -1,
+        }
+    } else {
+        let mut s = state().lock().unwrap();
+        match s.files.get_mut(&fd) {
+            Some(f) => match f.read(&mut tmp) {
+                Ok(n) => n,
+                Err(_) => return -1,
+            },
+            None => return -1,
+        }
+    };
+    if mem.write(buf, &tmp[..n]).is_err() {
+        return -1;
+    }
+    n as i128
+}
+
+/// Production `sys_write`: fd 1/2 write to the process's real stdout/stderr
+/// (flushed, so a write-then-exit program never loses output); fd >= 3 writes the
+/// real file/socket in the shared fd table (reused from the harness path).
+fn shim_write_production(args: &[i128], mem: &mut Mem) -> i128 {
+    let fd = args[0] as i32;
+    let buf = args[1] as u64;
+    let count = args[2] as usize;
+    let data = match mem.read(buf, count as u64, false) {
+        Ok(d) => d,
+        Err(_) => return -1,
+    };
+    match fd {
+        1 => write_all_flush(&mut std::io::stdout(), &data),
+        2 => write_all_flush(&mut std::io::stderr(), &data),
+        _ => {
+            let mut s = state().lock().unwrap();
+            match s.files.get_mut(&fd) {
+                Some(f) => match f.write(&data) {
+                    Ok(n) => n as i128,
+                    Err(_) => -1,
+                },
+                None => -1,
+            }
+        }
+    }
+}
+
+/// Write `data` in full and flush, returning the byte count (`write_all` loops over
+/// short writes) or `-1` on error — the POSIX-shaped result the wrapper expects.
+fn write_all_flush(w: &mut impl Write, data: &[u8]) -> i128 {
+    match w.write_all(data).and_then(|()| w.flush()) {
+        Ok(()) => data.len() as i128,
         Err(_) => -1,
     }
 }

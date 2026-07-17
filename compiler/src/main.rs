@@ -171,6 +171,9 @@ fn run_run(rest: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // The CLI does REAL host I/O: register the production foreign runtime (fd 1/2 ->
+    // real stdout/stderr, fd 0 -> real stdin, open/listdir as-given) before running.
+    candor::foreign_io::register_std_io_production();
     if engine == "mir" {
         return run_run_mir(path);
     }
@@ -195,6 +198,7 @@ fn run_run(rest: &[String]) -> ExitCode {
 /// `run --engine=mir <file>` — the Stage-A precise MIR interpreter.
 fn run_run_mir(path: &str) -> ExitCode {
     use candor::MirRunResult;
+    candor::foreign_io::register_std_io_production();
     let outcome = if std::path::Path::new(path).is_dir() {
         candor::run_dir_mir(std::path::Path::new(path))
     } else {
