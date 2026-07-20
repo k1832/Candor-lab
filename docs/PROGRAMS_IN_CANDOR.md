@@ -59,6 +59,33 @@ WASM interpreter" demo.
 
 ---
 
+## 1b. An HTTP/1.0 static-file server — in Candor  ⭐ the network showpiece
+
+**`compiler/tests/fixtures/http_server/main.cnr`** (~600 lines, a boundary module).
+A working web server written in Candor: it `listen`s on a TCP port, `accept`s
+connections, parses the HTTP request line with the std string utilities
+(`starts_with`/`split`/`trim`, plus a `contains "..'` path-traversal guard), maps
+`GET /path` to a file under its root, reads it through the std_io wrappers, and
+answers `200 OK` (with `Content-Length`, the body built as a `String`) or
+`404 Not Found`. Value-first and allocator-explicit throughout (it runs over the
+real free-list allocator); all I/O crosses the audited `foreign` boundary, so
+`candor audit` lists exactly what it trusts (`sys_tcp_listen`/`accept`/`port` +
+the shared read/write/close).
+
+**How it's verified:** `compiler/tests/http_server.rs` runs it on the tree-walker
+and the MIR interpreter (a real Rust `TcpStream` client connects and asserts the
+exact status lines and body bytes) *and* as a compiled native binary spawned as a
+process — same requests, same bytes, exit code = the server's sentinel.
+
+```
+cd compiler && cargo nextest run -E 'binary(http_server)'
+```
+
+**Demo:** compile it and point a real browser or `curl` at it — it is a genuine,
+if deliberately tiny, web server (HTTP/1.0, serves N requests then exits).
+
+---
+
 ## 2. The self-hosted compiler — Candor compiling Candor  ⭐
 
 **`selfhost/*.cnr`** (~19,300 lines). The Candor toolchain, written in
@@ -173,6 +200,7 @@ $CANDOR audit compiler/tests/fixtures/std_io
 | Program | Path | ~Lines of Candor |
 |---|---|---|
 | WebAssembly runtime | `compiler/tests/fixtures/wasm/interp.cnr` | 1,900 |
+| HTTP/1.0 static-file server | `compiler/tests/fixtures/http_server/main.cnr` | 600 |
 | Self-hosted compiler | `selfhost/*.cnr` | 19,300 |
 | Standard library | `compiler/tests/fixtures/corelib/`, `std_*.cnr` | — |
 | Systems corpus | `compiler/tests/fixtures/11_*.cnr` etc. | — |
