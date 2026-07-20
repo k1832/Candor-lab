@@ -1121,7 +1121,7 @@ impl<'a> Lowerer<'a> {
                     }
                     ExprKind::Field { base, field, iface } => {
                         let (fnname, _) = self
-                            .resolve_method(base, field, iface.as_ref(), args, e.span)
+                            .resolve_method(base, field, iface.as_ref(), args, e.span, false)
                             .ok_or_else(|| LowerError("match on unresolved method call".into()))?;
                         self.items.fns[fnname.as_str()].ret.clone()
                     }
@@ -1184,7 +1184,7 @@ impl<'a> Lowerer<'a> {
                     Some(self.items.fns[n.as_str()].ret.clone())
                 }
                 ExprKind::Field { base, field, iface } => {
-                    let (fnname, _) = self.resolve_method(base, field, iface.as_ref(), args, e.span)?;
+                    let (fnname, _) = self.resolve_method(base, field, iface.as_ref(), args, e.span, false)?;
                     Some(self.items.fns.get(&fnname)?.ret.clone())
                 }
                 _ => None,
@@ -1795,7 +1795,7 @@ impl<'a> Lowerer<'a> {
             ExprKind::Call { callee, args } => {
                 let (fname, all): (String, Vec<Expr>) = match &callee.kind {
                     ExprKind::Ident(n) if self.items.fns.contains_key(n.as_str()) => (n.clone(), args.to_vec()),
-                    ExprKind::Field { base, field, iface } => match self.resolve_method(base, field, iface.as_ref(), args, e.span) {
+                    ExprKind::Field { base, field, iface } => match self.resolve_method(base, field, iface.as_ref(), args, e.span, true) {
                         Some(m) => m,
                         None => return unsupported("aggregate method call"),
                     },
@@ -2287,7 +2287,7 @@ impl<'a> Lowerer<'a> {
         }
         // A method call `recv.m(args)` -> the mono-resolved impl free fn.
         if let ExprKind::Field { base, field, iface } = &callee.kind {
-            if let Some((fnname, all)) = self.resolve_method(base, field, iface.as_ref(), args, span) {
+            if let Some((fnname, all)) = self.resolve_method(base, field, iface.as_ref(), args, span, true) {
                 let sig = self.items.fns[fnname.as_str()].clone();
                 return self.lower_direct_call(fnname, &sig, &all, span);
             }
@@ -2574,13 +2574,21 @@ impl<'a> Lowerer<'a> {
     fn static_nominal(&self, e: &Expr) -> Option<String> {
         dispatch_nominal(&self.static_ty(e)?)
     }
-    fn resolve_method(&self, base: &Expr, field: &str, iface: Option<&String>, args: &[Expr], span: Span) -> Option<(String, Vec<Expr>)> {
+    /// When `record` is set (only the two call-lowering sites that emit an actual
+    /// call, not the static-type/scrutinee queries), the resolved key is logged to
+    /// `dispatch_trace` for design-0018 gate (d). MIR resolves dispatch once per
+    /// monomorphized call site at lowering; the native backends reuse this MIR, so
+    /// MIR coverage carries them. Recording is a no-op unless a test installed a sink.
+    fn resolve_method(&self, base: &Expr, field: &str, iface: Option<&String>, args: &[Expr], span: Span, record: bool) -> Option<(String, Vec<Expr>)> {
         let nominal = self.static_nominal(base)?;
         let key_iface = match iface {
             Some(i) => i.clone(),
             None => self.impls.first_iface.get(&(nominal.clone(), field.to_string()))?.clone(),
         };
-        let fnname = self.impls.dispatch.get(&(nominal, key_iface, field.to_string())).cloned()?;
+        let fnname = self.impls.dispatch.get(&(nominal.clone(), key_iface.clone(), field.to_string())).cloned()?;
+        if record {
+            crate::dispatch_trace::record(&nominal, &key_iface, field);
+        }
         let self_mode = self.items.fns.get(&fnname).and_then(|s| s.params.first().map(|p| p.mode));
         let base_is_borrow = matches!(self.static_ty(base), Some(Type::Borrow(_)) | Some(Type::BorrowMut(_)));
         let recv = match self_mode {

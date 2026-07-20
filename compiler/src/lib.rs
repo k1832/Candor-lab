@@ -10,6 +10,7 @@ pub mod build;
 pub mod check;
 pub mod count;
 pub mod diag;
+pub mod dispatch_trace;
 pub mod foreign;
 pub mod foreign_io;
 pub mod generics;
@@ -99,6 +100,26 @@ pub fn count_source_real(src: &str) -> Result<count::Counts, Diag> {
 pub fn check_source_real(src: &str) -> Result<Vec<Diag>, Diag> {
     let program = real::parse_source(src)?;
     Ok(check::check_program_real(&program))
+}
+
+/// Gate (d) (design 0018 §5.2): the set of interfaces the CHECKER resolved for
+/// interface-method calls in `src` — `resolve` in the `dispatch = resolve`
+/// invariant (§4.1). Read from the checker's recorded monomorphization shapes
+/// (`Shape::Method`), which is the type-checker's own selection, computed
+/// independently of the runtime dispatch tables. A dispatch that drifts from
+/// resolution (the §2.2 bug — checker resolves `A`, every engine runs `B`) shows
+/// up as this set disagreeing with the executed dispatch keys recorded by
+/// [`dispatch_trace`], which the five-engine differential gate cannot see.
+pub fn resolved_interfaces_real(src: &str) -> Result<std::collections::BTreeSet<String>, Diag> {
+    let program = real::parse_source(src)?;
+    let (_diags, _insts, shapes) = check::check_generic_program(&program, true);
+    Ok(shapes
+        .into_values()
+        .filter_map(|s| match s {
+            generics::Shape::Method(iface) => Some(iface),
+            _ => None,
+        })
+        .collect())
 }
 
 /// Parse, check, then run a real-syntax program's `main`.

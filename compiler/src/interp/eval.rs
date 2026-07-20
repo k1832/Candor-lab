@@ -1708,7 +1708,17 @@ impl<'a> Interp<'a> {
     /// carried on the call node by monomorphization; when absent (a non-generic
     /// program, which mono does not rewrite) the first impl providing the method
     /// for `nominal` is used — the same coherent first-match the checker made.
-    fn dispatch_method(&self, nominal: &str, field: &str, iface: Option<&String>) -> Option<&String> {
+    ///
+    /// When `record` is set (only the executed call path, not static-type
+    /// queries), the resolved key is logged to `dispatch_trace` for design-0018
+    /// gate (d); recording is a no-op unless a test has installed a sink.
+    fn dispatch_method(
+        &self,
+        nominal: &str,
+        field: &str,
+        iface: Option<&String>,
+        record: bool,
+    ) -> Option<&String> {
         let key_iface = match iface {
             Some(i) => i.clone(),
             None => self
@@ -1716,8 +1726,13 @@ impl<'a> Interp<'a> {
                 .get(&(nominal.to_string(), field.to_string()))?
                 .clone(),
         };
-        self.impl_dispatch
-            .get(&(nominal.to_string(), key_iface, field.to_string()))
+        let hit = self
+            .impl_dispatch
+            .get(&(nominal.to_string(), key_iface.clone(), field.to_string()));
+        if record && hit.is_some() {
+            crate::dispatch_trace::record(nominal, &key_iface, field);
+        }
+        hit
     }
 
     /// The static type of a place expression (local, field, dereference), for
@@ -1765,7 +1780,7 @@ impl<'a> Interp<'a> {
             }
             ExprKind::Field { base, field, iface } => {
                 let nominal = self.expr_static_nominal(base)?;
-                let fnname = self.dispatch_method(&nominal, field, iface.as_ref())?;
+                let fnname = self.dispatch_method(&nominal, field, iface.as_ref(), false)?;
                 self.items.fns.get(fnname.as_str()).map(|sig| sig.ret.clone())
             }
             _ => None,
@@ -1932,7 +1947,7 @@ impl<'a> Interp<'a> {
         // impl is chosen by the receiver's runtime nominal type.
         if let ExprKind::Field { base, field, iface } = &callee.kind {
             if let Some(nominal) = self.expr_static_nominal(base) {
-                if let Some(fnname) = self.dispatch_method(&nominal, field, iface.as_ref()).cloned() {
+                if let Some(fnname) = self.dispatch_method(&nominal, field, iface.as_ref(), true).cloned() {
                     let fnd = self.fns[fnname.as_str()];
                     let sig = self.items.fns[fnname.as_str()].clone();
                     // Pass the receiver per the method's `self` mode: `read`/`write`
