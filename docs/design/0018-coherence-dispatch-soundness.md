@@ -833,3 +833,12 @@ what genuinely holds — is recorded at
 [docs/reviews/0018-coherence-dispatch-soundness-review.md](../reviews/0018-coherence-dispatch-soundness-review.md).
 Commitments 1–3 are now binding pre-stability work: the spec section (Commitment 1) and
 the gate-(d) validation campaign (Commitment 2) are the implementation queue.
+
+**Commitment 1 status (2026-07-20): LANDED.** The dispatch-consistency invariant
+(§4.1), the reject-don't-miscompile rule (§4.1), the orphan/uniqueness rule with its
+builtin-scalar case and linked-program soundness role (§4.2), and associated-type
+projection normalization (§4.3) are specified normatively in
+[docs/spec/13-coherence-and-dispatch.md](../spec/13-coherence-and-dispatch.md)
+(chapter 13, §§1–5), with cross-reference clauses added to chapters 10 §7.5 and 12
+§1.5 and the chapter registered in `docs/spec/00-front.md`. Commitment 2 (the gate-(d)
+campaign) remains the open implementation queue item.

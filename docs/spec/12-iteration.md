@@ -35,6 +35,12 @@ chapter 10 (interfaces, opacity, coherence) and **discharges OBL-GENERICS-ITER**
     interface** (design 0009 §2.3). Coherence is unchanged — the member is fixed
     by the impl and keyed by its `(I, C)` pair (chapter 10 §7).
 
+1.5 **Normalization at instantiation.** When the base of a projection is made
+    concrete, `T::Item` SHALL normalize to a single concrete leaf — transitively
+    through adapter-over-adapter bindings, under a fixed depth bound — or the
+    program is rejected at check time; no unresolved projection reaches codegen.
+    Chapter 13 §5 states this obligation normatively (design 0009 §2.2).
+
 ---
 
 ## 2. The two iteration protocols as library definitions

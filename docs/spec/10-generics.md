@@ -214,6 +214,12 @@ codes (the non-normative appendix maps them). **Discharges OBL-GENERICS** and
     hold: "`T` satisfies `I`" has a single locally findable answer (design 0007
     §2.3).
 
+7.5 **Soundness role and builtin scalars.** This coherence is the precondition of
+    the dispatch-consistency invariant (chapter 13 §2): it makes `resolve` single-
+    valued, so at most one legal impl exists per `(instantiated interface, type)`
+    per linked program. A **builtin scalar** target has no defining module; chapter
+    13 §4.2 states where its impls are legal.
+
 ---
 
 ## 8. Cross-type `?`

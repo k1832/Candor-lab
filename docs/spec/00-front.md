@@ -103,6 +103,7 @@ Each chapter carries one status:
 | 10 | Generics and interface bounds | NORMATIVE-DRAFT | design 0007 + 0009 §2; P11/NN#10 |
 | 11 | Modules | NORMATIVE-DRAFT + SKELETON | design 0008; P20/NN#17 |
 | 12 | Iteration and associated types | NORMATIVE-DRAFT | design 0009; P11/P4 |
+| 13 | Coherence and dispatch soundness | NORMATIVE-DRAFT | design 0018 §4; 0007 §2.3 + 0009 §2.2; NN#1/NN#20 |
 | 99 | Obligations tracker | NORMATIVE (process) | all SKELETON/PENDING items |
 
 4.1 A SKELETON or ADOPTED-PENDING designation is **not** a licence for
@@ -119,8 +120,9 @@ Each chapter carries one status:
     the `enforced` contract level, and the `alloc` effect.
 
 5.2 User-defined generics and interface bounds (chapter 10), the module
-    structure (chapter 11 §§1–6), and iteration with associated types (chapter 12)
-    are now specified. The core deliberately **does not yet** specify: concurrency
+    structure (chapter 11 §§1–6), iteration with associated types (chapter 12),
+    and the coherence/dispatch soundness invariant (chapter 13) are now
+    specified. The core deliberately **does not yet** specify: concurrency
     and its consistency model (P10, chapter 09), FFI / boundary-module *content*
     and the foreign-trust effect (P17, chapters 08/11 §10.1), the imprecise
     fault window's formalization (NN#20), the unsafe-code aliasing optimizer model
