@@ -42,6 +42,8 @@
 #include <pthread.h>
 #include <dirent.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
 
@@ -165,6 +167,49 @@ int64_t tcp_connect(const char *host, uint64_t host_len, int32_t port) {
     }
     freeaddrinfo(res);
     return (int64_t)fd;
+}
+
+/* ------------------------------------------------------------------------- */
+/* std::net TCP server (design 0013 std net, server side).                   */
+/* ------------------------------------------------------------------------- */
+
+/* `sys_tcp_listen` binds here (there is no libc `tcp_listen`): open a TCP socket,
+ * SO_REUSEADDR it (so a just-closed test port rebinds without TIME_WAIT), bind to
+ * 127.0.0.1:port (port 0 => an ephemeral port the kernel picks), and listen. Returns
+ * the listening fd (>= 0) — an ORDINARY descriptor whose accepted connections libc
+ * read/write/close drive — or -1 on failure. Mirrors the interpreter shim's
+ * `TcpListener::bind`. */
+int64_t tcp_listen(int32_t port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons((uint16_t)port);
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) { close(fd); return -1; }
+    if (listen(fd, 16) != 0) { close(fd); return -1; }
+    return (int64_t)fd;
+}
+
+/* `sys_tcp_accept` binds here (the 1-arg wrapper over libc `accept`, which takes
+ * three): block until a client connects to the listener `fd`, discarding the peer
+ * address. Returns the connected fd (>= 0) or -1. */
+int64_t tcp_accept(int32_t fd) {
+    int cfd = accept(fd, NULL, NULL);
+    return (int64_t)cfd;
+}
+
+/* `sys_tcp_port` binds here (there is no libc `tcp_port`): the actual port `fd` is
+ * bound to (getsockname), so an ephemeral-port server can discover its port. Returns
+ * the port (> 0) or -1 on failure. */
+int64_t tcp_port(int32_t fd) {
+    struct sockaddr_in addr;
+    socklen_t len = sizeof(addr);
+    if (getsockname(fd, (struct sockaddr *)&addr, &len) != 0) return -1;
+    return (int64_t)ntohs(addr.sin_port);
 }
 
 /* ------------------------------------------------------------------------- */

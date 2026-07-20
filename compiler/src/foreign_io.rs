@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -44,6 +44,11 @@ const O_APPEND: i128 = 0x400;
 enum Handle {
     File(File),
     Tcp(TcpStream),
+    /// A listening socket (design 0013 std net, server side): it lives in the same
+    /// fd table as file/socket fds so `sys_close` drops it uniformly, but `sys_read`/
+    /// `sys_write` on it are a usage error (a listener carries no byte stream) — only
+    /// `sys_tcp_accept`/`sys_tcp_port` consume it.
+    Listener(TcpListener),
 }
 
 impl Handle {
@@ -51,12 +56,14 @@ impl Handle {
         match self {
             Handle::File(f) => f.read(buf),
             Handle::Tcp(s) => s.read(buf),
+            Handle::Listener(_) => Err(std::io::ErrorKind::InvalidInput.into()),
         }
     }
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         match self {
             Handle::File(f) => f.write(data),
             Handle::Tcp(s) => s.write(data),
+            Handle::Listener(_) => Err(std::io::ErrorKind::InvalidInput.into()),
         }
     }
 }
@@ -69,6 +76,7 @@ struct IoState {
     stderr: Vec<u8>,
     stdin: Vec<u8>,
     stdin_pos: usize,
+    last_listen_port: Option<u16>,
 }
 
 impl IoState {
@@ -81,6 +89,7 @@ impl IoState {
             stderr: Vec::new(),
             stdin: Vec::new(),
             stdin_pos: 0,
+            last_listen_port: None,
         }
     }
 }
@@ -120,6 +129,14 @@ pub fn take_stderr() -> Vec<u8> {
     std::mem::take(&mut state().lock().unwrap().stderr)
 }
 
+/// The port the most recent `sys_tcp_listen` bound (via `getsockname`), or `None`
+/// if none has bound yet. The harness reads this to learn a server's EPHEMERAL port
+/// (`listen(0)`) race-free — before it connects — without depending on the Candor
+/// program's own stdout timing.
+pub fn last_listen_port() -> Option<u16> {
+    state().lock().unwrap().last_listen_port
+}
+
 // ---- registration ----------------------------------------------------------
 
 /// Register the four std/io shims into the foreign registry. Idempotent.
@@ -144,11 +161,16 @@ pub fn unregister_std_io() {
 /// operate on the socket — register both for a network client. Idempotent.
 pub fn register_std_net() {
     crate::foreign::register("sys_tcp_connect", shim_tcp_connect);
+    crate::foreign::register("sys_tcp_listen", shim_tcp_listen);
+    crate::foreign::register("sys_tcp_accept", shim_tcp_accept);
+    crate::foreign::register("sys_tcp_port", shim_tcp_port);
 }
 
 /// Remove the std/net shim, restoring `no_foreign_runtime` for its symbol.
 pub fn unregister_std_net() {
-    crate::foreign::unregister("sys_tcp_connect");
+    for sym in ["sys_tcp_connect", "sys_tcp_listen", "sys_tcp_accept", "sys_tcp_port"] {
+        crate::foreign::unregister(sym);
+    }
 }
 
 /// Register the PRODUCTION std I/O + net shims for the `candor run` CLI. Unlike
@@ -168,6 +190,9 @@ pub fn register_std_io_production() {
     crate::foreign::register("sys_write", shim_write_production);
     crate::foreign::register("sys_listdir", shim_listdir);
     crate::foreign::register("sys_tcp_connect", shim_tcp_connect);
+    crate::foreign::register("sys_tcp_listen", shim_tcp_listen);
+    crate::foreign::register("sys_tcp_accept", shim_tcp_accept);
+    crate::foreign::register("sys_tcp_port", shim_tcp_port);
 }
 
 // ---- test-only shim overrides (fault-injection) ----------------------------
@@ -484,4 +509,69 @@ fn shim_tcp_connect(args: &[i128], mem: &mut Mem) -> i128 {
     s.next_fd += 1;
     s.files.insert(fd, Handle::Tcp(stream));
     fd as i128
+}
+
+
+/// `sys_tcp_listen(port: i32) -> i32` — bind a fresh TCP socket to `127.0.0.1:port`
+/// (`port == 0` requests an ephemeral port), start listening, insert the listener
+/// into the SHARED fd table, and return its fd (>= 3). The bound port is recorded so
+/// the harness can learn an ephemeral server's port race-free ([`last_listen_port`]).
+/// Returns -1 on any failure (port in use, permission), the POSIX-shaped convention
+/// the safe wrapper turns into its `Err` arm.
+fn shim_tcp_listen(args: &[i128], _mem: &mut Mem) -> i128 {
+    let port = args[0] as u16;
+    let listener = match TcpListener::bind(("127.0.0.1", port)) {
+        Ok(l) => l,
+        Err(_) => return -1,
+    };
+    let mut s = state().lock().unwrap();
+    s.last_listen_port = listener.local_addr().ok().map(|a| a.port());
+    let fd = s.next_fd;
+    s.next_fd += 1;
+    s.files.insert(fd, Handle::Listener(listener));
+    fd as i128
+}
+
+/// `sys_tcp_accept(fd: i32) -> i32` — block until a client connects to the listener
+/// at `fd`, then insert the connected stream into the SHARED fd table and return its
+/// fd (>= 3), so `sys_read`/`sys_write`/`sys_close` drive the connection. The listener
+/// is `try_clone`d so the blocking `accept` runs WITHOUT the `IoState` lock held (a
+/// held lock across a blocking call would stall every other fd op). Returns -1 if
+/// `fd` is not a listener or the accept fails.
+fn shim_tcp_accept(args: &[i128], _mem: &mut Mem) -> i128 {
+    let fd = args[0] as i32;
+    let listener = {
+        let s = state().lock().unwrap();
+        match s.files.get(&fd) {
+            Some(Handle::Listener(l)) => match l.try_clone() {
+                Ok(c) => c,
+                Err(_) => return -1,
+            },
+            _ => return -1,
+        }
+    };
+    let stream = match listener.accept() {
+        Ok((s, _)) => s,
+        Err(_) => return -1,
+    };
+    let mut s = state().lock().unwrap();
+    let cfd = s.next_fd;
+    s.next_fd += 1;
+    s.files.insert(cfd, Handle::Tcp(stream));
+    cfd as i128
+}
+
+/// `sys_tcp_port(fd: i32) -> i32` — the actual port the listener at `fd` is bound to
+/// (`getsockname`), letting a server that asked for an ephemeral port discover it.
+/// Returns -1 if `fd` is not a listener or `getsockname` fails.
+fn shim_tcp_port(args: &[i128], _mem: &mut Mem) -> i128 {
+    let fd = args[0] as i32;
+    let s = state().lock().unwrap();
+    match s.files.get(&fd) {
+        Some(Handle::Listener(l)) => match l.local_addr() {
+            Ok(a) => a.port() as i128,
+            Err(_) => -1,
+        },
+        _ => -1,
+    }
 }
