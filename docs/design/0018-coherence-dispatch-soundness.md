@@ -1,15 +1,14 @@
 # 0018 — Coherence and dispatch soundness obligation
 
-**Status: DRAFT — REPAIRED, PENDING RATIFICATION.**
-Adversarial review #1 returned **RATIFY-WITH-REPAIRS**; repairs 1–6 are applied (see
-the Appendix ledger). This document proposes a pre-stability soundness obligation — a
-*specification* obligation NN#20's spec already owns, plus a validation gate — and a
-narrow residual-risk 1.0 gate; under `LANG_PHILOSOPHY.md` §9 the 1.0-gate extension is
-a **Non-Negotiable amendment**, so it stays inert until it goes through the pipeline:
-**adversarial review → publication for open comment (the §9 slow path for NN
-amendments) → enactment by the deciding authority**, with the change and its evidence
-recorded in the philosophy's Appendix A ledger. Nothing below binds anything until that
-gate is passed. It is written to be attacked; §10 names where.
+**Status: RATIFIED (deciding authority, 2026-07-17), after adversarial review #1 + repairs.**
+Adversarial review #1 returned **RATIFY-WITH-REPAIRS**; repairs 1–6 were applied (see
+the Appendix ledger), and the deciding authority ratified the repaired document. This
+document establishes a pre-stability soundness obligation — a *specification* obligation
+NN#20's spec already owns, plus a validation gate — and a narrow residual-risk 1.0 gate.
+The §9 open-comment step for the NN-adjacent 1.0-gate extension is satisfied by this
+repository's public record (the draft, the review, and the repairs were published in
+full before enactment; objections, had any been recorded, would appear in the ledger).
+The commitments below are now binding pre-stability work.
 
 **Date:** 2026-07-17
 **Philosophy hooks:** **NN#1** (no undefined behavior in safe code — the invariant
@@ -827,7 +826,10 @@ Per the house norm of stating attacks before a reviewer does:
    design-kill: two distinct legal impls both selectable for one call under the
    resolution rule — fires without adjudication.
 
-**Status:** repairs applied; **pending deciding-authority ratification** via the
-`LANG_PHILOSOPHY.md` §9 open-comment path (§9 above). The full adversarial review #1 —
-its six findings, the accepted repairs, and what genuinely holds — is recorded at
+**Status:** repairs applied; **RATIFIED by the deciding authority, 2026-07-17** (the §9
+open-comment step satisfied by the public record of draft + review + repairs prior to
+enactment). The full adversarial review #1 — its six findings, the accepted repairs, and
+what genuinely holds — is recorded at
 [docs/reviews/0018-coherence-dispatch-soundness-review.md](../reviews/0018-coherence-dispatch-soundness-review.md).
+Commitments 1–3 are now binding pre-stability work: the spec section (Commitment 1) and
+the gate-(d) validation campaign (Commitment 2) are the implementation queue.
