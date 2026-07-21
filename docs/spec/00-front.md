@@ -96,7 +96,7 @@ Each chapter carries one status:
 | 03 | Types and values | NORMATIVE-DRAFT | design 0001 §1/§5/§8; 0006 spellings |
 | 04 | Ownership and borrows | NORMATIVE-DRAFT | design 0001 §2/§3/§5 + 0005; 0006 spellings |
 | 05 | Unsafe and pointers | NORMATIVE-DRAFT | design 0001 §4 + 0004; P18 aliasing model (§6, OBL-ALIAS) |
-| 06 | Faults | NORMATIVE-DRAFT + SKELETON | design 0001 §7 + P5; NN#20 window |
+| 06 | Faults | NORMATIVE-DRAFT + SKELETON | design 0001 §7 + P5; NN#20 window: single-threaded discharged (J1), concurrency composition deferred |
 | 07 | Contracts | NORMATIVE-DRAFT + SKELETON | design 0001 §7.3 + P8 |
 | 08 | Effects | NORMATIVE-DRAFT + SKELETON | design 0001 §3.2/§6 + P17 |
 | 09 | Memory consistency model | ADOPTED-PENDING | C/C++20 axis (P18); P10 |
@@ -125,7 +125,8 @@ Each chapter carries one status:
     specified. The core deliberately **does not yet** specify: concurrency
     and its consistency model (P10, chapter 09), FFI / boundary-module *content*
     and the foreign-trust effect (P17, chapters 08/11 §10.1), the imprecise
-    fault window's formalization (NN#20), and the P20 module interface-artifact /
+    fault window's concurrency composition (NN#20; the single-threaded core is
+    now specified, chapter 06 §7.4), and the P20 module interface-artifact /
     two-hash incrementality
     machinery (chapter 11 §§7–10, SKELETON). Each open item is an obligation in
     chapter 99, not an omission that licenses UB.

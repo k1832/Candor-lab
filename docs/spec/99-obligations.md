@@ -12,7 +12,14 @@ chapter's stated obligations bind now.
 ## 1. Pre-stability hard gates (named in the philosophy)
 
 ### OBL-WINDOW — imprecise fault-window formalization
-- **Chapter:** 06 §7 (SKELETON).
+- **Chapter:** 06 §7 (NORMATIVE-DRAFT single-threaded window; §7.5 concurrency
+  composition SKELETON).
+- **Status:** **discharged** (single-threaded edition, 2026-07-21; ruling J1,
+  `docs/1.0-GATE-TRIAGE.md`). The rigorous-informal single-threaded core
+  (Containment, Prefix-determinism, NN#1/NN#5 preservation, collapse-to-precise)
+  is promoted into chapter 06 §7.4; mechanization is **preferred, not required**
+  (J1). Concurrency composition (O1–O5) deferred as a bundle with the atomics
+  surface (OBL-CONSIST). See the status update below.
 - **Hook:** P5 (the fault-window bound); **NN#20** (named-novel, mandatory
   pre-stability formalization); philosophy §8 critical path; NN#1/NN#5.
 - **Gate:** blocks any optimizing implementation's soundness claim and any
@@ -182,7 +189,10 @@ Of these, **OBL-WINDOW, OBL-ALIAS, and OBL-CONSIST are the philosophy-named
 pre-stability tier** (P18, NN#20): no "1.0" precedes their discharge (chapter 00
 §3.4). OBL-ALIAS is **discharged** for the no-concurrency edition (2026-07-21; chapter 05
 §6 NORMATIVE-DRAFT; the review's one repair condition is met, below), its atomics
-composition deferred with OBL-CONSIST.
+composition deferred with OBL-CONSIST. OBL-WINDOW is likewise **discharged** for
+the single-threaded edition (2026-07-21; chapter 06 §7 single-threaded window
+NORMATIVE-DRAFT; ruling J1), its concurrency composition (O1–O5) deferred with
+OBL-CONSIST; mechanization preferred-not-required (J1).
 
 ## OBL-SLICE-REGION (found by transcription, 2026-07-08)
 
@@ -248,6 +258,27 @@ Prefix-determinism, NN#1/NN#5 preservation, and the collapse-to-precise limit un
 effect-order-total reordering license. Open: concurrency composition (stated as conjecture with
 obligations O1-O5), mechanization, compiler correctness, and the fault-torn multi-store
 transaction residual (deferred to the volatile-access design).
+
+## OBL-WINDOW status update (2026-07-21)
+
+Chapter 06 §7's single-threaded fault window is promoted from SKELETON to
+NORMATIVE-DRAFT, discharging OBL-WINDOW for the concurrency-free edition (ruling
+J1, `docs/1.0-GATE-TRIAGE.md`). The draft's discharged core — Containment
+(Theorem 1), Prefix-determinism (Theorem 2, program-order-first fault identity),
+NN#1/NN#5 preservation, and collapse-to-precise — is stated normatively in
+chapter 06 §7.4; `docs/spec/drafts/fault-window-formalization.md` is retained as
+the **proof artifact** the chapter cites. Per J1, **mechanization is preferred,
+not required** for this edition. The §7.2 window bound is now a normative
+property, not a draft claim.
+
+Open (deferred as a bundle with the atomics edition): the **concurrency
+composition** — the synchronization half of the §7.2 bound — and its obligations
+O1–O5 (draft §12), all CONJECTURE and blocked on the atomics surface (chapter 09
+§4, OBL-CONSIST); mechanization (preferred); compiler-correctness (out of scope
+by construction, draft §13.2); and the fault-torn multi-store transaction
+residual (deferred to the volatile-access design). Chapter 06 §7.5 records the
+scope; chapter 09 §4.3 gates any concurrency feature on the composition's
+discharge.
 
 ## OBL-MINMAX-INTRINSICS (found by editor-support work, 2026-07-08)
 

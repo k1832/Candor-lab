@@ -6,6 +6,17 @@ of OBL-WINDOW (chapter 99). Mechanization is preferred by P18 and is out of scop
 for this draft (§13). This document is the *arbiter's argument*, written to be
 attacked: every load-bearing step is stated so a reviewer can contest it.
 
+**Promotion note (2026-07-21).** The discharged single-threaded core here —
+Containment (Theorem 1, §7), Prefix-determinism (Theorem 2, §8), NN#1/NN#5
+preservation (§9), and collapse-to-precise (§10) — was **promoted into the
+normative specification, chapter 06 §7.4**, on 2026-07-21 per ruling J1
+(`docs/1.0-GATE-TRIAGE.md`): the single-threaded core discharges NN#20 for the
+concurrency-free edition, mechanization **preferred, not required**. This document
+is retained as the **proof artifact** chapter 06 §7 cites; O1–O5 (§12) and the
+concurrency composition (§13.1) remain **CONJECTURE** for the atomics edition. The
+§14 verdict below predates J1: the gate it records as "closed" is, per J1, the
+**concurrency-composition** gate — the single-threaded gate is discharged.
+
 **Hooks:** P5 (the invariant and its bound); NN#20 (named-novel, mandatory
 pre-stability formalization); NN#1 (no UB in safe code); NN#5 (no uninitialized
 reads); Bet 3 (imprecision restores scheduling, collapses where effects are
