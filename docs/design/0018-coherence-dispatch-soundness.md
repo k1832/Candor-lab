@@ -842,3 +842,20 @@ projection normalization (§4.3) are specified normatively in
 (chapter 13, §§1–5), with cross-reference clauses added to chapters 10 §7.5 and 12
 §1.5 and the chapter registered in `docs/spec/00-front.md`. Commitment 2 (the gate-(d)
 campaign) remains the open implementation queue item.
+
+**Commitment 2 status (2026-07-21): LANDED AND GREEN.** The gate-(d) campaign
+(`compiler/tests/dispatch_gate.rs`, 11 tests + `multi_iface_dispatch.rs`, 5) runs in
+the default suite (CI-gated since the lab workflow landed): per-call `resolve` checked
+equal to the executed `dispatch`, author-declared expected outputs, the §2.2 regression
+shape verified live to fail the gate if reintroduced, and the §5.3 mechanical
+design-kill probe (two legal impls both selectable) confirmed unconstructible.
+
+**Commitment 3 — VERDICT RECORDED (deciding authority, 2026-07-21): PASS.** The
+campaign is green on the full corpus with **no mechanical and no judgment design-kill**
+(§5.3): every trait method call dispatches the checker-resolved impl byte-identically
+on every engine, every coherence violation rejects, every projection normalizes or
+cleanly rejects, and the design-kill shape is unconstructible under the resolution
+rule. The 0018 residual-risk 1.0 precondition is therefore **discharged for this
+corpus** — provisional and corpus-scoped per §6.4, standing (the campaign stays a
+gating CI criterion; a future red run reopens the precondition, not this ledger
+entry alone).
