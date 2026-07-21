@@ -1,0 +1,61 @@
+# CI for the published Candor 0.x preview (installed by dist/seed.sh as
+# .github/workflows/ci.yml — edit it in the lab, never here).
+#
+# This is deliberately the USER-JOURNEY check, not the lab's deep gate: the
+# preview ships no tests/ (the five-engine differential suites, the self-host
+# oracle, and the fixtures live in the lab), so this repo verifies exactly what
+# a visitor does — build the toolchain, run the examples, run the stdlib — plus
+# a weekly scheduled run to catch bit-rot against newer stable Rust toolchains.
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1" # weekly: catch toolchain bit-rot
+jobs:
+  user-journey:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: toolchain
+      - name: Build the toolchain
+        run: cargo build --release
+        working-directory: toolchain
+      - name: Run the examples
+        working-directory: toolchain
+        run: |
+          set -eu
+          C=./target/release/candor
+          [ "$($C run ../examples/01_hello.cnr | tail -1)" = "42" ]
+          [ "$($C run ../examples/08_ordering.cnr | tail -1)" = "18" ]
+          [ "$($C run ../examples/11_wasm_interp.cnr | tail -1)" = "42" ]
+          echo "examples OK"
+      - name: Run the stdlib seed
+        working-directory: toolchain
+        run: |
+          [ "$(./target/release/candor run ../stdlib | tail -1)" = "380" ]
+          echo "stdlib OK (380)"
+      - name: HTTP server serves (compiled)
+        working-directory: examples/12_http_server
+        run: |
+          set -eu
+          ../../toolchain/target/release/candor compile main.cnr -o httpd
+          ./httpd & PID=$!
+          sleep 1
+          BODY=$(exec 3<>/dev/tcp/127.0.0.1/8080; printf 'GET /hello.txt HTTP/1.0\r\n\r\n' >&3; cat <&3)
+          echo "$BODY" | grep -q "200 OK"
+          echo "$BODY" | grep -q "Hello, Candor!"
+          # let the server finish its request budget or kill it; either is fine
+          kill "$PID" 2>/dev/null || true
+          echo "http OK"
+      - name: Compile an example to native
+        working-directory: toolchain
+        run: |
+          ./target/release/candor compile ../examples/01_hello.cnr -o /tmp/hello
+          code=0; /tmp/hello || code=$?
+          [ "$code" = "42" ]
+          echo "native OK"

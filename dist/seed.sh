@@ -87,6 +87,11 @@ cp "$LAB_ROOT/VERSIONING.md"    "$TARGET/VERSIONING.md"
 # Dual license (MIT OR Apache-2.0), shipped verbatim from the lab root.
 cp "$LAB_ROOT/LICENSE-MIT"      "$TARGET/LICENSE-MIT"
 cp "$LAB_ROOT/LICENSE-APACHE"   "$TARGET/LICENSE-APACHE"
+# The preview's own CI (the user-journey check: build, examples, stdlib, HTTP).
+# Maintained in the lab as dist/prod-ci.yml; installed here so the published
+# repo verifies itself on push + weekly (toolchain bit-rot).
+mkdir -p "$TARGET/.github/workflows"
+cp "$DIST_DIR/prod-ci.yml"      "$TARGET/.github/workflows/ci.yml"
 cp -R "$DIST_DIR/examples"      "$TARGET/examples"
 
 # --- 6. strip build caches -----------------------------------------------
