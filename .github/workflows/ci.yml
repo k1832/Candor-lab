@@ -52,13 +52,30 @@ jobs:
       # Report-only: NOT a gate yet. The p20 targets await ratification per
       # docs/1.0-GATE-TRIAGE.md gate item 2, so this must never fail the build.
       # The harness (harness=false bench) emits its JSON to stdout.
-      - name: P20 bench (report-only, targets pending ratification)
-        continue-on-error: true
+      # P20 targets RATIFIED 2026-07-21 (docs/1.0-GATE-TRIAGE.md, Rulings). Gated
+      # here: T1 incremental rebuild <= 1000ms; T2 body-edit downstream
+      # re-analysis == 0; clean `candor check` of the largest check-able module
+      # tree (the corelib; the self-host tree is harness-composed, not a
+      # `check <dir>` layout) <= 3000ms as the stand-in for the ratified "50kL
+      # reference <= 3s" until that reference project exists (design 0010 §3
+      # names it; creating it is part of discharging this clause at full scale).
+      # Report-only still: `--release <= 2x C baseline` (needs a C build here).
+      - name: P20 targets (GATE — ratified 2026-07-21)
         run: |
           cargo bench --bench p20 | tee "$RUNNER_TEMP/p20.json"
+          T1=$(python3 -c "import json;print(json.load(open('$RUNNER_TEMP/p20.json'))['T1_incremental_rebuild_ms'])")
+          T2=$(python3 -c "import json;print(json.load(open('$RUNNER_TEMP/p20.json'))['T2_downstream_reanalyzed'])")
+          python3 -c "assert float('$T1') <= 1000, 'P20 T1 exceeded: ${T1}ms > 1000ms'"
+          python3 -c "assert int('$T2') == 0, 'P20 T2 violated: downstream re-analysis = $T2'"
+          S=$(date +%s%N); ./target/debug/candor check tests/fixtures/corelib >/dev/null; E=$(date +%s%N)
+          MS=$(( (E - S) / 1000000 ))
+          [ "$MS" -le 3000 ] || { echo "P20 clean-check exceeded: ${MS}ms > 3000ms (corelib tree)"; exit 1; }
           {
-            echo '### P20 bench — report-only (not a 1.0 gate yet)'
-            echo 'Targets await ratification per docs/1.0-GATE-TRIAGE.md gate item 2.'
+            echo '### P20 targets — GATED (ratified 2026-07-21)'
+            echo "- T1 incremental rebuild: ${T1}ms (<= 1000ms) — PASS"
+            echo "- T2 downstream re-analysis: ${T2} (== 0) — PASS"
+            echo "- clean check, corelib tree: ${MS}ms (<= 3000ms) — PASS (50kL reference pending)"
+            echo '- `--release <= 2x C baseline`: report-only (no C baseline in CI yet)'
             echo '```json'
             cat "$RUNNER_TEMP/p20.json"
             echo '```'
