@@ -1,0 +1,94 @@
+name: CI
+
+# Stability-gate CI for the Candor lab (docs/1.0-GATE-TRIAGE.md gate item 2 and
+# the §4 order of attack). Two parallel jobs:
+#   build-test  — the gate: build, full test suite, clippy, tools build, plus the
+#                 report-only P20 bench.
+#   seed-check  — the standing "the preview can always be cut" invariant: seed the
+#                 distribution, build the seeded toolchain, run the stdlib seed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    name: Build, test, clippy, tools
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: compiler
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: taiki-e/install-action@nextest
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compiler -> target
+
+      - name: Build candor
+        run: cargo build --bin candor
+
+      # Full suite: self-host, native AOT (cc), LLVM (clang), wasm differential
+      # (wasmi crate). ~3 min; the default nextest profile is what CI runs.
+      - name: Test suite (nextest)
+        run: cargo nextest run
+
+      # The tree is clean under -D warnings (verified locally), so warnings gate.
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # tools/candor-lsp path-deps on the compiler crate (../../compiler).
+      - name: Build tools (candor-lsp)
+        working-directory: tools/candor-lsp
+        run: cargo build
+
+      # Report-only: NOT a gate yet. The p20 targets await ratification per
+      # docs/1.0-GATE-TRIAGE.md gate item 2, so this must never fail the build.
+      # The harness (harness=false bench) emits its JSON to stdout.
+      - name: P20 bench (report-only, targets pending ratification)
+        continue-on-error: true
+        run: |
+          cargo bench --bench p20 | tee "$RUNNER_TEMP/p20.json"
+          {
+            echo '### P20 bench — report-only (not a 1.0 gate yet)'
+            echo 'Targets await ratification per docs/1.0-GATE-TRIAGE.md gate item 2.'
+            echo '```json'
+            cat "$RUNNER_TEMP/p20.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  seed-check:
+    name: Distribution seed (preview can always be cut)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Seed before rust-cache so the seeded toolchain's Cargo.lock exists when the
+      # cache key is computed. seed.sh only copies files; it needs no Rust toolchain.
+      - name: Seed the distribution
+        run: dist/seed.sh "$RUNNER_TEMP/candor-0.x"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ runner.temp }}/candor-0.x/toolchain -> target
+
+      - name: Build the seeded toolchain (release)
+        working-directory: ${{ runner.temp }}/candor-0.x/toolchain
+        run: cargo build --release
+
+      # CANDOR_QUIET suppresses the run trace so stdout is the bare return value.
+      - name: Run the stdlib seed (assert 380)
+        working-directory: ${{ runner.temp }}/candor-0.x/toolchain
+        run: |
+          out=$(CANDOR_QUIET=1 ./target/release/candor run ../stdlib)
+          echo "stdlib seed returned: $out"
+          test "$out" = "380"
