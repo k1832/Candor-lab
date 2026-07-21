@@ -24,9 +24,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, llvm-tools-preview
 
       - uses: taiki-e/install-action@nextest
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -43,6 +45,21 @@ jobs:
       # The tree is clean under -D warnings (verified locally), so warnings gate.
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      # Report-only coverage (NEVER gates): line coverage + the least-covered
+      # modules as a standing worklist. Uses the fast nextest profile, so it is a
+      # FLOOR — the slow self-host integration binaries are excluded — and stays
+      # cheap. continue-on-error keeps a coverage hiccup from failing the build.
+      - name: Coverage (report-only)
+        continue-on-error: true
+        run: |
+          cargo llvm-cov nextest --profile fast --summary-only | tee "$RUNNER_TEMP/cov.txt"
+          {
+            echo '### Coverage (report-only, fast profile — a floor)'
+            echo '```'
+            cat "$RUNNER_TEMP/cov.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # tools/candor-lsp path-deps on the compiler crate (../../compiler).
       - name: Build tools (candor-lsp)

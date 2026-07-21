@@ -116,6 +116,43 @@ fn mir_dispatch(src: &str) -> (i64, Vec<i64>, Vec<Key>) {
     (ret, trace, keys)
 }
 
+/// Gate (d)'s core consistency predicate (§4.1), extracted so it is directly
+/// testable: the set of interfaces the checker RESOLVED must equal the set every
+/// engine DISPATCHED. The §2.2 regression keys dispatch on `(target, method)`
+/// instead of the resolved interface, so the two sets drift and this returns
+/// `Err`. The live-regression check that would prove the gate fires cannot run in
+/// CI (it edits the compiler); `gate_d_comparator_rejects_dispatch_resolve_drift`
+/// feeds this predicate the exact mismatch the bug produces and asserts it
+/// rejects, standing in for that check structurally.
+fn dispatch_matches_resolve(
+    resolved: &BTreeSet<String>,
+    dispatched: &BTreeSet<String>,
+) -> Result<(), String> {
+    if resolved == dispatched {
+        Ok(())
+    } else {
+        Err(format!(
+            "resolve != dispatch interfaces: resolved {resolved:?}, dispatched {dispatched:?}"
+        ))
+    }
+}
+
+#[test]
+fn gate_d_comparator_rejects_dispatch_resolve_drift() {
+    // Structural sensitivity check for gate (d): the §2.2 regression makes an engine
+    // dispatch a DIFFERENT interface than the checker resolved (checker picked `A`,
+    // engine ran `B`). That live regression can't run in CI, so we assert the gate's
+    // own comparator REJECTS the exact drift the bug produces...
+    let resolved = BTreeSet::from(["A".to_string()]);
+    let dispatched_bug = BTreeSet::from(["B".to_string()]);
+    assert!(
+        dispatch_matches_resolve(&resolved, &dispatched_bug).is_err(),
+        "comparator must reject a resolve/dispatch interface mismatch"
+    );
+    // ...and ACCEPTS an agreeing pair, so the rejection above is not vacuous.
+    assert!(dispatch_matches_resolve(&resolved, &resolved).is_ok());
+}
+
 /// The full gate (d) assertion for one corpus program.
 ///
 /// `keys` is the author-declared set of `(target, interface, method)` dispatch
@@ -166,7 +203,7 @@ fn gate_d(
     // interfaces every engine DISPATCHED. Under the §2.2 regression these diverge.
     let resolved = resolved_interfaces_real(src).expect("resolve");
     let dispatched_ifaces: BTreeSet<String> = declared.iter().map(|(_, i, _)| i.clone()).collect();
-    assert_eq!(resolved, dispatched_ifaces, "resolve != dispatch interfaces for {tag}");
+    dispatch_matches_resolve(&resolved, &dispatched_ifaces).unwrap_or_else(|e| panic!("{e} for {tag}"));
 }
 
 // Shared §2.2 shape: one type carrying two interfaces with a same-named method.

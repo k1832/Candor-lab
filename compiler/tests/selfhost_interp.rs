@@ -102,151 +102,155 @@ enum Shape {
 }
 use Shape::*;
 
-const CORPUS: &[(&str, Shape)] = &[
-    ("arith.cnr", Ret),
-    ("rem.cnr", Ret),
-    ("ifelse.cnr", Ret),
-    ("while_accum.cnr", Ret),
-    ("loop_break.cnr", Ret),
-    ("factorial.cnr", Ret),
-    ("fib.cnr", Ret),
-    ("shortcircuit.cnr", Ret),
-    ("compare.cnr", Ret),
-    ("bitwise.cnr", Ret),
-    ("unary.cnr", Ret),
-    ("assert_pass.cnr", Ret),
-    ("trace_multi.cnr", Ret),
-    ("width_i8.cnr", Ret),
-    ("u64_value.cnr", Ret),
-    ("overflow_i32.cnr", Fault),
-    ("divzero.cnr", Fault),
-    ("assert_fail.cnr", Fault),
-    ("panic.cnr", Fault),
-    ("width_i8_overflow.cnr", Fault),
-    ("width_u8_overflow.cnr", Fault),
-    ("u64_add_overflow.cnr", Fault),
-    ("u64_sub_underflow.cnr", Fault),
-    ("i64_mul_overflow.cnr", Fault),
-    // ---- S2: structs + arrays over the flat byte-memory model ----
-    ("struct_field.cnr", Ret),
-    ("nested_struct.cnr", Ret),
-    ("field_assign.cnr", Ret),
-    ("struct_param_ret.cnr", Ret),
-    ("struct_mixed_width.cnr", Ret),
-    ("array_index.cnr", Ret),
-    ("array_repeat.cnr", Ret),
-    ("index_assign.cnr", Ret),
-    ("array_of_structs.cnr", Ret),
-    ("struct_with_array.cnr", Ret),
-    ("aggregate_mixed.cnr", Ret),
-    ("array_bounds.cnr", Fault),
-    // ---- S3: MOVE/DROP schedule with trace-on-drop ----
-    ("drop_single.cnr", Ret),
-    ("drop_scope_order.cnr", Ret),
-    ("drop_move_suppress.cnr", Ret),
-    ("drop_partial_move.cnr", Ret),
-    ("drop_move_return.cnr", Ret),
-    ("drop_break.cnr", Ret),
-    ("drop_nested.cnr", Ret),
-    ("drop_param.cnr", Ret),
-    // ---- S4: ENUMS + MATCH ----
-    ("enum_construct_match.cnr", Ret),
-    ("match_wildcard.cnr", Ret),
-    ("enum_multi_variant.cnr", Ret),
-    ("match_bind_multi.cnr", Ret),
-    ("enum_result_shape.cnr", Ret),
-    ("enum_drop_payload.cnr", Ret),
-    // ---- S5a: ALLOCATOR-ABI FOUNDATION (rawptr/fnptr scalars, statics,
-    // fn-name-as-value, indirect calls, structural Alloc, minimal rawptr surface) ----
-    ("static_fnptr_indirect_call.cnr", Ret),
-    ("ptr_roundtrip.cnr", Ret),
-    ("cast_ptr_read.cnr", Ret),
-    ("alloc_abi.cnr", Ret),
-    // ---- S5b: BOX / BoxResult / unbox / Box-deref + alloc-on-drop ----
-    ("box_unbox_scalar.cnr", Ret),
-    ("box_struct.cnr", Ret),
-    ("unbox_path.cnr", Ret),
-    ("boxresult_oom.cnr", Ret),
-    ("box_drop_frees.cnr", Ret),
-    ("nested_box.cnr", Ret),
-    // ---- S6a: PAGED memory model + pointer intrinsics (offsetof / ptr_offset /
-    // ptr_to_addr). Infrastructure for the systems corpus (the corpus is S6b). ----
-    ("high_addr_roundtrip.cnr", Ret),
-    ("offsetof_first_field.cnr", Ret),
-    ("offsetof_nonzero_field.cnr", Ret),
-    ("ptr_offset_stride.cnr", Ret),
-    ("enum_padding_copy.cnr", Ret),
-    ("page_boundary.cnr", Ret),
-    // ---- S6b: the SYSTEMS CORPUS (five real programs), oracle-matched ----
-    ("11_3_mmio.cnr", Ret),
-    ("11_1_allocator.cnr", Ret),
-    ("11_2_scheduler.cnr", Ret),
-    ("11_5_arena.cnr", Ret),
-    ("11_4_parser.cnr", Ret),
-    // ---- USER GENERICS via the monomorphizer pre-pass (mono.cnr) ----
-    ("generics/mono3.cnr", Ret),
-    ("generics/pair.cnr", Ret),
-    ("generics/genenum.cnr", Ret),
-    ("generics/arena.cnr", Ret),
-    ("generics/gdrop.cnr", Ret),
-    ("generics/gdrop_groundfloor.cnr", Ret),
-    ("generics/mixed.cnr", Ret),
-    ("generics/nameval.cnr", Ret),
-    // ---- TRAIT interfaces + impls + static method dispatch (T2) ----
-    ("generics/iface.cnr", Ret),
-    ("generics/gimpl.cnr", Ret),
-    ("generics/gbound.cnr", Ret),
-    // ---- `?` operator + `From`-based error widening (T4) ----
-    ("generics/fromq.cnr", Ret),
-    ("generics/gfromq.cnr", Ret),
-    // ---- std COLLECTIONS: compiler-known String / Vec[T] / Map[V] ----
-    ("string_build.cnr", Ret),
-    ("vec_push_get_sum.cnr", Ret),
-    ("vec_pop_opt.cnr", Ret),
-    ("vec_struct_drop.cnr", Ret),
-    ("map_insert_contains_get.cnr", Ret),
-    ("vec_get_oob_fault.cnr", Fault),
-    // F-LAYOUT-DRIFT: a Vec field inside a struct; offsetof of the following scalar
-    // field proves the interp/lower ty_size agree on the Vec field's 40-byte size.
-    ("struct_with_vec.cnr", Ret),
-];
-
 fn read_fixture(rel: &str) -> String {
     let path = format!("{}/tests/fixtures/selfhost_interp/{}", env!("CARGO_MANIFEST_DIR"), rel);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 
-#[test]
-fn candor_interp_execution_equal_to_oracle_over_corpus() {
-    on_big_stack(|| {
-        let mut passed = 0usize;
-        let mut faults = 0usize;
-        let mut rets = 0usize;
-        for &(rel, shape) in CORPUS {
-            let src = read_fixture(rel);
-            let oracle = oracle_dump(&src);
-            let mine = candor_dump(&src);
-            assert_eq!(mine, oracle, "execution mismatch on {rel}");
-            match shape {
-                Ret => {
-                    assert!(oracle.starts_with("RET "), "expected a RET result on {rel}, got {oracle:?}");
-                    rets += 1;
-                }
-                Fault => {
-                    assert!(oracle.starts_with("FAULT "), "expected a FAULT result on {rel}, got {oracle:?}");
-                    faults += 1;
-                }
-            }
-            passed += 1;
+/// Execute one corpus program through the self-hosted Candor interpreter and
+/// assert its dump is byte-exact to the Rust reference oracle for the same
+/// source, and that the result has the declared shape (a real `RET` or `FAULT`,
+/// keeping the redundant human-auditable check that both engines actually ran).
+/// Each corpus program is its own `#[test]` (see `corpus!`) so nextest runs them
+/// as parallel processes; the wall clock is the slowest single program, not the
+/// serial sum over the whole corpus.
+fn check_program(rel: &'static str, shape: Shape) {
+    on_big_stack(move || {
+        let src = read_fixture(rel);
+        let oracle = oracle_dump(&src);
+        let mine = candor_dump(&src);
+        assert_eq!(mine, oracle, "execution mismatch on {rel}");
+        match shape {
+            Ret => assert!(
+                oracle.starts_with("RET "),
+                "expected a RET result on {rel}, got {oracle:?}"
+            ),
+            Fault => assert!(
+                oracle.starts_with("FAULT "),
+                "expected a FAULT result on {rel}, got {oracle:?}"
+            ),
         }
-        assert_eq!(passed, CORPUS.len());
-        assert!(rets > 0 && faults > 0, "corpus must exercise both returns and faults");
-        eprintln!(
-            "selfhost interp: EXECUTION PARITY on {}/{} fixtures ({} returns, {} faults) byte-equal to the Rust oracle",
-            passed,
-            CORPUS.len(),
-            rets,
-            faults
-        );
     });
+}
+
+/// One `#[test]` per corpus program, so nextest parallelizes the corpus across
+/// processes instead of running it as a single serial loop.
+macro_rules! corpus {
+    ($($name:ident : $rel:literal => $shape:ident),* $(,)?) => {
+        $(
+            #[test]
+            fn $name() {
+                check_program($rel, $shape);
+            }
+        )*
+    };
+}
+
+corpus! {
+    arith: "arith.cnr" => Ret,
+    rem: "rem.cnr" => Ret,
+    ifelse: "ifelse.cnr" => Ret,
+    while_accum: "while_accum.cnr" => Ret,
+    loop_break: "loop_break.cnr" => Ret,
+    factorial: "factorial.cnr" => Ret,
+    fib: "fib.cnr" => Ret,
+    shortcircuit: "shortcircuit.cnr" => Ret,
+    compare: "compare.cnr" => Ret,
+    bitwise: "bitwise.cnr" => Ret,
+    unary: "unary.cnr" => Ret,
+    assert_pass: "assert_pass.cnr" => Ret,
+    trace_multi: "trace_multi.cnr" => Ret,
+    width_i8: "width_i8.cnr" => Ret,
+    u64_value: "u64_value.cnr" => Ret,
+    overflow_i32: "overflow_i32.cnr" => Fault,
+    divzero: "divzero.cnr" => Fault,
+    assert_fail: "assert_fail.cnr" => Fault,
+    panic: "panic.cnr" => Fault,
+    width_i8_overflow: "width_i8_overflow.cnr" => Fault,
+    width_u8_overflow: "width_u8_overflow.cnr" => Fault,
+    u64_add_overflow: "u64_add_overflow.cnr" => Fault,
+    u64_sub_underflow: "u64_sub_underflow.cnr" => Fault,
+    i64_mul_overflow: "i64_mul_overflow.cnr" => Fault,
+    // ---- S2: structs + arrays over the flat byte-memory model ----
+    struct_field: "struct_field.cnr" => Ret,
+    nested_struct: "nested_struct.cnr" => Ret,
+    field_assign: "field_assign.cnr" => Ret,
+    struct_param_ret: "struct_param_ret.cnr" => Ret,
+    struct_mixed_width: "struct_mixed_width.cnr" => Ret,
+    array_index: "array_index.cnr" => Ret,
+    array_repeat: "array_repeat.cnr" => Ret,
+    index_assign: "index_assign.cnr" => Ret,
+    array_of_structs: "array_of_structs.cnr" => Ret,
+    struct_with_array: "struct_with_array.cnr" => Ret,
+    aggregate_mixed: "aggregate_mixed.cnr" => Ret,
+    array_bounds: "array_bounds.cnr" => Fault,
+    // ---- S3: MOVE/DROP schedule with trace-on-drop ----
+    drop_single: "drop_single.cnr" => Ret,
+    drop_scope_order: "drop_scope_order.cnr" => Ret,
+    drop_move_suppress: "drop_move_suppress.cnr" => Ret,
+    drop_partial_move: "drop_partial_move.cnr" => Ret,
+    drop_move_return: "drop_move_return.cnr" => Ret,
+    drop_break: "drop_break.cnr" => Ret,
+    drop_nested: "drop_nested.cnr" => Ret,
+    drop_param: "drop_param.cnr" => Ret,
+    // ---- S4: ENUMS + MATCH ----
+    enum_construct_match: "enum_construct_match.cnr" => Ret,
+    match_wildcard: "match_wildcard.cnr" => Ret,
+    enum_multi_variant: "enum_multi_variant.cnr" => Ret,
+    match_bind_multi: "match_bind_multi.cnr" => Ret,
+    enum_result_shape: "enum_result_shape.cnr" => Ret,
+    enum_drop_payload: "enum_drop_payload.cnr" => Ret,
+    // ---- S5a: ALLOCATOR-ABI FOUNDATION (rawptr/fnptr scalars, statics,
+    // fn-name-as-value, indirect calls, structural Alloc, minimal rawptr surface) ----
+    static_fnptr_indirect_call: "static_fnptr_indirect_call.cnr" => Ret,
+    ptr_roundtrip: "ptr_roundtrip.cnr" => Ret,
+    cast_ptr_read: "cast_ptr_read.cnr" => Ret,
+    alloc_abi: "alloc_abi.cnr" => Ret,
+    // ---- S5b: BOX / BoxResult / unbox / Box-deref + alloc-on-drop ----
+    box_unbox_scalar: "box_unbox_scalar.cnr" => Ret,
+    box_struct: "box_struct.cnr" => Ret,
+    unbox_path: "unbox_path.cnr" => Ret,
+    boxresult_oom: "boxresult_oom.cnr" => Ret,
+    box_drop_frees: "box_drop_frees.cnr" => Ret,
+    nested_box: "nested_box.cnr" => Ret,
+    // ---- S6a: PAGED memory model + pointer intrinsics (offsetof / ptr_offset /
+    // ptr_to_addr). Infrastructure for the systems corpus (the corpus is S6b). ----
+    high_addr_roundtrip: "high_addr_roundtrip.cnr" => Ret,
+    offsetof_first_field: "offsetof_first_field.cnr" => Ret,
+    offsetof_nonzero_field: "offsetof_nonzero_field.cnr" => Ret,
+    ptr_offset_stride: "ptr_offset_stride.cnr" => Ret,
+    enum_padding_copy: "enum_padding_copy.cnr" => Ret,
+    page_boundary: "page_boundary.cnr" => Ret,
+    // ---- S6b: the SYSTEMS CORPUS (five real programs), oracle-matched ----
+    p_11_3_mmio: "11_3_mmio.cnr" => Ret,
+    p_11_1_allocator: "11_1_allocator.cnr" => Ret,
+    p_11_2_scheduler: "11_2_scheduler.cnr" => Ret,
+    p_11_5_arena: "11_5_arena.cnr" => Ret,
+    p_11_4_parser: "11_4_parser.cnr" => Ret,
+    // ---- USER GENERICS via the monomorphizer pre-pass (mono.cnr) ----
+    generics_mono3: "generics/mono3.cnr" => Ret,
+    generics_pair: "generics/pair.cnr" => Ret,
+    generics_genenum: "generics/genenum.cnr" => Ret,
+    generics_arena: "generics/arena.cnr" => Ret,
+    generics_gdrop: "generics/gdrop.cnr" => Ret,
+    generics_gdrop_groundfloor: "generics/gdrop_groundfloor.cnr" => Ret,
+    generics_mixed: "generics/mixed.cnr" => Ret,
+    generics_nameval: "generics/nameval.cnr" => Ret,
+    // ---- TRAIT interfaces + impls + static method dispatch (T2) ----
+    generics_iface: "generics/iface.cnr" => Ret,
+    generics_gimpl: "generics/gimpl.cnr" => Ret,
+    generics_gbound: "generics/gbound.cnr" => Ret,
+    // ---- `?` operator + `From`-based error widening (T4) ----
+    generics_fromq: "generics/fromq.cnr" => Ret,
+    generics_gfromq: "generics/gfromq.cnr" => Ret,
+    // ---- std COLLECTIONS: compiler-known String / Vec[T] / Map[V] ----
+    string_build: "string_build.cnr" => Ret,
+    vec_push_get_sum: "vec_push_get_sum.cnr" => Ret,
+    vec_pop_opt: "vec_pop_opt.cnr" => Ret,
+    vec_struct_drop: "vec_struct_drop.cnr" => Ret,
+    map_insert_contains_get: "map_insert_contains_get.cnr" => Ret,
+    vec_get_oob_fault: "vec_get_oob_fault.cnr" => Fault,
+    // F-LAYOUT-DRIFT: a Vec field inside a struct; offsetof of the following scalar
+    // field proves the interp/lower ty_size agree on the Vec field's 40-byte size.
+    struct_with_vec: "struct_with_vec.cnr" => Ret,
 }

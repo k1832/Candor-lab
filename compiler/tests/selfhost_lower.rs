@@ -128,155 +128,159 @@ enum Shape {
 }
 use Shape::*;
 
-/// The scalar + control-flow + fault subset (the S1-era in-subset fixtures).
-const CORPUS: &[(&str, Shape)] = &[
-    ("arith.cnr", Ret),
-    ("rem.cnr", Ret),
-    ("ifelse.cnr", Ret),
-    ("while_accum.cnr", Ret),
-    ("loop_break.cnr", Ret),
-    ("factorial.cnr", Ret),
-    ("fib.cnr", Ret),
-    ("shortcircuit.cnr", Ret),
-    ("compare.cnr", Ret),
-    ("bitwise.cnr", Ret),
-    ("unary.cnr", Ret),
-    ("assert_pass.cnr", Ret),
-    ("trace_multi.cnr", Ret),
-    ("width_i8.cnr", Ret),
-    ("u64_value.cnr", Ret),
-    ("overflow_i32.cnr", Fault),
-    ("divzero.cnr", Fault),
-    ("assert_fail.cnr", Fault),
-    ("panic.cnr", Fault),
-    ("width_i8_overflow.cnr", Fault),
-    ("width_u8_overflow.cnr", Fault),
-    ("u64_add_overflow.cnr", Fault),
-    ("u64_sub_underflow.cnr", Fault),
-    ("i64_mul_overflow.cnr", Fault),
-    // S2 aggregates: structs + arrays (field offsets, strides, copyval, bounds).
-    ("struct_field.cnr", Ret),
-    ("nested_struct.cnr", Ret),
-    ("field_assign.cnr", Ret),
-    ("struct_param_ret.cnr", Ret),
-    ("struct_mixed_width.cnr", Ret),
-    ("array_index.cnr", Ret),
-    ("array_repeat.cnr", Ret),
-    ("index_assign.cnr", Ret),
-    ("array_of_structs.cnr", Ret),
-    ("struct_with_array.cnr", Ret),
-    ("aggregate_mixed.cnr", Ret),
-    ("array_bounds.cnr", Fault),
-    // S3 MOVE/DROP schedule: Drop ops + move masks + drop-hooks-as-MIR-fns. The
-    // trace-on-drop order is the load-bearing signal (reverse/LIFO, hook-then-fields,
-    // move-suppression, partial-move-remainder).
-    ("drop_single.cnr", Ret),
-    ("drop_scope_order.cnr", Ret),
-    ("drop_move_suppress.cnr", Ret),
-    ("drop_partial_move.cnr", Ret),
-    ("drop_move_return.cnr", Ret),
-    ("drop_break.cnr", Ret),
-    ("drop_nested.cnr", Ret),
-    ("drop_param.cnr", Ret),
-    // S4 ENUMS + MATCH: enum layout (tag@0/payload@8), the T_ENUMCTOR store, the
-    // match tag-switch branch chain, payload binds, and the consuming-match /
-    // tag-directed enum-drop L3 interaction (enum_drop_payload's TRACE order is
-    // the load-bearing signal).
-    ("enum_construct_match.cnr", Ret),
-    ("match_wildcard.cnr", Ret),
-    ("enum_multi_variant.cnr", Ret),
-    ("match_bind_multi.cnr", Ret),
-    ("enum_result_shape.cnr", Ret),
-    ("enum_drop_payload.cnr", Ret),
-    // S5/S6 box/alloc/rawptr/statics/CallIndirect + pointer intrinsics (L5).
-    ("offsetof_first_field.cnr", Ret),
-    ("offsetof_nonzero_field.cnr", Ret),
-    ("ptr_roundtrip.cnr", Ret),
-    ("cast_ptr_read.cnr", Ret),
-    ("ptr_offset_stride.cnr", Ret),
-    ("high_addr_roundtrip.cnr", Ret),
-    ("page_boundary.cnr", Ret),
-    ("enum_padding_copy.cnr", Ret),
-    ("static_fnptr_indirect_call.cnr", Ret),
-    ("alloc_abi.cnr", Ret),
-    ("box_unbox_scalar.cnr", Ret),
-    ("box_struct.cnr", Ret),
-    ("unbox_path.cnr", Ret),
-    ("boxresult_oom.cnr", Ret),
-    ("box_drop_frees.cnr", Ret),
-    ("nested_box.cnr", Ret),
-    // L6 MILESTONE: the SYSTEMS CORPUS (five real programs), lowered to MIR by the
-    // self-hosted lowering and executed byte-exact against the tree-walker oracle.
-    ("11_3_mmio.cnr", Ret),
-    ("11_1_allocator.cnr", Ret),
-    ("11_2_scheduler.cnr", Ret),
-    ("11_5_arena.cnr", Ret),
-    ("11_4_parser.cnr", Ret),
-    // ---- USER GENERICS via the monomorphizer pre-pass (mono.cnr), lowered to
-    // MIR by the self-hosted lowering. Mirrors the interp G1 corpus.
-    ("generics/mono3.cnr", Ret),
-    ("generics/mixed.cnr", Ret),
-    ("generics/nameval.cnr", Ret),
-    ("generics/pair.cnr", Ret),
-    ("generics/genenum.cnr", Ret),
-    ("generics/arena.cnr", Ret),
-    ("generics/gdrop_groundfloor.cnr", Ret),
-    ("generics/gdrop.cnr", Ret),
-    // T3: interface/impl method dispatch lowered to direct MIR Calls.
-    ("generics/iface.cnr", Ret),
-    ("generics/gimpl.cnr", Ret),
-    ("generics/gbound.cnr", Ret),
-    // T5: the `?` operator + `From` widening lowered to a MIR ok/err CFG.
-    ("generics/fromq.cnr", Ret),
-    ("generics/gfromq.cnr", Ret),
-    // L-std: std collections Vec/Map/String lowered to MIR CollectionOp. Mirrors
-    // the interp S7 corpus; closes the generic/std self-hosting tail.
-    ("string_build.cnr", Ret),
-    ("vec_push_get_sum.cnr", Ret),
-    ("vec_pop_opt.cnr", Ret),
-    ("vec_struct_drop.cnr", Ret),
-    ("map_insert_contains_get.cnr", Ret),
-    ("vec_get_oob_fault.cnr", Fault),
-    // F-LAYOUT-DRIFT regression: a Vec field inside a struct forces struct_size to
-    // size the Vec (40, not 0), so the following scalar field's offset matches the
-    // oracle. Before the ty_size fix this diverged.
-    ("struct_with_vec.cnr", Ret),
-];
-
 fn read_fixture(rel: &str) -> String {
     let path = format!("{}/tests/fixtures/selfhost_interp/{}", env!("CARGO_MANIFEST_DIR"), rel);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 
-#[test]
-fn candor_lowering_execution_equal_to_oracle_over_scalar_subset() {
-    on_big_stack(|| {
-        let mut rets = 0usize;
-        let mut faults = 0usize;
-        for &(rel, shape) in CORPUS {
-            let src = read_fixture(rel);
-            let oracle = oracle_dump(&src);
-            let mine = candor_dump(&src);
-            assert_eq!(mine, oracle, "L1 lowering execution mismatch on {rel}");
-            match shape {
-                Ret => {
-                    assert!(oracle.starts_with("RET "), "expected RET on {rel}, got {oracle:?}");
-                    rets += 1;
-                }
-                Fault => {
-                    assert!(oracle.starts_with("FAULT "), "expected FAULT on {rel}, got {oracle:?}");
-                    faults += 1;
-                }
-            }
+/// Lower one corpus program with the self-hosted lowering, deserialize its wire
+/// to a real `MirProgram`, run the precise MIR interpreter, and assert the dump
+/// is byte-exact to the tree-walking oracle for the same source -- plus that the
+/// result has the declared shape (a real `RET` or `FAULT`). Each corpus program
+/// is its own `#[test]` (see `corpus!`) so nextest runs them as parallel
+/// processes; the wall clock is the slowest single program, not the serial sum.
+fn check_program(rel: &'static str, shape: Shape) {
+    on_big_stack(move || {
+        let src = read_fixture(rel);
+        let oracle = oracle_dump(&src);
+        let mine = candor_dump(&src);
+        assert_eq!(mine, oracle, "L1 lowering execution mismatch on {rel}");
+        match shape {
+            Ret => assert!(
+                oracle.starts_with("RET "),
+                "expected RET on {rel}, got {oracle:?}"
+            ),
+            Fault => assert!(
+                oracle.starts_with("FAULT "),
+                "expected FAULT on {rel}, got {oracle:?}"
+            ),
         }
-        assert!(rets > 0 && faults > 0, "corpus must exercise both returns and faults");
-        eprintln!(
-            "selfhost lower (L1-L5): {}/{} fixtures lower -> deserialize -> interp byte-exact vs oracle ({} returns, {} faults)",
-            CORPUS.len(),
-            CORPUS.len(),
-            rets,
-            faults
-        );
     });
 }
 
+/// One `#[test]` per corpus program, so nextest parallelizes the corpus across
+/// processes instead of running it as a single serial loop.
+macro_rules! corpus {
+    ($($name:ident : $rel:literal => $shape:ident),* $(,)?) => {
+        $(
+            #[test]
+            fn $name() {
+                check_program($rel, $shape);
+            }
+        )*
+    };
+}
+
+corpus! {
+    arith: "arith.cnr" => Ret,
+    rem: "rem.cnr" => Ret,
+    ifelse: "ifelse.cnr" => Ret,
+    while_accum: "while_accum.cnr" => Ret,
+    loop_break: "loop_break.cnr" => Ret,
+    factorial: "factorial.cnr" => Ret,
+    fib: "fib.cnr" => Ret,
+    shortcircuit: "shortcircuit.cnr" => Ret,
+    compare: "compare.cnr" => Ret,
+    bitwise: "bitwise.cnr" => Ret,
+    unary: "unary.cnr" => Ret,
+    assert_pass: "assert_pass.cnr" => Ret,
+    trace_multi: "trace_multi.cnr" => Ret,
+    width_i8: "width_i8.cnr" => Ret,
+    u64_value: "u64_value.cnr" => Ret,
+    overflow_i32: "overflow_i32.cnr" => Fault,
+    divzero: "divzero.cnr" => Fault,
+    assert_fail: "assert_fail.cnr" => Fault,
+    panic: "panic.cnr" => Fault,
+    width_i8_overflow: "width_i8_overflow.cnr" => Fault,
+    width_u8_overflow: "width_u8_overflow.cnr" => Fault,
+    u64_add_overflow: "u64_add_overflow.cnr" => Fault,
+    u64_sub_underflow: "u64_sub_underflow.cnr" => Fault,
+    i64_mul_overflow: "i64_mul_overflow.cnr" => Fault,
+    // S2 aggregates: structs + arrays (field offsets, strides, copyval, bounds).
+    struct_field: "struct_field.cnr" => Ret,
+    nested_struct: "nested_struct.cnr" => Ret,
+    field_assign: "field_assign.cnr" => Ret,
+    struct_param_ret: "struct_param_ret.cnr" => Ret,
+    struct_mixed_width: "struct_mixed_width.cnr" => Ret,
+    array_index: "array_index.cnr" => Ret,
+    array_repeat: "array_repeat.cnr" => Ret,
+    index_assign: "index_assign.cnr" => Ret,
+    array_of_structs: "array_of_structs.cnr" => Ret,
+    struct_with_array: "struct_with_array.cnr" => Ret,
+    aggregate_mixed: "aggregate_mixed.cnr" => Ret,
+    array_bounds: "array_bounds.cnr" => Fault,
+    // S3 MOVE/DROP schedule: Drop ops + move masks + drop-hooks-as-MIR-fns. The
+    // trace-on-drop order is the load-bearing signal (reverse/LIFO, hook-then-fields,
+    // move-suppression, partial-move-remainder).
+    drop_single: "drop_single.cnr" => Ret,
+    drop_scope_order: "drop_scope_order.cnr" => Ret,
+    drop_move_suppress: "drop_move_suppress.cnr" => Ret,
+    drop_partial_move: "drop_partial_move.cnr" => Ret,
+    drop_move_return: "drop_move_return.cnr" => Ret,
+    drop_break: "drop_break.cnr" => Ret,
+    drop_nested: "drop_nested.cnr" => Ret,
+    drop_param: "drop_param.cnr" => Ret,
+    // S4 ENUMS + MATCH: enum layout (tag@0/payload@8), the T_ENUMCTOR store, the
+    // match tag-switch branch chain, payload binds, and the consuming-match /
+    // tag-directed enum-drop L3 interaction (enum_drop_payload's TRACE order is
+    // the load-bearing signal).
+    enum_construct_match: "enum_construct_match.cnr" => Ret,
+    match_wildcard: "match_wildcard.cnr" => Ret,
+    enum_multi_variant: "enum_multi_variant.cnr" => Ret,
+    match_bind_multi: "match_bind_multi.cnr" => Ret,
+    enum_result_shape: "enum_result_shape.cnr" => Ret,
+    enum_drop_payload: "enum_drop_payload.cnr" => Ret,
+    // S5/S6 box/alloc/rawptr/statics/CallIndirect + pointer intrinsics (L5).
+    offsetof_first_field: "offsetof_first_field.cnr" => Ret,
+    offsetof_nonzero_field: "offsetof_nonzero_field.cnr" => Ret,
+    ptr_roundtrip: "ptr_roundtrip.cnr" => Ret,
+    cast_ptr_read: "cast_ptr_read.cnr" => Ret,
+    ptr_offset_stride: "ptr_offset_stride.cnr" => Ret,
+    high_addr_roundtrip: "high_addr_roundtrip.cnr" => Ret,
+    page_boundary: "page_boundary.cnr" => Ret,
+    enum_padding_copy: "enum_padding_copy.cnr" => Ret,
+    static_fnptr_indirect_call: "static_fnptr_indirect_call.cnr" => Ret,
+    alloc_abi: "alloc_abi.cnr" => Ret,
+    box_unbox_scalar: "box_unbox_scalar.cnr" => Ret,
+    box_struct: "box_struct.cnr" => Ret,
+    unbox_path: "unbox_path.cnr" => Ret,
+    boxresult_oom: "boxresult_oom.cnr" => Ret,
+    box_drop_frees: "box_drop_frees.cnr" => Ret,
+    nested_box: "nested_box.cnr" => Ret,
+    // L6 MILESTONE: the SYSTEMS CORPUS (five real programs), lowered to MIR by the
+    // self-hosted lowering and executed byte-exact against the tree-walker oracle.
+    p_11_3_mmio: "11_3_mmio.cnr" => Ret,
+    p_11_1_allocator: "11_1_allocator.cnr" => Ret,
+    p_11_2_scheduler: "11_2_scheduler.cnr" => Ret,
+    p_11_5_arena: "11_5_arena.cnr" => Ret,
+    p_11_4_parser: "11_4_parser.cnr" => Ret,
+    // ---- USER GENERICS via the monomorphizer pre-pass (mono.cnr), lowered to
+    // MIR by the self-hosted lowering. Mirrors the interp G1 corpus.
+    generics_mono3: "generics/mono3.cnr" => Ret,
+    generics_mixed: "generics/mixed.cnr" => Ret,
+    generics_nameval: "generics/nameval.cnr" => Ret,
+    generics_pair: "generics/pair.cnr" => Ret,
+    generics_genenum: "generics/genenum.cnr" => Ret,
+    generics_arena: "generics/arena.cnr" => Ret,
+    generics_gdrop_groundfloor: "generics/gdrop_groundfloor.cnr" => Ret,
+    generics_gdrop: "generics/gdrop.cnr" => Ret,
+    // T3: interface/impl method dispatch lowered to direct MIR Calls.
+    generics_iface: "generics/iface.cnr" => Ret,
+    generics_gimpl: "generics/gimpl.cnr" => Ret,
+    generics_gbound: "generics/gbound.cnr" => Ret,
+    // T5: the `?` operator + `From` widening lowered to a MIR ok/err CFG.
+    generics_fromq: "generics/fromq.cnr" => Ret,
+    generics_gfromq: "generics/gfromq.cnr" => Ret,
+    // L-std: std collections Vec/Map/String lowered to MIR CollectionOp. Mirrors
+    // the interp S7 corpus; closes the generic/std self-hosting tail.
+    string_build: "string_build.cnr" => Ret,
+    vec_push_get_sum: "vec_push_get_sum.cnr" => Ret,
+    vec_pop_opt: "vec_pop_opt.cnr" => Ret,
+    vec_struct_drop: "vec_struct_drop.cnr" => Ret,
+    map_insert_contains_get: "map_insert_contains_get.cnr" => Ret,
+    vec_get_oob_fault: "vec_get_oob_fault.cnr" => Fault,
+    // F-LAYOUT-DRIFT regression: a Vec field inside a struct forces struct_size to
+    // size the Vec (40, not 0), so the following scalar field's offset matches the
+    // oracle. Before the ty_size fix this diverged.
+    struct_with_vec: "struct_with_vec.cnr" => Ret,
+}
