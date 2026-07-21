@@ -1,0 +1,39 @@
+// The P20 reference project entry. Drives a spread of the module DAG's
+// canonical functions and returns a sentinel.
+use l0::m000::{f000};
+use l1::m009::{f009};
+use l2::m026::{f026};
+use l2::m043::{f043};
+use l3::m060::{f060};
+use l3::m077::{f077};
+use l4::m094::{f094};
+use l4::m111::{f111};
+use l5::m128::{f128};
+use l6::m145::{f145};
+use l6::m162::{f162};
+use l7::m179::{f179};
+use l9::m196::{f196};
+use l9::m197::{f197};
+use l9::m198::{f198};
+use l9::m199::{f199};
+
+fn main() -> i64 {
+    let mut acc: i64 = 0i64;
+    acc = acc + f000(1i64);
+    acc = acc + f009(2i64);
+    acc = acc + f026(3i64);
+    acc = acc + f043(4i64);
+    acc = acc + f060(5i64);
+    acc = acc + f077(6i64);
+    acc = acc + f094(7i64);
+    acc = acc + f111(1i64);
+    acc = acc + f128(2i64);
+    acc = acc + f145(3i64);
+    acc = acc + f162(4i64);
+    acc = acc + f179(5i64);
+    acc = acc + f196(6i64);
+    acc = acc + f197(7i64);
+    acc = acc + f198(1i64);
+    acc = acc + f199(2i64);
+    return acc;
+}

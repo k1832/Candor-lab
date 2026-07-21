@@ -1,0 +1,320 @@
+// GENERATED reference module m147 (layer 6). Part of the P20
+// measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
+// via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
+use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
+use l3::m052::{f052};
+use l4::m092::{f092};
+
+pub struct S147_0 {
+    a: i64,
+    n0: i64,
+    flag: bool,
+}
+pub fn mk147_0(a: i64) -> S147_0 {
+    return S147_0 { a: a, n0: 0, flag: true };
+}
+impl Probe for S147_0 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0;
+    }
+}
+pub fn read147_0(s: read S147_0) -> i64 {
+    return s.a * 4i64;
+}
+pub fn bump147_0(s: write S147_0, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E147_0 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify147_0(e: E147_0) -> i64 {
+    match e {
+        E147_0::V0 => {
+            return 0i64;
+        },
+        E147_0::V1(a) => {
+            return a;
+        },
+        E147_0::V2(a, b) => {
+            return a + b;
+        },
+        E147_0::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick147_0[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum147_0(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard147_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 8i64;
+}
+pub struct S147_1 {
+    a: i64,
+    n0: i64,
+    flag: bool,
+}
+pub fn mk147_1(a: i64) -> S147_1 {
+    return S147_1 { a: a, n0: 0, flag: true };
+}
+impl Probe for S147_1 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0;
+    }
+}
+pub fn read147_1(s: read S147_1) -> i64 {
+    return s.a * 3i64;
+}
+pub fn bump147_1(s: write S147_1, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E147_1 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify147_1(e: E147_1) -> i64 {
+    match e {
+        E147_1::V0 => {
+            return 0i64;
+        },
+        E147_1::V1(a) => {
+            return a;
+        },
+        E147_1::V2(a, b) => {
+            return a + b;
+        },
+        E147_1::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick147_1[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum147_1(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard147_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 4i64;
+}
+pub struct S147_2 {
+    a: i64,
+    n0: u32,
+    n1: i64,
+    n2: i64,
+    flag: bool,
+}
+pub fn mk147_2(a: i64) -> S147_2 {
+    return S147_2 { a: a, n0: 0u32, n1: 0, n2: 0, flag: true };
+}
+impl Probe for S147_2 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + self.n1 + self.n2;
+    }
+}
+pub fn read147_2(s: read S147_2) -> i64 {
+    return s.a * 5i64;
+}
+pub fn bump147_2(s: write S147_2, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E147_2 {
+    V0,
+    V1(i64),
+}
+pub fn classify147_2(e: E147_2) -> i64 {
+    match e {
+        E147_2::V0 => {
+            return 0i64;
+        },
+        E147_2::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick147_2[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum147_2(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 3i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard147_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 6i64;
+}
+pub struct S147_3 {
+    a: i64,
+    n0: i64,
+    flag: bool,
+}
+pub fn mk147_3(a: i64) -> S147_3 {
+    return S147_3 { a: a, n0: 0, flag: true };
+}
+impl Probe for S147_3 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0;
+    }
+}
+pub fn read147_3(s: read S147_3) -> i64 {
+    return s.a * 7i64;
+}
+pub fn bump147_3(s: write S147_3, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E147_3 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify147_3(e: E147_3) -> i64 {
+    match e {
+        E147_3::V0 => {
+            return 0i64;
+        },
+        E147_3::V1(a) => {
+            return a;
+        },
+        E147_3::V2(a, b) => {
+            return a + b;
+        },
+        E147_3::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick147_3[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum147_3(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard147_3(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 9i64;
+}
+pub struct S147_4 {
+    a: i64,
+    n0: i64,
+    n1: i64,
+    flag: bool,
+}
+pub fn mk147_4(a: i64) -> S147_4 {
+    return S147_4 { a: a, n0: 0, n1: 0, flag: true };
+}
+impl Probe for S147_4 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0 + self.n1;
+    }
+}
+pub fn read147_4(s: read S147_4) -> i64 {
+    return s.a * 5i64;
+}
+pub fn bump147_4(s: write S147_4, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E147_4 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify147_4(e: E147_4) -> i64 {
+    match e {
+        E147_4::V0 => {
+            return 0i64;
+        },
+        E147_4::V1(a) => {
+            return a;
+        },
+        E147_4::V2(a, b) => {
+            return a + b;
+        },
+        E147_4::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick147_4[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum147_4(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard147_4(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 2i64;
+}
+pub fn f147(x: i64) -> i64 {
+    let mut acc: i64 = x;
+    acc = acc + f052(x + 1i64);
+    acc = acc + f092(x + 2i64);
+    let mut s0: S147_0 = mk147_0(acc);
+    bump147_0(write s0, 4i64);
+    acc = acc + s0.probe();
+    acc = acc + read147_0(read s0);
+    acc = acc + classify147_0(E147_0::V1(acc));
+    acc = acc + accum147_0(8i64);
+    let mut s1: S147_1 = mk147_1(acc);
+    bump147_1(write s1, 3i64);
+    acc = acc + s1.probe();
+    acc = acc + read147_1(read s1);
+    acc = acc + classify147_1(E147_1::V1(acc));
+    acc = acc + accum147_1(4i64);
+    let mut s2: S147_2 = mk147_2(acc);
+    bump147_2(write s2, 2i64);
+    acc = acc + s2.probe();
+    acc = acc + read147_2(read s2);
+    acc = acc + classify147_2(E147_2::V1(acc));
+    acc = acc + accum147_2(9i64);
+    let mut s3: S147_3 = mk147_3(acc);
+    bump147_3(write s3, 1i64);
+    acc = acc + s3.probe();
+    acc = acc + read147_3(read s3);
+    acc = acc + classify147_3(E147_3::V1(acc));
+    acc = acc + accum147_3(7i64);
+    let mut s4: S147_4 = mk147_4(acc);
+    bump147_4(write s4, 5i64);
+    acc = acc + s4.probe();
+    acc = acc + read147_4(read s4);
+    acc = acc + classify147_4(E147_4::V1(acc));
+    acc = acc + accum147_4(9i64);
+    acc = maxof(acc, x);
+    acc = minof(acc, x + 1i64);
+    return clampi(acc);
+}

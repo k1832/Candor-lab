@@ -1,0 +1,236 @@
+// GENERATED reference module m172 (layer 7). Part of the P20
+// measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
+// via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
+use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
+use l4::m092::{f092};
+use l5::m141::{f141};
+
+pub struct S172_0 {
+    a: i64,
+    n0: i64,
+    n1: usize,
+    flag: bool,
+}
+pub fn mk172_0(a: i64) -> S172_0 {
+    return S172_0 { a: a, n0: 0, n1: 0usize, flag: true };
+}
+impl Probe for S172_0 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0 + conv i64 self.n1;
+    }
+}
+pub fn read172_0(s: read S172_0) -> i64 {
+    return s.a * 2i64;
+}
+pub fn bump172_0(s: write S172_0, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E172_0 {
+    V0,
+    V1(i64),
+}
+pub fn classify172_0(e: E172_0) -> i64 {
+    match e {
+        E172_0::V0 => {
+            return 0i64;
+        },
+        E172_0::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick172_0[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum172_0(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard172_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 9i64;
+}
+pub struct S172_1 {
+    a: i64,
+    n0: usize,
+    n1: i64,
+    flag: bool,
+}
+pub fn mk172_1(a: i64) -> S172_1 {
+    return S172_1 { a: a, n0: 0usize, n1: 0, flag: true };
+}
+impl Probe for S172_1 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + self.n1;
+    }
+}
+pub fn read172_1(s: read S172_1) -> i64 {
+    return s.a * 2i64;
+}
+pub fn bump172_1(s: write S172_1, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E172_1 {
+    V0,
+    V1(i64),
+}
+pub fn classify172_1(e: E172_1) -> i64 {
+    match e {
+        E172_1::V0 => {
+            return 0i64;
+        },
+        E172_1::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick172_1[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum172_1(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard172_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 9i64;
+}
+pub struct S172_2 {
+    a: i64,
+    n0: u32,
+    n1: i64,
+    n2: u32,
+    flag: bool,
+}
+pub fn mk172_2(a: i64) -> S172_2 {
+    return S172_2 { a: a, n0: 0u32, n1: 0, n2: 0u32, flag: true };
+}
+impl Probe for S172_2 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + self.n1 + conv i64 self.n2;
+    }
+}
+pub fn read172_2(s: read S172_2) -> i64 {
+    return s.a * 5i64;
+}
+pub fn bump172_2(s: write S172_2, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E172_2 {
+    V0,
+    V1(i64),
+}
+pub fn classify172_2(e: E172_2) -> i64 {
+    match e {
+        E172_2::V0 => {
+            return 0i64;
+        },
+        E172_2::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick172_2[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum172_2(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard172_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 1i64;
+}
+pub struct S172_3 {
+    a: i64,
+    n0: i64,
+    n1: u32,
+    flag: bool,
+}
+pub fn mk172_3(a: i64) -> S172_3 {
+    return S172_3 { a: a, n0: 0, n1: 0u32, flag: true };
+}
+impl Probe for S172_3 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0 + conv i64 self.n1;
+    }
+}
+pub fn read172_3(s: read S172_3) -> i64 {
+    return s.a * 2i64;
+}
+pub fn bump172_3(s: write S172_3, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E172_3 {
+    V0,
+    V1(i64),
+}
+pub fn classify172_3(e: E172_3) -> i64 {
+    match e {
+        E172_3::V0 => {
+            return 0i64;
+        },
+        E172_3::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick172_3[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum172_3(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard172_3(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 8i64;
+}
+pub fn f172(x: i64) -> i64 {
+    let mut acc: i64 = x;
+    acc = acc + f092(x + 1i64);
+    acc = acc + f141(x + 2i64);
+    let mut s0: S172_0 = mk172_0(acc);
+    bump172_0(write s0, 5i64);
+    acc = acc + s0.probe();
+    acc = acc + read172_0(read s0);
+    acc = acc + classify172_0(E172_0::V1(acc));
+    acc = acc + accum172_0(4i64);
+    let mut s1: S172_1 = mk172_1(acc);
+    bump172_1(write s1, 2i64);
+    acc = acc + s1.probe();
+    acc = acc + read172_1(read s1);
+    acc = acc + classify172_1(E172_1::V1(acc));
+    acc = acc + accum172_1(5i64);
+    let mut s2: S172_2 = mk172_2(acc);
+    bump172_2(write s2, 1i64);
+    acc = acc + s2.probe();
+    acc = acc + read172_2(read s2);
+    acc = acc + classify172_2(E172_2::V1(acc));
+    acc = acc + accum172_2(8i64);
+    let mut s3: S172_3 = mk172_3(acc);
+    bump172_3(write s3, 9i64);
+    acc = acc + s3.probe();
+    acc = acc + read172_3(read s3);
+    acc = acc + classify172_3(E172_3::V1(acc));
+    acc = acc + accum172_3(5i64);
+    acc = maxof(acc, x);
+    acc = minof(acc, x + 1i64);
+    return clampi(acc);
+}

@@ -1,0 +1,320 @@
+// GENERATED reference module m188 (layer 8). Part of the P20
+// measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
+// via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
+use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
+use l4::m099::{f099};
+use l5::m113::{f113};
+use l5::m128::{f128};
+
+pub struct S188_0 {
+    a: i64,
+    n0: usize,
+    n1: i64,
+    flag: bool,
+}
+pub fn mk188_0(a: i64) -> S188_0 {
+    return S188_0 { a: a, n0: 0usize, n1: 0, flag: true };
+}
+impl Probe for S188_0 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + self.n1;
+    }
+}
+pub fn read188_0(s: read S188_0) -> i64 {
+    return s.a * 4i64;
+}
+pub fn bump188_0(s: write S188_0, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E188_0 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify188_0(e: E188_0) -> i64 {
+    match e {
+        E188_0::V0 => {
+            return 0i64;
+        },
+        E188_0::V1(a) => {
+            return a;
+        },
+        E188_0::V2(a, b) => {
+            return a + b;
+        },
+        E188_0::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick188_0[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum188_0(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard188_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 2i64;
+}
+pub struct S188_1 {
+    a: i64,
+    n0: u32,
+    n1: usize,
+    n2: i64,
+    flag: bool,
+}
+pub fn mk188_1(a: i64) -> S188_1 {
+    return S188_1 { a: a, n0: 0u32, n1: 0usize, n2: 0, flag: true };
+}
+impl Probe for S188_1 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + conv i64 self.n1 + self.n2;
+    }
+}
+pub fn read188_1(s: read S188_1) -> i64 {
+    return s.a * 3i64;
+}
+pub fn bump188_1(s: write S188_1, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E188_1 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify188_1(e: E188_1) -> i64 {
+    match e {
+        E188_1::V0 => {
+            return 0i64;
+        },
+        E188_1::V1(a) => {
+            return a;
+        },
+        E188_1::V2(a, b) => {
+            return a + b;
+        },
+        E188_1::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick188_1[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum188_1(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard188_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 4i64;
+}
+pub struct S188_2 {
+    a: i64,
+    n0: i64,
+    n1: u32,
+    flag: bool,
+}
+pub fn mk188_2(a: i64) -> S188_2 {
+    return S188_2 { a: a, n0: 0, n1: 0u32, flag: true };
+}
+impl Probe for S188_2 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0 + conv i64 self.n1;
+    }
+}
+pub fn read188_2(s: read S188_2) -> i64 {
+    return s.a * 4i64;
+}
+pub fn bump188_2(s: write S188_2, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E188_2 {
+    V0,
+    V1(i64),
+}
+pub fn classify188_2(e: E188_2) -> i64 {
+    match e {
+        E188_2::V0 => {
+            return 0i64;
+        },
+        E188_2::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick188_2[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum188_2(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard188_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 6i64;
+}
+pub struct S188_3 {
+    a: i64,
+    n0: usize,
+    n1: i64,
+    flag: bool,
+}
+pub fn mk188_3(a: i64) -> S188_3 {
+    return S188_3 { a: a, n0: 0usize, n1: 0, flag: true };
+}
+impl Probe for S188_3 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + self.n1;
+    }
+}
+pub fn read188_3(s: read S188_3) -> i64 {
+    return s.a * 4i64;
+}
+pub fn bump188_3(s: write S188_3, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E188_3 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify188_3(e: E188_3) -> i64 {
+    match e {
+        E188_3::V0 => {
+            return 0i64;
+        },
+        E188_3::V1(a) => {
+            return a;
+        },
+        E188_3::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick188_3[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum188_3(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 3i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard188_3(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 1i64;
+}
+pub struct S188_4 {
+    a: i64,
+    n0: u32,
+    flag: bool,
+}
+pub fn mk188_4(a: i64) -> S188_4 {
+    return S188_4 { a: a, n0: 0u32, flag: true };
+}
+impl Probe for S188_4 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0;
+    }
+}
+pub fn read188_4(s: read S188_4) -> i64 {
+    return s.a * 7i64;
+}
+pub fn bump188_4(s: write S188_4, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E188_4 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify188_4(e: E188_4) -> i64 {
+    match e {
+        E188_4::V0 => {
+            return 0i64;
+        },
+        E188_4::V1(a) => {
+            return a;
+        },
+        E188_4::V2(a, b) => {
+            return a + b;
+        },
+        E188_4::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick188_4[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum188_4(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard188_4(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 6i64;
+}
+pub fn f188(x: i64) -> i64 {
+    let mut acc: i64 = x;
+    acc = acc + f099(x + 1i64);
+    acc = acc + f113(x + 2i64);
+    acc = acc + f128(x + 3i64);
+    let mut s0: S188_0 = mk188_0(acc);
+    bump188_0(write s0, 4i64);
+    acc = acc + s0.probe();
+    acc = acc + read188_0(read s0);
+    acc = acc + classify188_0(E188_0::V1(acc));
+    acc = acc + accum188_0(3i64);
+    let mut s1: S188_1 = mk188_1(acc);
+    bump188_1(write s1, 3i64);
+    acc = acc + s1.probe();
+    acc = acc + read188_1(read s1);
+    acc = acc + classify188_1(E188_1::V1(acc));
+    acc = acc + accum188_1(8i64);
+    let mut s2: S188_2 = mk188_2(acc);
+    bump188_2(write s2, 7i64);
+    acc = acc + s2.probe();
+    acc = acc + read188_2(read s2);
+    acc = acc + classify188_2(E188_2::V1(acc));
+    acc = acc + accum188_2(3i64);
+    let mut s3: S188_3 = mk188_3(acc);
+    bump188_3(write s3, 1i64);
+    acc = acc + s3.probe();
+    acc = acc + read188_3(read s3);
+    acc = acc + classify188_3(E188_3::V1(acc));
+    acc = acc + accum188_3(3i64);
+    let mut s4: S188_4 = mk188_4(acc);
+    bump188_4(write s4, 1i64);
+    acc = acc + s4.probe();
+    acc = acc + read188_4(read s4);
+    acc = acc + classify188_4(E188_4::V1(acc));
+    acc = acc + accum188_4(9i64);
+    acc = maxof(acc, x);
+    acc = minof(acc, x + 1i64);
+    return clampi(acc);
+}

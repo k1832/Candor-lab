@@ -1,0 +1,313 @@
+// GENERATED reference module m030 (layer 2). Part of the P20
+// measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
+// via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
+use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
+use l0::m003::{f003};
+
+pub struct S030_0 {
+    a: i64,
+    n0: u32,
+    n1: u32,
+    flag: bool,
+}
+pub fn mk030_0(a: i64) -> S030_0 {
+    return S030_0 { a: a, n0: 0u32, n1: 0u32, flag: true };
+}
+impl Probe for S030_0 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + conv i64 self.n1;
+    }
+}
+pub fn read030_0(s: read S030_0) -> i64 {
+    return s.a * 4i64;
+}
+pub fn bump030_0(s: write S030_0, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E030_0 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify030_0(e: E030_0) -> i64 {
+    match e {
+        E030_0::V0 => {
+            return 0i64;
+        },
+        E030_0::V1(a) => {
+            return a;
+        },
+        E030_0::V2(a, b) => {
+            return a + b;
+        },
+        E030_0::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick030_0[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum030_0(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 3i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard030_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 7i64;
+}
+pub struct S030_1 {
+    a: i64,
+    n0: u32,
+    flag: bool,
+}
+pub fn mk030_1(a: i64) -> S030_1 {
+    return S030_1 { a: a, n0: 0u32, flag: true };
+}
+impl Probe for S030_1 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0;
+    }
+}
+pub fn read030_1(s: read S030_1) -> i64 {
+    return s.a * 2i64;
+}
+pub fn bump030_1(s: write S030_1, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E030_1 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify030_1(e: E030_1) -> i64 {
+    match e {
+        E030_1::V0 => {
+            return 0i64;
+        },
+        E030_1::V1(a) => {
+            return a;
+        },
+        E030_1::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick030_1[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum030_1(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard030_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 2i64;
+}
+pub struct S030_2 {
+    a: i64,
+    n0: u32,
+    n1: u32,
+    n2: usize,
+    flag: bool,
+}
+pub fn mk030_2(a: i64) -> S030_2 {
+    return S030_2 { a: a, n0: 0u32, n1: 0u32, n2: 0usize, flag: true };
+}
+impl Probe for S030_2 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + conv i64 self.n1 + conv i64 self.n2;
+    }
+}
+pub fn read030_2(s: read S030_2) -> i64 {
+    return s.a * 6i64;
+}
+pub fn bump030_2(s: write S030_2, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E030_2 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify030_2(e: E030_2) -> i64 {
+    match e {
+        E030_2::V0 => {
+            return 0i64;
+        },
+        E030_2::V1(a) => {
+            return a;
+        },
+        E030_2::V2(a, b) => {
+            return a + b;
+        },
+        E030_2::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick030_2[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum030_2(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 3i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard030_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 8i64;
+}
+pub struct S030_3 {
+    a: i64,
+    n0: usize,
+    n1: u32,
+    n2: usize,
+    flag: bool,
+}
+pub fn mk030_3(a: i64) -> S030_3 {
+    return S030_3 { a: a, n0: 0usize, n1: 0u32, n2: 0usize, flag: true };
+}
+impl Probe for S030_3 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + conv i64 self.n1 + conv i64 self.n2;
+    }
+}
+pub fn read030_3(s: read S030_3) -> i64 {
+    return s.a * 6i64;
+}
+pub fn bump030_3(s: write S030_3, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E030_3 {
+    V0,
+    V1(i64),
+}
+pub fn classify030_3(e: E030_3) -> i64 {
+    match e {
+        E030_3::V0 => {
+            return 0i64;
+        },
+        E030_3::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick030_3[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum030_3(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard030_3(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 2i64;
+}
+pub struct S030_4 {
+    a: i64,
+    n0: usize,
+    n1: u32,
+    flag: bool,
+}
+pub fn mk030_4(a: i64) -> S030_4 {
+    return S030_4 { a: a, n0: 0usize, n1: 0u32, flag: true };
+}
+impl Probe for S030_4 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + conv i64 self.n1;
+    }
+}
+pub fn read030_4(s: read S030_4) -> i64 {
+    return s.a * 2i64;
+}
+pub fn bump030_4(s: write S030_4, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E030_4 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify030_4(e: E030_4) -> i64 {
+    match e {
+        E030_4::V0 => {
+            return 0i64;
+        },
+        E030_4::V1(a) => {
+            return a;
+        },
+        E030_4::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick030_4[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum030_4(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard030_4(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 1i64;
+}
+pub fn f030(x: i64) -> i64 {
+    let mut acc: i64 = x;
+    acc = acc + f003(x + 1i64);
+    let mut s0: S030_0 = mk030_0(acc);
+    bump030_0(write s0, 9i64);
+    acc = acc + s0.probe();
+    acc = acc + read030_0(read s0);
+    acc = acc + classify030_0(E030_0::V1(acc));
+    acc = acc + accum030_0(3i64);
+    let mut s1: S030_1 = mk030_1(acc);
+    bump030_1(write s1, 5i64);
+    acc = acc + s1.probe();
+    acc = acc + read030_1(read s1);
+    acc = acc + classify030_1(E030_1::V1(acc));
+    acc = acc + accum030_1(7i64);
+    let mut s2: S030_2 = mk030_2(acc);
+    bump030_2(write s2, 1i64);
+    acc = acc + s2.probe();
+    acc = acc + read030_2(read s2);
+    acc = acc + classify030_2(E030_2::V1(acc));
+    acc = acc + accum030_2(4i64);
+    let mut s3: S030_3 = mk030_3(acc);
+    bump030_3(write s3, 6i64);
+    acc = acc + s3.probe();
+    acc = acc + read030_3(read s3);
+    acc = acc + classify030_3(E030_3::V1(acc));
+    acc = acc + accum030_3(3i64);
+    let mut s4: S030_4 = mk030_4(acc);
+    bump030_4(write s4, 7i64);
+    acc = acc + s4.probe();
+    acc = acc + read030_4(read s4);
+    acc = acc + classify030_4(E030_4::V1(acc));
+    acc = acc + accum030_4(3i64);
+    acc = maxof(acc, x);
+    acc = minof(acc, x + 1i64);
+    return clampi(acc);
+}

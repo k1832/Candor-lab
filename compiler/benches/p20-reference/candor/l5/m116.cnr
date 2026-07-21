@@ -1,0 +1,250 @@
+// GENERATED reference module m116 (layer 5). Part of the P20
+// measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
+// via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
+use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
+use l0::m006::{f006};
+use l2::m028::{f028};
+use l2::m039::{f039};
+use l4::m103::{f103};
+
+pub struct S116_0 {
+    a: i64,
+    n0: i64,
+    flag: bool,
+}
+pub fn mk116_0(a: i64) -> S116_0 {
+    return S116_0 { a: a, n0: 0, flag: true };
+}
+impl Probe for S116_0 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0;
+    }
+}
+pub fn read116_0(s: read S116_0) -> i64 {
+    return s.a * 4i64;
+}
+pub fn bump116_0(s: write S116_0, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E116_0 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify116_0(e: E116_0) -> i64 {
+    match e {
+        E116_0::V0 => {
+            return 0i64;
+        },
+        E116_0::V1(a) => {
+            return a;
+        },
+        E116_0::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick116_0[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum116_0(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard116_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 1i64;
+}
+pub struct S116_1 {
+    a: i64,
+    n0: u32,
+    n1: i64,
+    flag: bool,
+}
+pub fn mk116_1(a: i64) -> S116_1 {
+    return S116_1 { a: a, n0: 0u32, n1: 0, flag: true };
+}
+impl Probe for S116_1 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + self.n1;
+    }
+}
+pub fn read116_1(s: read S116_1) -> i64 {
+    return s.a * 4i64;
+}
+pub fn bump116_1(s: write S116_1, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E116_1 {
+    V0,
+    V1(i64),
+}
+pub fn classify116_1(e: E116_1) -> i64 {
+    match e {
+        E116_1::V0 => {
+            return 0i64;
+        },
+        E116_1::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick116_1[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum116_1(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 3i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard116_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 8i64;
+}
+pub struct S116_2 {
+    a: i64,
+    n0: u32,
+    n1: u32,
+    n2: usize,
+    flag: bool,
+}
+pub fn mk116_2(a: i64) -> S116_2 {
+    return S116_2 { a: a, n0: 0u32, n1: 0u32, n2: 0usize, flag: true };
+}
+impl Probe for S116_2 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + conv i64 self.n1 + conv i64 self.n2;
+    }
+}
+pub fn read116_2(s: read S116_2) -> i64 {
+    return s.a * 5i64;
+}
+pub fn bump116_2(s: write S116_2, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E116_2 {
+    V0,
+    V1(i64),
+}
+pub fn classify116_2(e: E116_2) -> i64 {
+    match e {
+        E116_2::V0 => {
+            return 0i64;
+        },
+        E116_2::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick116_2[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum116_2(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 3i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard116_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 4i64;
+}
+pub struct S116_3 {
+    a: i64,
+    n0: u32,
+    flag: bool,
+}
+pub fn mk116_3(a: i64) -> S116_3 {
+    return S116_3 { a: a, n0: 0u32, flag: true };
+}
+impl Probe for S116_3 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0;
+    }
+}
+pub fn read116_3(s: read S116_3) -> i64 {
+    return s.a * 5i64;
+}
+pub fn bump116_3(s: write S116_3, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E116_3 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify116_3(e: E116_3) -> i64 {
+    match e {
+        E116_3::V0 => {
+            return 0i64;
+        },
+        E116_3::V1(a) => {
+            return a;
+        },
+        E116_3::V2(a, b) => {
+            return a + b;
+        },
+        E116_3::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick116_3[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum116_3(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard116_3(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 9i64;
+}
+pub fn f116(x: i64) -> i64 {
+    let mut acc: i64 = x;
+    acc = acc + f006(x + 1i64);
+    acc = acc + f028(x + 2i64);
+    acc = acc + f039(x + 3i64);
+    acc = acc + f103(x + 4i64);
+    let mut s0: S116_0 = mk116_0(acc);
+    bump116_0(write s0, 2i64);
+    acc = acc + s0.probe();
+    acc = acc + read116_0(read s0);
+    acc = acc + classify116_0(E116_0::V1(acc));
+    acc = acc + accum116_0(8i64);
+    let mut s1: S116_1 = mk116_1(acc);
+    bump116_1(write s1, 5i64);
+    acc = acc + s1.probe();
+    acc = acc + read116_1(read s1);
+    acc = acc + classify116_1(E116_1::V1(acc));
+    acc = acc + accum116_1(6i64);
+    let mut s2: S116_2 = mk116_2(acc);
+    bump116_2(write s2, 4i64);
+    acc = acc + s2.probe();
+    acc = acc + read116_2(read s2);
+    acc = acc + classify116_2(E116_2::V1(acc));
+    acc = acc + accum116_2(3i64);
+    let mut s3: S116_3 = mk116_3(acc);
+    bump116_3(write s3, 6i64);
+    acc = acc + s3.probe();
+    acc = acc + read116_3(read s3);
+    acc = acc + classify116_3(E116_3::V1(acc));
+    acc = acc + accum116_3(4i64);
+    acc = maxof(acc, x);
+    acc = minof(acc, x + 1i64);
+    return clampi(acc);
+}

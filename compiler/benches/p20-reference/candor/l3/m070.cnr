@@ -1,0 +1,238 @@
+// GENERATED reference module m070 (layer 3). Part of the P20
+// measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
+// via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
+use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
+use l2::m041::{f041};
+
+pub struct S070_0 {
+    a: i64,
+    n0: i64,
+    flag: bool,
+}
+pub fn mk070_0(a: i64) -> S070_0 {
+    return S070_0 { a: a, n0: 0, flag: true };
+}
+impl Probe for S070_0 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0;
+    }
+}
+pub fn read070_0(s: read S070_0) -> i64 {
+    return s.a * 5i64;
+}
+pub fn bump070_0(s: write S070_0, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E070_0 {
+    V0,
+    V1(i64),
+}
+pub fn classify070_0(e: E070_0) -> i64 {
+    match e {
+        E070_0::V0 => {
+            return 0i64;
+        },
+        E070_0::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick070_0[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum070_0(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard070_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 2i64;
+}
+pub struct S070_1 {
+    a: i64,
+    n0: i64,
+    flag: bool,
+}
+pub fn mk070_1(a: i64) -> S070_1 {
+    return S070_1 { a: a, n0: 0, flag: true };
+}
+impl Probe for S070_1 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0;
+    }
+}
+pub fn read070_1(s: read S070_1) -> i64 {
+    return s.a * 6i64;
+}
+pub fn bump070_1(s: write S070_1, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E070_1 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify070_1(e: E070_1) -> i64 {
+    match e {
+        E070_1::V0 => {
+            return 0i64;
+        },
+        E070_1::V1(a) => {
+            return a;
+        },
+        E070_1::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick070_1[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum070_1(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 3i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard070_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 6i64;
+}
+pub struct S070_2 {
+    a: i64,
+    n0: i64,
+    n1: usize,
+    flag: bool,
+}
+pub fn mk070_2(a: i64) -> S070_2 {
+    return S070_2 { a: a, n0: 0, n1: 0usize, flag: true };
+}
+impl Probe for S070_2 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0 + conv i64 self.n1;
+    }
+}
+pub fn read070_2(s: read S070_2) -> i64 {
+    return s.a * 7i64;
+}
+pub fn bump070_2(s: write S070_2, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E070_2 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify070_2(e: E070_2) -> i64 {
+    match e {
+        E070_2::V0 => {
+            return 0i64;
+        },
+        E070_2::V1(a) => {
+            return a;
+        },
+        E070_2::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick070_2[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum070_2(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard070_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 8i64;
+}
+pub struct S070_3 {
+    a: i64,
+    n0: usize,
+    flag: bool,
+}
+pub fn mk070_3(a: i64) -> S070_3 {
+    return S070_3 { a: a, n0: 0usize, flag: true };
+}
+impl Probe for S070_3 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0;
+    }
+}
+pub fn read070_3(s: read S070_3) -> i64 {
+    return s.a * 4i64;
+}
+pub fn bump070_3(s: write S070_3, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E070_3 {
+    V0,
+    V1(i64),
+}
+pub fn classify070_3(e: E070_3) -> i64 {
+    match e {
+        E070_3::V0 => {
+            return 0i64;
+        },
+        E070_3::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick070_3[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum070_3(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard070_3(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 9i64;
+}
+pub fn f070(x: i64) -> i64 {
+    let mut acc: i64 = x;
+    acc = acc + f041(x + 1i64);
+    let mut s0: S070_0 = mk070_0(acc);
+    bump070_0(write s0, 9i64);
+    acc = acc + s0.probe();
+    acc = acc + read070_0(read s0);
+    acc = acc + classify070_0(E070_0::V1(acc));
+    acc = acc + accum070_0(3i64);
+    let mut s1: S070_1 = mk070_1(acc);
+    bump070_1(write s1, 2i64);
+    acc = acc + s1.probe();
+    acc = acc + read070_1(read s1);
+    acc = acc + classify070_1(E070_1::V1(acc));
+    acc = acc + accum070_1(5i64);
+    let mut s2: S070_2 = mk070_2(acc);
+    bump070_2(write s2, 3i64);
+    acc = acc + s2.probe();
+    acc = acc + read070_2(read s2);
+    acc = acc + classify070_2(E070_2::V1(acc));
+    acc = acc + accum070_2(4i64);
+    let mut s3: S070_3 = mk070_3(acc);
+    bump070_3(write s3, 4i64);
+    acc = acc + s3.probe();
+    acc = acc + read070_3(read s3);
+    acc = acc + classify070_3(E070_3::V1(acc));
+    acc = acc + accum070_3(9i64);
+    acc = maxof(acc, x);
+    acc = minof(acc, x + 1i64);
+    return clampi(acc);
+}

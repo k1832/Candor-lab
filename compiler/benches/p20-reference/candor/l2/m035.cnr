@@ -1,0 +1,256 @@
+// GENERATED reference module m035 (layer 2). Part of the P20
+// measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
+// via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
+use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
+use l0::m002::{f002};
+use l1::m008::{f008};
+use l1::m014::{f014};
+
+pub struct S035_0 {
+    a: i64,
+    n0: i64,
+    n1: usize,
+    flag: bool,
+}
+pub fn mk035_0(a: i64) -> S035_0 {
+    return S035_0 { a: a, n0: 0, n1: 0usize, flag: true };
+}
+impl Probe for S035_0 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0 + conv i64 self.n1;
+    }
+}
+pub fn read035_0(s: read S035_0) -> i64 {
+    return s.a * 4i64;
+}
+pub fn bump035_0(s: write S035_0, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E035_0 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify035_0(e: E035_0) -> i64 {
+    match e {
+        E035_0::V0 => {
+            return 0i64;
+        },
+        E035_0::V1(a) => {
+            return a;
+        },
+        E035_0::V2(a, b) => {
+            return a + b;
+        },
+        E035_0::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick035_0[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum035_0(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard035_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 1i64;
+}
+pub struct S035_1 {
+    a: i64,
+    n0: i64,
+    flag: bool,
+}
+pub fn mk035_1(a: i64) -> S035_1 {
+    return S035_1 { a: a, n0: 0, flag: true };
+}
+impl Probe for S035_1 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0;
+    }
+}
+pub fn read035_1(s: read S035_1) -> i64 {
+    return s.a * 7i64;
+}
+pub fn bump035_1(s: write S035_1, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E035_1 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify035_1(e: E035_1) -> i64 {
+    match e {
+        E035_1::V0 => {
+            return 0i64;
+        },
+        E035_1::V1(a) => {
+            return a;
+        },
+        E035_1::V2(a, b) => {
+            return a + b;
+        },
+        E035_1::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick035_1[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum035_1(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard035_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 7i64;
+}
+pub struct S035_2 {
+    a: i64,
+    n0: i64,
+    n1: u32,
+    n2: usize,
+    flag: bool,
+}
+pub fn mk035_2(a: i64) -> S035_2 {
+    return S035_2 { a: a, n0: 0, n1: 0u32, n2: 0usize, flag: true };
+}
+impl Probe for S035_2 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0 + conv i64 self.n1 + conv i64 self.n2;
+    }
+}
+pub fn read035_2(s: read S035_2) -> i64 {
+    return s.a * 3i64;
+}
+pub fn bump035_2(s: write S035_2, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E035_2 {
+    V0,
+    V1(i64),
+}
+pub fn classify035_2(e: E035_2) -> i64 {
+    match e {
+        E035_2::V0 => {
+            return 0i64;
+        },
+        E035_2::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick035_2[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum035_2(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard035_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 7i64;
+}
+pub struct S035_3 {
+    a: i64,
+    n0: i64,
+    flag: bool,
+}
+pub fn mk035_3(a: i64) -> S035_3 {
+    return S035_3 { a: a, n0: 0, flag: true };
+}
+impl Probe for S035_3 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0;
+    }
+}
+pub fn read035_3(s: read S035_3) -> i64 {
+    return s.a * 7i64;
+}
+pub fn bump035_3(s: write S035_3, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E035_3 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify035_3(e: E035_3) -> i64 {
+    match e {
+        E035_3::V0 => {
+            return 0i64;
+        },
+        E035_3::V1(a) => {
+            return a;
+        },
+        E035_3::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick035_3[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum035_3(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard035_3(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 6i64;
+}
+pub fn f035(x: i64) -> i64 {
+    let mut acc: i64 = x;
+    acc = acc + f002(x + 1i64);
+    acc = acc + f008(x + 2i64);
+    acc = acc + f014(x + 3i64);
+    let mut s0: S035_0 = mk035_0(acc);
+    bump035_0(write s0, 1i64);
+    acc = acc + s0.probe();
+    acc = acc + read035_0(read s0);
+    acc = acc + classify035_0(E035_0::V1(acc));
+    acc = acc + accum035_0(9i64);
+    let mut s1: S035_1 = mk035_1(acc);
+    bump035_1(write s1, 2i64);
+    acc = acc + s1.probe();
+    acc = acc + read035_1(read s1);
+    acc = acc + classify035_1(E035_1::V1(acc));
+    acc = acc + accum035_1(6i64);
+    let mut s2: S035_2 = mk035_2(acc);
+    bump035_2(write s2, 4i64);
+    acc = acc + s2.probe();
+    acc = acc + read035_2(read s2);
+    acc = acc + classify035_2(E035_2::V1(acc));
+    acc = acc + accum035_2(6i64);
+    let mut s3: S035_3 = mk035_3(acc);
+    bump035_3(write s3, 3i64);
+    acc = acc + s3.probe();
+    acc = acc + read035_3(read s3);
+    acc = acc + classify035_3(E035_3::V1(acc));
+    acc = acc + accum035_3(6i64);
+    acc = maxof(acc, x);
+    acc = minof(acc, x + 1i64);
+    return clampi(acc);
+}

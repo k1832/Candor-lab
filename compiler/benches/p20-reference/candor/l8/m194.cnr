@@ -1,0 +1,299 @@
+// GENERATED reference module m194 (layer 8). Part of the P20
+// measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
+// via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
+use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
+use l5::m119::{f119};
+use l6::m164::{f164};
+use l7::m168::{f168};
+use l7::m170::{f170};
+
+pub struct S194_0 {
+    a: i64,
+    n0: i64,
+    n1: u32,
+    flag: bool,
+}
+pub fn mk194_0(a: i64) -> S194_0 {
+    return S194_0 { a: a, n0: 0, n1: 0u32, flag: true };
+}
+impl Probe for S194_0 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0 + conv i64 self.n1;
+    }
+}
+pub fn read194_0(s: read S194_0) -> i64 {
+    return s.a * 6i64;
+}
+pub fn bump194_0(s: write S194_0, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E194_0 {
+    V0,
+    V1(i64),
+}
+pub fn classify194_0(e: E194_0) -> i64 {
+    match e {
+        E194_0::V0 => {
+            return 0i64;
+        },
+        E194_0::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick194_0[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum194_0(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard194_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 8i64;
+}
+pub struct S194_1 {
+    a: i64,
+    n0: i64,
+    flag: bool,
+}
+pub fn mk194_1(a: i64) -> S194_1 {
+    return S194_1 { a: a, n0: 0, flag: true };
+}
+impl Probe for S194_1 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0;
+    }
+}
+pub fn read194_1(s: read S194_1) -> i64 {
+    return s.a * 5i64;
+}
+pub fn bump194_1(s: write S194_1, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E194_1 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify194_1(e: E194_1) -> i64 {
+    match e {
+        E194_1::V0 => {
+            return 0i64;
+        },
+        E194_1::V1(a) => {
+            return a;
+        },
+        E194_1::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick194_1[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum194_1(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard194_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 6i64;
+}
+pub struct S194_2 {
+    a: i64,
+    n0: i64,
+    flag: bool,
+}
+pub fn mk194_2(a: i64) -> S194_2 {
+    return S194_2 { a: a, n0: 0, flag: true };
+}
+impl Probe for S194_2 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0;
+    }
+}
+pub fn read194_2(s: read S194_2) -> i64 {
+    return s.a * 6i64;
+}
+pub fn bump194_2(s: write S194_2, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E194_2 {
+    V0,
+    V1(i64),
+}
+pub fn classify194_2(e: E194_2) -> i64 {
+    match e {
+        E194_2::V0 => {
+            return 0i64;
+        },
+        E194_2::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick194_2[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum194_2(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard194_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 6i64;
+}
+pub struct S194_3 {
+    a: i64,
+    n0: i64,
+    flag: bool,
+}
+pub fn mk194_3(a: i64) -> S194_3 {
+    return S194_3 { a: a, n0: 0, flag: true };
+}
+impl Probe for S194_3 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0;
+    }
+}
+pub fn read194_3(s: read S194_3) -> i64 {
+    return s.a * 2i64;
+}
+pub fn bump194_3(s: write S194_3, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E194_3 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify194_3(e: E194_3) -> i64 {
+    match e {
+        E194_3::V0 => {
+            return 0i64;
+        },
+        E194_3::V1(a) => {
+            return a;
+        },
+        E194_3::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick194_3[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum194_3(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard194_3(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 3i64;
+}
+pub struct S194_4 {
+    a: i64,
+    n0: u32,
+    n1: u32,
+    flag: bool,
+}
+pub fn mk194_4(a: i64) -> S194_4 {
+    return S194_4 { a: a, n0: 0u32, n1: 0u32, flag: true };
+}
+impl Probe for S194_4 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + conv i64 self.n1;
+    }
+}
+pub fn read194_4(s: read S194_4) -> i64 {
+    return s.a * 4i64;
+}
+pub fn bump194_4(s: write S194_4, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E194_4 {
+    V0,
+    V1(i64),
+}
+pub fn classify194_4(e: E194_4) -> i64 {
+    match e {
+        E194_4::V0 => {
+            return 0i64;
+        },
+        E194_4::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick194_4[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum194_4(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard194_4(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 8i64;
+}
+pub fn f194(x: i64) -> i64 {
+    let mut acc: i64 = x;
+    acc = acc + f119(x + 1i64);
+    acc = acc + f164(x + 2i64);
+    acc = acc + f168(x + 3i64);
+    acc = acc + f170(x + 4i64);
+    let mut s0: S194_0 = mk194_0(acc);
+    bump194_0(write s0, 5i64);
+    acc = acc + s0.probe();
+    acc = acc + read194_0(read s0);
+    acc = acc + classify194_0(E194_0::V1(acc));
+    acc = acc + accum194_0(4i64);
+    let mut s1: S194_1 = mk194_1(acc);
+    bump194_1(write s1, 5i64);
+    acc = acc + s1.probe();
+    acc = acc + read194_1(read s1);
+    acc = acc + classify194_1(E194_1::V1(acc));
+    acc = acc + accum194_1(9i64);
+    let mut s2: S194_2 = mk194_2(acc);
+    bump194_2(write s2, 7i64);
+    acc = acc + s2.probe();
+    acc = acc + read194_2(read s2);
+    acc = acc + classify194_2(E194_2::V1(acc));
+    acc = acc + accum194_2(3i64);
+    let mut s3: S194_3 = mk194_3(acc);
+    bump194_3(write s3, 6i64);
+    acc = acc + s3.probe();
+    acc = acc + read194_3(read s3);
+    acc = acc + classify194_3(E194_3::V1(acc));
+    acc = acc + accum194_3(3i64);
+    let mut s4: S194_4 = mk194_4(acc);
+    bump194_4(write s4, 6i64);
+    acc = acc + s4.probe();
+    acc = acc + read194_4(read s4);
+    acc = acc + classify194_4(E194_4::V1(acc));
+    acc = acc + accum194_4(8i64);
+    acc = maxof(acc, x);
+    acc = minof(acc, x + 1i64);
+    return clampi(acc);
+}

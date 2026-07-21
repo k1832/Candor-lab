@@ -1,0 +1,300 @@
+// GENERATED reference module m149 (layer 6). Part of the P20
+// measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
+// via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
+use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
+use l2::m024::{f024};
+use l2::m042::{f042};
+
+pub struct S149_0 {
+    a: i64,
+    n0: usize,
+    n1: usize,
+    n2: usize,
+    flag: bool,
+}
+pub fn mk149_0(a: i64) -> S149_0 {
+    return S149_0 { a: a, n0: 0usize, n1: 0usize, n2: 0usize, flag: true };
+}
+impl Probe for S149_0 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + conv i64 self.n1 + conv i64 self.n2;
+    }
+}
+pub fn read149_0(s: read S149_0) -> i64 {
+    return s.a * 6i64;
+}
+pub fn bump149_0(s: write S149_0, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E149_0 {
+    V0,
+    V1(i64),
+}
+pub fn classify149_0(e: E149_0) -> i64 {
+    match e {
+        E149_0::V0 => {
+            return 0i64;
+        },
+        E149_0::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick149_0[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum149_0(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 3i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard149_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 8i64;
+}
+pub struct S149_1 {
+    a: i64,
+    n0: u32,
+    n1: i64,
+    flag: bool,
+}
+pub fn mk149_1(a: i64) -> S149_1 {
+    return S149_1 { a: a, n0: 0u32, n1: 0, flag: true };
+}
+impl Probe for S149_1 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + self.n1;
+    }
+}
+pub fn read149_1(s: read S149_1) -> i64 {
+    return s.a * 3i64;
+}
+pub fn bump149_1(s: write S149_1, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E149_1 {
+    V0,
+    V1(i64),
+}
+pub fn classify149_1(e: E149_1) -> i64 {
+    match e {
+        E149_1::V0 => {
+            return 0i64;
+        },
+        E149_1::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick149_1[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum149_1(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard149_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 7i64;
+}
+pub struct S149_2 {
+    a: i64,
+    n0: i64,
+    n1: u32,
+    flag: bool,
+}
+pub fn mk149_2(a: i64) -> S149_2 {
+    return S149_2 { a: a, n0: 0, n1: 0u32, flag: true };
+}
+impl Probe for S149_2 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0 + conv i64 self.n1;
+    }
+}
+pub fn read149_2(s: read S149_2) -> i64 {
+    return s.a * 5i64;
+}
+pub fn bump149_2(s: write S149_2, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E149_2 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify149_2(e: E149_2) -> i64 {
+    match e {
+        E149_2::V0 => {
+            return 0i64;
+        },
+        E149_2::V1(a) => {
+            return a;
+        },
+        E149_2::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick149_2[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum149_2(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard149_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 8i64;
+}
+pub struct S149_3 {
+    a: i64,
+    n0: i64,
+    n1: i64,
+    n2: i64,
+    flag: bool,
+}
+pub fn mk149_3(a: i64) -> S149_3 {
+    return S149_3 { a: a, n0: 0, n1: 0, n2: 0, flag: true };
+}
+impl Probe for S149_3 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0 + self.n1 + self.n2;
+    }
+}
+pub fn read149_3(s: read S149_3) -> i64 {
+    return s.a * 7i64;
+}
+pub fn bump149_3(s: write S149_3, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E149_3 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify149_3(e: E149_3) -> i64 {
+    match e {
+        E149_3::V0 => {
+            return 0i64;
+        },
+        E149_3::V1(a) => {
+            return a;
+        },
+        E149_3::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick149_3[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum149_3(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard149_3(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 6i64;
+}
+pub struct S149_4 {
+    a: i64,
+    n0: u32,
+    n1: u32,
+    flag: bool,
+}
+pub fn mk149_4(a: i64) -> S149_4 {
+    return S149_4 { a: a, n0: 0u32, n1: 0u32, flag: true };
+}
+impl Probe for S149_4 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + conv i64 self.n1;
+    }
+}
+pub fn read149_4(s: read S149_4) -> i64 {
+    return s.a * 5i64;
+}
+pub fn bump149_4(s: write S149_4, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E149_4 {
+    V0,
+    V1(i64),
+}
+pub fn classify149_4(e: E149_4) -> i64 {
+    match e {
+        E149_4::V0 => {
+            return 0i64;
+        },
+        E149_4::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick149_4[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum149_4(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard149_4(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 6i64;
+}
+pub fn f149(x: i64) -> i64 {
+    let mut acc: i64 = x;
+    acc = acc + f024(x + 1i64);
+    acc = acc + f042(x + 2i64);
+    let mut s0: S149_0 = mk149_0(acc);
+    bump149_0(write s0, 2i64);
+    acc = acc + s0.probe();
+    acc = acc + read149_0(read s0);
+    acc = acc + classify149_0(E149_0::V1(acc));
+    acc = acc + accum149_0(6i64);
+    let mut s1: S149_1 = mk149_1(acc);
+    bump149_1(write s1, 1i64);
+    acc = acc + s1.probe();
+    acc = acc + read149_1(read s1);
+    acc = acc + classify149_1(E149_1::V1(acc));
+    acc = acc + accum149_1(9i64);
+    let mut s2: S149_2 = mk149_2(acc);
+    bump149_2(write s2, 8i64);
+    acc = acc + s2.probe();
+    acc = acc + read149_2(read s2);
+    acc = acc + classify149_2(E149_2::V1(acc));
+    acc = acc + accum149_2(3i64);
+    let mut s3: S149_3 = mk149_3(acc);
+    bump149_3(write s3, 5i64);
+    acc = acc + s3.probe();
+    acc = acc + read149_3(read s3);
+    acc = acc + classify149_3(E149_3::V1(acc));
+    acc = acc + accum149_3(3i64);
+    let mut s4: S149_4 = mk149_4(acc);
+    bump149_4(write s4, 9i64);
+    acc = acc + s4.probe();
+    acc = acc + read149_4(read s4);
+    acc = acc + classify149_4(E149_4::V1(acc));
+    acc = acc + accum149_4(8i64);
+    acc = maxof(acc, x);
+    acc = minof(acc, x + 1i64);
+    return clampi(acc);
+}

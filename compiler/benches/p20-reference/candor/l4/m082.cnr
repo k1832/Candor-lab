@@ -1,0 +1,256 @@
+// GENERATED reference module m082 (layer 4). Part of the P20
+// measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
+// via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
+use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
+use l3::m056::{f056};
+
+pub struct S082_0 {
+    a: i64,
+    n0: usize,
+    n1: u32,
+    flag: bool,
+}
+pub fn mk082_0(a: i64) -> S082_0 {
+    return S082_0 { a: a, n0: 0usize, n1: 0u32, flag: true };
+}
+impl Probe for S082_0 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + conv i64 self.n1;
+    }
+}
+pub fn read082_0(s: read S082_0) -> i64 {
+    return s.a * 7i64;
+}
+pub fn bump082_0(s: write S082_0, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E082_0 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify082_0(e: E082_0) -> i64 {
+    match e {
+        E082_0::V0 => {
+            return 0i64;
+        },
+        E082_0::V1(a) => {
+            return a;
+        },
+        E082_0::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick082_0[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum082_0(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard082_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 7i64;
+}
+pub struct S082_1 {
+    a: i64,
+    n0: i64,
+    n1: u32,
+    n2: u32,
+    flag: bool,
+}
+pub fn mk082_1(a: i64) -> S082_1 {
+    return S082_1 { a: a, n0: 0, n1: 0u32, n2: 0u32, flag: true };
+}
+impl Probe for S082_1 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0 + conv i64 self.n1 + conv i64 self.n2;
+    }
+}
+pub fn read082_1(s: read S082_1) -> i64 {
+    return s.a * 4i64;
+}
+pub fn bump082_1(s: write S082_1, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E082_1 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify082_1(e: E082_1) -> i64 {
+    match e {
+        E082_1::V0 => {
+            return 0i64;
+        },
+        E082_1::V1(a) => {
+            return a;
+        },
+        E082_1::V2(a, b) => {
+            return a + b;
+        },
+        E082_1::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick082_1[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum082_1(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard082_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 8i64;
+}
+pub struct S082_2 {
+    a: i64,
+    n0: usize,
+    n1: u32,
+    n2: usize,
+    flag: bool,
+}
+pub fn mk082_2(a: i64) -> S082_2 {
+    return S082_2 { a: a, n0: 0usize, n1: 0u32, n2: 0usize, flag: true };
+}
+impl Probe for S082_2 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + conv i64 self.n1 + conv i64 self.n2;
+    }
+}
+pub fn read082_2(s: read S082_2) -> i64 {
+    return s.a * 6i64;
+}
+pub fn bump082_2(s: write S082_2, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E082_2 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify082_2(e: E082_2) -> i64 {
+    match e {
+        E082_2::V0 => {
+            return 0i64;
+        },
+        E082_2::V1(a) => {
+            return a;
+        },
+        E082_2::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick082_2[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum082_2(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard082_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 8i64;
+}
+pub struct S082_3 {
+    a: i64,
+    n0: u32,
+    n1: i64,
+    n2: i64,
+    flag: bool,
+}
+pub fn mk082_3(a: i64) -> S082_3 {
+    return S082_3 { a: a, n0: 0u32, n1: 0, n2: 0, flag: true };
+}
+impl Probe for S082_3 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + self.n1 + self.n2;
+    }
+}
+pub fn read082_3(s: read S082_3) -> i64 {
+    return s.a * 4i64;
+}
+pub fn bump082_3(s: write S082_3, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E082_3 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify082_3(e: E082_3) -> i64 {
+    match e {
+        E082_3::V0 => {
+            return 0i64;
+        },
+        E082_3::V1(a) => {
+            return a;
+        },
+        E082_3::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick082_3[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum082_3(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 3i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard082_3(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 3i64;
+}
+pub fn f082(x: i64) -> i64 {
+    let mut acc: i64 = x;
+    acc = acc + f056(x + 1i64);
+    let mut s0: S082_0 = mk082_0(acc);
+    bump082_0(write s0, 1i64);
+    acc = acc + s0.probe();
+    acc = acc + read082_0(read s0);
+    acc = acc + classify082_0(E082_0::V1(acc));
+    acc = acc + accum082_0(3i64);
+    let mut s1: S082_1 = mk082_1(acc);
+    bump082_1(write s1, 4i64);
+    acc = acc + s1.probe();
+    acc = acc + read082_1(read s1);
+    acc = acc + classify082_1(E082_1::V1(acc));
+    acc = acc + accum082_1(7i64);
+    let mut s2: S082_2 = mk082_2(acc);
+    bump082_2(write s2, 8i64);
+    acc = acc + s2.probe();
+    acc = acc + read082_2(read s2);
+    acc = acc + classify082_2(E082_2::V1(acc));
+    acc = acc + accum082_2(5i64);
+    let mut s3: S082_3 = mk082_3(acc);
+    bump082_3(write s3, 5i64);
+    acc = acc + s3.probe();
+    acc = acc + read082_3(read s3);
+    acc = acc + classify082_3(E082_3::V1(acc));
+    acc = acc + accum082_3(7i64);
+    acc = maxof(acc, x);
+    acc = minof(acc, x + 1i64);
+    return clampi(acc);
+}

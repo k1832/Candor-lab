@@ -1,0 +1,198 @@
+// GENERATED reference module m187 (layer 8). Part of the P20
+// measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
+// via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
+use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
+use l3::m072::{f072};
+use l4::m106::{f106};
+use l6::m146::{f146};
+
+pub struct S187_0 {
+    a: i64,
+    n0: i64,
+    n1: u32,
+    n2: u32,
+    flag: bool,
+}
+pub fn mk187_0(a: i64) -> S187_0 {
+    return S187_0 { a: a, n0: 0, n1: 0u32, n2: 0u32, flag: true };
+}
+impl Probe for S187_0 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0 + conv i64 self.n1 + conv i64 self.n2;
+    }
+}
+pub fn read187_0(s: read S187_0) -> i64 {
+    return s.a * 2i64;
+}
+pub fn bump187_0(s: write S187_0, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E187_0 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify187_0(e: E187_0) -> i64 {
+    match e {
+        E187_0::V0 => {
+            return 0i64;
+        },
+        E187_0::V1(a) => {
+            return a;
+        },
+        E187_0::V2(a, b) => {
+            return a + b;
+        },
+        E187_0::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick187_0[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum187_0(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard187_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 2i64;
+}
+pub struct S187_1 {
+    a: i64,
+    n0: usize,
+    flag: bool,
+}
+pub fn mk187_1(a: i64) -> S187_1 {
+    return S187_1 { a: a, n0: 0usize, flag: true };
+}
+impl Probe for S187_1 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0;
+    }
+}
+pub fn read187_1(s: read S187_1) -> i64 {
+    return s.a * 7i64;
+}
+pub fn bump187_1(s: write S187_1, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E187_1 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify187_1(e: E187_1) -> i64 {
+    match e {
+        E187_1::V0 => {
+            return 0i64;
+        },
+        E187_1::V1(a) => {
+            return a;
+        },
+        E187_1::V2(a, b) => {
+            return a + b;
+        },
+        E187_1::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick187_1[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum187_1(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard187_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 3i64;
+}
+pub struct S187_2 {
+    a: i64,
+    n0: u32,
+    n1: i64,
+    flag: bool,
+}
+pub fn mk187_2(a: i64) -> S187_2 {
+    return S187_2 { a: a, n0: 0u32, n1: 0, flag: true };
+}
+impl Probe for S187_2 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + self.n1;
+    }
+}
+pub fn read187_2(s: read S187_2) -> i64 {
+    return s.a * 3i64;
+}
+pub fn bump187_2(s: write S187_2, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E187_2 {
+    V0,
+    V1(i64),
+}
+pub fn classify187_2(e: E187_2) -> i64 {
+    match e {
+        E187_2::V0 => {
+            return 0i64;
+        },
+        E187_2::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick187_2[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum187_2(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard187_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 5i64;
+}
+pub fn f187(x: i64) -> i64 {
+    let mut acc: i64 = x;
+    acc = acc + f072(x + 1i64);
+    acc = acc + f106(x + 2i64);
+    acc = acc + f146(x + 3i64);
+    let mut s0: S187_0 = mk187_0(acc);
+    bump187_0(write s0, 4i64);
+    acc = acc + s0.probe();
+    acc = acc + read187_0(read s0);
+    acc = acc + classify187_0(E187_0::V1(acc));
+    acc = acc + accum187_0(5i64);
+    let mut s1: S187_1 = mk187_1(acc);
+    bump187_1(write s1, 4i64);
+    acc = acc + s1.probe();
+    acc = acc + read187_1(read s1);
+    acc = acc + classify187_1(E187_1::V1(acc));
+    acc = acc + accum187_1(5i64);
+    let mut s2: S187_2 = mk187_2(acc);
+    bump187_2(write s2, 1i64);
+    acc = acc + s2.probe();
+    acc = acc + read187_2(read s2);
+    acc = acc + classify187_2(E187_2::V1(acc));
+    acc = acc + accum187_2(4i64);
+    acc = maxof(acc, x);
+    acc = minof(acc, x + 1i64);
+    return clampi(acc);
+}

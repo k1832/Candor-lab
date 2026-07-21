@@ -1,0 +1,307 @@
+// GENERATED reference module m053 (layer 3). Part of the P20
+// measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
+// via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
+use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
+use l2::m039::{f039};
+use l2::m044::{f044};
+
+pub struct S053_0 {
+    a: i64,
+    n0: usize,
+    flag: bool,
+}
+pub fn mk053_0(a: i64) -> S053_0 {
+    return S053_0 { a: a, n0: 0usize, flag: true };
+}
+impl Probe for S053_0 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0;
+    }
+}
+pub fn read053_0(s: read S053_0) -> i64 {
+    return s.a * 6i64;
+}
+pub fn bump053_0(s: write S053_0, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E053_0 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify053_0(e: E053_0) -> i64 {
+    match e {
+        E053_0::V0 => {
+            return 0i64;
+        },
+        E053_0::V1(a) => {
+            return a;
+        },
+        E053_0::V2(a, b) => {
+            return a + b;
+        },
+        E053_0::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick053_0[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum053_0(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard053_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 9i64;
+}
+pub struct S053_1 {
+    a: i64,
+    n0: i64,
+    flag: bool,
+}
+pub fn mk053_1(a: i64) -> S053_1 {
+    return S053_1 { a: a, n0: 0, flag: true };
+}
+impl Probe for S053_1 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0;
+    }
+}
+pub fn read053_1(s: read S053_1) -> i64 {
+    return s.a * 6i64;
+}
+pub fn bump053_1(s: write S053_1, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E053_1 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify053_1(e: E053_1) -> i64 {
+    match e {
+        E053_1::V0 => {
+            return 0i64;
+        },
+        E053_1::V1(a) => {
+            return a;
+        },
+        E053_1::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick053_1[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum053_1(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard053_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 7i64;
+}
+pub struct S053_2 {
+    a: i64,
+    n0: i64,
+    n1: u32,
+    flag: bool,
+}
+pub fn mk053_2(a: i64) -> S053_2 {
+    return S053_2 { a: a, n0: 0, n1: 0u32, flag: true };
+}
+impl Probe for S053_2 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0 + conv i64 self.n1;
+    }
+}
+pub fn read053_2(s: read S053_2) -> i64 {
+    return s.a * 6i64;
+}
+pub fn bump053_2(s: write S053_2, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E053_2 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify053_2(e: E053_2) -> i64 {
+    match e {
+        E053_2::V0 => {
+            return 0i64;
+        },
+        E053_2::V1(a) => {
+            return a;
+        },
+        E053_2::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick053_2[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum053_2(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard053_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 5i64;
+}
+pub struct S053_3 {
+    a: i64,
+    n0: u32,
+    flag: bool,
+}
+pub fn mk053_3(a: i64) -> S053_3 {
+    return S053_3 { a: a, n0: 0u32, flag: true };
+}
+impl Probe for S053_3 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0;
+    }
+}
+pub fn read053_3(s: read S053_3) -> i64 {
+    return s.a * 3i64;
+}
+pub fn bump053_3(s: write S053_3, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E053_3 {
+    V0,
+    V1(i64),
+}
+pub fn classify053_3(e: E053_3) -> i64 {
+    match e {
+        E053_3::V0 => {
+            return 0i64;
+        },
+        E053_3::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick053_3[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum053_3(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard053_3(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 7i64;
+}
+pub struct S053_4 {
+    a: i64,
+    n0: u32,
+    n1: i64,
+    flag: bool,
+}
+pub fn mk053_4(a: i64) -> S053_4 {
+    return S053_4 { a: a, n0: 0u32, n1: 0, flag: true };
+}
+impl Probe for S053_4 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + self.n1;
+    }
+}
+pub fn read053_4(s: read S053_4) -> i64 {
+    return s.a * 3i64;
+}
+pub fn bump053_4(s: write S053_4, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E053_4 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify053_4(e: E053_4) -> i64 {
+    match e {
+        E053_4::V0 => {
+            return 0i64;
+        },
+        E053_4::V1(a) => {
+            return a;
+        },
+        E053_4::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick053_4[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum053_4(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 3i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard053_4(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 8i64;
+}
+pub fn f053(x: i64) -> i64 {
+    let mut acc: i64 = x;
+    acc = acc + f039(x + 1i64);
+    acc = acc + f044(x + 2i64);
+    let mut s0: S053_0 = mk053_0(acc);
+    bump053_0(write s0, 5i64);
+    acc = acc + s0.probe();
+    acc = acc + read053_0(read s0);
+    acc = acc + classify053_0(E053_0::V1(acc));
+    acc = acc + accum053_0(3i64);
+    let mut s1: S053_1 = mk053_1(acc);
+    bump053_1(write s1, 7i64);
+    acc = acc + s1.probe();
+    acc = acc + read053_1(read s1);
+    acc = acc + classify053_1(E053_1::V1(acc));
+    acc = acc + accum053_1(8i64);
+    let mut s2: S053_2 = mk053_2(acc);
+    bump053_2(write s2, 9i64);
+    acc = acc + s2.probe();
+    acc = acc + read053_2(read s2);
+    acc = acc + classify053_2(E053_2::V1(acc));
+    acc = acc + accum053_2(5i64);
+    let mut s3: S053_3 = mk053_3(acc);
+    bump053_3(write s3, 6i64);
+    acc = acc + s3.probe();
+    acc = acc + read053_3(read s3);
+    acc = acc + classify053_3(E053_3::V1(acc));
+    acc = acc + accum053_3(3i64);
+    let mut s4: S053_4 = mk053_4(acc);
+    bump053_4(write s4, 3i64);
+    acc = acc + s4.probe();
+    acc = acc + read053_4(read s4);
+    acc = acc + classify053_4(E053_4::V1(acc));
+    acc = acc + accum053_4(5i64);
+    acc = maxof(acc, x);
+    acc = minof(acc, x + 1i64);
+    return clampi(acc);
+}

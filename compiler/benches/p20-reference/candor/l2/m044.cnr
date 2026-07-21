@@ -1,0 +1,204 @@
+// GENERATED reference module m044 (layer 2). Part of the P20
+// measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
+// via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
+use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
+use l0::m001::{f001};
+use l0::m005::{f005};
+use l1::m008::{f008};
+use l1::m009::{f009};
+
+pub struct S044_0 {
+    a: i64,
+    n0: u32,
+    n1: usize,
+    flag: bool,
+}
+pub fn mk044_0(a: i64) -> S044_0 {
+    return S044_0 { a: a, n0: 0u32, n1: 0usize, flag: true };
+}
+impl Probe for S044_0 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + conv i64 self.n1;
+    }
+}
+pub fn read044_0(s: read S044_0) -> i64 {
+    return s.a * 7i64;
+}
+pub fn bump044_0(s: write S044_0, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E044_0 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify044_0(e: E044_0) -> i64 {
+    match e {
+        E044_0::V0 => {
+            return 0i64;
+        },
+        E044_0::V1(a) => {
+            return a;
+        },
+        E044_0::V2(a, b) => {
+            return a + b;
+        },
+        E044_0::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick044_0[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum044_0(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 3i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard044_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 4i64;
+}
+pub struct S044_1 {
+    a: i64,
+    n0: usize,
+    flag: bool,
+}
+pub fn mk044_1(a: i64) -> S044_1 {
+    return S044_1 { a: a, n0: 0usize, flag: true };
+}
+impl Probe for S044_1 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0;
+    }
+}
+pub fn read044_1(s: read S044_1) -> i64 {
+    return s.a * 5i64;
+}
+pub fn bump044_1(s: write S044_1, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E044_1 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify044_1(e: E044_1) -> i64 {
+    match e {
+        E044_1::V0 => {
+            return 0i64;
+        },
+        E044_1::V1(a) => {
+            return a;
+        },
+        E044_1::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick044_1[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum044_1(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 3i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard044_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 5i64;
+}
+pub struct S044_2 {
+    a: i64,
+    n0: u32,
+    n1: usize,
+    n2: usize,
+    flag: bool,
+}
+pub fn mk044_2(a: i64) -> S044_2 {
+    return S044_2 { a: a, n0: 0u32, n1: 0usize, n2: 0usize, flag: true };
+}
+impl Probe for S044_2 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + conv i64 self.n1 + conv i64 self.n2;
+    }
+}
+pub fn read044_2(s: read S044_2) -> i64 {
+    return s.a * 3i64;
+}
+pub fn bump044_2(s: write S044_2, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E044_2 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify044_2(e: E044_2) -> i64 {
+    match e {
+        E044_2::V0 => {
+            return 0i64;
+        },
+        E044_2::V1(a) => {
+            return a;
+        },
+        E044_2::V2(a, b) => {
+            return a + b;
+        },
+        E044_2::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick044_2[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum044_2(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard044_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 7i64;
+}
+pub fn f044(x: i64) -> i64 {
+    let mut acc: i64 = x;
+    acc = acc + f001(x + 1i64);
+    acc = acc + f005(x + 2i64);
+    acc = acc + f008(x + 3i64);
+    acc = acc + f009(x + 4i64);
+    let mut s0: S044_0 = mk044_0(acc);
+    bump044_0(write s0, 8i64);
+    acc = acc + s0.probe();
+    acc = acc + read044_0(read s0);
+    acc = acc + classify044_0(E044_0::V1(acc));
+    acc = acc + accum044_0(3i64);
+    let mut s1: S044_1 = mk044_1(acc);
+    bump044_1(write s1, 5i64);
+    acc = acc + s1.probe();
+    acc = acc + read044_1(read s1);
+    acc = acc + classify044_1(E044_1::V1(acc));
+    acc = acc + accum044_1(8i64);
+    let mut s2: S044_2 = mk044_2(acc);
+    bump044_2(write s2, 7i64);
+    acc = acc + s2.probe();
+    acc = acc + read044_2(read s2);
+    acc = acc + classify044_2(E044_2::V1(acc));
+    acc = acc + accum044_2(5i64);
+    acc = maxof(acc, x);
+    acc = minof(acc, x + 1i64);
+    return clampi(acc);
+}

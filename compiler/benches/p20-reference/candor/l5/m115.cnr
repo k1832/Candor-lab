@@ -1,0 +1,300 @@
+// GENERATED reference module m115 (layer 5). Part of the P20
+// measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
+// via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
+use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
+use l2::m044::{f044};
+
+pub struct S115_0 {
+    a: i64,
+    n0: i64,
+    flag: bool,
+}
+pub fn mk115_0(a: i64) -> S115_0 {
+    return S115_0 { a: a, n0: 0, flag: true };
+}
+impl Probe for S115_0 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0;
+    }
+}
+pub fn read115_0(s: read S115_0) -> i64 {
+    return s.a * 3i64;
+}
+pub fn bump115_0(s: write S115_0, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E115_0 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify115_0(e: E115_0) -> i64 {
+    match e {
+        E115_0::V0 => {
+            return 0i64;
+        },
+        E115_0::V1(a) => {
+            return a;
+        },
+        E115_0::V2(a, b) => {
+            return a + b;
+        },
+        E115_0::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick115_0[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum115_0(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard115_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 6i64;
+}
+pub struct S115_1 {
+    a: i64,
+    n0: usize,
+    flag: bool,
+}
+pub fn mk115_1(a: i64) -> S115_1 {
+    return S115_1 { a: a, n0: 0usize, flag: true };
+}
+impl Probe for S115_1 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0;
+    }
+}
+pub fn read115_1(s: read S115_1) -> i64 {
+    return s.a * 5i64;
+}
+pub fn bump115_1(s: write S115_1, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E115_1 {
+    V0,
+    V1(i64),
+}
+pub fn classify115_1(e: E115_1) -> i64 {
+    match e {
+        E115_1::V0 => {
+            return 0i64;
+        },
+        E115_1::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick115_1[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum115_1(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard115_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 6i64;
+}
+pub struct S115_2 {
+    a: i64,
+    n0: u32,
+    flag: bool,
+}
+pub fn mk115_2(a: i64) -> S115_2 {
+    return S115_2 { a: a, n0: 0u32, flag: true };
+}
+impl Probe for S115_2 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0;
+    }
+}
+pub fn read115_2(s: read S115_2) -> i64 {
+    return s.a * 3i64;
+}
+pub fn bump115_2(s: write S115_2, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E115_2 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify115_2(e: E115_2) -> i64 {
+    match e {
+        E115_2::V0 => {
+            return 0i64;
+        },
+        E115_2::V1(a) => {
+            return a;
+        },
+        E115_2::V2(a, b) => {
+            return a + b;
+        },
+        E115_2::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick115_2[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum115_2(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 3i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard115_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 8i64;
+}
+pub struct S115_3 {
+    a: i64,
+    n0: i64,
+    n1: u32,
+    flag: bool,
+}
+pub fn mk115_3(a: i64) -> S115_3 {
+    return S115_3 { a: a, n0: 0, n1: 0u32, flag: true };
+}
+impl Probe for S115_3 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0 + conv i64 self.n1;
+    }
+}
+pub fn read115_3(s: read S115_3) -> i64 {
+    return s.a * 6i64;
+}
+pub fn bump115_3(s: write S115_3, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E115_3 {
+    V0,
+    V1(i64),
+}
+pub fn classify115_3(e: E115_3) -> i64 {
+    match e {
+        E115_3::V0 => {
+            return 0i64;
+        },
+        E115_3::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick115_3[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum115_3(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard115_3(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 8i64;
+}
+pub struct S115_4 {
+    a: i64,
+    n0: u32,
+    flag: bool,
+}
+pub fn mk115_4(a: i64) -> S115_4 {
+    return S115_4 { a: a, n0: 0u32, flag: true };
+}
+impl Probe for S115_4 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0;
+    }
+}
+pub fn read115_4(s: read S115_4) -> i64 {
+    return s.a * 6i64;
+}
+pub fn bump115_4(s: write S115_4, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E115_4 {
+    V0,
+    V1(i64),
+}
+pub fn classify115_4(e: E115_4) -> i64 {
+    match e {
+        E115_4::V0 => {
+            return 0i64;
+        },
+        E115_4::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick115_4[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum115_4(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard115_4(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 2i64;
+}
+pub fn f115(x: i64) -> i64 {
+    let mut acc: i64 = x;
+    acc = acc + f044(x + 1i64);
+    let mut s0: S115_0 = mk115_0(acc);
+    bump115_0(write s0, 2i64);
+    acc = acc + s0.probe();
+    acc = acc + read115_0(read s0);
+    acc = acc + classify115_0(E115_0::V1(acc));
+    acc = acc + accum115_0(4i64);
+    let mut s1: S115_1 = mk115_1(acc);
+    bump115_1(write s1, 4i64);
+    acc = acc + s1.probe();
+    acc = acc + read115_1(read s1);
+    acc = acc + classify115_1(E115_1::V1(acc));
+    acc = acc + accum115_1(8i64);
+    let mut s2: S115_2 = mk115_2(acc);
+    bump115_2(write s2, 2i64);
+    acc = acc + s2.probe();
+    acc = acc + read115_2(read s2);
+    acc = acc + classify115_2(E115_2::V1(acc));
+    acc = acc + accum115_2(3i64);
+    let mut s3: S115_3 = mk115_3(acc);
+    bump115_3(write s3, 3i64);
+    acc = acc + s3.probe();
+    acc = acc + read115_3(read s3);
+    acc = acc + classify115_3(E115_3::V1(acc));
+    acc = acc + accum115_3(3i64);
+    let mut s4: S115_4 = mk115_4(acc);
+    bump115_4(write s4, 5i64);
+    acc = acc + s4.probe();
+    acc = acc + read115_4(read s4);
+    acc = acc + classify115_4(E115_4::V1(acc));
+    acc = acc + accum115_4(4i64);
+    acc = maxof(acc, x);
+    acc = minof(acc, x + 1i64);
+    return clampi(acc);
+}

@@ -1,0 +1,249 @@
+// GENERATED reference module m128 (layer 5). Part of the P20
+// measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
+// via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
+use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
+use l3::m056::{f056};
+use l4::m082::{f082};
+
+pub struct S128_0 {
+    a: i64,
+    n0: usize,
+    n1: i64,
+    n2: i64,
+    flag: bool,
+}
+pub fn mk128_0(a: i64) -> S128_0 {
+    return S128_0 { a: a, n0: 0usize, n1: 0, n2: 0, flag: true };
+}
+impl Probe for S128_0 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + self.n1 + self.n2;
+    }
+}
+pub fn read128_0(s: read S128_0) -> i64 {
+    return s.a * 3i64;
+}
+pub fn bump128_0(s: write S128_0, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E128_0 {
+    V0,
+    V1(i64),
+}
+pub fn classify128_0(e: E128_0) -> i64 {
+    match e {
+        E128_0::V0 => {
+            return 0i64;
+        },
+        E128_0::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick128_0[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum128_0(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard128_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 8i64;
+}
+pub struct S128_1 {
+    a: i64,
+    n0: i64,
+    n1: usize,
+    flag: bool,
+}
+pub fn mk128_1(a: i64) -> S128_1 {
+    return S128_1 { a: a, n0: 0, n1: 0usize, flag: true };
+}
+impl Probe for S128_1 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0 + conv i64 self.n1;
+    }
+}
+pub fn read128_1(s: read S128_1) -> i64 {
+    return s.a * 3i64;
+}
+pub fn bump128_1(s: write S128_1, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E128_1 {
+    V0,
+    V1(i64),
+}
+pub fn classify128_1(e: E128_1) -> i64 {
+    match e {
+        E128_1::V0 => {
+            return 0i64;
+        },
+        E128_1::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick128_1[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum128_1(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard128_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 5i64;
+}
+pub struct S128_2 {
+    a: i64,
+    n0: u32,
+    n1: i64,
+    n2: i64,
+    flag: bool,
+}
+pub fn mk128_2(a: i64) -> S128_2 {
+    return S128_2 { a: a, n0: 0u32, n1: 0, n2: 0, flag: true };
+}
+impl Probe for S128_2 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + self.n1 + self.n2;
+    }
+}
+pub fn read128_2(s: read S128_2) -> i64 {
+    return s.a * 7i64;
+}
+pub fn bump128_2(s: write S128_2, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E128_2 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify128_2(e: E128_2) -> i64 {
+    match e {
+        E128_2::V0 => {
+            return 0i64;
+        },
+        E128_2::V1(a) => {
+            return a;
+        },
+        E128_2::V2(a, b) => {
+            return a + b;
+        },
+        E128_2::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick128_2[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum128_2(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard128_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 2i64;
+}
+pub struct S128_3 {
+    a: i64,
+    n0: usize,
+    n1: i64,
+    flag: bool,
+}
+pub fn mk128_3(a: i64) -> S128_3 {
+    return S128_3 { a: a, n0: 0usize, n1: 0, flag: true };
+}
+impl Probe for S128_3 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + self.n1;
+    }
+}
+pub fn read128_3(s: read S128_3) -> i64 {
+    return s.a * 2i64;
+}
+pub fn bump128_3(s: write S128_3, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E128_3 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify128_3(e: E128_3) -> i64 {
+    match e {
+        E128_3::V0 => {
+            return 0i64;
+        },
+        E128_3::V1(a) => {
+            return a;
+        },
+        E128_3::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick128_3[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum128_3(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard128_3(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 7i64;
+}
+pub fn f128(x: i64) -> i64 {
+    let mut acc: i64 = x;
+    acc = acc + f056(x + 1i64);
+    acc = acc + f082(x + 2i64);
+    let mut s0: S128_0 = mk128_0(acc);
+    bump128_0(write s0, 3i64);
+    acc = acc + s0.probe();
+    acc = acc + read128_0(read s0);
+    acc = acc + classify128_0(E128_0::V1(acc));
+    acc = acc + accum128_0(9i64);
+    let mut s1: S128_1 = mk128_1(acc);
+    bump128_1(write s1, 3i64);
+    acc = acc + s1.probe();
+    acc = acc + read128_1(read s1);
+    acc = acc + classify128_1(E128_1::V1(acc));
+    acc = acc + accum128_1(6i64);
+    let mut s2: S128_2 = mk128_2(acc);
+    bump128_2(write s2, 8i64);
+    acc = acc + s2.probe();
+    acc = acc + read128_2(read s2);
+    acc = acc + classify128_2(E128_2::V1(acc));
+    acc = acc + accum128_2(6i64);
+    let mut s3: S128_3 = mk128_3(acc);
+    bump128_3(write s3, 9i64);
+    acc = acc + s3.probe();
+    acc = acc + read128_3(read s3);
+    acc = acc + classify128_3(E128_3::V1(acc));
+    acc = acc + accum128_3(7i64);
+    acc = maxof(acc, x);
+    acc = minof(acc, x + 1i64);
+    return clampi(acc);
+}

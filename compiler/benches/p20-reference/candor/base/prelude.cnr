@@ -1,0 +1,90 @@
+// The P20 reference project's prelude: the shared interfaces + scalar
+// ordering the generated module tree builds on. Non-`alloc`, drop-inert.
+
+pub enum Cmp {
+    Lt,
+    Eq,
+    Gt,
+}
+
+pub interface Probe {
+    fn probe(read self) -> i64;
+}
+
+pub interface Ord2 {
+    fn compare(read self, other: Self) -> Cmp;
+}
+
+impl Ord2 for i64 {
+    fn compare(read self, other: Self) -> Cmp {
+        if self.* < other {
+            return Cmp::Lt;
+        }
+        if self.* > other {
+            return Cmp::Gt;
+        }
+        return Cmp::Eq;
+    }
+}
+
+impl Ord2 for u32 {
+    fn compare(read self, other: Self) -> Cmp {
+        if self.* < other {
+            return Cmp::Lt;
+        }
+        if self.* > other {
+            return Cmp::Gt;
+        }
+        return Cmp::Eq;
+    }
+}
+
+impl Ord2 for usize {
+    fn compare(read self, other: Self) -> Cmp {
+        if self.* < other {
+            return Cmp::Lt;
+        }
+        if self.* > other {
+            return Cmp::Gt;
+        }
+        return Cmp::Eq;
+    }
+}
+
+pub fn maxof[T: Ord2 + copy](a: T, b: T) -> T {
+    match a.compare(b) {
+        Cmp::Lt => {
+            return b;
+        },
+        Cmp::Eq => {
+            return a;
+        },
+        Cmp::Gt => {
+            return a;
+        },
+    }
+}
+
+pub fn minof[T: Ord2 + copy](a: T, b: T) -> T {
+    match a.compare(b) {
+        Cmp::Lt => {
+            return a;
+        },
+        Cmp::Eq => {
+            return a;
+        },
+        Cmp::Gt => {
+            return b;
+        },
+    }
+}
+
+pub fn clampi(x: i64) -> i64 {
+    if x > 1000000i64 {
+        return 1000000i64;
+    }
+    if x < 0i64 - 1000000i64 {
+        return 0i64 - 1000000i64;
+    }
+    return x;
+}

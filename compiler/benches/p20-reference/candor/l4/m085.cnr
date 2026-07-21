@@ -1,0 +1,328 @@
+// GENERATED reference module m085 (layer 4). Part of the P20
+// measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
+// via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
+use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
+use l0::m003::{f003};
+use l1::m011::{f011};
+use l1::m017::{f017};
+use l3::m055::{f055};
+
+pub struct S085_0 {
+    a: i64,
+    n0: usize,
+    n1: u32,
+    n2: usize,
+    flag: bool,
+}
+pub fn mk085_0(a: i64) -> S085_0 {
+    return S085_0 { a: a, n0: 0usize, n1: 0u32, n2: 0usize, flag: true };
+}
+impl Probe for S085_0 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + conv i64 self.n1 + conv i64 self.n2;
+    }
+}
+pub fn read085_0(s: read S085_0) -> i64 {
+    return s.a * 7i64;
+}
+pub fn bump085_0(s: write S085_0, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E085_0 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify085_0(e: E085_0) -> i64 {
+    match e {
+        E085_0::V0 => {
+            return 0i64;
+        },
+        E085_0::V1(a) => {
+            return a;
+        },
+        E085_0::V2(a, b) => {
+            return a + b;
+        },
+        E085_0::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick085_0[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum085_0(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 3i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard085_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 8i64;
+}
+pub struct S085_1 {
+    a: i64,
+    n0: i64,
+    n1: usize,
+    n2: u32,
+    flag: bool,
+}
+pub fn mk085_1(a: i64) -> S085_1 {
+    return S085_1 { a: a, n0: 0, n1: 0usize, n2: 0u32, flag: true };
+}
+impl Probe for S085_1 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0 + conv i64 self.n1 + conv i64 self.n2;
+    }
+}
+pub fn read085_1(s: read S085_1) -> i64 {
+    return s.a * 6i64;
+}
+pub fn bump085_1(s: write S085_1, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E085_1 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify085_1(e: E085_1) -> i64 {
+    match e {
+        E085_1::V0 => {
+            return 0i64;
+        },
+        E085_1::V1(a) => {
+            return a;
+        },
+        E085_1::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick085_1[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum085_1(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard085_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 6i64;
+}
+pub struct S085_2 {
+    a: i64,
+    n0: usize,
+    n1: i64,
+    flag: bool,
+}
+pub fn mk085_2(a: i64) -> S085_2 {
+    return S085_2 { a: a, n0: 0usize, n1: 0, flag: true };
+}
+impl Probe for S085_2 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + self.n1;
+    }
+}
+pub fn read085_2(s: read S085_2) -> i64 {
+    return s.a * 3i64;
+}
+pub fn bump085_2(s: write S085_2, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E085_2 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify085_2(e: E085_2) -> i64 {
+    match e {
+        E085_2::V0 => {
+            return 0i64;
+        },
+        E085_2::V1(a) => {
+            return a;
+        },
+        E085_2::V2(a, b) => {
+            return a + b;
+        },
+        E085_2::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick085_2[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum085_2(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard085_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 4i64;
+}
+pub struct S085_3 {
+    a: i64,
+    n0: i64,
+    flag: bool,
+}
+pub fn mk085_3(a: i64) -> S085_3 {
+    return S085_3 { a: a, n0: 0, flag: true };
+}
+impl Probe for S085_3 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0;
+    }
+}
+pub fn read085_3(s: read S085_3) -> i64 {
+    return s.a * 7i64;
+}
+pub fn bump085_3(s: write S085_3, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E085_3 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify085_3(e: E085_3) -> i64 {
+    match e {
+        E085_3::V0 => {
+            return 0i64;
+        },
+        E085_3::V1(a) => {
+            return a;
+        },
+        E085_3::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick085_3[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum085_3(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard085_3(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 7i64;
+}
+pub struct S085_4 {
+    a: i64,
+    n0: i64,
+    n1: usize,
+    n2: usize,
+    flag: bool,
+}
+pub fn mk085_4(a: i64) -> S085_4 {
+    return S085_4 { a: a, n0: 0, n1: 0usize, n2: 0usize, flag: true };
+}
+impl Probe for S085_4 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0 + conv i64 self.n1 + conv i64 self.n2;
+    }
+}
+pub fn read085_4(s: read S085_4) -> i64 {
+    return s.a * 7i64;
+}
+pub fn bump085_4(s: write S085_4, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E085_4 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify085_4(e: E085_4) -> i64 {
+    match e {
+        E085_4::V0 => {
+            return 0i64;
+        },
+        E085_4::V1(a) => {
+            return a;
+        },
+        E085_4::V2(a, b) => {
+            return a + b;
+        },
+        E085_4::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick085_4[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum085_4(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard085_4(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 1i64;
+}
+pub fn f085(x: i64) -> i64 {
+    let mut acc: i64 = x;
+    acc = acc + f003(x + 1i64);
+    acc = acc + f011(x + 2i64);
+    acc = acc + f017(x + 3i64);
+    acc = acc + f055(x + 4i64);
+    let mut s0: S085_0 = mk085_0(acc);
+    bump085_0(write s0, 1i64);
+    acc = acc + s0.probe();
+    acc = acc + read085_0(read s0);
+    acc = acc + classify085_0(E085_0::V1(acc));
+    acc = acc + accum085_0(5i64);
+    let mut s1: S085_1 = mk085_1(acc);
+    bump085_1(write s1, 7i64);
+    acc = acc + s1.probe();
+    acc = acc + read085_1(read s1);
+    acc = acc + classify085_1(E085_1::V1(acc));
+    acc = acc + accum085_1(4i64);
+    let mut s2: S085_2 = mk085_2(acc);
+    bump085_2(write s2, 7i64);
+    acc = acc + s2.probe();
+    acc = acc + read085_2(read s2);
+    acc = acc + classify085_2(E085_2::V1(acc));
+    acc = acc + accum085_2(7i64);
+    let mut s3: S085_3 = mk085_3(acc);
+    bump085_3(write s3, 1i64);
+    acc = acc + s3.probe();
+    acc = acc + read085_3(read s3);
+    acc = acc + classify085_3(E085_3::V1(acc));
+    acc = acc + accum085_3(8i64);
+    let mut s4: S085_4 = mk085_4(acc);
+    bump085_4(write s4, 6i64);
+    acc = acc + s4.probe();
+    acc = acc + read085_4(read s4);
+    acc = acc + classify085_4(E085_4::V1(acc));
+    acc = acc + accum085_4(8i64);
+    acc = maxof(acc, x);
+    acc = minof(acc, x + 1i64);
+    return clampi(acc);
+}

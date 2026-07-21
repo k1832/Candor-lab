@@ -1,0 +1,11 @@
+{
+  "generator": "p20_gen.rs",
+  "seed": "0x5032305245464552",
+  "candor_modules": 202,
+  "candor_lines": 50379,
+  "c_translation_units": 202,
+  "c_lines": 45963,
+  "edit_target": "l1/m014.cnr",
+  "edit_target_dependents": 15,
+  "main_roots": 16
+}

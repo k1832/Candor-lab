@@ -1,0 +1,309 @@
+// GENERATED reference module m021 (layer 1). Part of the P20
+// measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
+// via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
+use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
+use l0::m003::{f003};
+
+pub struct S021_0 {
+    a: i64,
+    n0: usize,
+    n1: i64,
+    n2: usize,
+    flag: bool,
+}
+pub fn mk021_0(a: i64) -> S021_0 {
+    return S021_0 { a: a, n0: 0usize, n1: 0, n2: 0usize, flag: true };
+}
+impl Probe for S021_0 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + self.n1 + conv i64 self.n2;
+    }
+}
+pub fn read021_0(s: read S021_0) -> i64 {
+    return s.a * 4i64;
+}
+pub fn bump021_0(s: write S021_0, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E021_0 {
+    V0,
+    V1(i64),
+}
+pub fn classify021_0(e: E021_0) -> i64 {
+    match e {
+        E021_0::V0 => {
+            return 0i64;
+        },
+        E021_0::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick021_0[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum021_0(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard021_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 5i64;
+}
+pub struct S021_1 {
+    a: i64,
+    n0: usize,
+    n1: i64,
+    n2: usize,
+    flag: bool,
+}
+pub fn mk021_1(a: i64) -> S021_1 {
+    return S021_1 { a: a, n0: 0usize, n1: 0, n2: 0usize, flag: true };
+}
+impl Probe for S021_1 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + self.n1 + conv i64 self.n2;
+    }
+}
+pub fn read021_1(s: read S021_1) -> i64 {
+    return s.a * 7i64;
+}
+pub fn bump021_1(s: write S021_1, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E021_1 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify021_1(e: E021_1) -> i64 {
+    match e {
+        E021_1::V0 => {
+            return 0i64;
+        },
+        E021_1::V1(a) => {
+            return a;
+        },
+        E021_1::V2(a, b) => {
+            return a + b;
+        },
+        E021_1::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick021_1[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum021_1(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard021_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 9i64;
+}
+pub struct S021_2 {
+    a: i64,
+    n0: usize,
+    n1: i64,
+    n2: i64,
+    flag: bool,
+}
+pub fn mk021_2(a: i64) -> S021_2 {
+    return S021_2 { a: a, n0: 0usize, n1: 0, n2: 0, flag: true };
+}
+impl Probe for S021_2 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + self.n1 + self.n2;
+    }
+}
+pub fn read021_2(s: read S021_2) -> i64 {
+    return s.a * 4i64;
+}
+pub fn bump021_2(s: write S021_2, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E021_2 {
+    V0,
+    V1(i64),
+}
+pub fn classify021_2(e: E021_2) -> i64 {
+    match e {
+        E021_2::V0 => {
+            return 0i64;
+        },
+        E021_2::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick021_2[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum021_2(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard021_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 5i64;
+}
+pub struct S021_3 {
+    a: i64,
+    n0: usize,
+    n1: usize,
+    n2: u32,
+    flag: bool,
+}
+pub fn mk021_3(a: i64) -> S021_3 {
+    return S021_3 { a: a, n0: 0usize, n1: 0usize, n2: 0u32, flag: true };
+}
+impl Probe for S021_3 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + conv i64 self.n1 + conv i64 self.n2;
+    }
+}
+pub fn read021_3(s: read S021_3) -> i64 {
+    return s.a * 2i64;
+}
+pub fn bump021_3(s: write S021_3, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E021_3 {
+    V0,
+    V1(i64),
+}
+pub fn classify021_3(e: E021_3) -> i64 {
+    match e {
+        E021_3::V0 => {
+            return 0i64;
+        },
+        E021_3::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick021_3[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum021_3(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard021_3(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 3i64;
+}
+pub struct S021_4 {
+    a: i64,
+    n0: u32,
+    n1: u32,
+    n2: usize,
+    flag: bool,
+}
+pub fn mk021_4(a: i64) -> S021_4 {
+    return S021_4 { a: a, n0: 0u32, n1: 0u32, n2: 0usize, flag: true };
+}
+impl Probe for S021_4 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + conv i64 self.n1 + conv i64 self.n2;
+    }
+}
+pub fn read021_4(s: read S021_4) -> i64 {
+    return s.a * 2i64;
+}
+pub fn bump021_4(s: write S021_4, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E021_4 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify021_4(e: E021_4) -> i64 {
+    match e {
+        E021_4::V0 => {
+            return 0i64;
+        },
+        E021_4::V1(a) => {
+            return a;
+        },
+        E021_4::V2(a, b) => {
+            return a + b;
+        },
+        E021_4::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick021_4[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum021_4(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard021_4(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 1i64;
+}
+pub fn f021(x: i64) -> i64 {
+    let mut acc: i64 = x;
+    acc = acc + f003(x + 1i64);
+    let mut s0: S021_0 = mk021_0(acc);
+    bump021_0(write s0, 1i64);
+    acc = acc + s0.probe();
+    acc = acc + read021_0(read s0);
+    acc = acc + classify021_0(E021_0::V1(acc));
+    acc = acc + accum021_0(4i64);
+    let mut s1: S021_1 = mk021_1(acc);
+    bump021_1(write s1, 2i64);
+    acc = acc + s1.probe();
+    acc = acc + read021_1(read s1);
+    acc = acc + classify021_1(E021_1::V1(acc));
+    acc = acc + accum021_1(8i64);
+    let mut s2: S021_2 = mk021_2(acc);
+    bump021_2(write s2, 3i64);
+    acc = acc + s2.probe();
+    acc = acc + read021_2(read s2);
+    acc = acc + classify021_2(E021_2::V1(acc));
+    acc = acc + accum021_2(7i64);
+    let mut s3: S021_3 = mk021_3(acc);
+    bump021_3(write s3, 4i64);
+    acc = acc + s3.probe();
+    acc = acc + read021_3(read s3);
+    acc = acc + classify021_3(E021_3::V1(acc));
+    acc = acc + accum021_3(8i64);
+    let mut s4: S021_4 = mk021_4(acc);
+    bump021_4(write s4, 4i64);
+    acc = acc + s4.probe();
+    acc = acc + read021_4(read s4);
+    acc = acc + classify021_4(E021_4::V1(acc));
+    acc = acc + accum021_4(5i64);
+    acc = maxof(acc, x);
+    acc = minof(acc, x + 1i64);
+    return clampi(acc);
+}

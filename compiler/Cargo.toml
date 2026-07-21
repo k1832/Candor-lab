@@ -2,6 +2,7 @@
 name = "candor"
 version = "0.1.0"
 edition = "2021"
+autobenches = false
 description = "Candor Bet 5 validation prototype: lexer, AST and parser (Stage 1)"
 
 [lib]
@@ -11,6 +12,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "candor"
 path = "src/main.rs"
+
+[[bin]]
+name = "p20-gen"
+path = "benches/p20_gen.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

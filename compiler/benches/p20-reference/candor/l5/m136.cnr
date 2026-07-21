@@ -1,0 +1,313 @@
+// GENERATED reference module m136 (layer 5). Part of the P20
+// measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
+// via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
+use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
+use l0::m006::{f006};
+use l4::m079::{f079};
+use l4::m106::{f106};
+
+pub struct S136_0 {
+    a: i64,
+    n0: usize,
+    n1: u32,
+    flag: bool,
+}
+pub fn mk136_0(a: i64) -> S136_0 {
+    return S136_0 { a: a, n0: 0usize, n1: 0u32, flag: true };
+}
+impl Probe for S136_0 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + conv i64 self.n1;
+    }
+}
+pub fn read136_0(s: read S136_0) -> i64 {
+    return s.a * 4i64;
+}
+pub fn bump136_0(s: write S136_0, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E136_0 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify136_0(e: E136_0) -> i64 {
+    match e {
+        E136_0::V0 => {
+            return 0i64;
+        },
+        E136_0::V1(a) => {
+            return a;
+        },
+        E136_0::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick136_0[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum136_0(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard136_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 2i64;
+}
+pub struct S136_1 {
+    a: i64,
+    n0: i64,
+    n1: u32,
+    n2: u32,
+    flag: bool,
+}
+pub fn mk136_1(a: i64) -> S136_1 {
+    return S136_1 { a: a, n0: 0, n1: 0u32, n2: 0u32, flag: true };
+}
+impl Probe for S136_1 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0 + conv i64 self.n1 + conv i64 self.n2;
+    }
+}
+pub fn read136_1(s: read S136_1) -> i64 {
+    return s.a * 2i64;
+}
+pub fn bump136_1(s: write S136_1, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E136_1 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify136_1(e: E136_1) -> i64 {
+    match e {
+        E136_1::V0 => {
+            return 0i64;
+        },
+        E136_1::V1(a) => {
+            return a;
+        },
+        E136_1::V2(a, b) => {
+            return a + b;
+        },
+        E136_1::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick136_1[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum136_1(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard136_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 8i64;
+}
+pub struct S136_2 {
+    a: i64,
+    n0: usize,
+    n1: u32,
+    flag: bool,
+}
+pub fn mk136_2(a: i64) -> S136_2 {
+    return S136_2 { a: a, n0: 0usize, n1: 0u32, flag: true };
+}
+impl Probe for S136_2 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + conv i64 self.n1;
+    }
+}
+pub fn read136_2(s: read S136_2) -> i64 {
+    return s.a * 4i64;
+}
+pub fn bump136_2(s: write S136_2, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E136_2 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify136_2(e: E136_2) -> i64 {
+    match e {
+        E136_2::V0 => {
+            return 0i64;
+        },
+        E136_2::V1(a) => {
+            return a;
+        },
+        E136_2::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick136_2[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum136_2(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard136_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 8i64;
+}
+pub struct S136_3 {
+    a: i64,
+    n0: i64,
+    flag: bool,
+}
+pub fn mk136_3(a: i64) -> S136_3 {
+    return S136_3 { a: a, n0: 0, flag: true };
+}
+impl Probe for S136_3 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0;
+    }
+}
+pub fn read136_3(s: read S136_3) -> i64 {
+    return s.a * 7i64;
+}
+pub fn bump136_3(s: write S136_3, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E136_3 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify136_3(e: E136_3) -> i64 {
+    match e {
+        E136_3::V0 => {
+            return 0i64;
+        },
+        E136_3::V1(a) => {
+            return a;
+        },
+        E136_3::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick136_3[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum136_3(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard136_3(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 1i64;
+}
+pub struct S136_4 {
+    a: i64,
+    n0: u32,
+    n1: usize,
+    n2: usize,
+    flag: bool,
+}
+pub fn mk136_4(a: i64) -> S136_4 {
+    return S136_4 { a: a, n0: 0u32, n1: 0usize, n2: 0usize, flag: true };
+}
+impl Probe for S136_4 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + conv i64 self.n1 + conv i64 self.n2;
+    }
+}
+pub fn read136_4(s: read S136_4) -> i64 {
+    return s.a * 3i64;
+}
+pub fn bump136_4(s: write S136_4, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E136_4 {
+    V0,
+    V1(i64),
+}
+pub fn classify136_4(e: E136_4) -> i64 {
+    match e {
+        E136_4::V0 => {
+            return 0i64;
+        },
+        E136_4::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick136_4[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum136_4(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 2i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard136_4(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 4i64;
+}
+pub fn f136(x: i64) -> i64 {
+    let mut acc: i64 = x;
+    acc = acc + f006(x + 1i64);
+    acc = acc + f079(x + 2i64);
+    acc = acc + f106(x + 3i64);
+    let mut s0: S136_0 = mk136_0(acc);
+    bump136_0(write s0, 9i64);
+    acc = acc + s0.probe();
+    acc = acc + read136_0(read s0);
+    acc = acc + classify136_0(E136_0::V1(acc));
+    acc = acc + accum136_0(3i64);
+    let mut s1: S136_1 = mk136_1(acc);
+    bump136_1(write s1, 3i64);
+    acc = acc + s1.probe();
+    acc = acc + read136_1(read s1);
+    acc = acc + classify136_1(E136_1::V1(acc));
+    acc = acc + accum136_1(8i64);
+    let mut s2: S136_2 = mk136_2(acc);
+    bump136_2(write s2, 2i64);
+    acc = acc + s2.probe();
+    acc = acc + read136_2(read s2);
+    acc = acc + classify136_2(E136_2::V1(acc));
+    acc = acc + accum136_2(8i64);
+    let mut s3: S136_3 = mk136_3(acc);
+    bump136_3(write s3, 7i64);
+    acc = acc + s3.probe();
+    acc = acc + read136_3(read s3);
+    acc = acc + classify136_3(E136_3::V1(acc));
+    acc = acc + accum136_3(9i64);
+    let mut s4: S136_4 = mk136_4(acc);
+    bump136_4(write s4, 2i64);
+    acc = acc + s4.probe();
+    acc = acc + read136_4(read s4);
+    acc = acc + classify136_4(E136_4::V1(acc));
+    acc = acc + accum136_4(3i64);
+    acc = maxof(acc, x);
+    acc = minof(acc, x + 1i64);
+    return clampi(acc);
+}

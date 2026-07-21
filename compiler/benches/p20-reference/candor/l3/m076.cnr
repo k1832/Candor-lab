@@ -1,0 +1,246 @@
+// GENERATED reference module m076 (layer 3). Part of the P20
+// measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
+// via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
+use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
+use l0::m003::{f003};
+use l1::m014::{f014};
+
+pub struct S076_0 {
+    a: i64,
+    n0: u32,
+    n1: i64,
+    flag: bool,
+}
+pub fn mk076_0(a: i64) -> S076_0 {
+    return S076_0 { a: a, n0: 0u32, n1: 0, flag: true };
+}
+impl Probe for S076_0 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + self.n1;
+    }
+}
+pub fn read076_0(s: read S076_0) -> i64 {
+    return s.a * 7i64;
+}
+pub fn bump076_0(s: write S076_0, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E076_0 {
+    V0,
+    V1(i64),
+}
+pub fn classify076_0(e: E076_0) -> i64 {
+    match e {
+        E076_0::V0 => {
+            return 0i64;
+        },
+        E076_0::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick076_0[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum076_0(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 5i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard076_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 3i64;
+}
+pub struct S076_1 {
+    a: i64,
+    n0: i64,
+    flag: bool,
+}
+pub fn mk076_1(a: i64) -> S076_1 {
+    return S076_1 { a: a, n0: 0, flag: true };
+}
+impl Probe for S076_1 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0;
+    }
+}
+pub fn read076_1(s: read S076_1) -> i64 {
+    return s.a * 7i64;
+}
+pub fn bump076_1(s: write S076_1, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E076_1 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+    V3(i64),
+}
+pub fn classify076_1(e: E076_1) -> i64 {
+    match e {
+        E076_1::V0 => {
+            return 0i64;
+        },
+        E076_1::V1(a) => {
+            return a;
+        },
+        E076_1::V2(a, b) => {
+            return a + b;
+        },
+        E076_1::V3(a) => {
+            return a * 2i64;
+        },
+    }
+}
+pub fn pick076_1[T: Ord2 + copy](a: T, b: T) -> T {
+    return minof(a, b);
+}
+pub fn accum076_1(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard076_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 2i64;
+}
+pub struct S076_2 {
+    a: i64,
+    n0: usize,
+    n1: i64,
+    flag: bool,
+}
+pub fn mk076_2(a: i64) -> S076_2 {
+    return S076_2 { a: a, n0: 0usize, n1: 0, flag: true };
+}
+impl Probe for S076_2 {
+    fn probe(read self) -> i64 {
+        return self.a + conv i64 self.n0 + self.n1;
+    }
+}
+pub fn read076_2(s: read S076_2) -> i64 {
+    return s.a * 3i64;
+}
+pub fn bump076_2(s: write S076_2, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E076_2 {
+    V0,
+    V1(i64),
+}
+pub fn classify076_2(e: E076_2) -> i64 {
+    match e {
+        E076_2::V0 => {
+            return 0i64;
+        },
+        E076_2::V1(a) => {
+            return a;
+        },
+    }
+}
+pub fn pick076_2[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum076_2(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 4i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard076_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 8i64;
+}
+pub struct S076_3 {
+    a: i64,
+    n0: i64,
+    n1: usize,
+    flag: bool,
+}
+pub fn mk076_3(a: i64) -> S076_3 {
+    return S076_3 { a: a, n0: 0, n1: 0usize, flag: true };
+}
+impl Probe for S076_3 {
+    fn probe(read self) -> i64 {
+        return self.a + self.n0 + conv i64 self.n1;
+    }
+}
+pub fn read076_3(s: read S076_3) -> i64 {
+    return s.a * 4i64;
+}
+pub fn bump076_3(s: write S076_3, d: i64) -> unit {
+    s.*.a = s.a + d;
+}
+pub enum E076_3 {
+    V0,
+    V1(i64),
+    V2(i64, i64),
+}
+pub fn classify076_3(e: E076_3) -> i64 {
+    match e {
+        E076_3::V0 => {
+            return 0i64;
+        },
+        E076_3::V1(a) => {
+            return a;
+        },
+        E076_3::V2(a, b) => {
+            return a + b;
+        },
+    }
+}
+pub fn pick076_3[T: Ord2 + copy](a: T, b: T) -> T {
+    return maxof(a, b);
+}
+pub fn accum076_3(n: i64) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut i: i64 = 0i64;
+    while i < n {
+        acc = acc + i * 3i64;
+        i = i + 1i64;
+    }
+    return acc;
+}
+pub fn guard076_3(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
+    return x + 3i64;
+}
+pub fn f076(x: i64) -> i64 {
+    let mut acc: i64 = x;
+    acc = acc + f003(x + 1i64);
+    acc = acc + f014(x + 2i64);
+    let mut s0: S076_0 = mk076_0(acc);
+    bump076_0(write s0, 6i64);
+    acc = acc + s0.probe();
+    acc = acc + read076_0(read s0);
+    acc = acc + classify076_0(E076_0::V1(acc));
+    acc = acc + accum076_0(5i64);
+    let mut s1: S076_1 = mk076_1(acc);
+    bump076_1(write s1, 3i64);
+    acc = acc + s1.probe();
+    acc = acc + read076_1(read s1);
+    acc = acc + classify076_1(E076_1::V1(acc));
+    acc = acc + accum076_1(7i64);
+    let mut s2: S076_2 = mk076_2(acc);
+    bump076_2(write s2, 8i64);
+    acc = acc + s2.probe();
+    acc = acc + read076_2(read s2);
+    acc = acc + classify076_2(E076_2::V1(acc));
+    acc = acc + accum076_2(5i64);
+    let mut s3: S076_3 = mk076_3(acc);
+    bump076_3(write s3, 5i64);
+    acc = acc + s3.probe();
+    acc = acc + read076_3(read s3);
+    acc = acc + classify076_3(E076_3::V1(acc));
+    acc = acc + accum076_3(7i64);
+    acc = maxof(acc, x);
+    acc = minof(acc, x + 1i64);
+    return clampi(acc);
+}
