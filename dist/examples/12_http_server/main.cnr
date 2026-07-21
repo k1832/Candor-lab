@@ -1,0 +1,623 @@
+boundary
+// An HTTP/1.0 static-file server written in Candor — the showcase for the std I/O +
+// std net boundary. It LISTENS on 127.0.0.1:8080, serves a small fixed number of
+// connections from the `www/` directory, then exits with a sentinel (the count
+// served) so the demo ends itself.
+//
+//   RUN IT FROM THIS DIRECTORY (file paths resolve against the process cwd):
+//     cd examples/12_http_server
+//     candor run main.cnr                 # interpreted
+//     # or: candor compile main.cnr -o httpd && ./httpd
+//
+//   It prints one line — `serving on http://127.0.0.1:8080 (8 requests)` — then,
+//   from another terminal, visit http://127.0.0.1:8080/ in a browser or:
+//     curl http://127.0.0.1:8080/hello.txt      # 200 + the file body
+//     curl -i http://127.0.0.1:8080/missing      # 404
+//   After 8 requests it closes the listener and exits with status 8.
+//
+// The public surface is ordinary safe Candor: value-first, allocator-explicit, every
+// `foreign` effect discharged by an audited wrapper. The externs carry the C-boundary
+// TRUST; the wrappers carry the ENFORCED contracts — so `candor audit` reports the
+// whole foreign surface and the freestanding wall still rejects the graph.
+//
+// Server side adds three externs over the client `tcp_connect` slice: `sys_tcp_listen`
+// (a bound, listening fd), `sys_tcp_accept` (block for a client, yielding a connected
+// fd), and `sys_tcp_port` (the actual bound port). An accepted connection is an
+// ORDINARY descriptor, so `sys_read`/`sys_write`/`sys_close` drive it — no new
+// send/recv externs. File bodies come through the same libc `open`/`read`/`close`.
+// The extern symbols are `sys_*` (the edition strips the prefix to the C symbol):
+// `sys_read`/`sys_write`/`sys_close`/`sys_open` bind to libc; the three `tcp_*` ones
+// bind to the runtime's socket shims (there is no libc `tcp_listen`).
+
+extern "C" {
+    fn sys_tcp_listen(port: i32) foreign -> i32
+        trust "TCP server listen (socket/bind/listen on 127.0.0.1:port, port 0 => ephemeral): touches no Candor memory; returns a listening descriptor (>= 0) or a negative error" {
+        };
+    fn sys_tcp_accept(fd: i32) foreign -> i32
+        trust "TCP server accept: blocks until a client connects to the listening fd; touches no Candor memory; returns a connected descriptor (>= 0) or a negative error" {
+        };
+    fn sys_tcp_port(fd: i32) foreign -> i32
+        trust "getsockname on a listening fd: reports the actual bound port; touches no Candor memory; returns the port (> 0) or a negative error" {
+        };
+    fn sys_open(path: rawptr u8, flags: i32, mode: i32) foreign -> i32
+        trust "POSIX open(2): reads a NUL-terminated path, retains no pointer, thread-confined to this call" {
+            valid_nul_terminated(path),
+            no_retain(path),
+        };
+    fn sys_close(fd: i32) foreign -> i32
+        trust "POSIX close(2): closes a descriptor; touches no Candor memory" {
+        };
+    fn sys_read(fd: i32, buf: rawptr u8, count: usize) foreign -> isize
+        trust "POSIX read(2): writes at most count bytes into buf, retains no pointer, thread-confined" {
+            valid_for(buf, count),
+            no_retain(buf),
+            thread_confined(buf),
+        };
+    fn sys_write(fd: i32, buf: rawptr u8, count: usize) foreign -> isize
+        trust "POSIX write(2): reads at most count bytes from buf, retains no pointer, thread-confined" {
+            valid_for(buf, count),
+            no_retain(buf),
+            thread_confined(buf),
+        };
+}
+
+// ---- errors + result shapes -------------------------------------------------
+
+pub enum IoError {
+    Errno(i32),
+}
+
+pub enum IoResult {
+    ok Ok(usize),
+    Err(IoError),
+}
+
+// The listen/accept result carries a descriptor on success (native-safe scalar enum,
+// like the client `TcpResult`); the audited module stays NON-generic so `candor audit`
+// keeps its foreign-discharge report.
+pub enum TcpResult {
+    ok Ok(i32),
+    Err(IoError),
+}
+
+interface From[E] { fn from(e: E) -> Self; }
+impl From[IoError] for IoError { fn from(e: IoError) -> Self { return e; } }
+enum StrIoResult { ok Ok(String), Err(IoError) }
+
+// ---- boundary wrappers (each discharges `foreign`) --------------------------
+
+pub fn stdout() -> i32 { return 1i32; }
+
+// Bind a listening socket to 127.0.0.1:`port` (0 requests an ephemeral port). On a
+// bind/listen failure the extern returns a negative value, surfaced as `Err`.
+pub fn tcp_listen(port: i32) -> TcpResult {
+    unsafe "sys_tcp_listen trust discharged: touches no Candor memory; returns a descriptor or a negative error" {
+        let fd: i32 = sys_tcp_listen(port);
+        if fd < 0i32 {
+            return TcpResult::Err(IoError::Errno(fd));
+        }
+        return TcpResult::Ok(fd);
+    }
+}
+
+// Block until a client connects to the listening `fd`, returning the connected fd.
+pub fn tcp_accept(fd: i32) -> TcpResult {
+    unsafe "sys_tcp_accept trust discharged: fd is a listening descriptor; accept touches no Candor memory; returns a descriptor or a negative error" {
+        let cfd: i32 = sys_tcp_accept(fd);
+        if cfd < 0i32 {
+            return TcpResult::Err(IoError::Errno(cfd));
+        }
+        return TcpResult::Ok(cfd);
+    }
+}
+
+// The actual port `fd` is bound to (for an ephemeral `listen(0)`); negative on error.
+pub fn tcp_port(fd: i32) -> i32 {
+    unsafe "sys_tcp_port trust discharged: fd is a listening descriptor; getsockname touches no Candor memory" {
+        return sys_tcp_port(fd);
+    }
+}
+
+pub fn open_read(path: read [u8]) -> IoResult {
+    unsafe "sys_open trust discharged: path is a live NUL-terminated [u8] view; open retains nothing (POSIX)" {
+        let fd: i32 = sys_open(addr_of(path[0]), 0i32, 0i32);
+        if fd < 0i32 {
+            return IoResult::Err(IoError::Errno(fd));
+        }
+        return IoResult::Ok(conv usize fd);
+    }
+}
+
+pub fn close(fd: i32) -> IoResult {
+    unsafe "sys_close trust discharged: fd is a descriptor; close touches no Candor memory" {
+        let r: i32 = sys_close(fd);
+        if r < 0i32 {
+            return IoResult::Err(IoError::Errno(r));
+        }
+        return IoResult::Ok(0usize);
+    }
+}
+
+pub fn read_into(fd: i32, buf: write [u8]) -> IoResult {
+    unsafe "sys_read trust discharged: buf is a live [u8] view valid for len(buf) bytes; read retains nothing (POSIX), thread-confined" {
+        let n: isize = sys_read(fd, addr_of_mut(buf[0]), len(buf));
+        if n < 0isize {
+            return IoResult::Err(IoError::Errno(conv i32 n));
+        }
+        return IoResult::Ok(conv usize n);
+    }
+}
+
+pub fn write_all(fd: i32, s: read [u8]) -> IoResult {
+    let total: usize = len(s);
+    if total == 0usize {
+        return IoResult::Ok(0usize);
+    }
+    unsafe "sys_write trust discharged: s is a live [u8] view valid for len(s) bytes; write retains nothing (POSIX), thread-confined" {
+        let n: isize = sys_write(fd, addr_of(s[0]), total);
+        if n < 0isize {
+            return IoResult::Err(IoError::Errno(conv i32 n));
+        }
+        if conv usize n < total {
+            return IoResult::Err(IoError::Errno(0i32 - 1i32));
+        }
+        return IoResult::Ok(total);
+    }
+}
+
+// ---- allocator: an address-ordered free-list arena over a fixed window ------
+// (Verbatim from the std string-utils slice: a real allocator so `String`/`Vec`
+// growth is honest, not a runtime freebie.)
+
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+    realloc: fn(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) alloc -> rawptr u8,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+
+struct FreeList { next: usize, end: usize, head: rawptr u8 }
+struct FreeBlock { next: rawptr u8, size: usize }
+
+fn with_window(base: usize, size: usize) -> FreeList {
+    unsafe "the empty free list starts with a null head; no block is threaded yet" {
+        return FreeList { next: base, end: base + size, head: ptr_null[u8]() };
+    }
+}
+
+fn block_span(size: usize, align: usize) -> usize {
+    let mut need: usize = size;
+    if need < 16usize {
+        need = 16usize;
+    }
+    return (need + align - 1usize) / align * align;
+}
+
+fn freelist_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live FreeList whose [next, end) window and address-ordered free chain are reserved to this arena alone; every carved block stays inside [next, end) and is >= header-sized, and a split remainder (kept only when >= MIN_SPLIT) is written into the block's own tail" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let need: usize = block_span(size, align);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) {
+            let blk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if blk.size >= need {
+                if blk.size - need >= 32usize {
+                    let rem: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(cur) + need);
+                    ptr_write(cast_ptr[FreeBlock](rem), FreeBlock { next: blk.next, size: blk.size - need });
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: rem });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: rem, size: pblk.size });
+                    }
+                } else {
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: blk.next });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: blk.next, size: pblk.size });
+                    }
+                }
+                return cur;
+            }
+            prev = cur;
+            cur = blk.next;
+        }
+        let aligned: usize = (st.next + align - 1usize) / align * align;
+        if aligned + need > st.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: aligned + need, end: st.end, head: st.head });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+
+fn freelist_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    unsafe "the free list is kept ADDRESS-ORDERED; the freed block's own storage (>= header-sized, guaranteed by block_span in alloc) holds its FreeBlock header {next, size}, and a merge joins two blocks ONLY when their byte spans are exactly adjacent (addr + size == neighbour addr), so a merge can never overlap live memory nor bridge a gap" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let mut cap: usize = block_span(size, align);
+        let a: usize = ptr_to_addr(ptr);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) && ptr_to_addr(cur) < a {
+            let cblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            prev = cur;
+            cur = cblk.next;
+        }
+        let mut link: rawptr u8 = cur;
+        if !is_null(cur) {
+            let nblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if a + cap == ptr_to_addr(cur) {
+                cap = cap + nblk.size;
+                link = nblk.next;
+            }
+        }
+        if !is_null(prev) {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            if ptr_to_addr(prev) + pblk.size == a {
+                ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: link, size: pblk.size + cap });
+                return;
+            }
+        }
+        ptr_write(cast_ptr[FreeBlock](ptr), FreeBlock { next: link, size: cap });
+        if is_null(prev) {
+            ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: ptr });
+        } else {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: ptr, size: pblk.size });
+        }
+    }
+}
+
+fn freelist_realloc(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live FreeList; [ptr, ptr+old_span) is the block carved for old_size (block_span rounds identically on alloc/free). Growing in place either extends the bump frontier inside [next, end) or absorbs the physically-adjacent free block beginning exactly at ptr+old_span (splitting its tail when the remainder is >= MIN_SPLIT); the fallback carves a fresh block, copies old_size bytes into it, and frees the old block" {
+        let old_span: usize = block_span(old_size, align);
+        let new_span: usize = block_span(new_size, align);
+        if new_span <= old_span {
+            return ptr;
+        }
+        let a: usize = ptr_to_addr(ptr);
+        let tail: usize = a + old_span;
+        let extra: usize = new_span - old_span;
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        if tail == st.next {
+            if tail + extra <= st.end {
+                ptr_write(cast_ptr[FreeList](ctx), FreeList { next: tail + extra, end: st.end, head: st.head });
+                return ptr;
+            }
+        } else {
+            let mut prev: rawptr u8 = ptr_null[u8]();
+            let mut cur: rawptr u8 = st.head;
+            while !is_null(cur) && ptr_to_addr(cur) < tail {
+                let cblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+                prev = cur;
+                cur = cblk.next;
+            }
+            if !is_null(cur) && ptr_to_addr(cur) == tail {
+                let fblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+                if fblk.size >= extra {
+                    let mut link: rawptr u8 = fblk.next;
+                    if fblk.size - extra >= 32usize {
+                        let rem: rawptr u8 = addr_to_ptr[u8](tail + extra);
+                        ptr_write(cast_ptr[FreeBlock](rem), FreeBlock { next: fblk.next, size: fblk.size - extra });
+                        link = rem;
+                    }
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: link });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: link, size: pblk.size });
+                    }
+                    return ptr;
+                }
+            }
+        }
+        let newp: rawptr u8 = freelist_alloc(ctx, new_size, align);
+        if is_null(newp) {
+            return newp;
+        }
+        let mut i: usize = 0usize;
+        while i < old_size {
+            let s: rawptr u8 = addr_to_ptr[u8](a + i);
+            let d: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(newp) + i);
+            let v: u8 = ptr_read(s);
+            ptr_write(d, v);
+            i = i + 1usize;
+        }
+        freelist_free(ctx, ptr, old_size, align);
+        return newp;
+    }
+}
+
+static FREELIST_VT: AllocVtable = AllocVtable { alloc: freelist_alloc, free: freelist_free, realloc: freelist_realloc };
+
+fn mk_alloc(state: write FreeList) -> Alloc {
+    unsafe "ctx (the caller's FreeList local) and vt (the static FREELIST_VT) outlive every String this handle serves; the caller keeps the window and FREELIST_VT alive for the whole run and drops every String before the window dies" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(FREELIST_VT) };
+    }
+}
+
+// ---- std string utilities (byte-scan; see the std string-utils slice) -------
+
+fn starts_with(s: str, prefix: str) -> bool {
+    let sb: [u8] = as_bytes(s);
+    let pb: [u8] = as_bytes(prefix);
+    let n: usize = len(pb);
+    if n > len(sb) { return false; }
+    let mut i: usize = 0usize;
+    while i < n {
+        if sb[i] != pb[i] { return false; }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+fn is_ascii_ws(b: u8) -> bool {
+    return b == 32u8 || b == 9u8 || b == 10u8 || b == 13u8;
+}
+
+// Strip leading/trailing ASCII whitespace, returning a `substr` VIEW (no alloc).
+fn trim(s: str) -> str {
+    let sb: [u8] = as_bytes(s);
+    let m: usize = len(sb);
+    let mut start: usize = 0usize;
+    while start < m && is_ascii_ws(sb[start]) { start = start + 1usize; }
+    let mut end: usize = m;
+    while end > start && is_ascii_ws(sb[end - 1usize]) { end = end - 1usize; }
+    return substr(s, start, end);
+}
+
+fn matches_at(sb: [u8], i: usize, nb: [u8]) -> bool {
+    let n: usize = len(nb);
+    let mut j: usize = 0usize;
+    while j < n {
+        if sb[i + j] != nb[j] { return false; }
+        j = j + 1usize;
+    }
+    return true;
+}
+
+fn contains(s: str, needle: str) -> bool {
+    let sb: [u8] = as_bytes(s);
+    let nb: [u8] = as_bytes(needle);
+    let n: usize = len(nb);
+    let m: usize = len(sb);
+    if n == 0usize { return true; }
+    if n > m { return false; }
+    let last: usize = m - n;
+    let mut i: usize = 0usize;
+    loop {
+        if i > last { break; }
+        if matches_at(sb, i, nb) { return true; }
+        i = i + 1usize;
+    }
+    return false;
+}
+
+// Split `s` on a NON-EMPTY separator into OWNED `String` pieces (Rust `str::split`
+// empty-piece rule): always one more piece than separators. Each cut is char-boundary
+// aligned (a valid needle only matches on a boundary), so `substr` never faults.
+fn split(a: read Alloc, s: str, sep: str) alloc -> Vec[String] {
+    let sb: [u8] = as_bytes(s);
+    let nb: [u8] = as_bytes(sep);
+    let total: usize = len(sb);
+    let seplen: usize = len(nb);
+    let mut res: Vec[String] = vec_new(a);
+    let mut start: usize = 0usize;
+    let mut i: usize = 0usize;
+    loop {
+        if i + seplen > total { break; }
+        if matches_at(sb, i, nb) {
+            let mut piece: String = string_new(a);
+            append(write piece, substr(s, start, i));
+            push(write res, piece);
+            start = i + seplen;
+            i = i + seplen;
+        } else {
+            i = i + 1usize;
+        }
+    }
+    let mut last: String = string_new(a);
+    append(write last, substr(s, start, total));
+    push(write res, last);
+    return res;
+}
+
+// Render a non-negative `usize` to its decimal `String`: digits low-first into a
+// fixed buffer (a 64-bit int is at most 20 digits), then pushed high-to-low so the
+// String reads left-to-right. The push targets this function's OWN owned local (a
+// String reached through a borrow is not recognized by the intrinsic dispatch).
+fn fmt_usize(a: read Alloc, n: usize) alloc -> String {
+    let mut s: String = string_new(a);
+    let mut digits: [20]i64 = [0i64; 20];
+    let mut count: usize = 0usize;
+    let mut m: usize = n;
+    let mut more: bool = true;
+    while more {
+        digits[count] = 48i64 + conv i64 (m % 10usize);
+        count = count + 1usize;
+        m = m / 10usize;
+        more = m != 0usize;
+    }
+    let mut i: usize = count;
+    while i > 0usize {
+        i = i - 1usize;
+        push(write s, digits[i]);
+    }
+    return s;
+}
+
+// ---- file reading (open -> read-to-string -> close) -------------------------
+
+// Loop `read_into` a fixed [64]u8 buffer into an owned growable String: `Ok(0)` is
+// EOF; `Ok(n)` appends the first n bytes; `Err` propagates via `?`. A multibyte char
+// may straddle a read boundary, so `str_from_unchecked` (not `str_from`): the whole
+// is valid UTF-8 iff the file is; append only ever copies.
+fn read_to_string(a: read Alloc, fd: i32) alloc -> StrIoResult {
+    let mut s: String = string_new(a);
+    let mut buf: [64]u8 = [0u8; 64];
+    loop {
+        let n: usize = read_into(fd, slice_of_mut(buf))?;
+        if n == 0usize { break; }
+        let bytes: [u8] = subslice(slice_of(buf), 0usize, n);
+        unsafe "file bytes appended raw: a multibyte char may straddle a read boundary, so per-chunk validation would wrongly reject a valid whole; the accumulated String is valid UTF-8 iff the source is" {
+            append(write s, str_from_unchecked(bytes));
+        }
+    }
+    return StrIoResult::Ok(s);
+}
+
+fn read_file(a: read Alloc, path: read [u8]) alloc -> StrIoResult {
+    let fd: usize = open_read(path)?;
+    let s: String = read_to_string(a, conv i32 fd)?;
+    let cr: IoResult = close(conv i32 fd);
+    return StrIoResult::Ok(s);
+}
+
+// ---- HTTP response building -------------------------------------------------
+// HTTP line breaks are CRLF; `\r` (byte 13) is not a source escape, so a 2-byte
+// `crlf` String is built once and appended by view.
+
+fn resp_200(a: read Alloc, body: read String) alloc -> String {
+    let mut crlf: String = string_new(a);
+    push(write crlf, 13);
+    push(write crlf, 10);
+    let nl: str = as_str(read crlf);
+
+    let mut r: String = string_new(a);
+    append(write r, "HTTP/1.0 200 OK");
+    append(write r, nl);
+    append(write r, "Content-Length: ");
+    let body_len: usize = len(as_bytes(as_str(read body.*)));
+    let cl: String = fmt_usize(a, body_len);
+    append(write r, as_str(read cl));
+    append(write r, nl);
+    append(write r, nl);
+    append(write r, as_str(read body.*));
+    return r;
+}
+
+fn resp_404(a: read Alloc) alloc -> String {
+    let mut crlf: String = string_new(a);
+    push(write crlf, 13);
+    push(write crlf, 10);
+    let nl: str = as_str(read crlf);
+
+    let mut r: String = string_new(a);
+    append(write r, "HTTP/1.0 404 Not Found");
+    append(write r, nl);
+    append(write r, "Content-Length: 0");
+    append(write r, nl);
+    append(write r, nl);
+    return r;
+}
+
+// Build the NUL-terminated file path for `sys_open` under the `www/` root: strip the
+// leading '/', default "/" to "index.html", and prefix "www/" so serving stays inside
+// that directory (with the ".." guard in serve_one). Paths resolve against the process
+// cwd, so run the server from this example directory.
+fn file_name(a: read Alloc, reqpath: str) alloc -> String {
+    let pb: [u8] = as_bytes(reqpath);
+    let m: usize = len(pb);
+    let mut fname: String = string_new(a);
+    append(write fname, "www/");
+    if m <= 1usize {
+        append(write fname, "index.html");
+    } else {
+        append(write fname, substr(reqpath, 1usize, m));
+    }
+    push(write fname, 0);
+    return fname;
+}
+
+// ---- serve one connection ---------------------------------------------------
+// Read the request, parse `GET /path` with the std string utilities, map the path to
+// a file under the root, and write a 200 (with Content-Length + body) or a 404. The
+// request is assumed to arrive in a single `read_into` (ample for these small GETs).
+fn serve_one(a: read Alloc, cfd: i32) alloc -> bool {
+    let mut reqbuf: [512]u8 = [0u8; 512];
+    let n: usize = match read_into(cfd, slice_of_mut(reqbuf)) {
+        IoResult::Ok(c) => c,
+        IoResult::Err(e) => { return false; },
+    };
+
+    let mut reqs: String = string_new(a);
+    let raw: [u8] = subslice(slice_of(reqbuf), 0usize, n);
+    unsafe "request bytes appended raw for parsing; only ASCII request-line bytes (method, path, spaces) are inspected, so tail UTF-8 validity is irrelevant" {
+        append(write reqs, str_from_unchecked(raw));
+    }
+    let req: str = as_str(read reqs);
+
+    let toks: Vec[String] = split(a, req, " ");
+    let is_get: bool = starts_with(req, "GET ");
+    let has_path: bool = len(read toks) >= 2usize;
+    if !is_get || !has_path {
+        let nf: String = resp_404(a);
+        let w: IoResult = write_all(cfd, as_bytes(as_str(read nf)));
+        return false;
+    }
+
+    let path: str = trim(as_str(read get(read toks, 1usize).*));
+    // Reject path traversal outright: a "GET /../secret" never escapes the root.
+    if contains(path, "..") {
+        let nf: String = resp_404(a);
+        let w: IoResult = write_all(cfd, as_bytes(as_str(read nf)));
+        return false;
+    }
+
+    let namez: String = file_name(a, path);
+    let body: String = match read_file(a, as_bytes(as_str(read namez))) {
+        StrIoResult::Ok(v) => v,
+        StrIoResult::Err(e) => {
+            let nf: String = resp_404(a);
+            let w: IoResult = write_all(cfd, as_bytes(as_str(read nf)));
+            return false;
+        },
+    };
+
+    let ok: String = resp_200(a, read body);
+    let w: IoResult = write_all(cfd, as_bytes(as_str(read ok)));
+    return true;
+}
+
+// Listen on 127.0.0.1:8080, print one human-readable line, then serve exactly
+// SERVE_N connections sequentially (HTTP/1.0: one request per connection, close
+// after) and exit. The return value is the sentinel: the number of connections served.
+fn main() alloc -> i64 {
+    let mut st: FreeList = with_window(16777216usize, 4194304usize);
+    let a: Alloc = mk_alloc(write st);
+
+    let port: i32 = 8080i32;
+    let serve_n: i64 = 8i64;
+
+    let lfd: i32 = match tcp_listen(port) {
+        TcpResult::Ok(f) => f,
+        TcpResult::Err(e) => { return 0i64 - 1i64; },
+    };
+
+    let ports: String = fmt_usize(read a, conv usize port);
+    let counts: String = fmt_usize(read a, conv usize serve_n);
+    let mut banner: String = string_new(a);
+    append(write banner, "serving on http://127.0.0.1:");
+    append(write banner, as_str(read ports));
+    append(write banner, " (");
+    append(write banner, as_str(read counts));
+    append(write banner, " requests)");
+    push(write banner, 10);
+    let bw: IoResult = write_all(stdout(), as_bytes(as_str(read banner)));
+
+    let mut served: i64 = 0i64;
+    loop {
+        if served >= serve_n { break; }
+        let cfd: i32 = match tcp_accept(lfd) {
+            TcpResult::Ok(f) => f,
+            TcpResult::Err(e) => { return 0i64 - 2i64; },
+        };
+        let ok: bool = serve_one(read a, cfd);
+        let cc: IoResult = close(cfd);
+        served = served + 1i64;
+    }
+    let lc: IoResult = close(lfd);
+    return served;
+}

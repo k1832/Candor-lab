@@ -1,0 +1,2002 @@
+// A WebAssembly interpreter written from scratch in Candor. It decodes a REAL
+// `.wasm` binary module and executes it on a stack machine — pure compute, no
+// I/O. The module embedded in `main` below is `(i32.const 40) (i32.const 2)
+// i32.add`, so the program decodes it, runs it, and returns 42.
+//   candor run 11_wasm_interp.cnr                        -> 42
+//   candor compile 11_wasm_interp.cnr -o wasm && ./wasm  -> exits 42
+//
+// What it implements, end to end:
+//   * LEB128 decoding (unsigned `read_u32`, signed `read_i64`) over a byte cursor;
+//   * an id-dispatched section walk building a `Module` of per-function metadata
+//     (types, locals, exports, the function table, linear memory, data segments);
+//   * an opcode-dispatched eval loop over an operand stack and a structured
+//     control-label stack, with `call` driven by an explicit activation stack
+//     (not host recursion);
+//   * the full integer ISA (i32/i64) and float ISA (f32/f64), `call_indirect`
+//     through the function table, linear memory over a `Vec[u8]`, and a WASI-lite
+//     import set (`fd_write`/`proc_exit`).
+//
+// i32-in-i64 representation: an i32 operand-stack value is held in an i64 slot
+// SIGN-EXTENDED from bit 31 (bits 32..63 mirror bit 31). `i32.const` sign-
+// extends the decoded LEB value; every i32 result is re-normalized by
+// `(x << 32) >> 32` (arithmetic shift, `as_i32`) so the invariant holds after
+// wraps. i64 values use the full 64 bits. All operand arithmetic runs inside
+// `wrapping { }`, whose `+`/`-`/`*`/shifts reduce mod 2^bits with sign
+// reinterpret — exactly WebAssembly's iN semantics (the default regime FAULTS
+// on overflow/lost bits, so these blocks are load-bearing). Unsigned ops
+// (div_u/rem_u/shr_u/lt_u...) mask to the width (i32) or reinterpret via
+// `wrapping { conv u64 }` (i64). div/rem TRAP (panic) on divide-by-zero, and
+// signed div also traps on INT_MIN / -1, matching WebAssembly.
+
+struct Reader {
+    pos: usize,
+}
+
+fn read_byte(bytes: [u8], r: write Reader) -> u8 {
+    let b: u8 = bytes[r.pos];
+    r.*.pos = r.pos + 1;
+    return b;
+}
+
+// Unsigned LEB128 (section sizes, counts, indices): 7 payload bits per byte,
+// low-to-high, continuation in bit 7.
+fn read_u32(bytes: [u8], r: write Reader) -> u32 {
+    let mut acc: u32 = 0u32;
+    let mut shift: u32 = 0u32;
+    let mut more: bool = true;
+    while more {
+        let byte: u8 = read_byte(bytes, r);
+        let low: u32 = conv u32 (byte & 0x7fu8);
+        wrapping { acc = acc | (low << shift); }
+        shift = shift + 7u32;
+        if (byte & 0x80u8) == 0u8 {
+            more = false;
+        }
+    }
+    return acc;
+}
+
+// Signed LEB128 (`i32.const`/`i64.const` operands): like the unsigned form, but
+// if the final byte's sign bit (0x40) is set and fewer than 64 bits were read,
+// sign-extend the remaining high bits with ones.
+fn read_i64(bytes: [u8], r: write Reader) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut shift: u32 = 0u32;
+    let mut byte: u8 = 0u8;
+    let mut more: bool = true;
+    while more {
+        byte = read_byte(bytes, r);
+        let low: i64 = conv i64 (byte & 0x7fu8);
+        wrapping { acc = acc | (low << conv i64 shift); }
+        shift = shift + 7u32;
+        if (byte & 0x80u8) == 0u8 {
+            more = false;
+        }
+    }
+    if shift < 64u32 {
+        if (byte & 0x40u8) != 0u8 {
+            wrapping { acc = acc | ((0i64 - 1i64) << conv i64 shift); }
+        }
+    }
+    return acc;
+}
+
+fn expect_byte(bytes: [u8], r: write Reader, want: u8) -> unit {
+    let got: u8 = read_byte(bytes, r);
+    if got != want {
+        panic("malformed module: unexpected header byte");
+    }
+}
+
+// Per-function metadata, indexable by function index. `fstart`/`fend` bound the
+// instruction bytes (positioned just past the body's local declarations, up to
+// and including the trailing `end`). Fixed-capacity arrays keep the whole
+// interpreter allocation-free (runs identically on every engine).
+struct Module {
+    nfuncs: usize,
+    nimports: usize,
+    imp_host: [16]usize,
+    entry: usize,
+    fstart: [64]usize,
+    fend: [64]usize,
+    fnparams: [64]usize,
+    fnresults: [64]usize,
+    fnlocals: [64]usize,
+    has_mem: bool,
+    mem_min: usize,
+    mem_max: usize,
+    has_max: bool,
+    ndata: usize,
+    data_off: [16]usize,
+    data_start: [16]usize,
+    data_len: [16]usize,
+    // Globals: imported globals take the low indices, defined globals follow;
+    // each holds its i32/i64/f32/f64 value as a bit pattern in an i64 slot, plus a
+    // decoded mutability flag. `type_key`/`ftype` back call_indirect's signature
+    // check; `tbl` is the funcref table (function index per slot, -1 = null).
+    type_key: [64]i64,
+    ftype: [64]usize,
+    nglobals: usize,
+    nglobalimports: usize,
+    gval: [64]i64,
+    gmut: [64]bool,
+    has_table: bool,
+    tbl_size: usize,
+    tbl: [256]i64,
+}
+
+// A blocktype's RESULT arity. MVP blocktypes are `0x40` (empty -> 0) or a single
+// valtype (0x7c..0x7f -> 1). Multi-byte type-index blocktypes are unused by the
+// modules this interpreter runs and are rejected rather than mis-decoded.
+fn read_blocktype(bytes: [u8], r: write Reader) -> usize {
+    let bt: u8 = read_byte(bytes, r);
+    if bt == 0x40u8 {
+        return 0usize;
+    }
+    if bt >= 0x7cu8 {
+        return 1usize;
+    }
+    panic("unimplemented: type-index blocktype");
+    return 0usize;
+}
+
+// Advance past one instruction's immediate operands, given its already-read
+// opcode. Used by the structured-control forward scans so operand bytes are
+// never mistaken for opcodes.
+fn skip_immediates(bytes: [u8], r: write Reader, op: u8) -> unit {
+    if op == 0x02u8 || op == 0x03u8 || op == 0x04u8 {
+        let bt: usize = read_blocktype(bytes, r);
+    } else if op == 0x0cu8 || op == 0x0du8 {
+        let l: u32 = read_u32(bytes, r);
+    } else if op == 0x0eu8 {
+        let n: u32 = read_u32(bytes, r);
+        let mut k: u32 = 0u32;
+        while k <= n {
+            let l: u32 = read_u32(bytes, r);
+            k = k + 1u32;
+        }
+    } else if op == 0x10u8 || op == 0x20u8 || op == 0x21u8 || op == 0x22u8 || op == 0x23u8 || op == 0x24u8 {
+        let x: u32 = read_u32(bytes, r);
+    } else if op == 0x11u8 {
+        let ty: u32 = read_u32(bytes, r);
+        let tb: u8 = read_byte(bytes, r);
+    } else if op == 0x41u8 || op == 0x42u8 {
+        let v: i64 = read_i64(bytes, r);
+    } else if op == 0x43u8 {
+        let mut c: usize = 0usize;
+        while c < 4usize { let b: u8 = read_byte(bytes, r); c = c + 1usize; }
+    } else if op == 0x44u8 {
+        let mut c: usize = 0usize;
+        while c < 8usize { let b: u8 = read_byte(bytes, r); c = c + 1usize; }
+    } else if op >= 0x28u8 && op <= 0x3eu8 {
+        let algn: u32 = read_u32(bytes, r);
+        let offs: u32 = read_u32(bytes, r);
+    } else if op == 0x3fu8 || op == 0x40u8 {
+        let resv: u8 = read_byte(bytes, r);
+    }
+}
+
+// From just after an `if`'s blocktype, scan to its matching `else` (returns 0,
+// leaving `r` after the `else`) or matching `end` (returns 1, leaving `r` after
+// the `end`), tracking nested block depth so only the if's OWN else/end match.
+fn skip_to_else_or_end(bytes: [u8], r: write Reader) -> usize {
+    let mut depth: usize = 0;
+    let mut kind: usize = 1;
+    let mut going: bool = true;
+    while going {
+        let op: u8 = read_byte(bytes, r);
+        if op == 0x02u8 || op == 0x03u8 || op == 0x04u8 {
+            let bt: usize = read_blocktype(bytes, r);
+            depth = depth + 1;
+        } else if op == 0x0bu8 {
+            if depth == 0usize {
+                kind = 1;
+                going = false;
+            } else {
+                depth = depth - 1;
+            }
+        } else if op == 0x05u8 {
+            if depth == 0usize {
+                kind = 0;
+                going = false;
+            }
+        } else {
+            skip_immediates(bytes, r, op);
+        }
+    }
+    return kind;
+}
+
+// From a branch point, scan forward past `exits` matching `end`s at the current
+// nesting level, leaving `r` just after the target block's `end`. This resolves
+// a forward branch out of `exits`-1 enclosing blocks/ifs to their common exit.
+fn scan_forward_exits(bytes: [u8], r: write Reader, exits: usize) -> unit {
+    let mut depth: usize = 0;
+    let mut left: usize = exits;
+    let mut going: bool = true;
+    while going {
+        let op: u8 = read_byte(bytes, r);
+        if op == 0x02u8 || op == 0x03u8 || op == 0x04u8 {
+            let bt: usize = read_blocktype(bytes, r);
+            depth = depth + 1;
+        } else if op == 0x0bu8 {
+            if depth == 0usize {
+                left = left - 1;
+                if left == 0usize {
+                    going = false;
+                }
+            } else {
+                depth = depth - 1;
+            }
+        } else if op == 0x05u8 {
+            // `else` never closes a block for branch purposes; its `end` does.
+        } else {
+            skip_immediates(bytes, r, op);
+        }
+    }
+}
+
+// Evaluate a data segment's constant offset init expr. MVP handles the single
+// `i32.const N; end` form (globals are unused by these modules).
+fn read_const_offset(bytes: [u8], r: write Reader) -> usize {
+    let op: u8 = read_byte(bytes, r);
+    if op != 0x41u8 {
+        panic("unimplemented: non-i32.const data offset expr");
+    }
+    let v: i64 = read_i64(bytes, r);
+    let endb: u8 = read_byte(bytes, r);
+    if endb != 0x0bu8 {
+        panic("malformed data offset expr: expected end");
+    }
+    return conv usize (v & 0xffffffffi64);
+}
+
+// Match a decoded import name (a `[u8]` view of `blen` bytes) against a literal.
+fn eq_name(buf: [u8], blen: usize, lit: [u8], litlen: usize) -> bool {
+    if blen != litlen {
+        return false;
+    }
+    let mut i: usize = 0usize;
+    while i < blen {
+        if buf[i] != lit[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+// Resolve an import's (module, field) name to a host-function id. Module "env"
+// holds the WASI-lite set (`print_i32` -> 1, `print_str` -> 2); module
+// "wasi_snapshot_preview1" holds the real WASI Preview 1 core (`fd_write` -> 3,
+// `proc_exit` -> 4). Anything else resolves to 0 and TRAPS only if actually called.
+fn resolve_host(mn: [u8], mlen: usize, field: [u8], flen: usize) -> usize {
+    let env: [3]u8 = [0x65u8, 0x6eu8, 0x76u8];
+    if eq_name(mn, mlen, slice_of(env), 3usize) {
+        let pi: [9]u8 = [0x70u8, 0x72u8, 0x69u8, 0x6eu8, 0x74u8, 0x5fu8, 0x69u8, 0x33u8, 0x32u8];
+        if eq_name(field, flen, slice_of(pi), 9usize) {
+            return 1usize;
+        }
+        let ps: [9]u8 = [0x70u8, 0x72u8, 0x69u8, 0x6eu8, 0x74u8, 0x5fu8, 0x73u8, 0x74u8, 0x72u8];
+        if eq_name(field, flen, slice_of(ps), 9usize) {
+            return 2usize;
+        }
+        return 0usize;
+    }
+    // "wasi_snapshot_preview1" (22 bytes) then "fd_write" (8) / "proc_exit" (9).
+    let wasi: [22]u8 = [
+        0x77u8, 0x61u8, 0x73u8, 0x69u8, 0x5fu8, 0x73u8, 0x6eu8, 0x61u8, 0x70u8, 0x73u8, 0x68u8,
+        0x6fu8, 0x74u8, 0x5fu8, 0x70u8, 0x72u8, 0x65u8, 0x76u8, 0x69u8, 0x65u8, 0x77u8, 0x31u8,
+    ];
+    if eq_name(mn, mlen, slice_of(wasi), 22usize) {
+        let fw: [8]u8 = [0x66u8, 0x64u8, 0x5fu8, 0x77u8, 0x72u8, 0x69u8, 0x74u8, 0x65u8];
+        if eq_name(field, flen, slice_of(fw), 8usize) {
+            return 3usize;
+        }
+        let pe: [9]u8 = [0x70u8, 0x72u8, 0x6fu8, 0x63u8, 0x5fu8, 0x65u8, 0x78u8, 0x69u8, 0x74u8];
+        if eq_name(field, flen, slice_of(pe), 9usize) {
+            return 4usize;
+        }
+        return 0usize;
+    }
+    return 0usize;
+}
+
+// Walk the module: magic + version, then id-dispatched sections. Collects the
+// Type section arities, the Function section's type indices, the Export section
+// (to find the "main" entry), and the Code section's per-body range + local
+// count. Sections appear in ascending id order, so Type/Function/Export are all
+// seen before Code — the per-function arities are known when Code is decoded.
+fn decode_module(bytes: [u8]) -> Module {
+    let mut r: Reader = Reader { pos: 0 };
+    expect_byte(bytes, write r, 0x00u8);
+    expect_byte(bytes, write r, 0x61u8);
+    expect_byte(bytes, write r, 0x73u8);
+    expect_byte(bytes, write r, 0x6du8);
+    expect_byte(bytes, write r, 0x01u8);
+    expect_byte(bytes, write r, 0x00u8);
+    expect_byte(bytes, write r, 0x00u8);
+    expect_byte(bytes, write r, 0x00u8);
+
+    let mut tnparams: [64]usize = [0usize; 64];
+    let mut tnresults: [64]usize = [0usize; 64];
+    let mut m: Module = Module {
+        nfuncs: 0,
+        nimports: 0usize,
+        imp_host: [0usize; 16],
+        entry: 0,
+        fstart: [0usize; 64],
+        fend: [0usize; 64],
+        fnparams: [0usize; 64],
+        fnresults: [0usize; 64],
+        fnlocals: [0usize; 64],
+        has_mem: false,
+        mem_min: 0usize,
+        mem_max: 0usize,
+        has_max: false,
+        ndata: 0usize,
+        data_off: [0usize; 16],
+        data_start: [0usize; 16],
+        data_len: [0usize; 16],
+        type_key: [0i64; 64],
+        ftype: [0usize; 64],
+        nglobals: 0usize,
+        nglobalimports: 0usize,
+        gval: [0i64; 64],
+        gmut: [false; 64],
+        has_table: false,
+        tbl_size: 0usize,
+        tbl: [0i64 - 1i64; 256],
+    };
+
+    let total: usize = len(bytes);
+    while r.pos < total {
+        let id: u8 = read_byte(bytes, write r);
+        let size: u32 = read_u32(bytes, write r);
+        let payload_end: usize = r.pos + conv usize size;
+        if id == 0x01u8 {
+            // Type section: vec of functypes (0x60, params vec, results vec).
+            let ntypes: u32 = read_u32(bytes, write r);
+            let mut t: u32 = 0u32;
+            while t < ntypes {
+                expect_byte(bytes, write r, 0x60u8);
+                let mut key: i64 = 0i64;
+                let np: u32 = read_u32(bytes, write r);
+                let mut i: u32 = 0u32;
+                while i < np {
+                    let vt: u8 = read_byte(bytes, write r);
+                    wrapping { key = key * 8i64 + ((conv i64 vt) - 0x7bi64); }
+                    i = i + 1u32;
+                }
+                wrapping { key = key * 8i64 + 5i64; }
+                let nres: u32 = read_u32(bytes, write r);
+                let mut j: u32 = 0u32;
+                while j < nres {
+                    let vt: u8 = read_byte(bytes, write r);
+                    wrapping { key = key * 8i64 + ((conv i64 vt) - 0x7bi64); }
+                    j = j + 1u32;
+                }
+                tnparams[conv usize t] = conv usize np;
+                tnresults[conv usize t] = conv usize nres;
+                m.type_key[conv usize t] = key;
+                t = t + 1u32;
+            }
+        } else if id == 0x02u8 {
+            // Import section: imported functions occupy the LOWEST function
+            // indices, so a func import is recorded at index `nimports` (its type
+            // arities go into the same per-function arrays the defined bodies use,
+            // which the Function/Code sections then offset PAST the imports).
+            // Table/memory/global imports are decoded but do NOT consume a
+            // function index. `nimports` (K) is the shift applied to every defined
+            // function index.
+            let nimp: u32 = read_u32(bytes, write r);
+            let mut ii: u32 = 0u32;
+            while ii < nimp {
+                let mlen: usize = conv usize (read_u32(bytes, write r));
+                let mut mbuf: [32]u8 = [0u8; 32];
+                let mut ai: usize = 0usize;
+                while ai < mlen {
+                    mbuf[ai] = read_byte(bytes, write r);
+                    ai = ai + 1usize;
+                }
+                let flen: usize = conv usize (read_u32(bytes, write r));
+                let mut fbuf: [32]u8 = [0u8; 32];
+                let mut bj: usize = 0usize;
+                while bj < flen {
+                    fbuf[bj] = read_byte(bytes, write r);
+                    bj = bj + 1usize;
+                }
+                let ikind: u8 = read_byte(bytes, write r);
+                if ikind == 0x00u8 {
+                    let ti: usize = conv usize (read_u32(bytes, write r));
+                    let fx: usize = m.nimports;
+                    m.ftype[fx] = ti;
+                    m.fnparams[fx] = tnparams[ti];
+                    m.fnresults[fx] = tnresults[ti];
+                    m.imp_host[fx] = resolve_host(slice_of(mbuf), mlen, slice_of(fbuf), flen);
+                    m.nimports = m.nimports + 1usize;
+                } else if ikind == 0x01u8 {
+                    let et: u8 = read_byte(bytes, write r);
+                    let tflags: u8 = read_byte(bytes, write r);
+                    let tmin: u32 = read_u32(bytes, write r);
+                    if (tflags & 0x01u8) != 0u8 {
+                        let tmax: u32 = read_u32(bytes, write r);
+                    }
+                } else if ikind == 0x02u8 {
+                    let mflags: u8 = read_byte(bytes, write r);
+                    let mminp: u32 = read_u32(bytes, write r);
+                    m.has_mem = true;
+                    m.mem_min = conv usize mminp;
+                    if (mflags & 0x01u8) != 0u8 {
+                        let mmaxp: u32 = read_u32(bytes, write r);
+                        m.has_max = true;
+                        m.mem_max = conv usize mmaxp;
+                    }
+                } else {
+                    // Imported global: occupies a low global index (same index-
+                    // space pattern as functions). MVP has no host global, so its
+                    // runtime value defaults to 0; the mutability byte is recorded.
+                    let gvt: u8 = read_byte(bytes, write r);
+                    let gmutb: u8 = read_byte(bytes, write r);
+                    let gx: usize = m.nglobals;
+                    m.gmut[gx] = gmutb == 0x01u8;
+                    m.nglobals = m.nglobals + 1usize;
+                    m.nglobalimports = m.nglobalimports + 1usize;
+                }
+                ii = ii + 1u32;
+            }
+        } else if id == 0x03u8 {
+            // Function section: vec of type indices for the DEFINED functions,
+            // addressed at indices [nimports, nimports + count) — the imports
+            // hold the lower indices.
+            let nfns: u32 = read_u32(bytes, write r);
+            m.nfuncs = m.nimports + conv usize nfns;
+            let mut fi: u32 = 0u32;
+            while fi < nfns {
+                let ti: u32 = read_u32(bytes, write r);
+                let fx: usize = m.nimports + conv usize fi;
+                m.ftype[fx] = conv usize ti;
+                m.fnparams[fx] = tnparams[conv usize ti];
+                m.fnresults[fx] = tnresults[conv usize ti];
+                fi = fi + 1u32;
+            }
+        } else if id == 0x07u8 {
+            // Export section: pick the func index exported as "main" (kind 0).
+            let nexp: u32 = read_u32(bytes, write r);
+            let mut e: u32 = 0u32;
+            while e < nexp {
+                let namelen: u32 = read_u32(bytes, write r);
+                let mut is_main: bool = false;
+                if namelen == 4u32 {
+                    let c0: u8 = read_byte(bytes, write r);
+                    let c1: u8 = read_byte(bytes, write r);
+                    let c2: u8 = read_byte(bytes, write r);
+                    let c3: u8 = read_byte(bytes, write r);
+                    if c0 == 0x6du8 && c1 == 0x61u8 && c2 == 0x69u8 && c3 == 0x6eu8 {
+                        is_main = true;
+                    }
+                } else {
+                    let mut c: u32 = 0u32;
+                    while c < namelen {
+                        let ch: u8 = read_byte(bytes, write r);
+                        c = c + 1u32;
+                    }
+                }
+                let kind: u8 = read_byte(bytes, write r);
+                let idx: u32 = read_u32(bytes, write r);
+                if is_main && kind == 0x00u8 {
+                    m.entry = conv usize idx;
+                }
+                e = e + 1u32;
+            }
+        } else if id == 0x0au8 {
+            // Code section: vec of bodies (size, locals decl, instructions).
+            let nbodies: u32 = read_u32(bytes, write r);
+            let mut bi: u32 = 0u32;
+            while bi < nbodies {
+                let body_size: u32 = read_u32(bytes, write r);
+                let body_start: usize = r.pos;
+                let body_end: usize = body_start + conv usize body_size;
+                let nlocgroups: u32 = read_u32(bytes, write r);
+                let mut nloc: usize = 0;
+                let mut g: u32 = 0u32;
+                while g < nlocgroups {
+                    let cnt: u32 = read_u32(bytes, write r);
+                    let vt: u8 = read_byte(bytes, write r);
+                    nloc = nloc + conv usize cnt;
+                    g = g + 1u32;
+                }
+                let fx: usize = m.nimports + conv usize bi;
+                m.fstart[fx] = r.pos;
+                m.fend[fx] = body_end;
+                m.fnlocals[fx] = nloc;
+                bi = bi + 1u32;
+                r.pos = body_end;
+            }
+        } else if id == 0x05u8 {
+            // Memory section: vec of memory types (flags + min pages, opt max).
+            let nmem: u32 = read_u32(bytes, write r);
+            let mut mm: u32 = 0u32;
+            while mm < nmem {
+                let flags: u8 = read_byte(bytes, write r);
+                let minp: u32 = read_u32(bytes, write r);
+                m.has_mem = true;
+                m.mem_min = conv usize minp;
+                if (flags & 0x01u8) != 0u8 {
+                    let maxp: u32 = read_u32(bytes, write r);
+                    m.has_max = true;
+                    m.mem_max = conv usize maxp;
+                }
+                mm = mm + 1u32;
+            }
+        } else if id == 0x0bu8 {
+            // Data section: active segments (memidx 0, const offset, byte vector).
+            let nseg: u32 = read_u32(bytes, write r);
+            let mut sg: u32 = 0u32;
+            while sg < nseg {
+                let dflags: u32 = read_u32(bytes, write r);
+                if dflags != 0u32 {
+                    panic("unimplemented: non-active data segment");
+                }
+                let off: usize = read_const_offset(bytes, write r);
+                let dlen: u32 = read_u32(bytes, write r);
+                m.data_off[m.ndata] = off;
+                m.data_start[m.ndata] = r.pos;
+                m.data_len[m.ndata] = conv usize dlen;
+                m.ndata = m.ndata + 1usize;
+                r.pos = r.pos + conv usize dlen;
+                sg = sg + 1u32;
+            }
+        } else if id == 0x04u8 {
+            // Table section: a funcref table (elem type 0x70 + limits). MVP has one
+            // table; entries begin null (-1) and are filled by the Element section.
+            let ntab: u32 = read_u32(bytes, write r);
+            let mut tt: u32 = 0u32;
+            while tt < ntab {
+                let et: u8 = read_byte(bytes, write r);
+                let tflags: u8 = read_byte(bytes, write r);
+                let tmin: u32 = read_u32(bytes, write r);
+                m.has_table = true;
+                m.tbl_size = conv usize tmin;
+                if (tflags & 0x01u8) != 0u8 {
+                    let tmax: u32 = read_u32(bytes, write r);
+                }
+                tt = tt + 1u32;
+            }
+        } else if id == 0x06u8 {
+            // Global section: each global is a valtype + mutability byte + a
+            // constant init expr (`<const>; end`). Defined globals follow the
+            // imported ones in index space; `global.get` in an init expr reads an
+            // earlier (imported) global's value.
+            let nglob: u32 = read_u32(bytes, write r);
+            let mut gg: u32 = 0u32;
+            while gg < nglob {
+                let gvtb: u8 = read_byte(bytes, write r);
+                let gmutb: u8 = read_byte(bytes, write r);
+                let iop: u8 = read_byte(bytes, write r);
+                let mut gv: i64 = 0i64;
+                if iop == 0x41u8 {
+                    gv = as_i32(read_i64(bytes, write r));
+                } else if iop == 0x42u8 {
+                    gv = read_i64(bytes, write r);
+                } else if iop == 0x43u8 {
+                    let mut k: usize = 0usize;
+                    while k < 4usize {
+                        let bb: i64 = conv i64 (read_byte(bytes, write r));
+                        wrapping { gv = gv | (bb << conv i64 (k * 8usize)); }
+                        k = k + 1usize;
+                    }
+                } else if iop == 0x44u8 {
+                    let mut k: usize = 0usize;
+                    while k < 8usize {
+                        let bb: i64 = conv i64 (read_byte(bytes, write r));
+                        wrapping { gv = gv | (bb << conv i64 (k * 8usize)); }
+                        k = k + 1usize;
+                    }
+                } else if iop == 0x23u8 {
+                    let gi: usize = conv usize (read_u32(bytes, write r));
+                    gv = m.gval[gi];
+                } else {
+                    panic("unimplemented: global init expr");
+                }
+                let endb: u8 = read_byte(bytes, write r);
+                if endb != 0x0bu8 {
+                    panic("malformed global init expr: expected end");
+                }
+                let gx: usize = m.nglobals;
+                m.gval[gx] = gv;
+                m.gmut[gx] = gmutb == 0x01u8;
+                m.nglobals = m.nglobals + 1usize;
+                gg = gg + 1u32;
+            }
+        } else if id == 0x09u8 {
+            // Element section: active segments (table 0, const offset, vec of func
+            // indices) fill the table at instantiation for indirect dispatch.
+            let neseg: u32 = read_u32(bytes, write r);
+            let mut es: u32 = 0u32;
+            while es < neseg {
+                let eflags: u32 = read_u32(bytes, write r);
+                if eflags != 0u32 {
+                    panic("unimplemented: non-active element segment");
+                }
+                let eoff: usize = read_const_offset(bytes, write r);
+                let nfn: u32 = read_u32(bytes, write r);
+                let mut ek: u32 = 0u32;
+                while ek < nfn {
+                    let fnix: usize = conv usize (read_u32(bytes, write r));
+                    m.tbl[eoff + conv usize ek] = conv i64 fnix;
+                    ek = ek + 1u32;
+                }
+                es = es + 1u32;
+            }
+        }
+        r.pos = payload_end;
+    }
+    return m;
+}
+
+// Re-normalize an i64 holding an i32 result to the sign-extended-from-bit-31
+// representation. Runs in `wrapping` so the left shift cannot fault.
+fn as_i32(v: i64) -> i64 {
+    let mut norm: i64 = 0i64;
+    wrapping { norm = (v << 32i64) >> 32i64; }
+    return norm;
+}
+
+// clz/ctz/popcount, hand-rolled over shifts/masks. The 32-bit forms mask to the
+// low 32 bits first; all shift the value (never a mask) so unsigned `u64` shifts
+// avoid arithmetic-shift sign fill.
+fn clz32(v: i64) -> i64 {
+    let mut uv: u64 = conv u64 (v & 0xffffffffi64);
+    if uv == 0u64 {
+        return 32i64;
+    }
+    let mut n: i64 = 0i64;
+    while (uv & 0x80000000u64) == 0u64 {
+        n = n + 1i64;
+        uv = uv << 1u64;
+    }
+    return n;
+}
+
+fn ctz32(v: i64) -> i64 {
+    let mut uv: u64 = conv u64 (v & 0xffffffffi64);
+    if uv == 0u64 {
+        return 32i64;
+    }
+    let mut n: i64 = 0i64;
+    while (uv & 1u64) == 0u64 {
+        n = n + 1i64;
+        uv = uv >> 1u64;
+    }
+    return n;
+}
+
+fn popcnt32(v: i64) -> i64 {
+    let mut uv: u64 = conv u64 (v & 0xffffffffi64);
+    let mut n: i64 = 0i64;
+    while uv != 0u64 {
+        n = n + conv i64 (uv & 1u64);
+        uv = uv >> 1u64;
+    }
+    return n;
+}
+
+fn clz64(v: i64) -> i64 {
+    let mut uv: u64 = 0u64;
+    wrapping { uv = conv u64 v; }
+    if uv == 0u64 {
+        return 64i64;
+    }
+    let mut n: i64 = 0i64;
+    while (uv & 0x8000000000000000u64) == 0u64 {
+        n = n + 1i64;
+        uv = uv << 1u64;
+    }
+    return n;
+}
+
+fn ctz64(v: i64) -> i64 {
+    let mut uv: u64 = 0u64;
+    wrapping { uv = conv u64 v; }
+    if uv == 0u64 {
+        return 64i64;
+    }
+    let mut n: i64 = 0i64;
+    while (uv & 1u64) == 0u64 {
+        n = n + 1i64;
+        uv = uv >> 1u64;
+    }
+    return n;
+}
+
+fn popcnt64(v: i64) -> i64 {
+    let mut uv: u64 = 0u64;
+    wrapping { uv = conv u64 v; }
+    let mut n: i64 = 0i64;
+    while uv != 0u64 {
+        n = n + conv i64 (uv & 1u64);
+        uv = uv >> 1u64;
+    }
+    return n;
+}
+
+fn rotl32(a: i64, c: i64) -> i64 {
+    let s: i64 = c & 31i64;
+    if s == 0i64 {
+        return as_i32(a);
+    }
+    let ua: i64 = a & 0xffffffffi64;
+    let mut res: i64 = 0i64;
+    wrapping { res = ((ua << s) | (ua >> (32i64 - s))) & 0xffffffffi64; }
+    return as_i32(res);
+}
+
+fn rotr32(a: i64, c: i64) -> i64 {
+    let s: i64 = c & 31i64;
+    if s == 0i64 {
+        return as_i32(a);
+    }
+    let ua: i64 = a & 0xffffffffi64;
+    let mut res: i64 = 0i64;
+    wrapping { res = ((ua >> s) | (ua << (32i64 - s))) & 0xffffffffi64; }
+    return as_i32(res);
+}
+
+fn rotl64(a: i64, c: i64) -> i64 {
+    let s: i64 = c & 63i64;
+    if s == 0i64 {
+        return a;
+    }
+    let mut res: i64 = 0i64;
+    wrapping {
+        let ua: u64 = conv u64 a;
+        let sc: u64 = conv u64 s;
+        res = conv i64 ((ua << sc) | (ua >> (64u64 - sc)));
+    }
+    return res;
+}
+
+fn rotr64(a: i64, c: i64) -> i64 {
+    let s: i64 = c & 63i64;
+    if s == 0i64 {
+        return a;
+    }
+    let mut res: i64 = 0i64;
+    wrapping {
+        let ua: u64 = conv u64 a;
+        let sc: u64 = conv u64 s;
+        res = conv i64 ((ua >> sc) | (ua << (64u64 - sc)));
+    }
+    return res;
+}
+
+// The mutable machine state of one function activation: the operand stack and
+// the structured-control label stack. A label records its kind (block/loop/if),
+// a loop's re-entry position, its result arity, and the operand-stack height at
+// entry (the level a branch unwinds to).
+copy struct Frame {
+    stack: [64]i64,
+    sp: usize,
+    lab_kind: [32]usize,
+    lab_start: [32]usize,
+    lab_arity: [32]usize,
+    lab_height: [32]usize,
+    nlab: usize,
+}
+
+// A suspended call activation: the caller's frame plus its instruction position
+// and function identity. `call` snapshots the caller into an explicit activation
+// stack and switches the working state to the callee; function-return restores
+// the top snapshot. This keeps HOST recursion O(1) regardless of the WASM call
+// depth (a plain recursive evaluator overflows the tree-walker's host stack well
+// before fib(10)), so arbitrarily deep WASM recursion runs on every engine.
+copy struct Act {
+    fidx: usize,
+    end: usize,
+    nres: usize,
+    pos: usize,
+    locals: [32]i64,
+    frame: Frame,
+}
+
+fn zero_act() -> Act {
+    return Act {
+        fidx: 0,
+        end: 0,
+        nres: 0,
+        pos: 0,
+        locals: [0i64; 32],
+        frame: Frame {
+            stack: [0i64; 64],
+            sp: 0,
+            lab_kind: [0usize; 32],
+            lab_start: [0usize; 32],
+            lab_arity: [0usize; 32],
+            lab_height: [0usize; 32],
+            nlab: 0,
+        },
+    };
+}
+
+// Perform an INTRA-frame branch to label depth `n` (0 = innermost; callers route
+// `n >= nlab`, a branch to the function body, to the return path instead). A
+// branch to a `loop` jumps to its start and keeps the label; to a `block`/`if`
+// it skips forward past the matching `end` and pops the label (and every inner
+// one). The operand stack unwinds to the label's entry height, preserving the
+// top `arity` result values.
+fn do_branch(bytes: [u8], f: write Frame, r: write Reader, n: usize) -> unit {
+    let target: usize = f.nlab - 1 - n;
+    let arity: usize = f.lab_arity[target];
+    let height: usize = f.lab_height[target];
+    let mut i: usize = 0;
+    while i < arity {
+        f.*.stack[height + i] = f.stack[f.sp - arity + i];
+        i = i + 1;
+    }
+    f.*.sp = height + arity;
+    if f.lab_kind[target] == 1usize {
+        r.*.pos = f.lab_start[target];
+        f.*.nlab = target + 1;
+    } else {
+        scan_forward_exits(bytes, r, n + 1);
+        f.*.nlab = target;
+    }
+}
+
+// Pure numeric dispatch (no operand-stack/frame access), factored OUT of the
+// `exec` driver so the ~90-branch chain's temporaries live here rather than
+// bloating `exec`'s single (large) stack frame.
+fn eval_unop(op: u8, a: i64) -> i64 {
+    let mask: i64 = 0xffffffffi64;
+    let mut res: i64 = 0i64;
+        if op == 0x45u8 || op == 0x50u8 { if a == 0i64 { res = 1i64; } }
+        else if op == 0x67u8 { res = clz32(a); }
+        else if op == 0x68u8 { res = ctz32(a); }
+        else if op == 0x69u8 { res = popcnt32(a); }
+        else if op == 0x79u8 { res = clz64(a); }
+        else if op == 0x7au8 { res = ctz64(a); }
+        else if op == 0x7bu8 { res = popcnt64(a); }
+        else if op == 0xa7u8 { res = as_i32(a); }
+        else if op == 0xacu8 { res = a; }
+        else { res = a & mask; }
+    return res;
+}
+
+fn eval_binop(op: u8, a: i64, b: i64) -> i64 {
+    let mask: i64 = 0xffffffffi64;
+    let mut res: i64 = 0i64;
+        if op == 0x46u8 { if a == b { res = 1i64; } }
+        else if op == 0x47u8 { if a != b { res = 1i64; } }
+        else if op == 0x48u8 { if a < b { res = 1i64; } }
+        else if op == 0x49u8 { if (a & mask) < (b & mask) { res = 1i64; } }
+        else if op == 0x4au8 { if a > b { res = 1i64; } }
+        else if op == 0x4bu8 { if (a & mask) > (b & mask) { res = 1i64; } }
+        else if op == 0x4cu8 { if a <= b { res = 1i64; } }
+        else if op == 0x4du8 { if (a & mask) <= (b & mask) { res = 1i64; } }
+        else if op == 0x4eu8 { if a >= b { res = 1i64; } }
+        else if op == 0x4fu8 { if (a & mask) >= (b & mask) { res = 1i64; } }
+        else if op == 0x51u8 { if a == b { res = 1i64; } }
+        else if op == 0x52u8 { if a != b { res = 1i64; } }
+        else if op == 0x53u8 { if a < b { res = 1i64; } }
+        else if op == 0x54u8 { wrapping { let ua: u64 = conv u64 a; let ub: u64 = conv u64 b; if ua < ub { res = 1i64; } } }
+        else if op == 0x55u8 { if a > b { res = 1i64; } }
+        else if op == 0x56u8 { wrapping { let ua: u64 = conv u64 a; let ub: u64 = conv u64 b; if ua > ub { res = 1i64; } } }
+        else if op == 0x57u8 { if a <= b { res = 1i64; } }
+        else if op == 0x58u8 { wrapping { let ua: u64 = conv u64 a; let ub: u64 = conv u64 b; if ua <= ub { res = 1i64; } } }
+        else if op == 0x59u8 { if a >= b { res = 1i64; } }
+        else if op == 0x5au8 { wrapping { let ua: u64 = conv u64 a; let ub: u64 = conv u64 b; if ua >= ub { res = 1i64; } } }
+        else if op == 0x6au8 { wrapping { res = a + b; } res = as_i32(res); }
+        else if op == 0x6bu8 { wrapping { res = a - b; } res = as_i32(res); }
+        else if op == 0x6cu8 { wrapping { res = a * b; } res = as_i32(res); }
+        else if op == 0x6du8 {
+            if b == 0i64 { panic("integer divide by zero"); }
+            if a == (0i64 - 2147483648i64) && b == (0i64 - 1i64) { panic("integer overflow"); }
+            wrapping { res = a / b; }
+            res = as_i32(res);
+        }
+        else if op == 0x6eu8 {
+            if (b & mask) == 0i64 { panic("integer divide by zero"); }
+            wrapping { let ua: u64 = conv u64 (a & mask); let ub: u64 = conv u64 (b & mask); res = conv i64 (ua / ub); }
+            res = as_i32(res);
+        }
+        else if op == 0x6fu8 {
+            if b == 0i64 { panic("integer divide by zero"); }
+            if b == (0i64 - 1i64) { res = 0i64; }
+            else { wrapping { res = a % b; } res = as_i32(res); }
+        }
+        else if op == 0x70u8 {
+            if (b & mask) == 0i64 { panic("integer divide by zero"); }
+            wrapping { let ua: u64 = conv u64 (a & mask); let ub: u64 = conv u64 (b & mask); res = conv i64 (ua % ub); }
+            res = as_i32(res);
+        }
+        else if op == 0x71u8 { res = as_i32(a & b); }
+        else if op == 0x72u8 { res = as_i32(a | b); }
+        else if op == 0x73u8 { res = as_i32(a ^ b); }
+        else if op == 0x74u8 { wrapping { res = a << (b & 31i64); } res = as_i32(res); }
+        else if op == 0x75u8 { res = as_i32(a >> (b & 31i64)); }
+        else if op == 0x76u8 { res = as_i32((a & mask) >> (b & 31i64)); }
+        else if op == 0x77u8 { res = rotl32(a, b); }
+        else if op == 0x78u8 { res = rotr32(a, b); }
+        else if op == 0x7cu8 { wrapping { res = a + b; } }
+        else if op == 0x7du8 { wrapping { res = a - b; } }
+        else if op == 0x7eu8 { wrapping { res = a * b; } }
+        else if op == 0x7fu8 {
+            let mut i64min: i64 = 0i64;
+            wrapping { i64min = 1i64 << 63i64; }
+            if b == 0i64 { panic("integer divide by zero"); }
+            if a == i64min && b == (0i64 - 1i64) { panic("integer overflow"); }
+            wrapping { res = a / b; }
+        }
+        else if op == 0x80u8 {
+            if b == 0i64 { panic("integer divide by zero"); }
+            wrapping { let ua: u64 = conv u64 a; let ub: u64 = conv u64 b; res = conv i64 (ua / ub); }
+        }
+        else if op == 0x81u8 {
+            if b == 0i64 { panic("integer divide by zero"); }
+            if b == (0i64 - 1i64) { res = 0i64; }
+            else { wrapping { res = a % b; } }
+        }
+        else if op == 0x82u8 {
+            if b == 0i64 { panic("integer divide by zero"); }
+            wrapping { let ua: u64 = conv u64 a; let ub: u64 = conv u64 b; res = conv i64 (ua % ub); }
+        }
+        else if op == 0x83u8 { res = a & b; }
+        else if op == 0x84u8 { res = a | b; }
+        else if op == 0x85u8 { res = a ^ b; }
+        else if op == 0x86u8 { wrapping { res = a << (b & 63i64); } }
+        else if op == 0x87u8 { res = a >> (b & 63i64); }
+        else if op == 0x88u8 { wrapping { let ua: u64 = conv u64 a; let sc: u64 = conv u64 (b & 63i64); res = conv i64 (ua >> sc); } }
+        else if op == 0x89u8 { res = rotl64(a, b); }
+        else if op == 0x8au8 { res = rotr64(a, b); }
+        else { panic("unimplemented opcode"); }
+    return res;
+}
+
+// ---- floating point (WASM float ISA) ----------------------------------------
+//
+// Floats ride the i64 operand stack as their IEEE BIT PATTERN: an f64 as its
+// 64-bit `to_bits()`, an f32 as its 32-bit pattern zero-extended into the low
+// word (mirroring `f32.load`/`f32.const`, which read zero-extended). Every float
+// op reinterprets the slot with `bitcast` at the stack boundary, does the actual
+// math with Candor's IEEE `f32`/`f64` ops, and `bitcast`s the result back — so
+// the arithmetic is real IEEE-754, deterministic across every engine. Bit ops on
+// the slot handle abs/neg/copysign exactly (sign-bit only, so -0/NaN are exact).
+
+// copysign: the magnitude of `mag` with the sign of `sgn` (a pure bit splice).
+fn copysign64(mag: f64, sgn: f64) -> f64 {
+    let mut smask: i64 = 0i64;
+    wrapping { smask = 1i64 << 63i64; }
+    let mb: i64 = bitcast i64 (mag) & 0x7fffffffffffffffi64;
+    let sb: i64 = bitcast i64 (sgn) & smask;
+    return bitcast f64 (mb | sb);
+}
+fn copysign32(mag: f32, sgn: f32) -> f32 {
+    let mb: i64 = conv i64 (bitcast u32 (mag)) & 0x7fffffffi64;
+    let sb: i64 = conv i64 (bitcast u32 (sgn)) & 0x80000000i64;
+    return bitcast f32 (conv u32 (mb | sb));
+}
+
+// Round-toward-zero. Below 2^52 (f64) / 2^23 (f32) a value may have a fractional
+// part, dropped exactly by an int round-trip (in range, so `conv` is exact and
+// never saturates); the sign is restored so trunc(-0.5) is -0. At/above that
+// magnitude the value is already integral (and NaN/inf fall through unchanged).
+fn ftrunc64(x: f64) -> f64 {
+    let lim: f64 = 4503599627370496.0;
+    if x < lim && x > (0.0 - lim) {
+        return copysign64(conv f64 (conv i64 (x)), x);
+    }
+    return x;
+}
+fn ffloor64(x: f64) -> f64 { let t: f64 = ftrunc64(x); if t > x { return t - 1.0; } return t; }
+fn fceil64(x: f64) -> f64 { let t: f64 = ftrunc64(x); if t < x { return t + 1.0; } return t; }
+// Round to nearest, ties to even: adding then subtracting 2^52 with a matching
+// sign rounds under the IEEE default mode (round-nearest-even), exactly WASM's
+// `nearest`. Sign restored for the -0 / small-negative cases.
+fn fnearest64(x: f64) -> f64 {
+    let lim: f64 = 4503599627370496.0;
+    if x < lim && x > (0.0 - lim) {
+        let mut r: f64 = 0.0;
+        if x >= 0.0 { r = (x + lim) - lim; } else { r = (x - lim) + lim; }
+        return copysign64(r, x);
+    }
+    return x;
+}
+fn ftrunc32(x: f32) -> f32 {
+    let lim: f32 = 8388608.0f32;
+    if x < lim && x > (0.0f32 - lim) {
+        return copysign32(conv f32 (conv i32 (x)), x);
+    }
+    return x;
+}
+fn ffloor32(x: f32) -> f32 { let t: f32 = ftrunc32(x); if t > x { return t - 1.0f32; } return t; }
+fn fceil32(x: f32) -> f32 { let t: f32 = ftrunc32(x); if t < x { return t + 1.0f32; } return t; }
+fn fnearest32(x: f32) -> f32 {
+    let lim: f32 = 8388608.0f32;
+    if x < lim && x > (0.0f32 - lim) {
+        let mut r: f32 = 0.0f32;
+        if x >= 0.0f32 { r = (x + lim) - lim; } else { r = (x - lim) + lim; }
+        return copysign32(r, x);
+    }
+    return x;
+}
+
+// WASM min/max: NaN in -> NaN out; for equal-but-signed zeros, min picks -0 and
+// max picks +0 (an OR / AND of the two sign-carrying patterns yields exactly that,
+// and is the identity when the operands are equal non-zeros).
+fn fmin64(a: f64, b: f64) -> f64 {
+    if a != a { return a; }
+    if b != b { return b; }
+    if a < b { return a; }
+    if b < a { return b; }
+    return bitcast f64 (bitcast i64 (a) | bitcast i64 (b));
+}
+fn fmax64(a: f64, b: f64) -> f64 {
+    if a != a { return a; }
+    if b != b { return b; }
+    if a > b { return a; }
+    if b > a { return b; }
+    return bitcast f64 (bitcast i64 (a) & bitcast i64 (b));
+}
+fn fmin32(a: f32, b: f32) -> f32 {
+    if a != a { return a; }
+    if b != b { return b; }
+    if a < b { return a; }
+    if b < a { return b; }
+    return bitcast f32 (conv u32 (conv i64 (bitcast u32 (a)) | conv i64 (bitcast u32 (b))));
+}
+fn fmax32(a: f32, b: f32) -> f32 {
+    if a != a { return a; }
+    if b != b { return b; }
+    if a > b { return a; }
+    if b > a { return b; }
+    return bitcast f32 (conv u32 (conv i64 (bitcast u32 (a)) & conv i64 (bitcast u32 (b))));
+}
+
+// Unary float dispatch: abs/neg (bit ops), the exact rounding ops, the TRAPPING
+// float->int truncations (WASM MVP: trap on NaN / out of range — checked in the
+// float domain against the exact representable bounds, since Candor's `conv`
+// SATURATES rather than trapping), int->float conversions, promote/demote, and
+// reinterpret (a same-slot width re-canonicalization). `sqrt` uses the Candor
+// `sqrt` intrinsic (correctly-rounded IEEE, bit-exact vs hardware/wasmi): a
+// negative operand yields NaN and sqrt(-0.0) = -0.0 — a total, non-faulting op.
+fn eval_funop(op: u8, a: i64) -> i64 {
+    let mut res: i64 = 0i64;
+    if op == 0x8bu8 { res = a & 0x7fffffffi64; }
+    else if op == 0x8cu8 { res = a ^ 0x80000000i64; }
+    else if op == 0x8du8 { res = conv i64 (bitcast u32 (fceil32(bitcast f32 (conv u32 (a & 0xffffffffi64))))); }
+    else if op == 0x8eu8 { res = conv i64 (bitcast u32 (ffloor32(bitcast f32 (conv u32 (a & 0xffffffffi64))))); }
+    else if op == 0x8fu8 { res = conv i64 (bitcast u32 (ftrunc32(bitcast f32 (conv u32 (a & 0xffffffffi64))))); }
+    else if op == 0x90u8 { res = conv i64 (bitcast u32 (fnearest32(bitcast f32 (conv u32 (a & 0xffffffffi64))))); }
+    else if op == 0x91u8 { res = conv i64 (bitcast u32 (sqrt(bitcast f32 (conv u32 (a & 0xffffffffi64))))); }
+    else if op == 0x99u8 { res = a & 0x7fffffffffffffffi64; }
+    else if op == 0x9au8 { let mut m: i64 = 0i64; wrapping { m = 1i64 << 63i64; } res = a ^ m; }
+    else if op == 0x9bu8 { res = bitcast i64 (fceil64(bitcast f64 (a))); }
+    else if op == 0x9cu8 { res = bitcast i64 (ffloor64(bitcast f64 (a))); }
+    else if op == 0x9du8 { res = bitcast i64 (ftrunc64(bitcast f64 (a))); }
+    else if op == 0x9eu8 { res = bitcast i64 (fnearest64(bitcast f64 (a))); }
+    else if op == 0x9fu8 { res = bitcast i64 (sqrt(bitcast f64 (a))); }
+    else if op == 0xa8u8 {
+        let x: f32 = bitcast f32 (conv u32 (a & 0xffffffffi64));
+        if x != x { panic("invalid conversion to integer"); }
+        if x >= 2147483648.0f32 { panic("integer overflow"); }
+        if x < (0.0f32 - 2147483648.0f32) { panic("integer overflow"); }
+        res = conv i64 (conv i32 (x));
+    }
+    else if op == 0xa9u8 {
+        let x: f32 = bitcast f32 (conv u32 (a & 0xffffffffi64));
+        if x != x { panic("invalid conversion to integer"); }
+        if x >= 4294967296.0f32 { panic("integer overflow"); }
+        if x <= (0.0f32 - 1.0f32) { panic("integer overflow"); }
+        res = as_i32(conv i64 (conv u32 (x)));
+    }
+    else if op == 0xaau8 {
+        let x: f64 = bitcast f64 (a);
+        if x != x { panic("invalid conversion to integer"); }
+        if x >= 2147483648.0 { panic("integer overflow"); }
+        if x <= (0.0 - 2147483649.0) { panic("integer overflow"); }
+        res = conv i64 (conv i32 (x));
+    }
+    else if op == 0xabu8 {
+        let x: f64 = bitcast f64 (a);
+        if x != x { panic("invalid conversion to integer"); }
+        if x >= 4294967296.0 { panic("integer overflow"); }
+        if x <= (0.0 - 1.0) { panic("integer overflow"); }
+        res = as_i32(conv i64 (conv u32 (x)));
+    }
+    else if op == 0xaeu8 {
+        let x: f32 = bitcast f32 (conv u32 (a & 0xffffffffi64));
+        if x != x { panic("invalid conversion to integer"); }
+        if x >= 9223372036854775808.0f32 { panic("integer overflow"); }
+        if x < (0.0f32 - 9223372036854775808.0f32) { panic("integer overflow"); }
+        res = conv i64 (x);
+    }
+    else if op == 0xafu8 {
+        let x: f32 = bitcast f32 (conv u32 (a & 0xffffffffi64));
+        if x != x { panic("invalid conversion to integer"); }
+        if x >= 18446744073709551616.0f32 { panic("integer overflow"); }
+        if x <= (0.0f32 - 1.0f32) { panic("integer overflow"); }
+        wrapping { res = conv i64 (conv u64 (x)); }
+    }
+    else if op == 0xb0u8 {
+        let x: f64 = bitcast f64 (a);
+        if x != x { panic("invalid conversion to integer"); }
+        if x >= 9223372036854775808.0 { panic("integer overflow"); }
+        if x < (0.0 - 9223372036854775808.0) { panic("integer overflow"); }
+        res = conv i64 (x);
+    }
+    else if op == 0xb1u8 {
+        let x: f64 = bitcast f64 (a);
+        if x != x { panic("invalid conversion to integer"); }
+        if x >= 18446744073709551616.0 { panic("integer overflow"); }
+        if x <= (0.0 - 1.0) { panic("integer overflow"); }
+        wrapping { res = conv i64 (conv u64 (x)); }
+    }
+    else if op == 0xb2u8 { res = conv i64 (bitcast u32 (conv f32 (conv i32 (a)))); }
+    else if op == 0xb3u8 { res = conv i64 (bitcast u32 (conv f32 (conv u32 (a & 0xffffffffi64)))); }
+    else if op == 0xb4u8 { res = conv i64 (bitcast u32 (conv f32 (a))); }
+    else if op == 0xb5u8 { let mut uv: u64 = 0u64; wrapping { uv = conv u64 a; } res = conv i64 (bitcast u32 (conv f32 (uv))); }
+    else if op == 0xb6u8 { res = conv i64 (bitcast u32 (conv f32 (bitcast f64 (a)))); }
+    else if op == 0xb7u8 { res = bitcast i64 (conv f64 (conv i32 (a))); }
+    else if op == 0xb8u8 { res = bitcast i64 (conv f64 (conv u32 (a & 0xffffffffi64))); }
+    else if op == 0xb9u8 { res = bitcast i64 (conv f64 (a)); }
+    else if op == 0xbau8 { let mut uv: u64 = 0u64; wrapping { uv = conv u64 a; } res = bitcast i64 (conv f64 (uv)); }
+    else if op == 0xbbu8 { res = bitcast i64 (conv f64 (bitcast f32 (conv u32 (a & 0xffffffffi64)))); }
+    else if op == 0xbcu8 { res = as_i32(a & 0xffffffffi64); }
+    else if op == 0xbdu8 { res = a; }
+    else if op == 0xbeu8 { res = a & 0xffffffffi64; }
+    else { res = a; }
+    return res;
+}
+
+// Binary float dispatch: IEEE comparisons (push i32 0/1), `+ - * /`, WASM
+// min/max, and copysign, for both widths. Operands are reinterpreted from their
+// slot bits; the result rides back as bits (f32 zero-extended into the low word).
+fn eval_fbinop(op: u8, a: i64, b: i64) -> i64 {
+    let mut res: i64 = 0i64;
+    if op >= 0x5bu8 && op <= 0x60u8 {
+        let fa: f32 = bitcast f32 (conv u32 (a & 0xffffffffi64));
+        let fb: f32 = bitcast f32 (conv u32 (b & 0xffffffffi64));
+        if op == 0x5bu8 { if fa == fb { res = 1i64; } }
+        else if op == 0x5cu8 { if fa != fb { res = 1i64; } }
+        else if op == 0x5du8 { if fa < fb { res = 1i64; } }
+        else if op == 0x5eu8 { if fa > fb { res = 1i64; } }
+        else if op == 0x5fu8 { if fa <= fb { res = 1i64; } }
+        else { if fa >= fb { res = 1i64; } }
+    } else if op >= 0x61u8 && op <= 0x66u8 {
+        let fa: f64 = bitcast f64 (a);
+        let fb: f64 = bitcast f64 (b);
+        if op == 0x61u8 { if fa == fb { res = 1i64; } }
+        else if op == 0x62u8 { if fa != fb { res = 1i64; } }
+        else if op == 0x63u8 { if fa < fb { res = 1i64; } }
+        else if op == 0x64u8 { if fa > fb { res = 1i64; } }
+        else if op == 0x65u8 { if fa <= fb { res = 1i64; } }
+        else { if fa >= fb { res = 1i64; } }
+    } else if op >= 0x92u8 && op <= 0x98u8 {
+        let fa: f32 = bitcast f32 (conv u32 (a & 0xffffffffi64));
+        let fb: f32 = bitcast f32 (conv u32 (b & 0xffffffffi64));
+        let mut fr: f32 = 0.0f32;
+        if op == 0x92u8 { fr = fa + fb; }
+        else if op == 0x93u8 { fr = fa - fb; }
+        else if op == 0x94u8 { fr = fa * fb; }
+        else if op == 0x95u8 { fr = fa / fb; }
+        else if op == 0x96u8 { fr = fmin32(fa, fb); }
+        else if op == 0x97u8 { fr = fmax32(fa, fb); }
+        else { fr = copysign32(fa, fb); }
+        res = conv i64 (bitcast u32 (fr));
+    } else {
+        let fa: f64 = bitcast f64 (a);
+        let fb: f64 = bitcast f64 (b);
+        let mut fr: f64 = 0.0;
+        if op == 0xa0u8 { fr = fa + fb; }
+        else if op == 0xa1u8 { fr = fa - fb; }
+        else if op == 0xa2u8 { fr = fa * fb; }
+        else if op == 0xa3u8 { fr = fa / fb; }
+        else if op == 0xa4u8 { fr = fmin64(fa, fb); }
+        else if op == 0xa5u8 { fr = fmax64(fa, fb); }
+        else { fr = copysign64(fa, fb); }
+        res = bitcast i64 (fr);
+    }
+    return res;
+}
+
+// Append the decimal text of an i32 (held sign-extended in an i64) to `hout`,
+// then a newline. Negating stays within i64 for the whole i32 range, so INT_MIN
+// prints without overflow.
+fn emit_i32_dec(hout: write Vec[u8], v: i64) alloc -> unit {
+    if v < 0i64 {
+        push(write hout.*, 0x2du8);
+    }
+    let mut mag: i64 = v;
+    if v < 0i64 {
+        mag = 0i64 - v;
+    }
+    if mag == 0i64 {
+        push(write hout.*, 0x30u8);
+    } else {
+        let mut digits: [12]u8 = [0u8; 12];
+        let mut n: usize = 0usize;
+        while mag > 0i64 {
+            let d: u8 = conv u8 (mag % 10i64);
+            digits[n] = d + 0x30u8;
+            n = n + 1usize;
+            mag = mag / 10i64;
+        }
+        while n > 0usize {
+            n = n - 1usize;
+            push(write hout.*, digits[n]);
+        }
+    }
+    push(write hout.*, 0x0au8);
+}
+
+// A host call's outcome: the i32 `value` it returns (an errno for `fd_write`;
+// ignored when the import declares no result) and — for `proc_exit` — an `exit`
+// request carrying the program's `exit_code`. `exit` is the exec driver's clean-
+// termination signal, DISTINCT from a trap (a panic) and from a normal return.
+copy struct HostOutcome {
+    value: i64,
+    exit: bool,
+    exit_code: i64,
+}
+
+// WASI Preview 1 `fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) -> errno`: gather
+// `iovs_len` ciovec structs from linear memory at `iovs_ptr` — each 8 bytes, a
+// little-endian `buf_ptr` at offset 0 and `buf_len` at offset 4 — appending every
+// buffer's bytes to the host-output buffer, then write the TOTAL byte count back
+// as a little-endian i32 at `nwritten_ptr`. fd 1 (stdout) and fd 2 (stderr) both
+// route to the single buffered output (MVP: stderr is merged into stdout); any
+// other fd returns EBADF (8) without writing. Every span is bounds-checked and
+// TRAPS past the end of memory. Returns 0 (success) once the write completes.
+fn do_fd_write(fd_arg: i64, iovs_arg: i64, len_arg: i64, nwr_arg: i64, mem: write Vec[u8], hout: write Vec[u8]) alloc -> i64 {
+    let mask: i64 = 0xffffffffi64;
+    let fd: i64 = fd_arg & mask;
+    if fd != 1i64 && fd != 2i64 {
+        return 8i64;
+    }
+    let iovs_ptr: usize = conv usize (iovs_arg & mask);
+    let iovs_len: usize = conv usize (len_arg & mask);
+    let nwritten_ptr: usize = conv usize (nwr_arg & mask);
+    let mut total: i64 = 0i64;
+    let mut iv: usize = 0usize;
+    while iv < iovs_len {
+        let iov_base: usize = iovs_ptr + iv * 8usize;
+        if iov_base + 8usize > len(read mem.*) {
+            panic("out of bounds memory access");
+        }
+        let buf_ptr: usize = conv usize (mem_load_bytes(read mem.*, iov_base, 4usize) & mask);
+        let buf_len: usize = conv usize (mem_load_bytes(read mem.*, iov_base + 4usize, 4usize) & mask);
+        if buf_ptr + buf_len > len(read mem.*) {
+            panic("out of bounds memory access");
+        }
+        let mut k: usize = 0usize;
+        while k < buf_len {
+            push(write hout.*, get(read mem.*, buf_ptr + k).*);
+            k = k + 1usize;
+        }
+        wrapping { total = total + conv i64 buf_len; }
+        iv = iv + 1usize;
+    }
+    if nwritten_ptr + 4usize > len(read mem.*) {
+        panic("out of bounds memory access");
+    }
+    mem_store_bytes(write mem.*, nwritten_ptr, 4usize, total);
+    return 0i64;
+}
+
+// Dispatch a resolved host import. `print_i32` (1) appends the argument's decimal
+// + newline; `print_str(ptr, len)` (2) copies `len` bytes of LINEAR MEMORY at
+// `ptr` (bounds-checked — an out-of-range span TRAPS) to the output buffer;
+// `fd_write` (3) is the WASI Preview 1 gather-write (returns an errno); `proc_exit`
+// (4) requests clean termination with its i32 argument as the exit code. Output is
+// BUFFERED in `hout`: the pure interpreter has no I/O boundary and simply discards
+// an empty buffer, while the std::io boundary runner flushes it to real stdout
+// after the run.
+fn host_call(hid: usize, a0: i64, a1: i64, a2: i64, a3: i64, mem: write Vec[u8], hout: write Vec[u8]) alloc -> HostOutcome {
+    let mut hr: HostOutcome = HostOutcome { value: 0i64, exit: false, exit_code: 0i64 };
+    if hid == 1usize {
+        emit_i32_dec(write hout.*, a0);
+    } else if hid == 2usize {
+        let mask: i64 = 0xffffffffi64;
+        let ptr: usize = conv usize (a0 & mask);
+        let ln: usize = conv usize (a1 & mask);
+        if ptr + ln > len(read mem.*) {
+            panic("out of bounds memory access");
+        }
+        let mut k: usize = 0usize;
+        while k < ln {
+            push(write hout.*, get(read mem.*, ptr + k).*);
+            k = k + 1usize;
+        }
+    } else if hid == 3usize {
+        hr.value = do_fd_write(a0, a1, a2, a3, write mem.*, write hout.*);
+    } else if hid == 4usize {
+        hr.exit = true;
+        hr.exit_code = a0;
+    } else {
+        panic("unknown host import");
+    }
+    return hr;
+}
+
+// Non-recursive interpreter driver. The WORKING state (frame `f`, reader `r`,
+// `locals`, and the current function's identity/bounds) is kept in locals; a
+// `call` snapshots it onto the explicit `saved` activation stack and switches
+// to the callee; function-return (an outermost `end`, `return`, or a branch to
+// the function body) pops the snapshot and pushes the callee's result. Host
+// recursion is O(1), so WASM call depth is bounded only by `saved`'s capacity.
+// A WASI `proc_exit` import is a THIRD outcome: it halts the whole run immediately
+// (unwinding no activations, and distinct from a trap), surfacing its exit code as
+// the driver's return value.
+fn exec(bytes: [u8], m: read Module, mem: write Vec[u8], hout: write Vec[u8]) alloc -> i64 {
+    let mut saved: [256]Act = [zero_act(); 256];
+    let mut fp: usize = 0;
+
+    let mut fidx: usize = m.entry;
+    let mut end: usize = m.fend[fidx];
+    let mut nres: usize = m.fnresults[fidx];
+    let mut locals: [32]i64 = [0i64; 32];
+    // Module-instance globals: initialized from the decoded globals and shared
+    // across all activations (a callee's `global.set` is visible after return).
+    let mut gvals: [64]i64 = m.gval;
+    let mut f: Frame = Frame {
+        stack: [0i64; 64],
+        sp: 0,
+        lab_kind: [0usize; 32],
+        lab_start: [0usize; 32],
+        lab_arity: [0usize; 32],
+        lab_height: [0usize; 32],
+        nlab: 0,
+    };
+    let mut r: Reader = Reader { pos: m.fstart[fidx] };
+
+    let mask: i64 = 0xffffffffi64;
+    let mut retval: i64 = 0i64;
+    let mut running: bool = true;
+
+    while running {
+        if r.pos >= end {
+            panic("malformed body: ran off the end without `end`");
+        }
+        let op: u8 = read_byte(bytes, write r);
+        let mut func_return: bool = false;
+
+        if op == 0x00u8 {
+            panic("unreachable");
+        } else if op == 0x01u8 {
+            // nop
+        } else if op == 0x02u8 {
+            let ar: usize = read_blocktype(bytes, write r);
+            f.lab_kind[f.nlab] = 0usize;
+            f.lab_start[f.nlab] = 0usize;
+            f.lab_arity[f.nlab] = ar;
+            f.lab_height[f.nlab] = f.sp;
+            f.nlab = f.nlab + 1;
+        } else if op == 0x03u8 {
+            let ar: usize = read_blocktype(bytes, write r);
+            f.lab_kind[f.nlab] = 1usize;
+            f.lab_start[f.nlab] = r.pos;
+            f.lab_arity[f.nlab] = 0usize;
+            f.lab_height[f.nlab] = f.sp;
+            f.nlab = f.nlab + 1;
+        } else if op == 0x04u8 {
+            let ar: usize = read_blocktype(bytes, write r);
+            f.sp = f.sp - 1;
+            let cond: i64 = f.stack[f.sp];
+            f.lab_kind[f.nlab] = 2usize;
+            f.lab_start[f.nlab] = 0usize;
+            f.lab_arity[f.nlab] = ar;
+            f.lab_height[f.nlab] = f.sp;
+            f.nlab = f.nlab + 1;
+            if cond == 0i64 {
+                let k: usize = skip_to_else_or_end(bytes, write r);
+                if k == 1usize {
+                    f.nlab = f.nlab - 1;
+                }
+            }
+        } else if op == 0x05u8 {
+            scan_forward_exits(bytes, write r, 1usize);
+            f.nlab = f.nlab - 1;
+        } else if op == 0x0bu8 {
+            if f.nlab == 0usize {
+                func_return = true;
+            } else {
+                f.nlab = f.nlab - 1;
+            }
+        } else if op == 0x0cu8 {
+            let n: usize = conv usize (read_u32(bytes, write r));
+            if n >= f.nlab {
+                func_return = true;
+            } else {
+                do_branch(bytes, write f, write r, n);
+            }
+        } else if op == 0x0du8 {
+            let n: usize = conv usize (read_u32(bytes, write r));
+            f.sp = f.sp - 1;
+            let c: i64 = f.stack[f.sp];
+            if c != 0i64 {
+                if n >= f.nlab {
+                    func_return = true;
+                } else {
+                    do_branch(bytes, write f, write r, n);
+                }
+            }
+        } else if op == 0x0eu8 {
+            f.sp = f.sp - 1;
+            let idx: i64 = f.stack[f.sp] & mask;
+            let cnt: u32 = read_u32(bytes, write r);
+            let mut chosen: usize = 0;
+            let mut k: u32 = 0u32;
+            while k <= cnt {
+                let lbl: usize = conv usize (read_u32(bytes, write r));
+                if conv i64 k == idx {
+                    chosen = lbl;
+                }
+                if k == cnt && idx >= conv i64 cnt {
+                    chosen = lbl;
+                }
+                k = k + 1u32;
+            }
+            if chosen >= f.nlab {
+                func_return = true;
+            } else {
+                do_branch(bytes, write f, write r, chosen);
+            }
+        } else if op == 0x0fu8 {
+            func_return = true;
+        } else if op == 0x10u8 || op == 0x11u8 {
+            let mut callee: usize = 0usize;
+            if op == 0x10u8 {
+                callee = conv usize (read_u32(bytes, write r));
+            } else {
+                // call_indirect: a TYPE index + a table index byte (0x00 in MVP).
+                // Pop the i32 table slot, then apply the three spec TRAP checks
+                // before invoking: (1) the slot is OUT OF BOUNDS of the table,
+                // (2) the slot is NULL (uninitialized), (3) the stored function's
+                // signature must MATCH the call site's declared type. The last is
+                // the WASM indirect-call safety property a compiled vtable relies
+                // on: dispatch through a function pointer of the wrong type traps.
+                let type_idx: usize = conv usize (read_u32(bytes, write r));
+                let tbl_byte: u8 = read_byte(bytes, write r);
+                f.sp = f.sp - 1usize;
+                let slot_val: i64 = f.stack[f.sp] & mask;
+                let slot: usize = conv usize slot_val;
+                if slot >= m.tbl_size {
+                    panic("undefined element");
+                }
+                let entry: i64 = m.tbl[slot];
+                if entry < 0i64 {
+                    panic("uninitialized element");
+                }
+                callee = conv usize entry;
+                if m.type_key[m.ftype[callee]] != m.type_key[type_idx] {
+                    panic("indirect call type mismatch");
+                }
+            }
+            if callee < m.nimports {
+                // Host import (func index < K): pop the params, run the host
+                // effect, and push its result IF the import declares one (an errno
+                // for `fd_write`; the print functions declare none). No activation
+                // is pushed — the non-recursive driver is untouched. A `proc_exit`
+                // import instead requests clean termination (handled just below).
+                let nh: usize = m.fnparams[callee];
+                let mut hargs: [32]i64 = [0i64; 32];
+                let mut jh: usize = nh;
+                while jh > 0usize {
+                    jh = jh - 1usize;
+                    f.sp = f.sp - 1usize;
+                    hargs[jh] = f.stack[f.sp];
+                }
+                let hres: HostOutcome = host_call(m.imp_host[callee], hargs[0], hargs[1], hargs[2], hargs[3], write mem.*, write hout.*);
+                if m.fnresults[callee] == 1usize {
+                    f.stack[f.sp] = as_i32(hres.value);
+                    f.sp = f.sp + 1usize;
+                }
+                if hres.exit {
+                    retval = hres.exit_code;
+                    running = false;
+                }
+            } else {
+                // Defined function (func index >= K): its metadata lives at the
+                // same index (Function/Code stored it offset past the imports).
+                let np2: usize = m.fnparams[callee];
+                let mut cargs: [32]i64 = [0i64; 32];
+                let mut j: usize = np2;
+                while j > 0usize {
+                    j = j - 1usize;
+                    f.sp = f.sp - 1usize;
+                    cargs[j] = f.stack[f.sp];
+                }
+                if fp >= 256usize {
+                    panic("call stack exhausted");
+                }
+                saved[fp] = Act { fidx: fidx, end: end, nres: nres, pos: r.pos, locals: locals, frame: f };
+                fp = fp + 1;
+                fidx = callee;
+                end = m.fend[callee];
+                nres = m.fnresults[callee];
+                r.pos = m.fstart[callee];
+                locals = cargs;
+                f.sp = 0;
+                f.nlab = 0;
+            }
+        } else if op == 0x20u8 {
+            let x: usize = conv usize (read_u32(bytes, write r));
+            f.stack[f.sp] = locals[x];
+            f.sp = f.sp + 1;
+        } else if op == 0x21u8 {
+            let x: usize = conv usize (read_u32(bytes, write r));
+            f.sp = f.sp - 1;
+            locals[x] = f.stack[f.sp];
+        } else if op == 0x22u8 {
+            let x: usize = conv usize (read_u32(bytes, write r));
+            locals[x] = f.stack[f.sp - 1];
+        } else if op == 0x23u8 {
+            let x: usize = conv usize (read_u32(bytes, write r));
+            f.stack[f.sp] = gvals[x];
+            f.sp = f.sp + 1;
+        } else if op == 0x24u8 {
+            // global.set: the module is assumed valid, so a set to an immutable
+            // global never occurs (wasmi rejects it at validation); no runtime
+            // mutability check is needed.
+            let x: usize = conv usize (read_u32(bytes, write r));
+            f.sp = f.sp - 1;
+            gvals[x] = f.stack[f.sp];
+        } else if op == 0x41u8 {
+            let v: i64 = read_i64(bytes, write r);
+            f.stack[f.sp] = as_i32(v);
+            f.sp = f.sp + 1;
+        } else if op == 0x42u8 {
+            let v: i64 = read_i64(bytes, write r);
+            f.stack[f.sp] = v;
+            f.sp = f.sp + 1;
+        } else if op == 0x43u8 {
+            // f32.const: 4 raw little-endian bytes -> zero-extended 32-bit pattern.
+            let mut v: i64 = 0i64;
+            let mut k: usize = 0usize;
+            while k < 4usize {
+                let bb: i64 = conv i64 (read_byte(bytes, write r));
+                wrapping { v = v | (bb << conv i64 (k * 8usize)); }
+                k = k + 1usize;
+            }
+            f.stack[f.sp] = v;
+            f.sp = f.sp + 1;
+        } else if op == 0x44u8 {
+            // f64.const: 8 raw little-endian bytes -> the full 64-bit pattern.
+            let mut v: i64 = 0i64;
+            let mut k: usize = 0usize;
+            while k < 8usize {
+                let bb: i64 = conv i64 (read_byte(bytes, write r));
+                wrapping { v = v | (bb << conv i64 (k * 8usize)); }
+                k = k + 1usize;
+            }
+            f.stack[f.sp] = v;
+            f.sp = f.sp + 1;
+        } else if op >= 0x28u8 && op <= 0x35u8 {
+            // Load: memarg (align ignored); effective addr = popped i32 + offset.
+            let algn: u32 = read_u32(bytes, write r);
+            let offs: u32 = read_u32(bytes, write r);
+            f.sp = f.sp - 1usize;
+            let base_addr: i64 = f.stack[f.sp] & mask;
+            let eaddr: usize = conv usize base_addr + conv usize offs;
+            f.stack[f.sp] = do_load(read mem.*, op, eaddr);
+            f.sp = f.sp + 1usize;
+        } else if op >= 0x36u8 && op <= 0x3eu8 {
+            // Store: pop value then address; write low bytes little-endian.
+            let algn: u32 = read_u32(bytes, write r);
+            let offs: u32 = read_u32(bytes, write r);
+            f.sp = f.sp - 1usize;
+            let sval: i64 = f.stack[f.sp];
+            f.sp = f.sp - 1usize;
+            let base_addr: i64 = f.stack[f.sp] & mask;
+            let eaddr: usize = conv usize base_addr + conv usize offs;
+            do_store(write mem.*, op, eaddr, sval);
+        } else if op == 0x3fu8 {
+            // memory.size: push the current size in pages (reserved memidx byte).
+            let resv: u8 = read_byte(bytes, write r);
+            let pages: i64 = conv i64 (len(read mem.*) / 65536usize);
+            f.stack[f.sp] = as_i32(pages);
+            f.sp = f.sp + 1usize;
+        } else if op == 0x40u8 {
+            // memory.grow: pop delta pages, grow by zero bytes; push old page count
+            // (or -1 on failure). Reserved memidx byte first.
+            let resv: u8 = read_byte(bytes, write r);
+            f.sp = f.sp - 1usize;
+            let delta: i64 = f.stack[f.sp] & mask;
+            let grown: i64 = do_grow(write mem.*, m.mem_max, m.has_max, conv usize delta);
+            f.stack[f.sp] = as_i32(grown);
+            f.sp = f.sp + 1usize;
+        } else if op == 0x45u8 || op == 0x50u8 || op == 0x67u8 || op == 0x68u8 || op == 0x69u8 || op == 0x79u8 || op == 0x7au8 || op == 0x7bu8 || op == 0xa7u8 || op == 0xacu8 || op == 0xadu8 {
+            // Unary numeric: pop one operand, push one result.
+            f.sp = f.sp - 1;
+            let a: i64 = f.stack[f.sp];
+            f.stack[f.sp] = eval_unop(op, a);
+            f.sp = f.sp + 1;
+        } else if (op >= 0x8bu8 && op <= 0x91u8) || (op >= 0x99u8 && op <= 0x9fu8) || (op >= 0xa8u8 && op <= 0xbfu8) {
+            // Float unary / conversion / reinterpret: pop one, push one.
+            f.sp = f.sp - 1;
+            let a: i64 = f.stack[f.sp];
+            f.stack[f.sp] = eval_funop(op, a);
+            f.sp = f.sp + 1;
+        } else if (op >= 0x5bu8 && op <= 0x66u8) || (op >= 0x92u8 && op <= 0x98u8) || (op >= 0xa0u8 && op <= 0xa6u8) {
+            // Float binary (compare / arithmetic / min-max / copysign): pop two, push one.
+            f.sp = f.sp - 1;
+            let b: i64 = f.stack[f.sp];
+            f.sp = f.sp - 1;
+            let a: i64 = f.stack[f.sp];
+            f.stack[f.sp] = eval_fbinop(op, a, b);
+            f.sp = f.sp + 1;
+        } else {
+            // Binary numeric: pop b then a, push one result.
+            f.sp = f.sp - 1;
+            let b: i64 = f.stack[f.sp];
+            f.sp = f.sp - 1;
+            let a: i64 = f.stack[f.sp];
+            f.stack[f.sp] = eval_binop(op, a, b);
+            f.sp = f.sp + 1;
+        }
+
+        if func_return {
+            let mut ret_val: i64 = 0i64;
+            if nres == 1usize {
+                ret_val = f.stack[f.sp - 1];
+            }
+            let ret_nres: usize = nres;
+            if fp == 0usize {
+                retval = ret_val;
+                running = false;
+            } else {
+                fp = fp - 1;
+                let s: Act = saved[fp];
+                fidx = s.fidx;
+                end = s.end;
+                nres = s.nres;
+                r.pos = s.pos;
+                locals = s.locals;
+                f = s.frame;
+                if ret_nres == 1usize {
+                    f.stack[f.sp] = ret_val;
+                    f.sp = f.sp + 1;
+                }
+            }
+        }
+    }
+
+    return retval;
+}
+
+// ---- linear memory (M2): a growable native `Vec[u8]`, byte-addressed --------
+//
+// WebAssembly memory is little-endian, zero-initialized, sized in 64 KiB pages.
+// It is represented as a native `Vec[u8]` grown over an explicit free-list
+// allocator (below): `min_pages * 65536` zero bytes at instantiation, and
+// `memory.grow` pushes more. Loads/stores bounds-check `eaddr + size <= len` and
+// TRAP (panic) past the end. This keeps the interpreter honest end-to-end — the
+// decode+eval genuinely reads/writes the bytes.
+
+// Sign-extend the low `bits` of `v` to a full i64 (arithmetic-shift pair inside
+// `wrapping` so neither shift can fault).
+fn sign_extend(v: i64, bits: usize) -> i64 {
+    let sh: i64 = conv i64 (64usize - bits);
+    let mut res: i64 = 0i64;
+    wrapping { res = (v << sh) >> sh; }
+    return res;
+}
+
+// Assemble `size` little-endian bytes at `eaddr` into the low bits of an i64
+// (zero-extended); callers apply sign/zero extension per opcode.
+fn mem_load_bytes(mem: read Vec[u8], eaddr: usize, size: usize) -> i64 {
+    let mut acc: i64 = 0i64;
+    let mut k: usize = 0usize;
+    while k < size {
+        let b: i64 = conv i64 (get(read mem.*, eaddr + k).*);
+        let sh: i64 = conv i64 (k * 8usize);
+        wrapping { acc = acc | (b << sh); }
+        k = k + 1usize;
+    }
+    return acc;
+}
+
+// Write the low `size` bytes of `val` little-endian into memory at `eaddr`.
+fn mem_store_bytes(mem: write Vec[u8], eaddr: usize, size: usize, val: i64) alloc -> unit {
+    let mut k: usize = 0usize;
+    while k < size {
+        let sh: i64 = conv i64 (k * 8usize);
+        let mut byteval: i64 = 0i64;
+        wrapping { byteval = (val >> sh) & 0xffi64; }
+        let b: u8 = conv u8 byteval;
+        set(write mem.*, eaddr + k, b);
+        k = k + 1usize;
+    }
+}
+
+// Load per opcode: pick the access size, bounds-check (TRAP past the end), read
+// little-endian, then sign- or zero-extend to the i32/i64 result representation.
+fn do_load(mem: read Vec[u8], op: u8, eaddr: usize) -> i64 {
+    let mut size: usize = 4usize;
+    if op == 0x29u8 || op == 0x2bu8 {
+        size = 8usize;
+    } else if op == 0x2cu8 || op == 0x2du8 || op == 0x30u8 || op == 0x31u8 {
+        size = 1usize;
+    } else if op == 0x2eu8 || op == 0x2fu8 || op == 0x32u8 || op == 0x33u8 {
+        size = 2usize;
+    } else {
+        size = 4usize;
+    }
+    if eaddr + size > len(read mem.*) {
+        panic("out of bounds memory access");
+    }
+    let raw: i64 = mem_load_bytes(read mem.*, eaddr, size);
+    let mut res: i64 = 0i64;
+    if op == 0x28u8 {
+        res = as_i32(raw);
+    } else if op == 0x29u8 {
+        res = raw;
+    } else if op == 0x2cu8 || op == 0x30u8 {
+        res = sign_extend(raw, 8usize);
+    } else if op == 0x2eu8 || op == 0x32u8 {
+        res = sign_extend(raw, 16usize);
+    } else if op == 0x34u8 {
+        res = sign_extend(raw, 32usize);
+    } else {
+        res = raw;
+    }
+    return res;
+}
+
+// Store per opcode: pick the access size, bounds-check (TRAP past the end), write
+// the low bytes little-endian.
+fn do_store(mem: write Vec[u8], op: u8, eaddr: usize, val: i64) alloc -> unit {
+    let mut size: usize = 4usize;
+    if op == 0x37u8 || op == 0x39u8 {
+        size = 8usize;
+    } else if op == 0x3au8 || op == 0x3cu8 {
+        size = 1usize;
+    } else if op == 0x3bu8 || op == 0x3du8 {
+        size = 2usize;
+    } else {
+        size = 4usize;
+    }
+    if eaddr + size > len(read mem.*) {
+        panic("out of bounds memory access");
+    }
+    mem_store_bytes(write mem.*, eaddr, size, val);
+}
+
+// memory.grow: append `delta` pages of zero bytes, respecting a declared max;
+// returns the OLD page count, or -1 on failure.
+fn do_grow(mem: write Vec[u8], mem_max: usize, has_max: bool, delta: usize) alloc -> i64 {
+    let old_bytes: usize = len(read mem.*);
+    let old_pages: usize = old_bytes / 65536usize;
+    let new_pages: usize = old_pages + delta;
+    if has_max {
+        if new_pages > mem_max {
+            return 0i64 - 1i64;
+        }
+    }
+    let add: usize = delta * 65536usize;
+    let mut k: usize = 0usize;
+    while k < add {
+        push(write mem.*, 0u8);
+        k = k + 1usize;
+    }
+    return conv i64 old_pages;
+}
+
+// ---- free-list allocator (backs the linear-memory `Vec[u8]`) ---------------
+
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+    realloc: fn(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) alloc -> rawptr u8,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+
+struct FreeList { next: usize, end: usize, head: rawptr u8 }
+struct FreeBlock { next: rawptr u8, size: usize }
+
+fn with_window(base: usize, size: usize) -> FreeList {
+    unsafe "the empty free list starts with a null head; no block is threaded yet" {
+        return FreeList { next: base, end: base + size, head: ptr_null[u8]() };
+    }
+}
+
+fn block_span(size: usize, align: usize) -> usize {
+    let mut need: usize = size;
+    if need < 16usize {
+        need = 16usize;
+    }
+    return (need + align - 1usize) / align * align;
+}
+
+fn freelist_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live FreeList whose [next, end) window and address-ordered free chain are reserved to this arena alone; every carved block stays inside [next, end) and is >= header-sized, and a split remainder (kept only when >= MIN_SPLIT) is written into the block's own tail" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let need: usize = block_span(size, align);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) {
+            let blk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if blk.size >= need {
+                if blk.size - need >= 32usize {
+                    let rem: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(cur) + need);
+                    ptr_write(cast_ptr[FreeBlock](rem), FreeBlock { next: blk.next, size: blk.size - need });
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: rem });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: rem, size: pblk.size });
+                    }
+                } else {
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: blk.next });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: blk.next, size: pblk.size });
+                    }
+                }
+                return cur;
+            }
+            prev = cur;
+            cur = blk.next;
+        }
+        let aligned: usize = (st.next + align - 1usize) / align * align;
+        if aligned + need > st.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: aligned + need, end: st.end, head: st.head });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+
+fn freelist_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    unsafe "the free list is kept ADDRESS-ORDERED; the freed block's own storage (>= header-sized, guaranteed by block_span in alloc) holds its FreeBlock header {next, size}, and a merge joins two blocks ONLY when their byte spans are exactly adjacent (addr + size == neighbour addr), so a merge can never overlap live memory nor bridge a gap" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let mut cap: usize = block_span(size, align);
+        let a: usize = ptr_to_addr(ptr);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) && ptr_to_addr(cur) < a {
+            let cblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            prev = cur;
+            cur = cblk.next;
+        }
+        let mut link: rawptr u8 = cur;
+        if !is_null(cur) {
+            let nblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if a + cap == ptr_to_addr(cur) {
+                cap = cap + nblk.size;
+                link = nblk.next;
+            }
+        }
+        if !is_null(prev) {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            if ptr_to_addr(prev) + pblk.size == a {
+                ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: link, size: pblk.size + cap });
+                return;
+            }
+        }
+        ptr_write(cast_ptr[FreeBlock](ptr), FreeBlock { next: link, size: cap });
+        if is_null(prev) {
+            ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: ptr });
+        } else {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: ptr, size: pblk.size });
+        }
+    }
+}
+
+fn freelist_realloc(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live FreeList; [ptr, ptr+old_span) is the block carved for old_size (block_span rounds identically on alloc/free). Growing in place either extends the bump frontier inside [next, end) or absorbs the physically-adjacent free block beginning exactly at ptr+old_span (splitting its tail when the remainder is >= MIN_SPLIT); the fallback carves a fresh block, copies old_size bytes into it, and frees the old block" {
+        let old_span: usize = block_span(old_size, align);
+        let new_span: usize = block_span(new_size, align);
+        if new_span <= old_span {
+            return ptr;
+        }
+        let a: usize = ptr_to_addr(ptr);
+        let tail: usize = a + old_span;
+        let extra: usize = new_span - old_span;
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        if tail == st.next {
+            if tail + extra <= st.end {
+                ptr_write(cast_ptr[FreeList](ctx), FreeList { next: tail + extra, end: st.end, head: st.head });
+                return ptr;
+            }
+        } else {
+            let mut prev: rawptr u8 = ptr_null[u8]();
+            let mut cur: rawptr u8 = st.head;
+            while !is_null(cur) && ptr_to_addr(cur) < tail {
+                let cblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+                prev = cur;
+                cur = cblk.next;
+            }
+            if !is_null(cur) && ptr_to_addr(cur) == tail {
+                let fblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+                if fblk.size >= extra {
+                    let mut link: rawptr u8 = fblk.next;
+                    if fblk.size - extra >= 32usize {
+                        let rem: rawptr u8 = addr_to_ptr[u8](tail + extra);
+                        ptr_write(cast_ptr[FreeBlock](rem), FreeBlock { next: fblk.next, size: fblk.size - extra });
+                        link = rem;
+                    }
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: link });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: link, size: pblk.size });
+                    }
+                    return ptr;
+                }
+            }
+        }
+        let newp: rawptr u8 = freelist_alloc(ctx, new_size, align);
+        if is_null(newp) {
+            return newp;
+        }
+        let mut i: usize = 0usize;
+        while i < old_size {
+            let s: rawptr u8 = addr_to_ptr[u8](a + i);
+            let d: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(newp) + i);
+            let v: u8 = ptr_read(s);
+            ptr_write(d, v);
+            i = i + 1usize;
+        }
+        freelist_free(ctx, ptr, old_size, align);
+        return newp;
+    }
+}
+
+static FREELIST_VT: AllocVtable = AllocVtable { alloc: freelist_alloc, free: freelist_free, realloc: freelist_realloc };
+
+fn mk_alloc(state: write FreeList) -> Alloc {
+    unsafe "ctx (the caller's FreeList local) and vt (the static FREELIST_VT) outlive every String this handle serves; the caller keeps the window and FREELIST_VT alive for the whole run and drops every String before the window dies" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(FREELIST_VT) };
+    }
+}
+
+// Instantiate + run: decode, build the linear memory over the free-list
+// allocator, size it to the declared minimum, copy each active data segment into
+// place (bounds-checked), then run the entry on the eval loop.
+fn run_module(bytes: [u8], hout: write Vec[u8]) alloc -> i64 {
+    let m: Module = decode_module(bytes);
+    let mut st: FreeList = with_window(16777216usize, 8388608usize);
+    let a: Alloc = mk_alloc(write st);
+    let mut mem: Vec[u8] = vec_new(read a);
+    let total: usize = m.mem_min * 65536usize;
+    let mut i: usize = 0usize;
+    while i < total {
+        push(write mem, 0u8);
+        i = i + 1usize;
+    }
+    let mut sg: usize = 0usize;
+    while sg < m.ndata {
+        let off: usize = m.data_off[sg];
+        let dlen: usize = m.data_len[sg];
+        let dstart: usize = m.data_start[sg];
+        if off + dlen > len(read mem) {
+            panic("data segment out of bounds");
+        }
+        let mut k: usize = 0usize;
+        while k < dlen {
+            set(write mem, off + k, bytes[dstart + k]);
+            k = k + 1usize;
+        }
+        sg = sg + 1usize;
+    }
+    return exec(bytes, read m, write mem, write hout.*);
+}
+
+// The embedded module below keeps this a standalone program: the add
+// module (no Export section, so the entry defaults to func 0) yields 42.
+fn main() alloc -> i64 {
+    let data: [30]u8 = [
+        0x00u8, 0x61u8, 0x73u8, 0x6du8, 0x01u8, 0x00u8, 0x00u8, 0x00u8,
+        0x01u8, 0x05u8, 0x01u8, 0x60u8, 0x00u8, 0x01u8, 0x7fu8,
+        0x03u8, 0x02u8, 0x01u8, 0x00u8,
+        0x0au8, 0x09u8, 0x01u8, 0x07u8, 0x00u8, 0x41u8, 0x28u8, 0x41u8, 0x02u8, 0x6au8, 0x0bu8,
+    ];
+    let mut st: FreeList = with_window(33554432usize, 8388608usize);
+    let a: Alloc = mk_alloc(write st);
+    let mut hout: Vec[u8] = vec_new(read a);
+    return run_module(slice_of(data), write hout);
+}

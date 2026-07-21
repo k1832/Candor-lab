@@ -71,6 +71,45 @@ candor compile --freestanding hello.cnr -o hello && ldd hello   # => "not a dyna
 
 ---
 
+## Showcase — two real programs, written in Candor
+
+Not snippets — substantial programs you can read, run, and point at:
+
+**A WebAssembly interpreter** (`examples/11_wasm_interp.cnr`, ~2,000 lines of
+Candor): decodes a real `.wasm` binary (LEB128, the section format) and executes
+it — the integer and float ISA, structured control flow, linear memory,
+`call_indirect`, WASI — running its embedded module to 42:
+
+```sh
+candor run examples/11_wasm_interp.cnr        # -> 42
+candor compile examples/11_wasm_interp.cnr -o wasmvm && ./wasmvm   # exits 42
+```
+
+**An HTTP/1.0 static-file server** (`examples/12_http_server/`, ~600 lines):
+listens, parses requests with the std string utilities, serves files (with a
+path-traversal guard), answers 200/404 — then curl it:
+
+```sh
+cd examples/12_http_server
+candor run main.cnr        # serving on http://127.0.0.1:8080 (8 requests)
+# from another terminal:
+curl http://127.0.0.1:8080/hello.txt          # -> Hello, Candor!
+curl http://127.0.0.1:8080/                   # -> the index page
+```
+
+It serves 8 requests and exits itself. (A compiled `candor compile main.cnr -o
+httpd && ./httpd` serves identically. If you relaunch immediately and port 8080
+is still in TIME_WAIT, wait a moment and retry.)
+
+And the parts too big to ship as examples, on the public record in the
+[lab repository](https://github.com/k1832/Candor-lab): the **self-hosted
+compiler** (~19,300 lines of Candor that check, interpret, lower, and compile
+Candor, verified byte-exact against the reference), the **five-engine
+differential verification** every program here passes, and the frozen **Bet 5**
+memory-model experiment the language is founded on.
+
+---
+
 ## Examples
 
 Runnable, formatted programs in [examples/](examples/) — each verified against
@@ -88,6 +127,8 @@ this toolchain:
 | `08_ordering.cnr` | `candor run` | `Ord` on scalars, `[T: Ord]` bounds, `min`/`max`/`sort_ord` |
 | `09_strings.cnr` | `candor run` | string utilities — `split`/`join`/`contains`/`trim` |
 | `10_iterators.cnr` | `candor run` | iterator adapters + terminals composing (`take_n`/`enumerate`/`fold`/`find`) |
+| `11_wasm_interp.cnr` | `candor run` / `candor compile` | ⭐ a from-scratch WebAssembly interpreter (see Showcase) |
+| `12_http_server/` | `candor run` (from its dir) | ⭐ an HTTP/1.0 static-file server over the audited TCP boundary (see Showcase) |
 
 ---
 
