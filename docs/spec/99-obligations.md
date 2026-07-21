@@ -25,7 +25,9 @@ chapter's stated obligations bind now.
 
 ### OBL-ALIAS — unsafe-code aliasing model
 - **Chapter:** 05 §6 (NORMATIVE-DRAFT).
-- **Status:** **discharged-pending-review** (2026-07-21; see the status update below).
+- **Status:** **discharged** (single-threaded edition, 2026-07-21; atomics
+  composition deferred with OBL-CONSIST). The adversarial review's one repair
+  condition is met — see the status update below.
 - **Hook:** **P18** (named mandatory spec scope); NN#1 (which quietly rests on it).
 - **Gate:** blocks any optimizing implementation's soundness claim and any
   stability commitment.
@@ -178,9 +180,9 @@ skeleton-chapter gates (OBL-LEX, OBL-GRAM), one real-toolchain gate
 
 Of these, **OBL-WINDOW, OBL-ALIAS, and OBL-CONSIST are the philosophy-named
 pre-stability tier** (P18, NN#20): no "1.0" precedes their discharge (chapter 00
-§3.4). OBL-ALIAS is **discharged-pending-review** for the no-concurrency edition
-(2026-07-21; chapter 05 §6 NORMATIVE-DRAFT), its atomics composition deferred with
-OBL-CONSIST.
+§3.4). OBL-ALIAS is **discharged** for the no-concurrency edition (2026-07-21; chapter 05
+§6 NORMATIVE-DRAFT; the review's one repair condition is met, below), its atomics
+composition deferred with OBL-CONSIST.
 
 ## OBL-SLICE-REGION (found by transcription, 2026-07-08)
 
@@ -218,6 +220,20 @@ elides dead pure non-faulting `τ`-steps, and every `rawptr` deref is marked
 observable and lowered as a barrier call (fully volatile). No backend emits an
 assumption a `rawptr` could falsify, so §6.4.1's obligation is un-exercised today;
 it is stated now so a future noalias-deriving backend inherits it, not discovers it.
+
+**Review + discharge (2026-07-21).** Adversarially reviewed
+(`docs/reviews/05-aliasing-model-review.md`): verdict SOUND-WITH-REPAIRS, one
+REPAIR required before dropping "discharged-pending-review" — "observable" was
+undefined for non-faulting executions. Repaired: chapter 06 §8 now defines
+**observable effect** normatively for **any** execution (MMIO accesses, foreign /
+boundary calls, `trace`, program completion) with the program-order-among-
+observables rule the optimizer owes (§8.2); chapter 05 §6.2.5 / §6.3.1(c) anchor to
+it instead of the fault-window clauses. The §6.5.3 future-`noalias` seam was
+tightened to state that a borrow-based `noalias` tightening **withdraws** §6.4.1's
+`rawptr`-read carve-out (foreign reads through an aliasing `rawptr` become UB, as
+LLVM `noalias` requires) — a restatement of §6.4 by amendment with a migrator, not
+merely a narrowing of sound programs. OBL-ALIAS is thus **discharged** for the
+single-threaded edition.
 
 Open (deferred with the concurrency edition): the composition with atomics and the
 full chapter-09 consistency model (OBL-CONSIST); mechanization (preferred, not

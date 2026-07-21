@@ -3,8 +3,11 @@
 **Status: NORMATIVE-DRAFT.** §§1–5 (the valve and its audit line) are transcribed
 from design `0001-memory-model` §4 and design `0004` `field_ptr`; §6 (the
 unsafe-code aliasing model) discharges P18's named mandatory obligation OBL-ALIAS
-(discharged-pending-review). Rationale is in designs 0001 and 0004; the shipping
-backends' actual assumptions for §6 are recorded in the non-normative Appendix 05-A.
+(discharged for the single-threaded edition; the adversarial review's repair
+condition is met — chapter 99, and
+`docs/reviews/05-aliasing-model-review.md`). Rationale is in designs 0001 and 0004;
+the shipping backends' actual assumptions for §6 are recorded in the non-normative
+Appendix 05-A.
 
 ---
 
@@ -158,9 +161,10 @@ what other accesses may touch the same storage.
 
 6.2.5 **MMIO address (`addr_to_ptr[T](a)`).** A `rawptr` formed from an integer
     address (§2.4) denotes memory outside the abstract machine's own storage — a
-    device window (design 0001 §11.3). Its accesses are **observable** (P5): they
-    SHALL NOT be invented, duplicated, elided as dead, or reordered across one
-    another or across any other observable or fault (chapter 06 §6.3, §7.2).
+    device window (design 0001 §11.3). Its accesses are **observable effects**
+    (chapter 06 §8): they SHALL NOT be invented, duplicated, elided as dead, or
+    reordered across one another or across any other observable effect or fault
+    (the ordering rule of chapter 06 §8.2).
     **Aliasing set:** everything (it is a `rawptr`), plus this observable-ordering
     guarantee. A conforming implementation that cannot distinguish an MMIO `rawptr`
     from an ordinary one SHALL treat **every** `rawptr` access as observable — a
@@ -189,7 +193,8 @@ what other accesses may touch the same storage.
   (c) **Observable ordering.** Accesses a conforming implementation treats as
       observable — MMIO, and any `rawptr` access it does not prove non-observable
       (§6.2.5) — SHALL NOT be invented, duplicated, elided, or reordered across one
-      another or across faults/other observables (chapter 06 §6.3, §7.2).
+      another or across faults/other observable effects (the ordering rule of
+      chapter 06 §8.2, which defines the observable-effect set for any execution).
 
   (d) **No contract-derived assumption** (§6.1.2, P8).
 
@@ -260,7 +265,16 @@ what other accesses may touch the same storage.
     programs (unsafe code sound today could become UB) or change observable
     optimization, it is a **breaking change** and SHALL ship only by amendment with
     an automatic migrator story (P15/NN#14; chapter 00 §3.2) and a restatement of
-    §6.3/§6.4. Until such an amendment, §6.3 is the ceiling and §6.4.1 is the only
+    §6.3/§6.4. **In particular, a borrow-based `noalias` tightening WITHDRAWS
+    §6.4.1's `rawptr`-*read* carve-out.** LLVM `noalias` promises the optimizer that
+    a `noalias` pointee is neither written **nor read** through any pointer not
+    derived from that borrow; so under such an amendment a foreign **read** through a
+    `rawptr` aliasing a live borrow — explicitly **not** UB today (§6.4.1) — becomes
+    UB too. That amendment is therefore a **restatement of §6.4's aliasing
+    obligation by amendment** (the read carve-out withdrawn, so both reads and
+    writes through an aliasing `rawptr` are UB), not merely a narrowing of
+    otherwise-sound programs, and its migrator SHALL flag the newly-UB foreign
+    reads. Until such an amendment, §6.3 is the ceiling and §6.4.1 is the only
     aliasing obligation on unsafe code.
 
 **Gate discharged.** OBL-ALIAS's acceptance criterion — the optimizer assumptions

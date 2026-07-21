@@ -127,7 +127,8 @@ window (§3; no optimizer), so it is the cheapest point to fix the position.
 
 7.2 **The window's bound (normative position).** A fault SHALL be delivered **no
     later than the next synchronization operation or externally visible effect**
-    that follows the faulting operation in program order; nothing past that point
+    (an **observable effect**, §8) that follows the faulting operation in program
+    order; nothing past that point
     executes.
 
 7.3 **Window collapse (normative position).** Where externally visible effects
@@ -151,3 +152,49 @@ window (§3; no optimizer), so it is the cheapest point to fix the position.
 
 **Gate:** blocks any optimizing implementation's soundness claim and any
 stability commitment (NN#20 is named a hard pre-stability gate).
+
+---
+
+## 8. Observable effects
+
+**Status: NORMATIVE-DRAFT.** This section defines the term **observable effect**
+for **any** execution — faulting or not — so the ordering guarantees the aliasing
+model (chapter 05 §6.2.5, §6.3.1(c)) and the fault window (§7.2) rest on have a
+single normative anchor rather than each restating it. Rationale: design 0001
+§11.3 (MMIO) and §7 (the fault window).
+
+8.1 **The observable effects of an execution are, and are only:**
+
+- **MMIO accesses.** A read or write through a `rawptr` formed from an integer
+  address (`addr_to_ptr[T]`, chapter 05 §2.4) that denotes memory outside the
+  abstract machine's own storage — a device window (design 0001 §11.3).
+- **Foreign / boundary calls.** A call across the foreign boundary (a boundary
+  module, chapter 08 §6) — its I/O and any effect on foreign state. No FFI surface
+  ships this edition (OBL-FFI), so this class is presently empty; it is enumerated
+  now so a future boundary module inherits the ordering rule rather than
+  discovering it.
+- **`trace`.** The program's explicit output channel: `trace(x)` appends to the
+  observable trace `θ`.
+- **Program completion.** The program's termination and its externally visible
+  result — the return value / exit status and, on a faulting execution, the
+  structured fault report (§6.2).
+
+8.2 **The ordering rule the optimizer owes.** Observable effects occur in
+    **program order relative to one another.** A conforming optimizing
+    implementation SHALL NOT **invent**, **duplicate**, **elide**, or **reorder**
+    an observable effect — neither across another observable effect nor across a
+    fault (§6.3, §7.2). This is the whole of the ordering the optimizer owes an
+    execution: non-observable computation MAY be reordered, coalesced, or elided
+    subject only to the fault window (§7) and the aliasing bound (chapter 05 §6.3).
+
+8.3 **Spec-level requirement vs. conservative implementation (non-normative
+    note).** Of the classes in §8.1, only *MMIO accesses* make a `rawptr` access
+    observable at the spec level: an ordinary (non-MMIO) `rawptr` access carries no
+    observable-ordering guarantee here, and the aliasing model permits optimizing
+    it (chapter 05 §6.2.3). Because an implementation generally cannot distinguish
+    an MMIO `rawptr` from an ordinary one, chapter 05 §6.2.5 **requires** it to
+    treat **every** `rawptr` access as observable — a sound over-approximation that
+    only adds ordering constraints. The shipping backends do exactly this: every
+    `ptr_read` / `ptr_write` is marked observable in MIR (`mir/build.rs`
+    `mark_last_observable`) and lowered as a barrier call, so `rawptr` is fully
+    **volatile** today — stronger than §8.1 alone requires (Appendix 05-A).

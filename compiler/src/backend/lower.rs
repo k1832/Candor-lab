@@ -15,10 +15,10 @@
 //!   unreachable `trap`. Stage A is precise (`ReplayPolicy::Precise`), so faults
 //!   fire program-order-first with no reordering — the replay obligation is
 //!   vacuous, held by *not reordering* fault-capable ops (no optimization runs).
-//! * **INV-OBS-ORDER.** The one MIR-marked observable, `trace`, lowers to a call
-//!   with a side effect, across which no Cranelift pass reorders; at `opt_level=
-//!   none` nothing is reordered at all. (rawptr/MMIO are not yet MIR-marked
-//!   observable; see the module docs on `mir` — the honest boundary.)
+//! * **INV-OBS-ORDER.** Each MIR-marked observable — `trace`, and every
+//!   rawptr/MMIO access (`Statement::observable`, set in `mir/build.rs` by
+//!   `mark_last_observable`) — lowers to a barrier call with a side effect, across
+//!   which no Cranelift pass reorders; at `opt_level=none` nothing is reordered.
 //!
 //! ## Values and the flat model
 //! Every scalar SSA value is the *canonical i64* of its Candor type
