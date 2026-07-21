@@ -20,8 +20,11 @@ use crate::types::*;
 /// (returns the unresolved projection) instead of looping forever.
 const MAX_PROJ_DEPTH: usize = 64;
 
-/// Documented monomorphization depth limit (design 0007 §5.1.1): a deterministic
-/// resource backstop for the undecidable instantiation tail.
+/// Documented monomorphization depth limit (design 0007 §5.1.1, spec 10.4): the
+/// maximum length of an instantiation *chain* — an instance requested by another
+/// instance is one deeper, roots are depth 0. It backstops a genuinely divergent
+/// chain (`f[T]` -> `g[Wrap[T]]` -> `f[Wrap[Wrap[T]]]` -> ...), NOT the total
+/// number of instances: unbounded breadth at shallow depth is legal.
 pub const MONO_DEPTH_LIMIT: usize = 64;
 
 /// A monomorphization shape recorded at an expression node during checking: the
@@ -801,11 +804,13 @@ struct Monomorphizer<'a> {
     generic_item: HashMap<String, usize>,
     fn_done: HashSet<String>,
     type_done: HashSet<String>,
-    fn_work: Vec<(String, Vec<Type>)>,
-    type_work: Vec<(String, Vec<Type>)>,
+    fn_work: Vec<(String, Vec<Type>, usize)>,
+    type_work: Vec<(String, Vec<Type>, usize)>,
     out: Vec<Item>,
     diags: Vec<Diag>,
-    depth: usize,
+    /// Chain depth to stamp on instances enqueued while the current item is being
+    /// emitted: the emitting item's depth + 1 (roots are 0). See [`MONO_DEPTH_LIMIT`].
+    next_depth: usize,
     /// The original generic decls, keyed by name.
     generic_fns_ast: HashMap<String, FnDecl>,
     generic_structs_ast: HashMap<String, StructDecl>,
@@ -816,7 +821,7 @@ struct Monomorphizer<'a> {
     /// Emitted impl instances, keyed by (impl span, concrete target instance name).
     impl_done: HashSet<String>,
     /// Pending impl instances to emit: (app_impls index, concrete param types).
-    impl_work: Vec<(usize, Vec<Type>)>,
+    impl_work: Vec<(usize, Vec<Type>, usize)>,
     /// Associated-type resolution table (design 0009 §2.2): each entry is
     /// `(target_head, target_args, impl_param_names, assoc_member, assoc_type)`.
     /// A projection `C::Assoc` resolves by unifying `C` with the target pattern
@@ -916,7 +921,7 @@ pub fn monomorphize(
         type_work: Vec::new(),
         out: Vec::new(),
         diags: Vec::new(),
-        depth: 0,
+        next_depth: 0,
         generic_fns_ast,
         generic_structs_ast,
         generic_enums_ast,
@@ -989,12 +994,12 @@ impl<'a> Monomorphizer<'a> {
         if self.generic_fns_ast.contains_key(name) {
             let key = inst_fn_name(name, &args);
             if self.fn_done.insert(key) {
-                self.fn_work.push((name.to_string(), args.clone()));
+                self.fn_work.push((name.to_string(), args.clone(), self.next_depth));
             }
         } else if self.generic_structs_ast.contains_key(name) || self.generic_enums_ast.contains_key(name) {
             let key = inst_type_name(name, &args);
             if self.type_done.insert(key) {
-                self.type_work.push((name.to_string(), args.clone()));
+                self.type_work.push((name.to_string(), args.clone(), self.next_depth));
             }
         }
         // Any app-target impl whose target head matches this instance is reached:
@@ -1021,30 +1026,43 @@ impl<'a> Monomorphizer<'a> {
             let inst_name = inst_type_name(name, &args);
             let key = format!("{}#{}", self.app_impls[idx].decl.span.start, inst_name);
             if self.impl_done.insert(key) {
-                self.impl_work.push((idx, cargs));
+                self.impl_work.push((idx, cargs, self.next_depth));
             }
         }
     }
 
     fn drive(&mut self) {
-        while !self.fn_work.is_empty() || !self.type_work.is_empty() || !self.impl_work.is_empty() {
-            self.depth += 1;
-            if self.depth > MONO_DEPTH_LIMIT {
+        // Pop priority (impl, then type, then fn) must match the peek below so the
+        // depth read is the depth of the item actually popped.
+        loop {
+            let depth = if let Some((_, _, d)) = self.impl_work.last() {
+                *d
+            } else if let Some((_, _, d)) = self.type_work.last() {
+                *d
+            } else if let Some((_, _, d)) = self.fn_work.last() {
+                *d
+            } else {
+                return;
+            };
+            // Bound the instantiation *chain*, not the total instance count: only a
+            // divergent chain climbs past the limit (design 0007 §5.1.1, spec 10.4).
+            if depth > MONO_DEPTH_LIMIT {
                 self.diags.push(
                     Diag::error(
                         "E1099",
-                        format!("monomorphization exceeded the depth limit ({MONO_DEPTH_LIMIT})"),
+                        format!("monomorphization instantiation chain exceeded the depth limit ({MONO_DEPTH_LIMIT})"),
                         Span::point(0),
                     )
-                    .with_note("this is a compile resource limit, not a type error (design 0007 §5.1.1)", None),
+                    .with_note("a generic body instantiating another with a growing type argument does not terminate; this is a compile resource limit, not a type error (design 0007 §5.1.1)", None),
                 );
                 return;
             }
-            if let Some((idx, cargs)) = self.impl_work.pop() {
+            self.next_depth = depth + 1;
+            if let Some((idx, cargs, _)) = self.impl_work.pop() {
                 self.emit_impl_instance(idx, &cargs);
-            } else if let Some((name, args)) = self.type_work.pop() {
+            } else if let Some((name, args, _)) = self.type_work.pop() {
                 self.emit_type_instance(&name, &args);
-            } else if let Some((name, args)) = self.fn_work.pop() {
+            } else if let Some((name, args, _)) = self.fn_work.pop() {
                 self.emit_fn_instance(&name, &args);
             }
         }

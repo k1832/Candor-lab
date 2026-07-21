@@ -6,7 +6,7 @@
 use candor::diag::Severity;
 use candor::{
     check_dir, check_source_real, run_dir, run_dir_mir, run_dir_native, run_dir_native_opt,
-    run_source_real, MirRunResult, RunResult,
+    run_source_real, run_source_real_mir, MirRunResult, RunResult,
 };
 use std::path::PathBuf;
 
@@ -566,5 +566,101 @@ fn cross_module_generic_instantiation_no_span_collision() {
             MirRunResult::Ok(run) => assert_eq!(run.ret, expected, "{label}"),
             other => panic!("{label} did not run: ok={}", matches!(other, MirRunResult::Ok(_))),
         }
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Monomorphization backstop: DEPTH of an instantiation chain, not total breadth
+// (design 0007 §5.1.1, spec 10.4). Surfaced by the P20 50 kL reference build,
+// which authored its per-module `pick[T]` generics as definition-only because the
+// old `drive` counter incremented per work-item and never reset -- bounding the
+// TOTAL instances program-wide at 64, aborting hundreds of legal, distinct,
+// shallow instantiations with E1099.
+// ---------------------------------------------------------------------------
+
+/// The shared P20 prelude (i64-only): `Cmp`, the `Ord2` interface + its `i64`
+/// impl, and the `maxof` combiner every generated `pick[T]` delegates to.
+fn ord2_prelude() -> String {
+    "enum Cmp { Lt, Eq, Gt, }\n\
+     interface Ord2 { fn compare(read self, other: Self) -> Cmp; }\n\
+     impl Ord2 for i64 {\n\
+     \x20   fn compare(read self, other: Self) -> Cmp {\n\
+     \x20       if self.* < other { return Cmp::Lt; }\n\
+     \x20       if self.* > other { return Cmp::Gt; }\n\
+     \x20       return Cmp::Eq;\n\
+     \x20   }\n\
+     }\n\
+     fn maxof[T: Ord2 + copy](a: T, b: T) -> T {\n\
+     \x20   match a.compare(b) {\n\
+     \x20       Cmp::Lt => { return b; },\n\
+     \x20       Cmp::Eq => { return a; },\n\
+     \x20       Cmp::Gt => { return a; },\n\
+     \x20   }\n\
+     }\n".to_string()
+}
+
+/// Breadth is unbounded: several hundred DISTINCT generic instantiations at
+/// shallow depth compile and run. Mirrors the P20 tree's per-module `pick[T]`
+/// pattern the generator had to keep definition-only. `pickK(k, k+1)` returns
+/// `k+1`, so `main` sums `k+1` over `k in 0..N` -> `N*(N+1)/2`. With N = 300 the
+/// program reaches ~300 distinct `pickK[i64]` instances (plus the shared
+/// `maxof[i64]` and the `Ord2 for i64` method) -- far past the old count-of-64
+/// cliff. Byte-exact across the tree-walker and the MIR engine.
+#[test]
+fn wide_generic_breadth_monomorphizes() {
+    const N: i64 = 300;
+    let mut src = ord2_prelude();
+    for k in 0..N {
+        src.push_str(&format!(
+            "fn pick{k}[T: Ord2 + copy](a: T, b: T) -> T {{ return maxof(a, b); }}\n"
+        ));
+    }
+    src.push_str("fn main() -> i64 {\n    let mut acc: i64 = 0i64;\n");
+    for k in 0..N {
+        src.push_str(&format!("    acc = acc + pick{k}({k}i64, {}i64);\n", k + 1));
+    }
+    src.push_str("    return acc;\n}\n");
+
+    let expected = N * (N + 1) / 2;
+    assert!(
+        check_source_real(&src).unwrap().iter().all(|d| d.severity != Severity::Error),
+        "wide breadth should check clean, got {:?}",
+        check_source_real(&src).unwrap()
+    );
+    match run_source_real(&src) {
+        RunResult::Ok(r) => assert_eq!(r.ret, expected, "tree-walker"),
+        other => panic!("tree-walker did not run: ok={}", matches!(other, RunResult::Ok(_))),
+    }
+    match run_source_real_mir(&src) {
+        MirRunResult::Ok(run) => assert_eq!(run.ret, expected, "mir"),
+        other => panic!("mir did not run: ok={}", matches!(other, MirRunResult::Ok(_))),
+    }
+}
+
+/// The recursion guard still fires: a genuinely divergent chain -- mutual
+/// recursion with a syntactically GROWING type argument (`ping[T]` -> `pong[Wrap[T]]`
+/// -> `ping[Wrap[Wrap[T]]]` -> ...) -- has no fixed point. It is INDIRECT, so the
+/// direct-only def-site check (E1020) does not catch it; monomorphization aborts
+/// with E1099 at depth rather than looping forever.
+#[test]
+fn divergent_instantiation_chain_hits_depth_limit() {
+    let src = "struct Wrap[T] { v: T }\n\
+               fn ping[T](x: T) -> i64 { let w: Wrap[T] = Wrap { v: x }; return pong(w); }\n\
+               fn pong[T](x: T) -> i64 { let w: Wrap[T] = Wrap { v: x }; return ping(w); }\n\
+               fn main() -> i64 { return ping(0i64); }\n";
+    // The bodies check clean (mutual recursion escapes the direct-only E1020).
+    assert!(
+        check_source_real(src).unwrap().iter().all(|d| d.severity != Severity::Error),
+        "divergent chain should check clean at the definition site, got {:?}",
+        check_source_real(src).unwrap()
+    );
+    match run_source_real(src) {
+        RunResult::CheckErrors(d) => assert!(
+            d.iter().any(|x| x.code == "E1099"),
+            "expected E1099 depth backstop, got {:?}",
+            d.iter().map(|x| &x.code).collect::<Vec<_>>()
+        ),
+        other => panic!("expected E1099, got ok={}", matches!(other, RunResult::Ok(_))),
     }
 }
