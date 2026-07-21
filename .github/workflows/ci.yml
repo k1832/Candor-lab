@@ -66,33 +66,33 @@ jobs:
         working-directory: tools/candor-lsp
         run: cargo build
 
-      # Report-only: NOT a gate yet. The p20 targets await ratification per
-      # docs/1.0-GATE-TRIAGE.md gate item 2, so this must never fail the build.
-      # The harness (harness=false bench) emits its JSON to stdout.
-      # P20 targets RATIFIED 2026-07-21 (docs/1.0-GATE-TRIAGE.md, Rulings). Gated
-      # here: T1 incremental rebuild <= 1000ms; T2 body-edit downstream
-      # re-analysis == 0; clean `candor check` of the largest check-able module
-      # tree (the corelib; the self-host tree is harness-composed, not a
-      # `check <dir>` layout) <= 3000ms as the stand-in for the ratified "50kL
-      # reference <= 3s" until that reference project exists (design 0010 §3
-      # names it; creating it is part of discharging this clause at full scale).
-      # Report-only still: `--release <= 2x C baseline` (needs a C build here).
-      - name: P20 targets (GATE — ratified 2026-07-21)
+      # P20 targets RATIFIED 2026-07-21 (docs/1.0-GATE-TRIAGE.md, Rulings), now
+      # gated AT FULL SCALE against the committed 50kL reference project
+      # (benches/p20-reference/, 202 modules): clean check <= 3000ms, T1
+      # incremental <= 1000ms, T2 downstream re-analysis == 0, and --release
+      # <= 2x the cc -O2 baseline. The bench emits pass flags per clause in
+      # target/p20.json; any false flag fails the build.
+      - name: P20 targets (GATE — ratified 2026-07-21, 50kL reference scale)
         run: |
           cargo bench --bench p20 | tee "$RUNNER_TEMP/p20.json"
-          T1=$(python3 -c "import json;print(json.load(open('$RUNNER_TEMP/p20.json'))['T1_incremental_rebuild_ms'])")
-          T2=$(python3 -c "import json;print(json.load(open('$RUNNER_TEMP/p20.json'))['T2_downstream_reanalyzed'])")
-          python3 -c "assert float('$T1') <= 1000, 'P20 T1 exceeded: ${T1}ms > 1000ms'"
-          python3 -c "assert int('$T2') == 0, 'P20 T2 violated: downstream re-analysis = $T2'"
-          S=$(date +%s%N); ./target/debug/candor check tests/fixtures/corelib >/dev/null; E=$(date +%s%N)
-          MS=$(( (E - S) / 1000000 ))
-          [ "$MS" -le 3000 ] || { echo "P20 clean-check exceeded: ${MS}ms > 3000ms (corelib tree)"; exit 1; }
+          python3 - "$RUNNER_TEMP/p20.json" <<'EOF'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          r = d["trees"]["reference"]["targets"]
+          checks = {
+              "check_le_3000ms": r["check_le_3000ms"],
+              "T1_le_1000ms": r["T1_le_1000ms"],
+              "T2_downstream_eq_0": r["T2_downstream_eq_0"],
+              "release_le_2x_cc": d["release_baseline"]["target_le_2x"],
+          }
+          failed = {k: v for k, v in checks.items() if not v["pass"]}
+          for k, v in checks.items():
+              print(f"P20 {k}: actual={v['actual']} pass={v['pass']}")
+          if failed:
+              sys.exit(f"P20 GATE FAILED: {failed}")
+          EOF
           {
-            echo '### P20 targets — GATED (ratified 2026-07-21)'
-            echo "- T1 incremental rebuild: ${T1}ms (<= 1000ms) — PASS"
-            echo "- T2 downstream re-analysis: ${T2} (== 0) — PASS"
-            echo "- clean check, corelib tree: ${MS}ms (<= 3000ms) — PASS (50kL reference pending)"
-            echo '- `--release <= 2x C baseline`: report-only (no C baseline in CI yet)'
+            echo '### P20 targets — GATED at 50kL reference scale (ratified 2026-07-21)'
             echo '```json'
             cat "$RUNNER_TEMP/p20.json"
             echo '```'
