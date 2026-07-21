@@ -160,3 +160,34 @@ field_ptr ruling:
   Philosophy v4.2's binding commitments are discharged: both design items shipped and reviewed,
   the re-port re-measured under frozen rules, result equal-or-better. NN#14's conditional gate
   obligations are met; Bet 5's provisional confirmation stands as ruled.
+
+## At-gate re-measurement of the scheduler re-port — 2026-07-21
+
+The v4.2 binding commitment requires the scheduler re-port to be re-measured under the
+frozen successor rules **before any syntax freeze** (a freeze precedes 1.0;
+`docs/1.0-GATE-TRIAGE.md` row 6a). This is the at-gate re-confirmation of the 2026-07-08
+re-port (`ports/candor/scheduler-v2/`), performed under the current compiler and the
+current frozen counters. Full record: `docs/measurements/2026-07-21-bet5-scheduler-gate-remeasure.md`.
+
+- **Functional gate:** both the original port and the re-port pass the full frozen suite
+  under the current `compiler/target/release/candor` — T1-T20 incl. the T19 20k-step
+  shadow-compared stress, **sentinel 777**, exit 0.
+- **Instrument stability:** the frozen tools reproduce every recorded figure exactly —
+  original `valve_statements` 47, re-port 45, Rust baseline 89 (Σ src/) — so the ruler
+  is unchanged across the toolchain hardening since 2026-07-08.
+- **Feature usage (the experiment):** the re-port uses `field_ptr` (design 0004) at 11
+  sites — `t_link` leaves the valve exactly as the a-priori ruling predicted — and the
+  implicit call-site reborrow of design 0005 (M1-neutral by construction).
+
+| Metric | original port | re-port | Rust | frozen threshold | direction |
+|---|---|---|---|---|---|
+| V1 `R_valve` (operative) | 0.5281 | **0.5056** | — | KILL>1.25 / WARN>1.00 → **pass** | improved |
+| annotation density | 0.2948 | 0.2907 | 0.5132 | pass | improved |
+| valve-line (v1 ruler, retired) | 0.4120 | 0.3934 | — | old 0.40 ceiling | improved (now below) |
+| valve-fn (retired) | 0.8750 | 0.8750 | 0.5000 | not gating | unchanged |
+
+**Verdict: IMPROVED — the re-measurement worsens on no frozen metric.** The commitment's
+return-to-review trigger does not fire; Bet 5's provisional confirmation stands. The
+scheduler's home-ground baseline-sensitivity (§6.6; authored-only 45/2 = 22.5) is
+unchanged and routes to the same standing mandatory §6.4 review as at the v4.2 ruling —
+not a worsening. Authority to record the discharge of row 6a.

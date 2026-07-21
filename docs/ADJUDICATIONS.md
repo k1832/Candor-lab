@@ -139,3 +139,33 @@ updated counter (commit 3a18e82) parses the new grammar and carries a test demon
 region rule is preserved in both directions. The predicted effect on the scheduler re-measurement,
 stated a priori per design 0004: approximately one valve statement removed (t_link); the two
 shrunken blocks are metric-invisible. Objection window: open from this publication.
+
+## 2026-07-21 — Bet-5 scheduler re-port: at-gate re-measurement verdict (v4.2 commitment)
+
+**Class:** measurement under the frozen successor criterion (BET5_CRITERION2, frozen
+2026-07-08); no rule, unit table, spec, or tool is changed. Records the verdict of the
+"re-measured before any syntax freeze" clause of the v4.2 provisional confirmation
+(`docs/RESULTS.md` §"§9 review ruling — 2026-07-08"; `docs/1.0-GATE-TRIAGE.md` row 6a).
+
+**Re-port artifact.** `ports/candor/scheduler-v2/scheduler.cn` (authored 2026-07-08
+under designs 0004/0005, commit `af47102`) is confirmed as the commitment's re-port. No
+new port was authored at the gate: criterion §9.1's spirit bars artifacts authored after
+the verdict is known, and §7.1 prescribes re-running the frozen counters on the frozen
+artifact — which is what was done. Idiomaticity was already confirmed under R19; the
+re-port uses `field_ptr` (design 0004, 11 sites; `t_link` leaves the valve per the
+2026-07-08 a-priori philosophy-tier ruling) and the implicit reborrow of design 0005.
+
+**Findings (frozen tools, current compiler).** Both the original port and the re-port
+pass the full frozen suite (T1-T20 incl. the 20k stress, sentinel 777). The frozen
+counters reproduce every recorded figure (original V=47, re-port V=45, Rust baseline
+V=89). Operative V1 `R_valve`: original 47/89 = 0.5281, re-port 45/89 = **0.5056** —
+PASS. Annotation density 0.2948 -> 0.2907; retired v1 valve-line 0.4120 -> 0.3934 (below
+the old 0.40 breach); retired valve-fn 0.875 unchanged.
+
+**Ruling.** The re-measurement **improves** on every frozen metric and **worsens on
+none**. The v4.2 return-to-review trigger therefore **does not fire**; Bet 5's
+provisional confirmation stands. The scheduler's §6.6 home-ground baseline-sensitivity
+(authored-only 45/2 = 22.5 vs registered 0.5056) is unchanged and continues to route to
+the standing mandatory §6.4 review as dispositioned in the v4.2 ruling — it is not a
+worsening. Row 6a is dischargeable; the deciding authority records the discharge.
+Objection window: open from this publication.
