@@ -24,15 +24,16 @@ chapter's stated obligations bind now.
   NN#1 and NN#5.
 
 ### OBL-ALIAS — unsafe-code aliasing model
-- **Chapter:** 05 §6 (SKELETON).
+- **Chapter:** 05 §6 (NORMATIVE-DRAFT).
+- **Status:** **discharged-pending-review** (2026-07-21; see the status update below).
 - **Hook:** **P18** (named mandatory spec scope); NN#1 (which quietly rests on it).
 - **Gate:** blocks any optimizing implementation's soundness claim and any
   stability commitment.
 - **Acceptance:** the spec states, for every unsafe operation of chapter 05 §2,
   the optimizer assumptions it preserves or breaks — notably the materialization
-  question (05 §6.2) — composed with chapter 09; Rust's Stacked/Tree Borrows
-  studied as cautionary art (05 §6.3); mechanized where feasible, rigorous-
-  informal at minimum.
+  question (former 05 §6.2, now the §6.4 author obligation) — composed with chapter
+  09; Rust's Stacked/Tree Borrows studied as cautionary art (05 §6.5); mechanized
+  where feasible, rigorous-informal at minimum.
 
 ### OBL-CONSIST — memory consistency model adoption
 - **Chapter:** 09 (ADOPTED-PENDING).
@@ -177,7 +178,9 @@ skeleton-chapter gates (OBL-LEX, OBL-GRAM), one real-toolchain gate
 
 Of these, **OBL-WINDOW, OBL-ALIAS, and OBL-CONSIST are the philosophy-named
 pre-stability tier** (P18, NN#20): no "1.0" precedes their discharge (chapter 00
-§3.4).
+§3.4). OBL-ALIAS is **discharged-pending-review** for the no-concurrency edition
+(2026-07-21; chapter 05 §6 NORMATIVE-DRAFT), its atomics composition deferred with
+OBL-CONSIST.
 
 ## OBL-SLICE-REGION (found by transcription, 2026-07-08)
 
@@ -192,6 +195,33 @@ Resolution (2026-07-08, review #1): real-syntax spelling `read[r] [T]` /
 `write[r] [T]` adopted in design 0006 §2.2; 0001 §3.3 amended to state the
 counting rule (slice parameters count as borrow parameters); prototype stopgap
 `slice[r] T` / `slice_mut[r] T` added.
+
+## OBL-ALIAS status update (2026-07-21)
+
+Chapter 05 §6 promoted from SKELETON to NORMATIVE-DRAFT, discharging OBL-ALIAS
+rigorous-informal (**discharged-pending-review**; deciding-authority ruling J2,
+`docs/1.0-GATE-TRIAGE.md`, made this REQUIRED pre-1.0 because the shipping
+Cranelift/LLVM backends optimize). The section states, as an upper bound (P2): the
+pointer taxonomy and each kind's aliasing set (§6.2), the most a conforming
+optimizer MAY assume (§6.3 — safe-borrow non-aliasing from the checker's XOR only;
+no `rawptr` assumption; observable ordering for MMIO/rawptr; nothing from a
+contract, P8), the one aliasing UB the checker cannot check and `unsafe` therefore
+carries (§6.4 — no `rawptr` aliasing a live `write`/`read` borrow), and the
+adopted-art position (§6.5 — C-style "rawptr may alias anything," explicitly **not**
+a Rust Stacked/Tree-Borrows model for the valve; future noalias tightening is a
+breaking edition change requiring a migrator, P15/NN#14).
+
+Verified for honesty (non-normative Appendix 05-A): the backends assume strictly
+**less** than §6.3 grants — no `!tbaa`/`noalias`/`!alias.scope` in the LLVM emitter,
+default `MemFlags::new()` (no `noalias`/`readonly`) in Cranelift, the MIR pass only
+elides dead pure non-faulting `τ`-steps, and every `rawptr` deref is marked
+observable and lowered as a barrier call (fully volatile). No backend emits an
+assumption a `rawptr` could falsify, so §6.4.1's obligation is un-exercised today;
+it is stated now so a future noalias-deriving backend inherits it, not discovers it.
+
+Open (deferred with the concurrency edition): the composition with atomics and the
+full chapter-09 consistency model (OBL-CONSIST); mechanization (preferred, not
+required). The single-threaded, no-atomics edition is discharged.
 
 ## OBL-WINDOW status update (2026-07-08)
 

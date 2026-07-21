@@ -95,7 +95,7 @@ Each chapter carries one status:
 | 02 | Grammar | NORMATIVE-DRAFT | design 0006 (real EBNF); NN#13/NN#17/P2/NN#11 |
 | 03 | Types and values | NORMATIVE-DRAFT | design 0001 §1/§5/§8; 0006 spellings |
 | 04 | Ownership and borrows | NORMATIVE-DRAFT | design 0001 §2/§3/§5 + 0005; 0006 spellings |
-| 05 | Unsafe and pointers | NORMATIVE-DRAFT + SKELETON | design 0001 §4 + 0004; P18 aliasing model |
+| 05 | Unsafe and pointers | NORMATIVE-DRAFT | design 0001 §4 + 0004; P18 aliasing model (§6, OBL-ALIAS) |
 | 06 | Faults | NORMATIVE-DRAFT + SKELETON | design 0001 §7 + P5; NN#20 window |
 | 07 | Contracts | NORMATIVE-DRAFT + SKELETON | design 0001 §7.3 + P8 |
 | 08 | Effects | NORMATIVE-DRAFT + SKELETON | design 0001 §3.2/§6 + P17 |
@@ -125,7 +125,7 @@ Each chapter carries one status:
     specified. The core deliberately **does not yet** specify: concurrency
     and its consistency model (P10, chapter 09), FFI / boundary-module *content*
     and the foreign-trust effect (P17, chapters 08/11 §10.1), the imprecise
-    fault window's formalization (NN#20), the unsafe-code aliasing optimizer model
-    (P18), and the P20 module interface-artifact / two-hash incrementality
+    fault window's formalization (NN#20), and the P20 module interface-artifact /
+    two-hash incrementality
     machinery (chapter 11 §§7–10, SKELETON). Each open item is an obligation in
     chapter 99, not an omission that licenses UB.
