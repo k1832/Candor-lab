@@ -612,17 +612,16 @@ fn box_subpaths_rec(
         // A projection is opaque and unbounded (design 0009 §2.3): frees at its
         // own place, exactly like a non-`copy` parameter.
         Type::Proj(_, _) => out.push(prefix.clone()),
-        Type::App(n, _) => {
-            // A `Vec[T]` (compiler-known, alloc-on-drop) frees at its own place;
-            // and an alloc-on-drop generic aggregate frees at its own place
-            // regardless of a bare `Box` field (design 0007 §3.4, F5).
+        // A `Vec[T]` (compiler-known, alloc-on-drop) frees at its own place;
+        // and an alloc-on-drop generic aggregate frees at its own place
+        // regardless of a bare `Box` field (design 0007 §3.4, F5).
+        Type::App(n, _)
             if n == "Vec"
                 || n == "Map"
                 || env.lookup_generic(n).map(|g| g.alloc_on_drop).unwrap_or(false)
-                || bears_box(ty, env)
-            {
-                out.push(prefix.clone());
-            }
+                || bears_box(ty, env) =>
+        {
+            out.push(prefix.clone());
         }
         _ => {}
     }

@@ -183,17 +183,15 @@ impl<'a> Checker<'a> {
                         return Some((i, HashMap::new()));
                     }
                 }
-                Type::App(n, args) => {
-                    if im.target == *n && im.target_args.len() == args.len() {
-                        let mut map = HashMap::new();
-                        if im
-                            .target_args
-                            .iter()
-                            .zip(args)
-                            .all(|(d, a)| crate::generics::unify_inst(d, a, &mut map))
-                        {
-                            return Some((i, map));
-                        }
+                Type::App(n, args) if im.target == *n && im.target_args.len() == args.len() => {
+                    let mut map = HashMap::new();
+                    if im
+                        .target_args
+                        .iter()
+                        .zip(args)
+                        .all(|(d, a)| crate::generics::unify_inst(d, a, &mut map))
+                    {
+                        return Some((i, map));
                     }
                 }
                 _ => {}

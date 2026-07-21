@@ -538,10 +538,10 @@ impl<'a> Checker<'a> {
                 }
                 // A generic aggregate's `drop` hook is recorded on its generic decl
                 // (design 0007 §3.4): a partial move across it is equally forbidden.
-                Type::App(n, _) => {
-                    if self.items.lookup_generic(n).map(|g| g.has_drop).unwrap_or(false) {
-                        return true;
-                    }
+                Type::App(n, _)
+                    if self.items.lookup_generic(n).map(|g| g.has_drop).unwrap_or(false) =>
+                {
+                    return true;
                 }
                 _ => {}
             }
