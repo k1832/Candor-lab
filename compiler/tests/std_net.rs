@@ -225,7 +225,7 @@ fn audit_enumerates_tcp_connect_extern_and_discharge() {
 // containing it. Confirms the new extern does not slip past the freestanding wall.
 #[test]
 fn tcp_connect_foreign_surface_is_visible_to_freestanding_gate() {
-    let surface = candor::audit::first_boundary_surface(std::path::Path::new(&dir()))
+    let surface = candor::audit::first_boundary_surface(std::path::Path::new(&dir()), candor::manifest::Edition::E2026)
         .expect("boundary surface enumeration")
         .expect("the net module is a boundary with a foreign extern");
     assert_eq!(

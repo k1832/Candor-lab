@@ -18,6 +18,12 @@
 //!                               -- P15 migrator (design 0006 §5): parse the
 //!                                  throwaway `.cn` file and emit real (`.cnr`)
 //!                                  syntax to stdout (or `-o` file).
+//!   candor migrate-edition <pkg-dir>
+//!                               -- P15 edition migrator (1.0-gate item 1):
+//!                                  mechanically migrate a package from the 2026
+//!                                  edition to the 2027-rehearsal edition
+//!                                  (rewrites `mut` -> `mutable`, bumps the
+//!                                  manifest). Automatic and idempotent.
 //!
 //! The surface syntax is chosen by file extension (design 0006; spec 01/02):
 //!   * `.cnr` -> the real toolchain syntax (borrows/slices as keywords, the
@@ -40,6 +46,7 @@ fn main() -> ExitCode {
         (Some("manifest"), Some(path)) => run_manifest(path),
         (Some("compile"), Some(_)) => run_compile(&args[2..]),
         (Some("migrate"), Some(path)) => run_migrate(path, &args[3..]),
+        (Some("migrate-edition"), Some(path)) => run_migrate_edition(path),
         (Some("fmt"), Some(path)) => run_fmt(path, &args[3..]),
         (Some("--version" | "-V" | "version"), _) => {
             println!("candor {}", env!("CARGO_PKG_VERSION"));
@@ -58,7 +65,7 @@ fn main() -> ExitCode {
 
 /// The CLI usage text, shared by `--help` (stdout, exit 0) and the unknown-command
 /// error path (stderr, exit 2).
-const USAGE: &str = "usage: candor (parse|check|run|count|audit|build|manifest) <file>  |  run [--engine=mir] <file>  |  compile <file_or_dir> -o <prog> [--release] [--freestanding] [--linker=<name>]  |  migrate <file.cn> [-o <out.cnr>]  |  fmt <file_or_dir.cnr> [--check|--stdout]  |  --version  |  --help   (.cnr = real syntax, .cn = throwaway)";
+const USAGE: &str = "usage: candor (parse|check|run|count|audit|build|manifest) <file>  |  run [--engine=mir] <file>  |  compile <file_or_dir> -o <prog> [--release] [--freestanding] [--linker=<name>]  |  migrate <file.cn> [-o <out.cnr>]  |  migrate-edition <pkg-dir>  |  fmt <file_or_dir.cnr> [--check|--stdout]  |  --version  |  --help   (.cnr = real syntax, .cn = throwaway)";
 
 /// True when the path names a real-syntax (`.cnr`) source file.
 fn is_real(path: &str) -> bool {
@@ -530,6 +537,32 @@ fn run_migrate(path: &str, rest: &[String]) -> ExitCode {
         },
         Err(diag) => {
             eprintln!("{}", diag.to_json());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `migrate-edition <pkg-dir>` — the P15 edition migrator (1.0-gate item 1):
+/// mechanically migrate a package from the 2026 edition to the 2027-rehearsal
+/// edition and bump its manifest. Automatic and idempotent (an already-migrated
+/// package is a reported no-op).
+fn run_migrate_edition(path: &str) -> ExitCode {
+    let dir = std::path::Path::new(path);
+    if !dir.is_dir() {
+        eprintln!("error: `migrate-edition` takes a package directory (with a `candor.toml`)");
+        return ExitCode::from(2);
+    }
+    match candor::migrate_edition_dir(dir) {
+        Ok(m) => {
+            if m.manifest_bumped {
+                println!("migrated to `2027-rehearsal`: {} file(s) rewritten, manifest bumped", m.files_rewritten.len());
+            } else {
+                println!("already on `2027-rehearsal`: no changes (idempotent no-op)");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
             ExitCode::FAILURE
         }
     }

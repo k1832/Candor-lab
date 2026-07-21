@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ast::*;
 use crate::diag::Diag;
+use crate::manifest::Edition;
 use crate::span::Span;
 
 /// The result of building a module tree: one merged, name-qualified program
@@ -164,12 +165,20 @@ pub struct DirRoot {
     /// directory, `dir/src` for a manifested package.
     root: PathBuf,
     entry: EntryRule,
+    /// The surface edition governing this build's front-end (1.0-gate item 1),
+    /// read from the manifest (a manifest-less bare directory defaults to 2026).
+    edition: Edition,
 }
 
 impl DirRoot {
     /// The directory to discover `.cnr` module files from.
     pub fn discover_root(&self) -> &Path {
         &self.root
+    }
+
+    /// The surface edition this single-package build parses under (1.0-gate item 1).
+    pub fn edition(&self) -> Edition {
+        self.edition
     }
 }
 
@@ -199,8 +208,12 @@ struct RequiredEntry {
 /// rooted at `src/` (0017 §1). A manifest parse error surfaces as a build `Diag`.
 pub fn resolve_dir_root(dir: &Path) -> Result<DirRoot, Diag> {
     match crate::manifest::load_manifest(dir) {
-        Ok(None) => Ok(DirRoot { root: dir.to_path_buf(), entry: EntryRule::BareMain }),
-        Ok(Some(m)) => Ok(DirRoot { root: dir.join("src"), entry: package_entry(&m) }),
+        Ok(None) => Ok(DirRoot { root: dir.to_path_buf(), entry: EntryRule::BareMain, edition: Edition::E2026 }),
+        Ok(Some(m)) => Ok(DirRoot {
+            root: dir.join("src"),
+            entry: package_entry(&m),
+            edition: m.package.edition_kind(),
+        }),
         Err(e) => Err(Diag::error(
             e.code,
             format!("cannot read package manifest: {}", e.message),
@@ -316,7 +329,7 @@ fn assemble(root: &DirRoot) -> Result<Assembled, Diag> {
     let mut modules: Vec<Module> = Vec::new();
     for (path, file) in files {
         let src = std::fs::read_to_string(&file).map_err(|e| io_err(&file, &e.to_string()))?;
-        let (program, uses, vis, boundary) = crate::real::parse_module(&src)?;
+        let (program, uses, vis, boundary) = crate::real::parse_module_in(&src, root.edition)?;
         let (type_exports, value_exports) = collect_exports(&path, &program, &vis, Some(bare.as_slice()));
         modules.push(Module {
             path,
@@ -595,7 +608,11 @@ fn build_tree_multi(res: &crate::resolve_pkg::Resolution) -> Result<ModuleBuild,
     let mut mod_pkg: Vec<usize> = Vec::new(); // module index -> res.packages index
     for (path, file, pi) in discover_multi(res)? {
         let src = std::fs::read_to_string(&file).map_err(|e| io_err(&file, &e.to_string()))?;
-        let (program, uses, vis, boundary) = crate::real::parse_module(&src)?;
+        // Cross-edition linking (0017 F4): each package is parsed under ITS OWN
+        // manifest edition, so a 2026 package and a 2027-rehearsal package compose
+        // in one merged program — the interface is edition-agnostic (1.0-gate item 1).
+        let (program, uses, vis, boundary) =
+            crate::real::parse_module_in(&src, res.packages[pi].edition_kind())?;
         let (type_exports, value_exports) =
             collect_exports(&path, &program, &vis, entry.as_deref());
         modules.push(Module {
@@ -920,9 +937,15 @@ pub struct ParsedOne {
 /// module is touched — the signature-only incremental build parses exactly the
 /// modules whose own source changed. `entry` is the module path whose `fn main`
 /// keeps the bare global name (the single-package `["main"]`, or the root
-/// package's pkgid-prefixed entry in a multi-package build).
-pub fn parse_one(path: &[String], source: &str, entry: Option<&[String]>) -> Result<ParsedOne, Diag> {
-    let (program, uses, vis, boundary) = crate::real::parse_module(source)?;
+/// package's pkgid-prefixed entry in a multi-package build). `edition` is the
+/// owning package's surface edition (1.0-gate item 1).
+pub fn parse_one(
+    path: &[String],
+    source: &str,
+    entry: Option<&[String]>,
+    edition: Edition,
+) -> Result<ParsedOne, Diag> {
+    let (program, uses, vis, boundary) = crate::real::parse_module_in(source, edition)?;
     let (type_exports, value_exports) = collect_exports(path, &program, &vis, entry);
     Ok(ParsedOne {
         items: program.items,

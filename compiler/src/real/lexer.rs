@@ -6,6 +6,7 @@
 //! no parse context or symbol table (NN#13, §6).
 
 use crate::diag::Diag;
+use crate::manifest::Edition;
 use crate::span::Span;
 use crate::token::{scalar_from_str, ScalarTy};
 
@@ -14,6 +15,9 @@ use super::token::{real_keyword_from_str, RTok, RToken};
 pub struct RLexer<'a> {
     src: &'a [u8],
     pos: usize,
+    /// The surface edition governing keyword recognition (1.0-gate item 1). It is
+    /// the only place the edition steers the front-end (see [`real_keyword_from_str`]).
+    edition: Edition,
     /// Byte spans of `//` line and `/* */` block comments, in source order.
     /// Collected only when [`RLexer::tokenize_collecting`] is used (the
     /// formatter); the ordinary [`RLexer::tokenize`] path leaves it empty.
@@ -22,7 +26,13 @@ pub struct RLexer<'a> {
 
 impl<'a> RLexer<'a> {
     pub fn new(src: &'a str) -> RLexer<'a> {
-        RLexer { src: src.as_bytes(), pos: 0, comments: Vec::new() }
+        RLexer::with_edition(src, Edition::E2026)
+    }
+
+    /// A lexer for a specific surface [`Edition`] (1.0-gate item 1). A package's
+    /// edition (from its manifest) reaches the front-end through here.
+    pub fn with_edition(src: &'a str, edition: Edition) -> RLexer<'a> {
+        RLexer { src: src.as_bytes(), pos: 0, comments: Vec::new(), edition }
     }
 
     pub fn tokenize(mut self) -> Result<Vec<RToken>, Diag> {
@@ -176,7 +186,7 @@ impl<'a> RLexer<'a> {
             }
         }
         let text = std::str::from_utf8(&self.src[start..self.pos]).expect("ascii ident");
-        let kind = if let Some(kw) = real_keyword_from_str(text) {
+        let kind = if let Some(kw) = real_keyword_from_str(text, self.edition) {
             RTok::Kw(kw)
         } else if let Some(sc) = scalar_from_str(text) {
             RTok::Scalar(sc)
@@ -391,9 +401,15 @@ fn is_ident_continue(b: u8) -> bool {
     b == b'_' || b.is_ascii_alphanumeric()
 }
 
-/// Convenience wrapper.
+/// Convenience wrapper (default [`Edition::E2026`]).
 pub fn lex(src: &str) -> Result<Vec<RToken>, Diag> {
     RLexer::new(src).tokenize()
+}
+
+/// Lex under a specific surface [`Edition`] (1.0-gate item 1). The package's
+/// manifest edition reaches the front-end through this entry.
+pub fn lex_in(src: &str, edition: Edition) -> Result<Vec<RToken>, Diag> {
+    RLexer::with_edition(src, edition).tokenize()
 }
 
 impl RLexer<'_> {

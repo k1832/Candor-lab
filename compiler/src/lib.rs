@@ -215,6 +215,129 @@ pub fn migrate_source(src: &str) -> Result<String, Diag> {
 }
 
 // ---------------------------------------------------------------------------
+// P15 edition migrator (1.0-gate item 1, docs/1.0-GATE-TRIAGE.md row 1): the
+// automatic migrator for the REHEARSAL edition transition (2026 ->
+// 2027-rehearsal). The rehearsal's only breaking change is a keyword rename
+// (`mut` -> `mutable`, `manifest::REHEARSAL_EDITION`), so the migration is a
+// mechanical, formatting-preserving token splice plus a manifest edition bump.
+// Fully automatic, idempotent, and semantics-preserving — the migrated package
+// checks and runs byte-identically to the original (verified across engines).
+// ---------------------------------------------------------------------------
+
+/// The outcome of an edition migration ([`migrate_edition_dir`]).
+pub struct EditionMigration {
+    /// The `.cnr` files whose text was rewritten (empty on an already-migrated,
+    /// no-op re-run).
+    pub files_rewritten: Vec<std::path::PathBuf>,
+    /// Whether the manifest's `edition` field was bumped (false on a no-op re-run).
+    pub manifest_bumped: bool,
+}
+
+/// Rewrite one 2026 real-syntax source string to the 2027-rehearsal edition:
+/// respell every `mut` keyword as `mutable`, preserving all other bytes
+/// (comments, whitespace, layout). The rewrite is token-driven — it lexes under
+/// the 2026 edition and splices only the byte spans of `mut` *keyword* tokens, so
+/// a `mut` inside a string, comment, or a longer identifier is never touched.
+///
+/// Idempotent: applied to already-migrated text (which spells the keyword
+/// `mutable`, an ordinary identifier under the 2026 lexer) it finds no `mut`
+/// keyword tokens and returns the input unchanged.
+pub fn migrate_edition_source(src: &str) -> Result<String, Diag> {
+    use real::token::{RKw, RTok};
+    let tokens = real::lexer::lex_in(src, manifest::Edition::E2026)?;
+    let mut out = String::with_capacity(src.len());
+    let mut last = 0usize;
+    for t in &tokens {
+        if t.kind == RTok::Kw(RKw::Mut) {
+            out.push_str(&src[last..t.span.start]);
+            out.push_str("mutable");
+            last = t.span.end;
+        }
+    }
+    out.push_str(&src[last..]);
+    Ok(out)
+}
+
+/// Migrate a whole 2026 package directory to the 2027-rehearsal edition: rewrite
+/// every `.cnr` under `src/` ([`migrate_edition_source`]) and bump the manifest's
+/// `edition` field. Fully automatic and idempotent — a package already on the
+/// rehearsal edition is a no-op (both fields of the returned [`EditionMigration`]
+/// report nothing changed).
+///
+/// Known rehearsal-scope limitation (an honest note on keyword-rename migration):
+/// a complete migrator would also alpha-rename any existing identifier spelled
+/// `mutable` (it becomes a keyword in the new edition). The rehearsal fixtures use
+/// no such identifier, so this migrator does not; a shipped keyword rename would
+/// need that additional pass.
+pub fn migrate_edition_dir(dir: &std::path::Path) -> Result<EditionMigration, String> {
+    let manifest_path = dir.join("candor.toml");
+    let manifest_text = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("cannot read `{}`: {e}", manifest_path.display()))?;
+    let parsed = manifest::parse_manifest(&manifest_text).map_err(|e| e.to_string())?;
+
+    // Idempotency: a package already on the rehearsal edition needs no work.
+    if parsed.package.edition_kind() == manifest::Edition::E2027Rehearsal {
+        return Ok(EditionMigration { files_rewritten: Vec::new(), manifest_bumped: false });
+    }
+
+    let src_root = dir.join("src");
+    let files = modules::discover_module_files(&src_root).map_err(|d| d.to_json())?;
+    let mut files_rewritten = Vec::new();
+    for (_path, file) in files {
+        let src = std::fs::read_to_string(&file)
+            .map_err(|e| format!("cannot read `{}`: {e}", file.display()))?;
+        let migrated = migrate_edition_source(&src).map_err(|d| d.to_json())?;
+        if migrated != src {
+            std::fs::write(&file, &migrated)
+                .map_err(|e| format!("cannot write `{}`: {e}", file.display()))?;
+            files_rewritten.push(file);
+        }
+    }
+    files_rewritten.sort();
+
+    let bumped = bump_manifest_edition(&manifest_text).ok_or_else(|| {
+        format!(
+            "manifest `{}` has no `edition = \"{}\"` field to migrate",
+            manifest_path.display(),
+            manifest::CURRENT_EDITION,
+        )
+    })?;
+    std::fs::write(&manifest_path, &bumped)
+        .map_err(|e| format!("cannot write `{}`: {e}", manifest_path.display()))?;
+
+    Ok(EditionMigration { files_rewritten, manifest_bumped: true })
+}
+
+/// Bump a manifest's `[package] edition` from the stable default to the rehearsal
+/// edition, preserving every other byte (comments, layout, key order). Returns
+/// `None` when no `edition = "2026"` field is present. Line-oriented rather than a
+/// TOML round-trip so the manifest is not reformatted.
+fn bump_manifest_edition(text: &str) -> Option<String> {
+    let needle = format!("edition = \"{}\"", manifest::CURRENT_EDITION);
+    let replacement = format!("edition = \"{}\"", manifest::REHEARSAL_EDITION);
+    let mut done = false;
+    let out: Vec<String> = text
+        .lines()
+        .map(|line| {
+            if !done && line.trim_start().starts_with("edition") && line.contains(&needle) {
+                done = true;
+                line.replacen(&needle, &replacement, 1)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    if !done {
+        return None;
+    }
+    let mut joined = out.join("\n");
+    if text.ends_with('\n') {
+        joined.push('\n');
+    }
+    Some(joined)
+}
+
+// ---------------------------------------------------------------------------
 // Blessed formatter (P16 / NN#11): parse real (`.cnr`) syntax and re-print it in
 // the one canonical form, preserving comments (spec 02 §9; design 0006 §4).
 // ---------------------------------------------------------------------------

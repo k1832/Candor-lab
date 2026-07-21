@@ -5269,3 +5269,54 @@ Ratified fork (deciding authority, 2026-07-16). `AllocVtable` grew a third slot
   their golden item-counts and `.cn`/migrator pairing are unchanged). Full
   `cargo nextest run` green (929 tests) incl. self-host interp+lower corpus, AOT,
   LLVM fifth-engine, wasm; clippy `--all-targets` clean.
+
+## OBL-EDITION-REHEARSAL — P15 edition/migrator machinery exercised end-to-end (1.0-gate item 1) (2026-07-21)
+
+1.0-gate item 1 (`docs/1.0-GATE-TRIAGE.md` row 1): P15's promise that "the
+evolution mechanism works before it is relied on." Before this slice the manifest
+had a required, validated `edition` field with **only `"2026"` legal**, and the
+edition never reached the front-end — no second edition, no retained old
+front-end, no breaking-change migrator had ever run. This slice proves the
+machinery with a **REHEARSAL** edition (`"2027-rehearsal"`, `manifest::REHEARSAL_EDITION`),
+deliberately synthetic and clearly marked so nobody mistakes it for a shipped
+language change; it can be retired once a real edition relies on the machinery.
+
+- **The plumbing the design assumed but did not have.** The `edition` field
+  validated but was **never threaded to the parser** (`resolve_dir_root`,
+  `resolve_pkg`, and `build_dir` all loaded the manifest yet parsed with a fixed
+  front-end). This slice adds that plumbing: `manifest::Edition` flows from each
+  package's manifest through the module builders (`modules.rs`, `build/mod.rs`),
+  the resolver (`resolve_pkg.rs`), and the audit walk (`audit.rs`) into the real
+  lexer (`real::lexer::lex_in` / `real::token::real_keyword_from_str`). The
+  **parser is edition-agnostic** — both keyword spellings lex to the same token —
+  so the fork lives in exactly one place (the lexer keyword table).
+- **The breaking change (surface-only, byte-identical semantics, 0017 F4).** In
+  `2027-rehearsal` the mutability keyword `mut` is respelled `mutable`; `mut` is
+  demoted to an ordinary identifier. (a) The 2026 front-end still accepts `mut`
+  (old editions keep compiling), (b) the 2027-rehearsal front-end accepts ONLY
+  `mutable` (it IS a breaking change), (c) both spellings map to `RKw::Mut` — the
+  same AST — so the program means the same thing across the boundary.
+- **The automatic migrator.** `candor migrate-edition <pkg-dir>` (and
+  `candor::migrate_edition_dir`): a token-driven, formatting-preserving rewrite of
+  every `.cnr` under `src/` (`mut` keyword tokens -> `mutable`, leaving `mut` in
+  comments/strings/identifiers untouched) plus a line-oriented manifest edition
+  bump. Fully automatic and **idempotent** (an already-migrated package is a
+  reported no-op). Honest scope note: a shipped keyword rename would also need to
+  alpha-rename any existing identifier equal to the new keyword; the rehearsal
+  fixtures use none, so the migrator does not.
+- **Verified byte-identical across engines.** The migrated (2027) package checks
+  clean and returns identically to the original (2026) on the tree-walker, the MIR
+  interpreter, the Cranelift native engine, and the AOT executable
+  (`tests/editions.rs`).
+- **Cross-edition linking, both directions (0017 F4).** A 2026 app depending on a
+  2027-rehearsal library (using `mutable`) and a 2027-rehearsal app (using
+  `mutable`) depending on a 2026 library (using `mut`) both link, check clean, and
+  run across every engine — each package parsed under its own manifest edition, the
+  merged interface artifact edition-agnostic.
+- **Gate.** `tests/editions.rs` (9 tests, CI-gated with the suite): old edition
+  compiles+runs; new edition rejects the old spelling and accepts only the new;
+  old edition rejects the new spelling; unknown edition still errors (M0102);
+  migrator is automatic + idempotent + byte-identical across engines; migrate
+  source is idempotent; cross-edition deps link both directions. Full
+  `cargo nextest run` green; clippy `--all-targets` clean. ROADMAP left to the
+  deciding authority.

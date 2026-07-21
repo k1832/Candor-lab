@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::build::sha256;
 use crate::diag::Diag;
-use crate::manifest::{self, Manifest, Source, Version};
+use crate::manifest::{self, Edition, Manifest, Source, Version};
 use crate::span::Span;
 
 /// A resolved package in the pinned build set (design 0017 §6).
@@ -52,6 +52,14 @@ pub struct ResolvedPackage {
     pub public_root: Vec<String>,
     /// Local dependency name -> resolved pkgid (drives cross-package `use`, §5).
     pub deps: BTreeMap<String, String>,
+}
+
+impl ResolvedPackage {
+    /// This package's surface [`Edition`] (1.0-gate item 1). Total because the
+    /// manifest was validated when it was loaded.
+    pub fn edition_kind(&self) -> Edition {
+        Edition::from_field(&self.edition).unwrap_or_default()
+    }
 }
 
 /// A pinned dependency source (design 0017 §4/§6).
@@ -259,7 +267,7 @@ fn check_freestanding_composition(res: &Resolution) -> Result<(), Diag> {
         // The load-bearing F5 case: a transitive `boundary`/`foreign` surface. A
         // declared `foreign` extern (even one never called) has no libc to bind to
         // under freestanding (0011 §5).
-        if let Some(surface) = crate::audit::first_boundary_surface(&pkg.src_root)? {
+        if let Some(surface) = crate::audit::first_boundary_surface(&pkg.src_root, pkg.edition_kind())? {
             return Err(freestanding_boundary_diag(root, pkg, &surface));
         }
     }
@@ -317,7 +325,7 @@ fn trust_summaries(packages: &[ResolvedPackage]) -> Result<Vec<crate::audit::Tru
     // Reuse the impl #4 per-package audit enumeration to COUNT boundary modules,
     // foreign externs, and `unsafe` regions over the same `src/` tree the content
     // hash already covers — so the counts are reproducible with the sources.
-    packages.iter().map(|p| crate::audit::trust_counts(&p.src_root)).collect()
+    packages.iter().map(|p| crate::audit::trust_counts(&p.src_root, p.edition_kind())).collect()
 }
 
 /// Create a graph node, enforcing single-version unification (design 0017 §6):

@@ -16,10 +16,53 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-/// The one language edition legal today (0017 §3). Written `"2026"` as a
-/// placeholder for the naming authority; the *field* exists now to reserve the
-/// edition mechanism (adding it later would be the un-migratable break it guards).
+/// The default, stable language edition (0017 §3). Written `"2026"` as a
+/// placeholder for the naming authority; every manifest-less build and every
+/// single file defaults to it.
 pub const CURRENT_EDITION: &str = "2026";
+
+/// A **rehearsal** edition — 1.0-gate item 1 (docs/1.0-GATE-TRIAGE.md row 1),
+/// the P15 promise that the evolution mechanism works before it is relied on.
+///
+/// This is NOT a shipped language change. It exists only to exercise the
+/// edition/migrator machinery end-to-end with a deliberately tiny, synthetic
+/// breaking surface change: in this edition the mutability keyword `mut` is
+/// respelled `mutable` (semantics byte-identical — both map to the same AST). It
+/// can be retired once the machinery is proven. The `-rehearsal` suffix marks it
+/// so nobody mistakes it for a real edition.
+pub const REHEARSAL_EDITION: &str = "2027-rehearsal";
+
+/// A recognized language edition. The edition governs the *surface* front-end
+/// (which keyword spellings the lexer accepts, 0017 §3); it never changes program
+/// semantics across the boundary (0017 F4). A package's edition comes from its
+/// manifest; a manifest-less build or a bare file defaults to [`Edition::E2026`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Edition {
+    /// The default, stable edition (`"2026"`).
+    #[default]
+    E2026,
+    /// The synthetic rehearsal edition (`"2027-rehearsal"`); see [`REHEARSAL_EDITION`].
+    E2027Rehearsal,
+}
+
+impl Edition {
+    /// Recognize an edition field value, or `None` for an unknown edition.
+    pub fn from_field(s: &str) -> Option<Edition> {
+        match s {
+            CURRENT_EDITION => Some(Edition::E2026),
+            REHEARSAL_EDITION => Some(Edition::E2027Rehearsal),
+            _ => None,
+        }
+    }
+
+    /// The manifest field spelling of this edition.
+    pub fn as_field(self) -> &'static str {
+        match self {
+            Edition::E2026 => CURRENT_EDITION,
+            Edition::E2027Rehearsal => REHEARSAL_EDITION,
+        }
+    }
+}
 
 /// A parsed, validated `candor.toml`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -40,6 +83,15 @@ pub struct Package {
     pub version: Version,
     pub edition: String,
     pub freestanding: bool,
+}
+
+impl Package {
+    /// The parsed [`Edition`] of this package. Total because the manifest is
+    /// validated at parse time ([`validate_edition`]); an unrecognized edition
+    /// never reaches a constructed `Package`.
+    pub fn edition_kind(&self) -> Edition {
+        Edition::from_field(&self.edition).unwrap_or_default()
+    }
 }
 
 /// A semver triple `major.minor.patch` (0017 §3).
@@ -250,14 +302,16 @@ fn parse_version(s: &str) -> Result<Version, ManifestError> {
     Ok(Version { major: nums[0], minor: nums[1], patch: nums[2] })
 }
 
-/// Exactly one edition is legal today (0017 §3); editions are never inferred.
+/// An edition must be one Candor recognizes (0017 §3); editions are never
+/// inferred. The rehearsal edition (1.0-gate item 1) is legal alongside the
+/// stable default so the migrator machinery can be exercised end-to-end.
 fn validate_edition(s: &str) -> Result<(), ManifestError> {
-    if s == CURRENT_EDITION {
+    if Edition::from_field(s).is_some() {
         Ok(())
     } else {
         Err(ManifestError::new(
             "M0102",
-            format!("unknown edition `{s}`; the only supported edition is `{CURRENT_EDITION}`"),
+            format!("unknown edition `{s}`; supported editions are `{CURRENT_EDITION}`, `{REHEARSAL_EDITION}`"),
         ))
     }
 }

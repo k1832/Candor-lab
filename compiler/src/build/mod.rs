@@ -254,18 +254,35 @@ impl Plan {
     #[allow(clippy::type_complexity)]
     fn universe(
         &self,
-    ) -> Result<(Vec<(Vec<String>, PathBuf, usize)>, Vec<modules::ImportResolver>, Option<Vec<String>>), Diag> {
+    ) -> Result<
+        (
+            Vec<(Vec<String>, PathBuf, usize)>,
+            Vec<modules::ImportResolver>,
+            Vec<crate::manifest::Edition>,
+            Option<Vec<String>>,
+        ),
+        Diag,
+    > {
         match self {
             Plan::Single(root) => {
                 let discovered = modules::discover_module_files(root.discover_root())?
                     .into_iter()
                     .map(|(path, file)| (path, file, 0usize))
                     .collect();
-                Ok((discovered, vec![modules::ImportResolver::single()], Some(vec![String::from("main")])))
+                Ok((
+                    discovered,
+                    vec![modules::ImportResolver::single()],
+                    vec![root.edition()],
+                    Some(vec![String::from("main")]),
+                ))
             }
+            // The editions vec is index-parallel to the per-package resolvers, so a
+            // module's `resolver` index also selects its package's surface edition —
+            // cross-edition builds parse each package under its own edition (1.0-gate item 1).
             Plan::Multi(res) => Ok((
                 modules::discover_multi(res)?,
                 modules::ImportResolver::per_package(res),
+                res.packages.iter().map(|p| p.edition_kind()).collect(),
                 res.entry_module(),
             )),
         }
@@ -314,7 +331,7 @@ pub fn build_dir_with_salt(dir: &Path, salt: &str) -> Result<BuildReport, Diag> 
     } else {
         Plan::Single(modules::resolve_dir_root(dir)?)
     };
-    let (discovered, resolvers, entry) = plan.universe()?;
+    let (discovered, resolvers, editions, entry) = plan.universe()?;
 
     // The present-source universe: read + hash every `.cnr` file (NO parse).
     struct Present {
@@ -323,6 +340,8 @@ pub fn build_dir_with_salt(dir: &Path, salt: &str) -> Result<BuildReport, Diag> 
         source_hash: String,
         /// Index into `resolvers`: this module's package import resolver.
         resolver: usize,
+        /// This module's package surface edition (1.0-gate item 1).
+        edition: crate::manifest::Edition,
     }
     let mut present: BTreeMap<String, Present> = BTreeMap::new();
     for (mp, file, ri) in discovered {
@@ -330,7 +349,7 @@ pub fn build_dir_with_salt(dir: &Path, salt: &str) -> Result<BuildReport, Diag> 
             Diag::error("E0900", format!("cannot read module `{}`: {e}", file.display()), crate::span::Span::point(0))
         })?;
         let source_hash = sha256::hex(source.as_bytes());
-        present.insert(path_str(&mp), Present { path: mp, source, source_hash, resolver: ri });
+        present.insert(path_str(&mp), Present { path: mp, source, source_hash, resolver: ri, edition: editions[ri] });
     }
 
     // 2. Module-path universe = present sources ∪ cached artifacts (a reused
@@ -360,7 +379,7 @@ pub fn build_dir_with_salt(dir: &Path, salt: &str) -> Result<BuildReport, Diag> 
         if clean {
             edges.insert(path.clone(), art.unwrap().edges.clone());
         } else if let Some(pr) = pr {
-            let po = modules::parse_one(&pr.path, &pr.source, entry.as_deref())?;
+            let po = modules::parse_one(&pr.path, &pr.source, entry.as_deref(), pr.edition)?;
             // A dirty module's edges are its `use`s RESOLVED through its package's
             // import resolver — cross-package aware in a multi-package build, so a
             // dependency's module is an edge exactly as an in-package one is.
@@ -452,7 +471,7 @@ pub fn build_dir_with_salt(dir: &Path, salt: &str) -> Result<BuildReport, Diag> 
                 let pr = present.get(path).ok_or_else(|| {
                     Diag::error("E0906", format!("module `{path}` must re-check but its source is absent"), crate::span::Span::point(0))
                 })?;
-                let po = modules::parse_one(&pr.path, &pr.source, entry.as_deref())?;
+                let po = modules::parse_one(&pr.path, &pr.source, entry.as_deref(), pr.edition)?;
                 parsed.entry(path.clone()).or_insert(po)
             }
         };

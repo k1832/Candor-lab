@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ast::*;
 use crate::diag::Diag;
+use crate::manifest::Edition;
 
 #[derive(Serialize, Clone)]
 pub struct AuditReport {
@@ -193,7 +194,7 @@ fn audit_graph(root_dir: &Path) -> Result<String, Diag> {
         // Each package is audited over its own `src/` tree; the structural
         // boundary/unsafe enumeration is a pure parse per file, and the effect
         // reach runs the checker over that package alone.
-        let audit = audit_program(&pkg.src_root)?;
+        let audit = audit_program(&pkg.src_root, pkg.edition_kind())?;
         let is_root = i == resolution.root;
         if is_root {
             root_audit = Some(audit.clone());
@@ -233,19 +234,31 @@ pub fn audit_path(path: &Path) -> Result<String, Diag> {
     if is_multi_package(path)? {
         return audit_graph(path);
     }
-    let report = audit_program(path)?;
+    let report = audit_program(path, dir_edition(path))?;
     Ok(serde_json::to_string_pretty(&report).expect("AuditReport serializes"))
+}
+
+/// The surface edition of a bare file or a single (dependency-free) package
+/// directory (1.0-gate item 1): a manifested package's declared edition, else the
+/// 2026 default (a bare file or manifest-less directory).
+fn dir_edition(path: &Path) -> Edition {
+    if path.is_dir() {
+        if let Ok(Some(m)) = crate::manifest::load_manifest(path) {
+            return m.package.edition_kind();
+        }
+    }
+    Edition::E2026
 }
 
 /// Audit one program rooted at `path` (a `.cnr` file or a module-tree directory):
 /// its boundary modules, effect reach, and `unsafe` regions. This is the per-
 /// package walk the whole-graph audit runs over each resolved package.
-fn audit_program(path: &Path) -> Result<AuditReport, Diag> {
+fn audit_program(path: &Path, edition: Edition) -> Result<AuditReport, Diag> {
     let Surface { boundary_modules, unsafe_regions, externs, trust_predicates, exports } =
-        structural_surface(path)?;
+        structural_surface(path, edition)?;
 
     // Effect reach: run the checker over the merged/single program.
-    let (foreign_report, undischarged) = effect_reach(path)?;
+    let (foreign_report, undischarged) = effect_reach(path, edition)?;
 
     let summary = Summary {
         boundary_modules: boundary_modules.len(),
@@ -265,8 +278,8 @@ fn audit_program(path: &Path) -> Result<AuditReport, Diag> {
 /// reach, which the counts do not need. It is the post-resolution pass's source
 /// of the lockfile's per-package trust summary — kept here, beside the walk it
 /// reuses, so the resolver never depends on the audit's enumeration itself.
-pub fn trust_counts(src_root: &Path) -> Result<TrustSummary, Diag> {
-    let s = structural_surface(src_root)?;
+pub fn trust_counts(src_root: &Path, edition: Edition) -> Result<TrustSummary, Diag> {
+    let s = structural_surface(src_root, edition)?;
     Ok(TrustSummary {
         boundary_modules: s.boundary_modules.len(),
         externs: s.externs,
@@ -293,8 +306,8 @@ pub struct BoundarySurface {
 /// consumes the audit's data instead of re-walking. Boundary modules are
 /// enumerated in module-path-sorted order and externs in source order, so the
 /// reported surface is deterministic.
-pub fn first_boundary_surface(src_root: &Path) -> Result<Option<BoundarySurface>, Diag> {
-    let s = structural_surface(src_root)?;
+pub fn first_boundary_surface(src_root: &Path, edition: Edition) -> Result<Option<BoundarySurface>, Diag> {
+    let s = structural_surface(src_root, edition)?;
     Ok(s.boundary_modules.into_iter().next().map(|m| BoundarySurface {
         module: m.module,
         foreign_extern: m.externs.into_iter().next().map(|e| e.name),
@@ -313,7 +326,7 @@ struct Surface {
     exports: usize,
 }
 
-fn structural_surface(path: &Path) -> Result<Surface, Diag> {
+fn structural_surface(path: &Path, edition: Edition) -> Result<Surface, Diag> {
     let files = collect_files(path)?;
     let mut modules = Vec::new();
     let mut unsafe_regions = Vec::new();
@@ -324,7 +337,7 @@ fn structural_surface(path: &Path) -> Result<Surface, Diag> {
     for (module, file, display) in &files {
         let src = std::fs::read_to_string(file)
             .map_err(|e| Diag::error("E0900", format!("cannot read `{}`: {e}", file.display()), crate::span::Span::point(0)))?;
-        let (prog, boundary) = crate::real::parse_with_boundary(&src)?;
+        let (prog, boundary) = crate::real::parse_with_boundary_in(&src, edition)?;
         collect_unsafe_regions(&prog, module, display, &mut unsafe_regions);
         if !boundary {
             continue;
@@ -397,13 +410,13 @@ fn structural_surface(path: &Path) -> Result<Surface, Diag> {
 /// Run the checker over the whole program and return the boundary-module effect
 /// reach (functions that discharge or propagate `foreign`) plus the undischarged
 /// count. Names are module-qualified for a directory build.
-fn effect_reach(path: &Path) -> Result<(Vec<ReachEntry>, usize), Diag> {
+fn effect_reach(path: &Path, edition: Edition) -> Result<(Vec<ReachEntry>, usize), Diag> {
     let prog = if path.is_dir() {
         crate::modules::build_tree(path)?.program
     } else {
         let src = std::fs::read_to_string(path)
             .map_err(|e| Diag::error("E0900", format!("cannot read `{}`: {e}", path.display()), crate::span::Span::point(0)))?;
-        crate::real::parse_source(&src)?
+        crate::real::parse_source_in(&src, edition)?
     };
     let (_diags, report) = crate::check::check_program_real_foreign(&prog);
     let mut out = Vec::new();

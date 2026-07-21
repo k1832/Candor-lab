@@ -6,6 +6,7 @@
 //! `slice`/`slice_mut`/`borrow`/`borrow_mut`/`deref`/`case` are NOT keywords here
 //! (spec 01 §2.6) — they lex as ordinary identifiers.
 
+use crate::manifest::Edition;
 use crate::span::Span;
 use crate::token::ScalarTy;
 
@@ -130,9 +131,24 @@ pub struct RToken {
 }
 
 /// Map an identifier spelling to a hard keyword of the real grammar, if it is
-/// one. `alloc` and `ok` are contextual (spec 01 §2.5) and the retired spellings
-/// (`slice`, `borrow`, `deref`, `case`, …) are absent (§2.6): all lex as IDENT.
-pub fn real_keyword_from_str(s: &str) -> Option<RKw> {
+/// one, under the given [`Edition`]. `alloc` and `ok` are contextual (spec 01
+/// §2.5) and the retired spellings (`slice`, `borrow`, `deref`, `case`, …) are
+/// absent (§2.6): all lex as IDENT.
+///
+/// Edition fork (1.0-gate item 1, the rehearsal breaking change): in
+/// [`Edition::E2027Rehearsal`] the mutability keyword is spelled `mutable`, and
+/// `mut` is demoted to an ordinary identifier. Both spellings map to the same
+/// [`RKw::Mut`], so the change is surface-only — byte-identical semantics across
+/// the edition boundary (0017 F4). This is the ONE place the edition alters the
+/// front-end; the parser downstream is edition-agnostic.
+pub fn real_keyword_from_str(s: &str, edition: Edition) -> Option<RKw> {
+    if edition == Edition::E2027Rehearsal {
+        match s {
+            "mut" => return None,           // demoted to an identifier here
+            "mutable" => return Some(RKw::Mut),
+            _ => {}
+        }
+    }
     Some(match s {
         "rawptr" => RKw::RawPtr,
         "Box" => RKw::Box,

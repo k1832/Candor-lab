@@ -224,7 +224,7 @@ fn audit_enumerates_server_externs_and_discharge() {
 #[test]
 fn server_foreign_surface_is_visible_to_freestanding_gate() {
     let _g = lock();
-    let surface = candor::audit::first_boundary_surface(&dir())
+    let surface = candor::audit::first_boundary_surface(&dir(), candor::manifest::Edition::E2026)
         .expect("boundary surface enumeration")
         .expect("the http server module is a boundary with a foreign extern");
     assert_eq!(
