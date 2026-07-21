@@ -89,6 +89,12 @@ cp "$LAB_ROOT/LICENSE-MIT"      "$TARGET/LICENSE-MIT"
 cp "$LAB_ROOT/LICENSE-APACHE"   "$TARGET/LICENSE-APACHE"
 cp -R "$DIST_DIR/examples"      "$TARGET/examples"
 
+# --- 6. strip build caches -----------------------------------------------
+# The lab working tree may carry untracked .candor-cache/ dirs (incremental-
+# build caches from verification runs); cp -R copies the working tree, so
+# strip them from the seed — a distribution ships sources, never caches.
+find "$TARGET" -type d -name '.candor-cache' -exec rm -rf {} +
+
 echo
 echo "Done. The standalone repo is assembled at:"
 echo "  $TARGET"
