@@ -64,7 +64,7 @@ pub fn format_source(src: &str) -> Result<String, Diag> {
     let (tokens, comment_spans) = super::lexer::lex_with_comments(src)?;
     let (program, uses, vis, boundary) = super::parser::parse_format(tokens)?;
     let comments = build_comments(src, &comment_spans);
-    let mut f = Fmt { buf: String::new(), indent: 0, src, comments, ci: 0, last_pos: 0 };
+    let mut f = Fmt { buf: String::new(), indent: 0, src, comments, ci: 0, last_pos: 0, no_struct: false };
     f.emit_unit(&program, &uses, &vis, boundary);
     Ok(f.buf)
 }
@@ -127,6 +127,10 @@ struct Fmt<'a> {
     comments: Vec<Comment>,
     ci: usize,
     last_pos: usize,
+    /// True while emitting a control-flow head (spec 02 §6.1), where a bare `{`
+    /// starts the block: a struct literal reached on the head's operator spine
+    /// must parenthesize itself to stay reparseable.
+    no_struct: bool,
 }
 
 impl Fmt<'_> {
@@ -868,6 +872,9 @@ impl Fmt<'_> {
         let paren = bp < parent_bp;
         if paren {
             self.push("(");
+            // Precedence parens already disambiguate a leading `{`, so a struct
+            // literal inside them needs no extra head-position parens.
+            self.no_struct = false;
         }
         self.emit_expr_bare(e, wp);
         if paren {
@@ -909,6 +916,10 @@ impl Fmt<'_> {
     }
 
     fn emit_expr_bare(&mut self, e: &Expr, wp: bool) {
+        // Consume the head-position flag: sub-expressions are not in head
+        // position unless a spine arm below re-arms it before recursing. Every
+        // `emit_expr`/`emit_expr_bare` therefore returns with `no_struct` false.
+        let head = std::mem::replace(&mut self.no_struct, false);
         match &e.kind {
             ExprKind::IntLit { value, suffix } => {
                 self.push(&value.to_string());
@@ -922,6 +933,13 @@ impl Fmt<'_> {
                 if let Some(s) = suffix {
                     self.push(scalar_kw(*s));
                 }
+            }
+            ExprKind::FloatLit { .. } => {
+                // The AST keeps only the parsed IEEE-754 bits (design 0016), so
+                // re-rendering from the value would risk a lossy round-trip. The
+                // span is exactly the literal, so emit the source lexeme verbatim.
+                let src = self.src;
+                self.push(&src[e.span.start..e.span.end]);
             }
             ExprKind::StrLit(s) => self.emit_string(s),
             ExprKind::BytesLit(s) => {
@@ -976,6 +994,7 @@ impl Fmt<'_> {
             }
             ExprKind::Prefix { op, expr } => match op {
                 PrefixOp::Deref => {
+                    self.no_struct = head;
                     self.emit_expr(expr, BP_POSTFIX, wp);
                     self.push(".*");
                 }
@@ -988,17 +1007,21 @@ impl Fmt<'_> {
             },
             ExprKind::Binary { op, lhs, rhs } => {
                 let obp = bin_bp(*op);
+                self.no_struct = head;
                 self.emit_expr(lhs, obp, false);
                 self.push(" ");
                 self.push(bin_sym(*op));
                 self.push(" ");
+                self.no_struct = head;
                 self.emit_expr(rhs, obp + 1, false);
             }
             ExprKind::Try(inner) => {
+                self.no_struct = head;
                 self.emit_expr(inner, BP_POSTFIX, false);
                 self.push("?");
             }
             ExprKind::Call { callee, args } => {
+                self.no_struct = head;
                 self.emit_expr(callee, BP_POSTFIX, false);
                 self.push("(");
                 self.emit_args(args);
@@ -1009,11 +1032,13 @@ impl Fmt<'_> {
                 self.emit_expr(place, BP_MIN, false);
             }
             ExprKind::Field { base, field, .. } => {
+                self.no_struct = head;
                 self.emit_place_base(base, wp);
                 self.push(".");
                 self.push(field);
             }
             ExprKind::Index { base, index } => {
+                self.no_struct = head;
                 self.emit_place_base(base, wp);
                 self.push("[");
                 self.emit_expr(index, BP_MIN, false);
@@ -1041,6 +1066,9 @@ impl Fmt<'_> {
                 self.push("]");
             }
             ExprKind::StructLit { name, fields } => {
+                if head {
+                    self.push("(");
+                }
                 self.push(name);
                 if fields.is_empty() {
                     self.push(" {}");
@@ -1055,6 +1083,9 @@ impl Fmt<'_> {
                         self.emit_expr(&f.value, BP_MIN, false);
                     }
                     self.push(" }");
+                }
+                if head {
+                    self.push(")");
                 }
             }
             ExprKind::ArrayLit(elems) => {
@@ -1101,7 +1132,10 @@ impl Fmt<'_> {
                 self.emit_type(ty);
                 self.push(")");
             }
-            ExprKind::Paren(inner) => self.emit_expr_bare(strip_paren(inner), wp),
+            ExprKind::Paren(inner) => {
+                self.no_struct = head;
+                self.emit_expr_bare(strip_paren(inner), wp);
+            }
             _ if is_block_like(&e.kind) => self.emit_block_like(e),
             _ => unreachable!("unhandled expression kind in formatter"),
         }
@@ -1253,14 +1287,12 @@ impl Fmt<'_> {
     }
 
     fn emit_head(&mut self, e: &Expr) {
-        let inner = strip_paren(e);
-        if matches!(inner.kind, ExprKind::StructLit { .. }) {
-            self.push("(");
-            self.emit_expr(inner, BP_MIN, false);
-            self.push(")");
-        } else {
-            self.emit_expr(e, BP_MIN, false);
-        }
+        // A control-flow head forbids a bare `{`, so every struct literal
+        // reachable on its operator spine must be parenthesized. Arm the flag;
+        // each exposed struct literal then self-parenthesizes (see `emit_expr_bare`).
+        self.no_struct = true;
+        self.emit_expr(e, BP_MIN, false);
+        self.no_struct = false;
     }
 
     fn emit_pattern(&mut self, p: &Pattern) {

@@ -375,35 +375,15 @@ fn behaves_identically(a: &str, b: &str) -> bool {
     true
 }
 
-// Format-containing fixtures the formatter currently PANICS on. Every entry
-// contains an `f64`/`f32` literal, which `emit_expr_bare` does not handle
-// (`ExprKind::FloatLit` falls through to `unreachable!`, fmt.rs). This is a
-// standing KNOWN BUG (P16 finding); the corpus gate asserts the panic set is
-// EXACTLY this list, so fixing FloatLit (or a new float fixture) trips the gate.
-const FMT_FLOAT_PANIC_FIXTURES: &[&str] = &[
-    "bitcast.cnr",
-    "floats.cnr",
-    "floats_f32.cnr",
-    "fmt_f64_trace.cnr",
-    "sqrt.cnr",
-    "sqrt_f32.cnr",
-    "wasm_interp.cnr",
-];
+// The formatter no longer panics on any run-corpus fixture: `emit_expr_bare`
+// now handles `ExprKind::FloatLit` (fmt.rs). The set is pinned EMPTY so that a
+// newly-crashing fixture trips `corpus_format_panic_set_is_pinned` rather than
+// silently regressing. Float fixtures now flow through the full semantic gate.
+const FMT_FLOAT_PANIC_FIXTURES: &[&str] = &[];
 
-// The same bug reaches float fixtures outside run/ too. Full-tree basenames that
-// panic the formatter (used by the whole-tree idempotency scan).
-const FMT_FLOAT_PANIC_ANY: &[&str] = &[
-    "bitcast.cnr",
-    "floats.cnr",
-    "floats_f32.cnr",
-    "fmt_f64_trace.cnr",
-    "sqrt.cnr",
-    "sqrt_f32.cnr",
-    "wasm_interp.cnr",
-    "std_fmt.cnr",
-    "interp.cnr",
-    "run_wasm_file.cnr",
-];
+// No full-tree fixture panics the formatter any more (FloatLit is handled), so
+// the whole-tree idempotency scan now checks every float fixture too.
+const FMT_FLOAT_PANIC_ANY: &[&str] = &[];
 
 // ---- the load-bearing corpus-wide SEMANTIC gate ----------------------------
 
@@ -809,22 +789,22 @@ fn formatted_runnable_programs_behave_identically() {
     }
 }
 
-// ---- KNOWN-BUG pending regressions (P16 findings; do not bless) ------------
-// These encode the CORRECT expectation for two formatter bugs found this cycle.
-// They are #[ignore]d so the suite stays green; un-ignore each when its bug is
-// fixed. See the run report for the precise findings.
+// ---- fixed-bug regressions (P16 findings) ----------------------------------
+// The two formatter bugs found this cycle -- a panic on float literals and a
+// struct literal losing its disambiguating parens in a control-flow head -- are
+// fixed; these pin the correct behavior so it cannot silently regress.
 
 #[test]
-#[ignore = "KNOWN BUG (P16): formatter panics on float literals; ExprKind::FloatLit unhandled in emit_expr_bare (fmt.rs ~L1106). Un-ignore when handled."]
-fn known_bug_float_literals_should_format() {
+fn float_literals_format_and_round_trip() {
     let src = "fn main() -> i64 { let x: f64 = 1.5; let y: f64 = x + 2.25; return 0; }";
-    let out = candor::format_source_real(src).expect("float literals should format, not panic");
-    assert!(out.contains("1.5") && out.contains("2.25"));
+    let out = candor::format_source_real(src).expect("float literals must format, not panic");
+    assert!(out.contains("1.5") && out.contains("2.25"), "float lexemes preserved: {out}");
+    let twice = candor::format_source_real(&out).expect("formatted float source must reparse");
+    assert_eq!(twice, out, "float formatting must be idempotent");
 }
 
 #[test]
-#[ignore = "KNOWN BUG (P16): a struct literal nested in a control-flow head loses its disambiguating parens; the formatted output fails to reparse. Un-ignore when fixed."]
-fn known_bug_struct_literal_in_head_keeps_parens() {
+fn struct_literal_in_head_keeps_parens() {
     let src = "struct P { x: i64 }\nfn main() -> i64 {\n    if (P { x: 1 }).x == 1 {\n        return 7;\n    }\n    return 0;\n}\n";
     let out = candor::format_source_real(src).expect("format ok");
     // Correct expectation: formatted output must re-parse and preserve behavior.
