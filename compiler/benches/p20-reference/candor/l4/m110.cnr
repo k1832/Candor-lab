@@ -2,27 +2,24 @@
 // measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
 // via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
 use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
-use l1::m018::{f018};
-use l1::m020::{f020};
-use l3::m054::{f054};
-use l3::m055::{f055};
+use l1::m015::{f015};
 
 pub struct S110_0 {
     a: i64,
     n0: u32,
-    n1: i64,
+    n1: u32,
     flag: bool,
 }
 pub fn mk110_0(a: i64) -> S110_0 {
-    return S110_0 { a: a, n0: 0u32, n1: 0, flag: true };
+    return S110_0 { a: a, n0: 0u32, n1: 0u32, flag: true };
 }
 impl Probe for S110_0 {
     fn probe(read self) -> i64 {
-        return self.a + conv i64 self.n0 + self.n1;
+        return self.a + conv i64 self.n0 + conv i64 self.n1;
     }
 }
 pub fn read110_0(s: read S110_0) -> i64 {
-    return s.a * 5i64;
+    return s.a * 6i64;
 }
 pub fn bump110_0(s: write S110_0, d: i64) -> unit {
     s.*.a = s.a + d;
@@ -58,23 +55,25 @@ pub fn accum110_0(n: i64) -> i64 {
     return acc;
 }
 pub fn guard110_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
-    return x + 6i64;
+    return x + 9i64;
 }
 pub struct S110_1 {
     a: i64,
-    n0: i64,
+    n0: u32,
+    n1: u32,
+    n2: usize,
     flag: bool,
 }
 pub fn mk110_1(a: i64) -> S110_1 {
-    return S110_1 { a: a, n0: 0, flag: true };
+    return S110_1 { a: a, n0: 0u32, n1: 0u32, n2: 0usize, flag: true };
 }
 impl Probe for S110_1 {
     fn probe(read self) -> i64 {
-        return self.a + self.n0;
+        return self.a + conv i64 self.n0 + conv i64 self.n1 + conv i64 self.n2;
     }
 }
 pub fn read110_1(s: read S110_1) -> i64 {
-    return s.a * 2i64;
+    return s.a * 6i64;
 }
 pub fn bump110_1(s: write S110_1, d: i64) -> unit {
     s.*.a = s.a + d;
@@ -83,7 +82,6 @@ pub enum E110_1 {
     V0,
     V1(i64),
     V2(i64, i64),
-    V3(i64),
 }
 pub fn classify110_1(e: E110_1) -> i64 {
     match e {
@@ -96,38 +94,34 @@ pub fn classify110_1(e: E110_1) -> i64 {
         E110_1::V2(a, b) => {
             return a + b;
         },
-        E110_1::V3(a) => {
-            return a * 2i64;
-        },
     }
 }
 pub fn pick110_1[T: Ord2 + copy](a: T, b: T) -> T {
-    return minof(a, b);
+    return maxof(a, b);
 }
 pub fn accum110_1(n: i64) -> i64 {
     let mut acc: i64 = 0i64;
     let mut i: i64 = 0i64;
     while i < n {
-        acc = acc + i * 3i64;
+        acc = acc + i * 5i64;
         i = i + 1i64;
     }
     return acc;
 }
 pub fn guard110_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
-    return x + 2i64;
+    return x + 1i64;
 }
 pub struct S110_2 {
     a: i64,
     n0: u32,
-    n1: usize,
     flag: bool,
 }
 pub fn mk110_2(a: i64) -> S110_2 {
-    return S110_2 { a: a, n0: 0u32, n1: 0usize, flag: true };
+    return S110_2 { a: a, n0: 0u32, flag: true };
 }
 impl Probe for S110_2 {
     fn probe(read self) -> i64 {
-        return self.a + conv i64 self.n0 + conv i64 self.n1;
+        return self.a + conv i64 self.n0;
     }
 }
 pub fn read110_2(s: read S110_2) -> i64 {
@@ -165,38 +159,41 @@ pub fn accum110_2(n: i64) -> i64 {
     let mut acc: i64 = 0i64;
     let mut i: i64 = 0i64;
     while i < n {
-        acc = acc + i * 2i64;
+        acc = acc + i * 5i64;
         i = i + 1i64;
     }
     return acc;
 }
 pub fn guard110_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
-    return x + 8i64;
+    return x + 6i64;
 }
 pub fn f110(x: i64) -> i64 {
     let mut acc: i64 = x;
-    acc = acc + f018(x + 1i64);
-    acc = acc + f020(x + 2i64);
-    acc = acc + f054(x + 3i64);
-    acc = acc + f055(x + 4i64);
+    acc = acc + f015(x + 1i64);
     let mut s0: S110_0 = mk110_0(acc);
-    bump110_0(write s0, 4i64);
+    bump110_0(write s0, 1i64);
     acc = acc + s0.probe();
     acc = acc + read110_0(read s0);
     acc = acc + classify110_0(E110_0::V1(acc));
-    acc = acc + accum110_0(4i64);
+    acc = acc + accum110_0(9i64);
+    acc = acc + pick110_0(8i64, 4i64);
+    acc = acc + conv i64 (pick110_0(3u32, 9u32));
     let mut s1: S110_1 = mk110_1(acc);
-    bump110_1(write s1, 4i64);
+    bump110_1(write s1, 5i64);
     acc = acc + s1.probe();
     acc = acc + read110_1(read s1);
     acc = acc + classify110_1(E110_1::V1(acc));
-    acc = acc + accum110_1(4i64);
+    acc = acc + accum110_1(6i64);
+    acc = acc + pick110_1(3i64, 5i64);
     let mut s2: S110_2 = mk110_2(acc);
-    bump110_2(write s2, 2i64);
+    bump110_2(write s2, 1i64);
     acc = acc + s2.probe();
     acc = acc + read110_2(read s2);
     acc = acc + classify110_2(E110_2::V1(acc));
-    acc = acc + accum110_2(9i64);
+    acc = acc + accum110_2(7i64);
+    acc = acc + pick110_2(6i64, 7i64);
+    acc = acc + conv i64 (pick110_2(5u32, 3u32));
+    acc = acc + conv i64 (pick110_2(9usize, 2usize));
     acc = maxof(acc, x);
     acc = minof(acc, x + 1i64);
     return clampi(acc);

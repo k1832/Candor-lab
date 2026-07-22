@@ -5,6 +5,7 @@ typedef struct {
     long a;
     long n0;
     long n1;
+    long n2;
     int flag;
 } S127_0;
 
@@ -13,11 +14,12 @@ static S127_0 mk127_0(long a) {
     s.a = a;
     s.n0 = 0;
     s.n1 = 0;
+    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe127_0(const S127_0 *s) {
-    return s->a + s->n0 + s->n1;
+    return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read127_0(const S127_0 *s) {
     return s->a * 7;
@@ -46,12 +48,16 @@ static long accum127_0(long n) {
     return acc;
 }
 static long guard127_0(long x) {
-    return x + 5;
+    return x + 9;
 }
 
+static long pick127_0_0(long a, long b) { return a > b ? a : b; }
+static long pick127_0_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
+    long n1;
+    long n2;
     int flag;
 } S127_1;
 
@@ -59,14 +65,16 @@ static S127_1 mk127_1(long a) {
     S127_1 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
+    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe127_1(const S127_1 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read127_1(const S127_1 *s) {
-    return s->a * 4;
+    return s->a * 3;
 }
 static void bump127_1(S127_1 *s, long d) {
     s->a = s->a + d;
@@ -92,12 +100,15 @@ static long accum127_1(long n) {
     return acc;
 }
 static long guard127_1(long x) {
-    return x + 1;
+    return x + 4;
 }
 
+static long pick127_1_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
+    long n1;
+    long n2;
     int flag;
 } S127_2;
 
@@ -105,14 +116,16 @@ static S127_2 mk127_2(long a) {
     S127_2 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
+    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe127_2(const S127_2 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read127_2(const S127_2 *s) {
-    return s->a * 4;
+    return s->a * 3;
 }
 static void bump127_2(S127_2 *s, long d) {
     s->a = s->a + d;
@@ -138,14 +151,13 @@ static long accum127_2(long n) {
     return acc;
 }
 static long guard127_2(long x) {
-    return x + 7;
+    return x + 9;
 }
 
+static long pick127_2_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
-    long n1;
-    long n2;
     int flag;
 } S127_3;
 
@@ -153,13 +165,11 @@ static S127_3 mk127_3(long a) {
     S127_3 s;
     s.a = a;
     s.n0 = 0;
-    s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe127_3(const S127_3 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0;
 }
 static long read127_3(const S127_3 *s) {
     return s->a * 2;
@@ -188,39 +198,52 @@ static long accum127_3(long n) {
     return acc;
 }
 static long guard127_3(long x) {
-    return x + 8;
+    return x + 6;
 }
 
+static long pick127_3_0(long a, long b) { return a > b ? a : b; }
+static long pick127_3_1(long a, long b) { return a > b ? a : b; }
+static long pick127_3_2(long a, long b) { return a > b ? a : b; }
 long f127(long x) {
     long acc = x;
-    acc += f046(x + 1);
+    acc += f016(x + 1);
+    acc += f051(x + 2);
+    acc += f094(x + 3);
+    acc += f100(x + 4);
     S127_0 s0 = mk127_0(acc);
-    bump127_0(&s0, 1);
+    bump127_0(&s0, 5);
     acc += probe127_0(&s0);
     acc += read127_0(&s0);
     acc += classify127_0(1, acc, acc);
-    acc += accum127_0(5);
+    acc += accum127_0(4);
     acc += guard127_0(acc);
+    acc += pick127_0_0(acc, acc + 3);
+    acc += pick127_0_1(acc, acc + 9);
     S127_1 s1 = mk127_1(acc);
-    bump127_1(&s1, 8);
+    bump127_1(&s1, 3);
     acc += probe127_1(&s1);
     acc += read127_1(&s1);
     acc += classify127_1(1, acc, acc);
     acc += accum127_1(3);
     acc += guard127_1(acc);
+    acc += pick127_1_0(acc, acc + 1);
     S127_2 s2 = mk127_2(acc);
-    bump127_2(&s2, 1);
+    bump127_2(&s2, 6);
     acc += probe127_2(&s2);
     acc += read127_2(&s2);
     acc += classify127_2(1, acc, acc);
-    acc += accum127_2(4);
+    acc += accum127_2(5);
     acc += guard127_2(acc);
+    acc += pick127_2_0(acc, acc + 1);
     S127_3 s3 = mk127_3(acc);
-    bump127_3(&s3, 4);
+    bump127_3(&s3, 1);
     acc += probe127_3(&s3);
     acc += read127_3(&s3);
     acc += classify127_3(1, acc, acc);
-    acc += accum127_3(8);
+    acc += accum127_3(4);
     acc += guard127_3(acc);
+    acc += pick127_3_0(acc, acc + 5);
+    acc += pick127_3_1(acc, acc + 4);
+    acc += pick127_3_2(acc, acc + 9);
     return clampi(acc);
 }

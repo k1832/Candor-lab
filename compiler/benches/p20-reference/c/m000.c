@@ -51,6 +51,9 @@ static long guard0_0(long x) {
     return x + 2;
 }
 
+static long pick0_0_0(long a, long b) { return a > b ? a : b; }
+static long pick0_0_1(long a, long b) { return a > b ? a : b; }
+static long pick0_0_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -101,6 +104,9 @@ static long guard0_1(long x) {
     return x + 9;
 }
 
+static long pick0_1_0(long a, long b) { return a > b ? a : b; }
+static long pick0_1_1(long a, long b) { return a > b ? a : b; }
+static long pick0_1_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -147,6 +153,7 @@ static long guard0_2(long x) {
     return x + 7;
 }
 
+static long pick0_2_0(long a, long b) { return a > b ? a : b; }
 long f000(long x) {
     long acc = x;
     S0_0 s0 = mk0_0(acc);
@@ -156,19 +163,26 @@ long f000(long x) {
     acc += classify0_0(1, acc, acc);
     acc += accum0_0(7);
     acc += guard0_0(acc);
+    acc += pick0_0_0(acc, acc + 9);
+    acc += pick0_0_1(acc, acc + 7);
+    acc += pick0_0_2(acc, acc + 4);
     S0_1 s1 = mk0_1(acc);
-    bump0_1(&s1, 9);
+    bump0_1(&s1, 1);
     acc += probe0_1(&s1);
     acc += read0_1(&s1);
     acc += classify0_1(1, acc, acc);
-    acc += accum0_1(6);
+    acc += accum0_1(4);
     acc += guard0_1(acc);
+    acc += pick0_1_0(acc, acc + 3);
+    acc += pick0_1_1(acc, acc + 3);
+    acc += pick0_1_2(acc, acc + 9);
     S0_2 s2 = mk0_2(acc);
-    bump0_2(&s2, 4);
+    bump0_2(&s2, 3);
     acc += probe0_2(&s2);
     acc += read0_2(&s2);
     acc += classify0_2(1, acc, acc);
-    acc += accum0_2(8);
+    acc += accum0_2(6);
     acc += guard0_2(acc);
+    acc += pick0_2_0(acc, acc + 2);
     return clampi(acc);
 }

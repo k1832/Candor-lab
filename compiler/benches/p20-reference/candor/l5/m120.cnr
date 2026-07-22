@@ -2,23 +2,22 @@
 // measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
 // via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
 use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
-use l2::m045::{f045};
-use l3::m059::{f059};
+use l1::m012::{f012};
+use l3::m063::{f063};
+use l4::m091::{f091};
 use l4::m100::{f100};
-use l4::m101::{f101};
 
 pub struct S120_0 {
     a: i64,
-    n0: i64,
-    n1: u32,
+    n0: u32,
     flag: bool,
 }
 pub fn mk120_0(a: i64) -> S120_0 {
-    return S120_0 { a: a, n0: 0, n1: 0u32, flag: true };
+    return S120_0 { a: a, n0: 0u32, flag: true };
 }
 impl Probe for S120_0 {
     fn probe(read self) -> i64 {
-        return self.a + self.n0 + conv i64 self.n1;
+        return self.a + conv i64 self.n0;
     }
 }
 pub fn read120_0(s: read S120_0) -> i64 {
@@ -30,8 +29,6 @@ pub fn bump120_0(s: write S120_0, d: i64) -> unit {
 pub enum E120_0 {
     V0,
     V1(i64),
-    V2(i64, i64),
-    V3(i64),
 }
 pub fn classify120_0(e: E120_0) -> i64 {
     match e {
@@ -40,12 +37,6 @@ pub fn classify120_0(e: E120_0) -> i64 {
         },
         E120_0::V1(a) => {
             return a;
-        },
-        E120_0::V2(a, b) => {
-            return a + b;
-        },
-        E120_0::V3(a) => {
-            return a * 2i64;
         },
     }
 }
@@ -56,26 +47,26 @@ pub fn accum120_0(n: i64) -> i64 {
     let mut acc: i64 = 0i64;
     let mut i: i64 = 0i64;
     while i < n {
-        acc = acc + i * 4i64;
+        acc = acc + i * 3i64;
         i = i + 1i64;
     }
     return acc;
 }
 pub fn guard120_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
-    return x + 5i64;
+    return x + 9i64;
 }
 pub struct S120_1 {
     a: i64,
-    n0: u32,
-    n1: u32,
+    n0: i64,
+    n1: usize,
     flag: bool,
 }
 pub fn mk120_1(a: i64) -> S120_1 {
-    return S120_1 { a: a, n0: 0u32, n1: 0u32, flag: true };
+    return S120_1 { a: a, n0: 0, n1: 0usize, flag: true };
 }
 impl Probe for S120_1 {
     fn probe(read self) -> i64 {
-        return self.a + conv i64 self.n0 + conv i64 self.n1;
+        return self.a + self.n0 + conv i64 self.n1;
     }
 }
 pub fn read120_1(s: read S120_1) -> i64 {
@@ -87,6 +78,8 @@ pub fn bump120_1(s: write S120_1, d: i64) -> unit {
 pub enum E120_1 {
     V0,
     V1(i64),
+    V2(i64, i64),
+    V3(i64),
 }
 pub fn classify120_1(e: E120_1) -> i64 {
     match e {
@@ -95,6 +88,12 @@ pub fn classify120_1(e: E120_1) -> i64 {
         },
         E120_1::V1(a) => {
             return a;
+        },
+        E120_1::V2(a, b) => {
+            return a + b;
+        },
+        E120_1::V3(a) => {
+            return a * 2i64;
         },
     }
 }
@@ -105,30 +104,30 @@ pub fn accum120_1(n: i64) -> i64 {
     let mut acc: i64 = 0i64;
     let mut i: i64 = 0i64;
     while i < n {
-        acc = acc + i * 5i64;
+        acc = acc + i * 4i64;
         i = i + 1i64;
     }
     return acc;
 }
 pub fn guard120_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
-    return x + 1i64;
+    return x + 6i64;
 }
 pub struct S120_2 {
     a: i64,
     n0: i64,
-    n1: i64,
+    n1: usize,
     flag: bool,
 }
 pub fn mk120_2(a: i64) -> S120_2 {
-    return S120_2 { a: a, n0: 0, n1: 0, flag: true };
+    return S120_2 { a: a, n0: 0, n1: 0usize, flag: true };
 }
 impl Probe for S120_2 {
     fn probe(read self) -> i64 {
-        return self.a + self.n0 + self.n1;
+        return self.a + self.n0 + conv i64 self.n1;
     }
 }
 pub fn read120_2(s: read S120_2) -> i64 {
-    return s.a * 6i64;
+    return s.a * 4i64;
 }
 pub fn bump120_2(s: write S120_2, d: i64) -> unit {
     s.*.a = s.a + d;
@@ -136,6 +135,7 @@ pub fn bump120_2(s: write S120_2, d: i64) -> unit {
 pub enum E120_2 {
     V0,
     V1(i64),
+    V2(i64, i64),
 }
 pub fn classify120_2(e: E120_2) -> i64 {
     match e {
@@ -145,10 +145,13 @@ pub fn classify120_2(e: E120_2) -> i64 {
         E120_2::V1(a) => {
             return a;
         },
+        E120_2::V2(a, b) => {
+            return a + b;
+        },
     }
 }
 pub fn pick120_2[T: Ord2 + copy](a: T, b: T) -> T {
-    return minof(a, b);
+    return maxof(a, b);
 }
 pub fn accum120_2(n: i64) -> i64 {
     let mut acc: i64 = 0i64;
@@ -160,32 +163,38 @@ pub fn accum120_2(n: i64) -> i64 {
     return acc;
 }
 pub fn guard120_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
-    return x + 3i64;
+    return x + 5i64;
 }
 pub fn f120(x: i64) -> i64 {
     let mut acc: i64 = x;
-    acc = acc + f045(x + 1i64);
-    acc = acc + f059(x + 2i64);
-    acc = acc + f100(x + 3i64);
-    acc = acc + f101(x + 4i64);
+    acc = acc + f012(x + 1i64);
+    acc = acc + f063(x + 2i64);
+    acc = acc + f091(x + 3i64);
+    acc = acc + f100(x + 4i64);
     let mut s0: S120_0 = mk120_0(acc);
-    bump120_0(write s0, 2i64);
+    bump120_0(write s0, 7i64);
     acc = acc + s0.probe();
     acc = acc + read120_0(read s0);
     acc = acc + classify120_0(E120_0::V1(acc));
-    acc = acc + accum120_0(8i64);
+    acc = acc + accum120_0(6i64);
+    acc = acc + pick120_0(5i64, 4i64);
     let mut s1: S120_1 = mk120_1(acc);
-    bump120_1(write s1, 1i64);
+    bump120_1(write s1, 4i64);
     acc = acc + s1.probe();
     acc = acc + read120_1(read s1);
     acc = acc + classify120_1(E120_1::V1(acc));
-    acc = acc + accum120_1(4i64);
+    acc = acc + accum120_1(5i64);
+    acc = acc + pick120_1(9i64, 4i64);
+    acc = acc + conv i64 (pick120_1(1u32, 6u32));
     let mut s2: S120_2 = mk120_2(acc);
-    bump120_2(write s2, 8i64);
+    bump120_2(write s2, 2i64);
     acc = acc + s2.probe();
     acc = acc + read120_2(read s2);
     acc = acc + classify120_2(E120_2::V1(acc));
-    acc = acc + accum120_2(5i64);
+    acc = acc + accum120_2(4i64);
+    acc = acc + pick120_2(5i64, 3i64);
+    acc = acc + conv i64 (pick120_2(5u32, 4u32));
+    acc = acc + conv i64 (pick120_2(2usize, 1usize));
     acc = maxof(acc, x);
     acc = minof(acc, x + 1i64);
     return clampi(acc);

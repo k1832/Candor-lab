@@ -4,7 +4,6 @@
 typedef struct {
     long a;
     long n0;
-    long n1;
     int flag;
 } S102_0;
 
@@ -12,15 +11,14 @@ static S102_0 mk102_0(long a) {
     S102_0 s;
     s.a = a;
     s.n0 = 0;
-    s.n1 = 0;
     s.flag = 1;
     return s;
 }
 static long probe102_0(const S102_0 *s) {
-    return s->a + s->n0 + s->n1;
+    return s->a + s->n0;
 }
 static long read102_0(const S102_0 *s) {
-    return s->a * 3;
+    return s->a * 7;
 }
 static void bump102_0(S102_0 *s, long d) {
     s->a = s->a + d;
@@ -41,14 +39,15 @@ static long accum102_0(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 2;
     }
     return acc;
 }
 static long guard102_0(long x) {
-    return x + 3;
+    return x + 5;
 }
 
+static long pick102_0_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -70,7 +69,7 @@ static long probe102_1(const S102_1 *s) {
     return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read102_1(const S102_1 *s) {
-    return s->a * 5;
+    return s->a * 7;
 }
 static void bump102_1(S102_1 *s, long d) {
     s->a = s->a + d;
@@ -91,14 +90,17 @@ static long accum102_1(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 3;
     }
     return acc;
 }
 static long guard102_1(long x) {
-    return x + 5;
+    return x + 3;
 }
 
+static long pick102_1_0(long a, long b) { return a > b ? a : b; }
+static long pick102_1_1(long a, long b) { return a > b ? a : b; }
+static long pick102_1_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -141,37 +143,47 @@ static long accum102_2(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 5;
+        acc += i * 3;
     }
     return acc;
 }
 static long guard102_2(long x) {
-    return x + 6;
+    return x + 8;
 }
 
+static long pick102_2_0(long a, long b) { return a > b ? a : b; }
+static long pick102_2_1(long a, long b) { return a > b ? a : b; }
 long f102(long x) {
     long acc = x;
-    acc += f057(x + 1);
+    acc += f011(x + 1);
+    acc += f026(x + 2);
+    acc += f054(x + 3);
     S102_0 s0 = mk102_0(acc);
-    bump102_0(&s0, 9);
+    bump102_0(&s0, 3);
     acc += probe102_0(&s0);
     acc += read102_0(&s0);
     acc += classify102_0(1, acc, acc);
-    acc += accum102_0(6);
+    acc += accum102_0(4);
     acc += guard102_0(acc);
+    acc += pick102_0_0(acc, acc + 3);
     S102_1 s1 = mk102_1(acc);
-    bump102_1(&s1, 6);
+    bump102_1(&s1, 3);
     acc += probe102_1(&s1);
     acc += read102_1(&s1);
     acc += classify102_1(1, acc, acc);
     acc += accum102_1(7);
     acc += guard102_1(acc);
+    acc += pick102_1_0(acc, acc + 6);
+    acc += pick102_1_1(acc, acc + 2);
+    acc += pick102_1_2(acc, acc + 6);
     S102_2 s2 = mk102_2(acc);
-    bump102_2(&s2, 4);
+    bump102_2(&s2, 5);
     acc += probe102_2(&s2);
     acc += read102_2(&s2);
     acc += classify102_2(1, acc, acc);
-    acc += accum102_2(8);
+    acc += accum102_2(3);
     acc += guard102_2(acc);
+    acc += pick102_2_0(acc, acc + 3);
+    acc += pick102_2_1(acc, acc + 3);
     return clampi(acc);
 }

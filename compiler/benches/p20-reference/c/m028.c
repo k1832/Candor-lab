@@ -4,6 +4,7 @@
 typedef struct {
     long a;
     long n0;
+    long n1;
     int flag;
 } S28_0;
 
@@ -11,14 +12,15 @@ static S28_0 mk28_0(long a) {
     S28_0 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
     s.flag = 1;
     return s;
 }
 static long probe28_0(const S28_0 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1;
 }
 static long read28_0(const S28_0 *s) {
-    return s->a * 2;
+    return s->a * 5;
 }
 static void bump28_0(S28_0 *s, long d) {
     s->a = s->a + d;
@@ -39,14 +41,15 @@ static long accum28_0(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 5;
+        acc += i * 3;
     }
     return acc;
 }
 static long guard28_0(long x) {
-    return x + 7;
+    return x + 8;
 }
 
+static long pick28_0_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -85,19 +88,18 @@ static long accum28_1(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 2;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard28_1(long x) {
-    return x + 5;
+    return x + 9;
 }
 
+static long pick28_1_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
-    long n1;
-    long n2;
     int flag;
 } S28_2;
 
@@ -105,16 +107,14 @@ static S28_2 mk28_2(long a) {
     S28_2 s;
     s.a = a;
     s.n0 = 0;
-    s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe28_2(const S28_2 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0;
 }
 static long read28_2(const S28_2 *s) {
-    return s->a * 5;
+    return s->a * 4;
 }
 static void bump28_2(S28_2 *s, long d) {
     s->a = s->a + d;
@@ -135,38 +135,44 @@ static long accum28_2(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 2;
+        acc += i * 3;
     }
     return acc;
 }
 static long guard28_2(long x) {
-    return x + 6;
+    return x + 8;
 }
 
+static long pick28_2_0(long a, long b) { return a > b ? a : b; }
+static long pick28_2_1(long a, long b) { return a > b ? a : b; }
 long f028(long x) {
     long acc = x;
-    acc += f008(x + 1);
-    acc += f023(x + 2);
+    acc += f019(x + 1);
+    acc += f021(x + 2);
     S28_0 s0 = mk28_0(acc);
-    bump28_0(&s0, 2);
+    bump28_0(&s0, 5);
     acc += probe28_0(&s0);
     acc += read28_0(&s0);
     acc += classify28_0(1, acc, acc);
-    acc += accum28_0(3);
+    acc += accum28_0(9);
     acc += guard28_0(acc);
+    acc += pick28_0_0(acc, acc + 2);
     S28_1 s1 = mk28_1(acc);
-    bump28_1(&s1, 2);
+    bump28_1(&s1, 6);
     acc += probe28_1(&s1);
     acc += read28_1(&s1);
     acc += classify28_1(1, acc, acc);
-    acc += accum28_1(6);
+    acc += accum28_1(7);
     acc += guard28_1(acc);
+    acc += pick28_1_0(acc, acc + 9);
     S28_2 s2 = mk28_2(acc);
-    bump28_2(&s2, 2);
+    bump28_2(&s2, 4);
     acc += probe28_2(&s2);
     acc += read28_2(&s2);
     acc += classify28_2(1, acc, acc);
-    acc += accum28_2(9);
+    acc += accum28_2(8);
     acc += guard28_2(acc);
+    acc += pick28_2_0(acc, acc + 5);
+    acc += pick28_2_1(acc, acc + 8);
     return clampi(acc);
 }

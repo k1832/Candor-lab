@@ -4,6 +4,8 @@
 typedef struct {
     long a;
     long n0;
+    long n1;
+    long n2;
     int flag;
 } S147_0;
 
@@ -11,14 +13,16 @@ static S147_0 mk147_0(long a) {
     S147_0 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
+    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe147_0(const S147_0 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read147_0(const S147_0 *s) {
-    return s->a * 3;
+    return s->a * 4;
 }
 static void bump147_0(S147_0 *s, long d) {
     s->a = s->a + d;
@@ -39,14 +43,17 @@ static long accum147_0(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 3;
     }
     return acc;
 }
 static long guard147_0(long x) {
-    return x + 1;
+    return x + 7;
 }
 
+static long pick147_0_0(long a, long b) { return a > b ? a : b; }
+static long pick147_0_1(long a, long b) { return a > b ? a : b; }
+static long pick147_0_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -66,7 +73,7 @@ static long probe147_1(const S147_1 *s) {
     return s->a + s->n0 + s->n1;
 }
 static long read147_1(const S147_1 *s) {
-    return s->a * 3;
+    return s->a * 6;
 }
 static void bump147_1(S147_1 *s, long d) {
     s->a = s->a + d;
@@ -87,14 +94,15 @@ static long accum147_1(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 2;
+        acc += i * 4;
     }
     return acc;
 }
 static long guard147_1(long x) {
-    return x + 3;
+    return x + 2;
 }
 
+static long pick147_1_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -116,7 +124,7 @@ static long probe147_2(const S147_2 *s) {
     return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read147_2(const S147_2 *s) {
-    return s->a * 5;
+    return s->a * 7;
 }
 static void bump147_2(S147_2 *s, long d) {
     s->a = s->a + d;
@@ -142,9 +150,10 @@ static long accum147_2(long n) {
     return acc;
 }
 static long guard147_2(long x) {
-    return x + 5;
+    return x + 1;
 }
 
+static long pick147_2_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -166,7 +175,7 @@ static long probe147_3(const S147_3 *s) {
     return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read147_3(const S147_3 *s) {
-    return s->a * 3;
+    return s->a * 5;
 }
 static void bump147_3(S147_3 *s, long d) {
     s->a = s->a + d;
@@ -187,14 +196,17 @@ static long accum147_3(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 3;
     }
     return acc;
 }
 static long guard147_3(long x) {
-    return x + 8;
+    return x + 9;
 }
 
+static long pick147_3_0(long a, long b) { return a > b ? a : b; }
+static long pick147_3_1(long a, long b) { return a > b ? a : b; }
+static long pick147_3_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -212,7 +224,7 @@ static long probe147_4(const S147_4 *s) {
     return s->a + s->n0;
 }
 static long read147_4(const S147_4 *s) {
-    return s->a * 4;
+    return s->a * 3;
 }
 static void bump147_4(S147_4 *s, long d) {
     s->a = s->a + d;
@@ -233,52 +245,61 @@ static long accum147_4(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 4;
     }
     return acc;
 }
 static long guard147_4(long x) {
-    return x + 1;
+    return x + 2;
 }
 
+static long pick147_4_0(long a, long b) { return a > b ? a : b; }
 long f147(long x) {
     long acc = x;
-    acc += f052(x + 1);
-    acc += f092(x + 2);
+    acc += f074(x + 1);
     S147_0 s0 = mk147_0(acc);
-    bump147_0(&s0, 2);
+    bump147_0(&s0, 8);
     acc += probe147_0(&s0);
     acc += read147_0(&s0);
     acc += classify147_0(1, acc, acc);
-    acc += accum147_0(8);
+    acc += accum147_0(3);
     acc += guard147_0(acc);
+    acc += pick147_0_0(acc, acc + 1);
+    acc += pick147_0_1(acc, acc + 1);
+    acc += pick147_0_2(acc, acc + 7);
     S147_1 s1 = mk147_1(acc);
-    bump147_1(&s1, 8);
+    bump147_1(&s1, 3);
     acc += probe147_1(&s1);
     acc += read147_1(&s1);
     acc += classify147_1(1, acc, acc);
-    acc += accum147_1(9);
+    acc += accum147_1(8);
     acc += guard147_1(acc);
+    acc += pick147_1_0(acc, acc + 2);
     S147_2 s2 = mk147_2(acc);
-    bump147_2(&s2, 9);
+    bump147_2(&s2, 3);
     acc += probe147_2(&s2);
     acc += read147_2(&s2);
     acc += classify147_2(1, acc, acc);
-    acc += accum147_2(4);
+    acc += accum147_2(7);
     acc += guard147_2(acc);
+    acc += pick147_2_0(acc, acc + 8);
     S147_3 s3 = mk147_3(acc);
-    bump147_3(&s3, 7);
+    bump147_3(&s3, 8);
     acc += probe147_3(&s3);
     acc += read147_3(&s3);
     acc += classify147_3(1, acc, acc);
-    acc += accum147_3(5);
+    acc += accum147_3(4);
     acc += guard147_3(acc);
+    acc += pick147_3_0(acc, acc + 1);
+    acc += pick147_3_1(acc, acc + 4);
+    acc += pick147_3_2(acc, acc + 6);
     S147_4 s4 = mk147_4(acc);
-    bump147_4(&s4, 5);
+    bump147_4(&s4, 9);
     acc += probe147_4(&s4);
     acc += read147_4(&s4);
     acc += classify147_4(1, acc, acc);
-    acc += accum147_4(7);
+    acc += accum147_4(8);
     acc += guard147_4(acc);
+    acc += pick147_4_0(acc, acc + 3);
     return clampi(acc);
 }

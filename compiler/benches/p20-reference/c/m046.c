@@ -5,6 +5,7 @@ typedef struct {
     long a;
     long n0;
     long n1;
+    long n2;
     int flag;
 } S46_0;
 
@@ -13,11 +14,12 @@ static S46_0 mk46_0(long a) {
     s.a = a;
     s.n0 = 0;
     s.n1 = 0;
+    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe46_0(const S46_0 *s) {
-    return s->a + s->n0 + s->n1;
+    return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read46_0(const S46_0 *s) {
     return s->a * 6;
@@ -41,18 +43,18 @@ static long accum46_0(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 5;
+        acc += i * 4;
     }
     return acc;
 }
 static long guard46_0(long x) {
-    return x + 5;
+    return x + 1;
 }
 
+static long pick46_0_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
-    long n1;
     int flag;
 } S46_1;
 
@@ -60,12 +62,11 @@ static S46_1 mk46_1(long a) {
     S46_1 s;
     s.a = a;
     s.n0 = 0;
-    s.n1 = 0;
     s.flag = 1;
     return s;
 }
 static long probe46_1(const S46_1 *s) {
-    return s->a + s->n0 + s->n1;
+    return s->a + s->n0;
 }
 static long read46_1(const S46_1 *s) {
     return s->a * 2;
@@ -89,14 +90,15 @@ static long accum46_1(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 5;
+        acc += i * 3;
     }
     return acc;
 }
 static long guard46_1(long x) {
-    return x + 1;
+    return x + 3;
 }
 
+static long pick46_1_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -116,7 +118,7 @@ static long probe46_2(const S46_2 *s) {
     return s->a + s->n0 + s->n1;
 }
 static long read46_2(const S46_2 *s) {
-    return s->a * 7;
+    return s->a * 5;
 }
 static void bump46_2(S46_2 *s, long d) {
     s->a = s->a + d;
@@ -137,17 +139,21 @@ static long accum46_2(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 5;
+        acc += i * 2;
     }
     return acc;
 }
 static long guard46_2(long x) {
-    return x + 1;
+    return x + 5;
 }
 
+static long pick46_2_0(long a, long b) { return a > b ? a : b; }
+static long pick46_2_1(long a, long b) { return a > b ? a : b; }
+static long pick46_2_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
+    long n1;
     int flag;
 } S46_3;
 
@@ -155,14 +161,15 @@ static S46_3 mk46_3(long a) {
     S46_3 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
     s.flag = 1;
     return s;
 }
 static long probe46_3(const S46_3 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1;
 }
 static long read46_3(const S46_3 *s) {
-    return s->a * 3;
+    return s->a * 7;
 }
 static void bump46_3(S46_3 *s, long d) {
     s->a = s->a + d;
@@ -183,14 +190,17 @@ static long accum46_3(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 3;
     }
     return acc;
 }
 static long guard46_3(long x) {
-    return x + 7;
+    return x + 1;
 }
 
+static long pick46_3_0(long a, long b) { return a > b ? a : b; }
+static long pick46_3_1(long a, long b) { return a > b ? a : b; }
+static long pick46_3_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -212,7 +222,7 @@ static long probe46_4(const S46_4 *s) {
     return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read46_4(const S46_4 *s) {
-    return s->a * 6;
+    return s->a * 5;
 }
 static void bump46_4(S46_4 *s, long d) {
     s->a = s->a + d;
@@ -233,51 +243,67 @@ static long accum46_4(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard46_4(long x) {
-    return x + 5;
+    return x + 4;
 }
 
+static long pick46_4_0(long a, long b) { return a > b ? a : b; }
+static long pick46_4_1(long a, long b) { return a > b ? a : b; }
+static long pick46_4_2(long a, long b) { return a > b ? a : b; }
 long f046(long x) {
     long acc = x;
-    acc += f011(x + 1);
+    acc += f006(x + 1);
+    acc += f010(x + 2);
+    acc += f015(x + 3);
     S46_0 s0 = mk46_0(acc);
-    bump46_0(&s0, 8);
+    bump46_0(&s0, 6);
     acc += probe46_0(&s0);
     acc += read46_0(&s0);
     acc += classify46_0(1, acc, acc);
-    acc += accum46_0(9);
+    acc += accum46_0(7);
     acc += guard46_0(acc);
+    acc += pick46_0_0(acc, acc + 2);
     S46_1 s1 = mk46_1(acc);
     bump46_1(&s1, 7);
     acc += probe46_1(&s1);
     acc += read46_1(&s1);
     acc += classify46_1(1, acc, acc);
-    acc += accum46_1(7);
+    acc += accum46_1(3);
     acc += guard46_1(acc);
+    acc += pick46_1_0(acc, acc + 3);
     S46_2 s2 = mk46_2(acc);
-    bump46_2(&s2, 2);
+    bump46_2(&s2, 5);
     acc += probe46_2(&s2);
     acc += read46_2(&s2);
     acc += classify46_2(1, acc, acc);
-    acc += accum46_2(7);
+    acc += accum46_2(3);
     acc += guard46_2(acc);
+    acc += pick46_2_0(acc, acc + 2);
+    acc += pick46_2_1(acc, acc + 2);
+    acc += pick46_2_2(acc, acc + 6);
     S46_3 s3 = mk46_3(acc);
-    bump46_3(&s3, 2);
+    bump46_3(&s3, 9);
     acc += probe46_3(&s3);
     acc += read46_3(&s3);
     acc += classify46_3(1, acc, acc);
-    acc += accum46_3(8);
+    acc += accum46_3(6);
     acc += guard46_3(acc);
+    acc += pick46_3_0(acc, acc + 7);
+    acc += pick46_3_1(acc, acc + 1);
+    acc += pick46_3_2(acc, acc + 5);
     S46_4 s4 = mk46_4(acc);
     bump46_4(&s4, 6);
     acc += probe46_4(&s4);
     acc += read46_4(&s4);
     acc += classify46_4(1, acc, acc);
-    acc += accum46_4(9);
+    acc += accum46_4(6);
     acc += guard46_4(acc);
+    acc += pick46_4_0(acc, acc + 8);
+    acc += pick46_4_1(acc, acc + 2);
+    acc += pick46_4_2(acc, acc + 2);
     return clampi(acc);
 }

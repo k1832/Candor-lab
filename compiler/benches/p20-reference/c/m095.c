@@ -20,7 +20,7 @@ static long probe95_0(const S95_0 *s) {
     return s->a + s->n0 + s->n1;
 }
 static long read95_0(const S95_0 *s) {
-    return s->a * 3;
+    return s->a * 2;
 }
 static void bump95_0(S95_0 *s, long d) {
     s->a = s->a + d;
@@ -46,14 +46,15 @@ static long accum95_0(long n) {
     return acc;
 }
 static long guard95_0(long x) {
-    return x + 9;
+    return x + 8;
 }
 
+static long pick95_0_0(long a, long b) { return a > b ? a : b; }
+static long pick95_0_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
     long n1;
-    long n2;
     int flag;
 } S95_1;
 
@@ -62,15 +63,14 @@ static S95_1 mk95_1(long a) {
     s.a = a;
     s.n0 = 0;
     s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe95_1(const S95_1 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0 + s->n1;
 }
 static long read95_1(const S95_1 *s) {
-    return s->a * 7;
+    return s->a * 3;
 }
 static void bump95_1(S95_1 *s, long d) {
     s->a = s->a + d;
@@ -91,19 +91,19 @@ static long accum95_1(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard95_1(long x) {
-    return x + 6;
+    return x + 1;
 }
 
+static long pick95_1_0(long a, long b) { return a > b ? a : b; }
+static long pick95_1_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
-    long n1;
-    long n2;
     int flag;
 } S95_2;
 
@@ -111,13 +111,11 @@ static S95_2 mk95_2(long a) {
     S95_2 s;
     s.a = a;
     s.n0 = 0;
-    s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe95_2(const S95_2 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0;
 }
 static long read95_2(const S95_2 *s) {
     return s->a * 3;
@@ -141,39 +139,44 @@ static long accum95_2(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard95_2(long x) {
-    return x + 4;
+    return x + 5;
 }
 
+static long pick95_2_0(long a, long b) { return a > b ? a : b; }
 long f095(long x) {
     long acc = x;
-    acc += f040(x + 1);
-    acc += f061(x + 2);
-    acc += f066(x + 3);
+    acc += f022(x + 1);
+    acc += f076(x + 2);
     S95_0 s0 = mk95_0(acc);
-    bump95_0(&s0, 9);
+    bump95_0(&s0, 5);
     acc += probe95_0(&s0);
     acc += read95_0(&s0);
     acc += classify95_0(1, acc, acc);
-    acc += accum95_0(8);
+    acc += accum95_0(7);
     acc += guard95_0(acc);
+    acc += pick95_0_0(acc, acc + 9);
+    acc += pick95_0_1(acc, acc + 7);
     S95_1 s1 = mk95_1(acc);
-    bump95_1(&s1, 6);
+    bump95_1(&s1, 4);
     acc += probe95_1(&s1);
     acc += read95_1(&s1);
     acc += classify95_1(1, acc, acc);
-    acc += accum95_1(3);
+    acc += accum95_1(8);
     acc += guard95_1(acc);
+    acc += pick95_1_0(acc, acc + 1);
+    acc += pick95_1_1(acc, acc + 4);
     S95_2 s2 = mk95_2(acc);
-    bump95_2(&s2, 1);
+    bump95_2(&s2, 6);
     acc += probe95_2(&s2);
     acc += read95_2(&s2);
     acc += classify95_2(1, acc, acc);
-    acc += accum95_2(5);
+    acc += accum95_2(7);
     acc += guard95_2(acc);
+    acc += pick95_2_0(acc, acc + 7);
     return clampi(acc);
 }

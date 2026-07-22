@@ -140,14 +140,16 @@ fn gen_group(s: &mut String, id: usize, g: usize, rng: &mut Rng) {
     s.push_str("    }\n}\n");
 
     // --- generic fn with an interface bound -----------------------------------
-    // Definition-only: `pick` is CHECKED (every def-site body is type-checked,
-    // bounds and all) but NOT called from `f<id>`, so it never reaches codegen.
-    // Reaching ~700 distinct `pick<i64>` monomorphizations would abort `build`/
-    // `--release` with E1099: the monomorphization backstop (src/generics.rs
-    // `drive`) increments its counter PER work-item and never resets, so it caps
-    // TOTAL instantiations at 64 (spec 10.4 intends a depth/chain bound). Codegen
-    // therefore monomorphizes only the shared `maxof`/`minof`; the full generic
-    // surface is exercised by `check`, which does not monomorphize.
+    // CODEGEN-REACHED: `pick<id>_<g>[T: Ord2 + copy]` is both CHECKED at its def
+    // site and CALLED from the `main`-reachable `f<id>` body at concrete types
+    // (see the f-body loop below), so every instantiation reaches codegen and is
+    // monomorphized by `build`/`--release`. Across the 202 modules this emits
+    // several hundred to a few thousand DISTINCT `pick` instances -- an honest
+    // generic-breadth workload. This was definition-only until the mono depth fix
+    // (src/generics.rs `drive`, design 0007 §5.1.1 / spec 10.4): the backstop now
+    // bounds the instantiation CHAIN depth (roots=0; `pick` -> `maxof`/`minof` ->
+    // `Ord2::compare` reaches depth 2), not the TOTAL instance count, so unbounded
+    // breadth at shallow depth compiles (test: `wide_generic_breadth_monomorphizes`).
     let use_min = rng.chance(1, 2);
     let combiner = if use_min { "minof" } else { "maxof" };
     writeln!(
@@ -230,11 +232,11 @@ fn gen_main(roots: &[usize]) -> String {
 // graph across TUs — an honest same-shape, same-scale -O2 workload.
 // --------------------------------------------------------------------------
 
-fn gen_c_module(id: usize, deps: &[usize], groups: usize, rng: &mut Rng) -> String {
+fn gen_c_module(id: usize, deps: &[usize], pick_insts: &[usize], rng: &mut Rng) -> String {
     let mut s = String::new();
     writeln!(s, "/* GENERATED C mirror of reference module m{id:03}. */").unwrap();
     s.push_str("#include \"proto.h\"\n\n");
-    for g in 0..groups {
+    for (g, &group_picks) in pick_insts.iter().enumerate() {
         // Mirror the Candor group's shape (struct + numeric extras + flag) and its
         // function set (constructor / probe / reader / mutator / classifier /
         // accumulator / contract-guard) so the C TU set is a same-shape workload.
@@ -283,13 +285,18 @@ fn gen_c_module(id: usize, deps: &[usize], groups: usize, rng: &mut Rng) -> Stri
         let bias = rng.range(1, 9) as i64;
         writeln!(s, "static long guard{id}_{g}(long x) {{").unwrap();
         writeln!(s, "    return x + {bias};\n}}\n").unwrap();
+        // Mirror the Candor group's `pick[T]` monomorphizations: each concrete
+        // instance is just another function in the -O2 baseline TU.
+        for j in 0..group_picks {
+            writeln!(s, "static long pick{id}_{g}_{j}(long a, long b) {{ return a > b ? a : b; }}").unwrap();
+        }
     }
     writeln!(s, "long f{id:03}(long x) {{").unwrap();
     s.push_str("    long acc = x;\n");
     for (k, &d) in deps.iter().enumerate() {
         writeln!(s, "    acc += f{d:03}(x + {});", (k as i64) + 1).unwrap();
     }
-    for g in 0..groups {
+    for (g, &group_picks) in pick_insts.iter().enumerate() {
         writeln!(s, "    S{id}_{g} s{g} = mk{id}_{g}(acc);").unwrap();
         writeln!(s, "    bump{id}_{g}(&s{g}, {});", rng.range(1, 9)).unwrap();
         writeln!(s, "    acc += probe{id}_{g}(&s{g});").unwrap();
@@ -297,6 +304,9 @@ fn gen_c_module(id: usize, deps: &[usize], groups: usize, rng: &mut Rng) -> Stri
         writeln!(s, "    acc += classify{id}_{g}(1, acc, acc);").unwrap();
         writeln!(s, "    acc += accum{id}_{g}({});", rng.range(3, 9)).unwrap();
         writeln!(s, "    acc += guard{id}_{g}(acc);").unwrap();
+        for j in 0..group_picks {
+            writeln!(s, "    acc += pick{id}_{g}_{j}(acc, acc + {});", rng.range(1, 9)).unwrap();
+        }
     }
     s.push_str("    return clampi(acc);\n}\n");
     s
@@ -356,6 +366,16 @@ fn main() {
     for gc in group_count.iter_mut() {
         *gc = rng.range(3, 5);
     }
+    // Per-group generic breadth: how many concrete type args each module's group
+    // `pick[T]` is reached at (1..=3 of {i64,u32,usize}). Drawn from the shared
+    // structural stream so the Candor and C trees agree on generic breadth.
+    let mut pick_insts: Vec<Vec<usize>> = vec![Vec::new(); NUM_MODULES];
+    for id in 0..NUM_MODULES {
+        for _ in 0..group_count[id] {
+            pick_insts[id].push(rng.range(1, NUM_TYS.len()));
+        }
+    }
+    let total_pick_insts: usize = pick_insts.iter().flatten().sum();
     for (id, slot) in deps_of.iter_mut().enumerate() {
         let layer = layer_of(id);
         if layer == 0 {
@@ -383,7 +403,7 @@ fn main() {
     let mut candor_lines = 0usize;
     for id in 0..NUM_MODULES {
         // consume exactly the group count decided above by regenerating with it
-        let src = gen_candor_module_fixed(id, &deps_of[id], group_count[id], &mut body_rng);
+        let src = gen_candor_module_fixed(id, &deps_of[id], group_count[id], &pick_insts[id], &mut body_rng);
         let lines = count_lines(&src);
         candor_lines += lines;
         write_file(&candor_dir.join(mod_file(id)), &src);
@@ -410,7 +430,7 @@ fn main() {
     let mut c_rng = Rng(SEED ^ 0xC0C0_C0C0_C0C0_C0C0);
     let mut c_lines = 0usize;
     for id in 0..NUM_MODULES {
-        let src = gen_c_module(id, &deps_of[id], group_count[id], &mut c_rng);
+        let src = gen_c_module(id, &deps_of[id], &pick_insts[id], &mut c_rng);
         c_lines += count_lines(&src);
         write_file(&c_dir.join(format!("m{id:03}.c")), &src);
     }
@@ -432,6 +452,7 @@ fn main() {
     let manifest = format!(
         "{{\n  \"generator\": \"p20_gen.rs\",\n  \"seed\": \"{SEED:#018x}\",\n\
          \x20 \"candor_modules\": {},\n  \"candor_lines\": {candor_lines},\n\
+         \x20 \"pick_instantiations\": {total_pick_insts},\n\
          \x20 \"c_translation_units\": {},\n  \"c_lines\": {c_lines},\n\
          \x20 \"edit_target\": \"{edit_path}\",\n  \"edit_target_dependents\": {},\n\
          \x20 \"main_roots\": {}\n}}\n",
@@ -443,7 +464,7 @@ fn main() {
     write_file(&root.join("p20-manifest.json"), &manifest);
 
     eprintln!(
-        "generated p20-reference: {} candor modules ({} lines), {} C TUs ({} lines); edit target {edit_path} ({} dependents)",
+        "generated p20-reference: {} candor modules ({} lines), {} C TUs ({} lines); {total_pick_insts} pick instantiations; edit target {edit_path} ({} dependents)",
         NUM_MODULES + 2,
         candor_lines,
         NUM_MODULES + 2,
@@ -454,7 +475,7 @@ fn main() {
 
 /// As `gen_candor_module` but with a caller-fixed group count (so the Candor and C
 /// trees share module shapes deterministically).
-fn gen_candor_module_fixed(id: usize, deps: &[usize], groups: usize, rng: &mut Rng) -> String {
+fn gen_candor_module_fixed(id: usize, deps: &[usize], groups: usize, pick_insts: &[usize], rng: &mut Rng) -> String {
     let mut s = String::new();
     let layer = layer_of(id);
     writeln!(
@@ -477,13 +498,23 @@ fn gen_candor_module_fixed(id: usize, deps: &[usize], groups: usize, rng: &mut R
     for (k, &d) in deps.iter().enumerate() {
         writeln!(s, "    acc = acc + f{d:03}(x + {}i64);", (k as i64) + 1).unwrap();
     }
-    for g in 0..groups {
+    for (g, &group_picks) in pick_insts.iter().enumerate() {
         writeln!(s, "    let mut s{g}: S{id:03}_{g} = mk{id:03}_{g}(acc);").unwrap();
         writeln!(s, "    bump{id:03}_{g}(write s{g}, {}i64);", rng.range(1, 9)).unwrap();
         writeln!(s, "    acc = acc + s{g}.probe();").unwrap();
         writeln!(s, "    acc = acc + read{id:03}_{g}(read s{g});").unwrap();
         writeln!(s, "    acc = acc + classify{id:03}_{g}(E{id:03}_{g}::V1(acc));").unwrap();
         writeln!(s, "    acc = acc + accum{id:03}_{g}({}i64);", rng.range(3, 9)).unwrap();
+        // Reach this group's `pick[T]` at concrete types so it monomorphizes: one
+        // distinct instance per type arg (design 0007 §5.1.1 depth fix).
+        for &(ty, _) in NUM_TYS.iter().take(group_picks) {
+            let (a, b) = (rng.range(1, 9), rng.range(1, 9));
+            if ty == "i64" {
+                writeln!(s, "    acc = acc + pick{id:03}_{g}({a}i64, {b}i64);").unwrap();
+            } else {
+                writeln!(s, "    acc = acc + conv i64 (pick{id:03}_{g}({a}{ty}, {b}{ty}));").unwrap();
+            }
+        }
     }
     s.push_str("    acc = maxof(acc, x);\n");
     s.push_str("    acc = minof(acc, x + 1i64);\n");

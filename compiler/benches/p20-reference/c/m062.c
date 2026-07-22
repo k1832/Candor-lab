@@ -20,7 +20,7 @@ static long probe62_0(const S62_0 *s) {
     return s->a + s->n0 + s->n1;
 }
 static long read62_0(const S62_0 *s) {
-    return s->a * 5;
+    return s->a * 6;
 }
 static void bump62_0(S62_0 *s, long d) {
     s->a = s->a + d;
@@ -49,10 +49,13 @@ static long guard62_0(long x) {
     return x + 3;
 }
 
+static long pick62_0_0(long a, long b) { return a > b ? a : b; }
+static long pick62_0_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
     long n1;
+    long n2;
     int flag;
 } S62_1;
 
@@ -61,14 +64,15 @@ static S62_1 mk62_1(long a) {
     s.a = a;
     s.n0 = 0;
     s.n1 = 0;
+    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe62_1(const S62_1 *s) {
-    return s->a + s->n0 + s->n1;
+    return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read62_1(const S62_1 *s) {
-    return s->a * 6;
+    return s->a * 3;
 }
 static void bump62_1(S62_1 *s, long d) {
     s->a = s->a + d;
@@ -94,9 +98,12 @@ static long accum62_1(long n) {
     return acc;
 }
 static long guard62_1(long x) {
-    return x + 2;
+    return x + 3;
 }
 
+static long pick62_1_0(long a, long b) { return a > b ? a : b; }
+static long pick62_1_1(long a, long b) { return a > b ? a : b; }
+static long pick62_1_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -139,17 +146,19 @@ static long accum62_2(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard62_2(long x) {
-    return x + 7;
+    return x + 9;
 }
 
+static long pick62_2_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
+    long n1;
     int flag;
 } S62_3;
 
@@ -157,11 +166,12 @@ static S62_3 mk62_3(long a) {
     S62_3 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
     s.flag = 1;
     return s;
 }
 static long probe62_3(const S62_3 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1;
 }
 static long read62_3(const S62_3 *s) {
     return s->a * 3;
@@ -185,14 +195,15 @@ static long accum62_3(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 2;
     }
     return acc;
 }
 static long guard62_3(long x) {
-    return x + 8;
+    return x + 7;
 }
 
+static long pick62_3_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -212,7 +223,7 @@ static long probe62_4(const S62_4 *s) {
     return s->a + s->n0 + s->n1;
 }
 static long read62_4(const S62_4 *s) {
-    return s->a * 3;
+    return s->a * 4;
 }
 static void bump62_4(S62_4 *s, long d) {
     s->a = s->a + d;
@@ -233,17 +244,18 @@ static long accum62_4(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard62_4(long x) {
-    return x + 3;
+    return x + 6;
 }
 
+static long pick62_4_0(long a, long b) { return a > b ? a : b; }
 long f062(long x) {
     long acc = x;
-    acc += f026(x + 1);
+    acc += f016(x + 1);
     S62_0 s0 = mk62_0(acc);
     bump62_0(&s0, 2);
     acc += probe62_0(&s0);
@@ -251,33 +263,41 @@ long f062(long x) {
     acc += classify62_0(1, acc, acc);
     acc += accum62_0(5);
     acc += guard62_0(acc);
+    acc += pick62_0_0(acc, acc + 6);
+    acc += pick62_0_1(acc, acc + 2);
     S62_1 s1 = mk62_1(acc);
-    bump62_1(&s1, 6);
+    bump62_1(&s1, 9);
     acc += probe62_1(&s1);
     acc += read62_1(&s1);
     acc += classify62_1(1, acc, acc);
     acc += accum62_1(9);
     acc += guard62_1(acc);
+    acc += pick62_1_0(acc, acc + 5);
+    acc += pick62_1_1(acc, acc + 9);
+    acc += pick62_1_2(acc, acc + 5);
     S62_2 s2 = mk62_2(acc);
-    bump62_2(&s2, 9);
+    bump62_2(&s2, 4);
     acc += probe62_2(&s2);
     acc += read62_2(&s2);
     acc += classify62_2(1, acc, acc);
-    acc += accum62_2(8);
+    acc += accum62_2(3);
     acc += guard62_2(acc);
+    acc += pick62_2_0(acc, acc + 1);
     S62_3 s3 = mk62_3(acc);
-    bump62_3(&s3, 6);
+    bump62_3(&s3, 4);
     acc += probe62_3(&s3);
     acc += read62_3(&s3);
     acc += classify62_3(1, acc, acc);
-    acc += accum62_3(3);
+    acc += accum62_3(4);
     acc += guard62_3(acc);
+    acc += pick62_3_0(acc, acc + 2);
     S62_4 s4 = mk62_4(acc);
-    bump62_4(&s4, 5);
+    bump62_4(&s4, 9);
     acc += probe62_4(&s4);
     acc += read62_4(&s4);
     acc += classify62_4(1, acc, acc);
-    acc += accum62_4(9);
+    acc += accum62_4(6);
     acc += guard62_4(acc);
+    acc += pick62_4_0(acc, acc + 8);
     return clampi(acc);
 }

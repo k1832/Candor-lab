@@ -18,7 +18,7 @@ static long probe96_0(const S96_0 *s) {
     return s->a + s->n0;
 }
 static long read96_0(const S96_0 *s) {
-    return s->a * 2;
+    return s->a * 6;
 }
 static void bump96_0(S96_0 *s, long d) {
     s->a = s->a + d;
@@ -44,14 +44,15 @@ static long accum96_0(long n) {
     return acc;
 }
 static long guard96_0(long x) {
-    return x + 8;
+    return x + 9;
 }
 
+static long pick96_0_0(long a, long b) { return a > b ? a : b; }
+static long pick96_0_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
     long n1;
-    long n2;
     int flag;
 } S96_1;
 
@@ -60,15 +61,14 @@ static S96_1 mk96_1(long a) {
     s.a = a;
     s.n0 = 0;
     s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe96_1(const S96_1 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0 + s->n1;
 }
 static long read96_1(const S96_1 *s) {
-    return s->a * 2;
+    return s->a * 7;
 }
 static void bump96_1(S96_1 *s, long d) {
     s->a = s->a + d;
@@ -94,9 +94,11 @@ static long accum96_1(long n) {
     return acc;
 }
 static long guard96_1(long x) {
-    return x + 5;
+    return x + 3;
 }
 
+static long pick96_1_0(long a, long b) { return a > b ? a : b; }
+static long pick96_1_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -118,7 +120,7 @@ static long probe96_2(const S96_2 *s) {
     return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read96_2(const S96_2 *s) {
-    return s->a * 2;
+    return s->a * 4;
 }
 static void bump96_2(S96_2 *s, long d) {
     s->a = s->a + d;
@@ -139,39 +141,45 @@ static long accum96_2(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 2;
     }
     return acc;
 }
 static long guard96_2(long x) {
-    return x + 9;
+    return x + 5;
 }
 
+static long pick96_2_0(long a, long b) { return a > b ? a : b; }
 long f096(long x) {
     long acc = x;
-    acc += f018(x + 1);
-    acc += f035(x + 2);
-    acc += f068(x + 3);
+    acc += f038(x + 1);
+    acc += f065(x + 2);
+    acc += f067(x + 3);
     S96_0 s0 = mk96_0(acc);
-    bump96_0(&s0, 6);
+    bump96_0(&s0, 3);
     acc += probe96_0(&s0);
     acc += read96_0(&s0);
     acc += classify96_0(1, acc, acc);
-    acc += accum96_0(7);
+    acc += accum96_0(3);
     acc += guard96_0(acc);
+    acc += pick96_0_0(acc, acc + 2);
+    acc += pick96_0_1(acc, acc + 4);
     S96_1 s1 = mk96_1(acc);
-    bump96_1(&s1, 3);
+    bump96_1(&s1, 7);
     acc += probe96_1(&s1);
     acc += read96_1(&s1);
     acc += classify96_1(1, acc, acc);
-    acc += accum96_1(8);
+    acc += accum96_1(7);
     acc += guard96_1(acc);
+    acc += pick96_1_0(acc, acc + 7);
+    acc += pick96_1_1(acc, acc + 2);
     S96_2 s2 = mk96_2(acc);
-    bump96_2(&s2, 7);
+    bump96_2(&s2, 3);
     acc += probe96_2(&s2);
     acc += read96_2(&s2);
     acc += classify96_2(1, acc, acc);
-    acc += accum96_2(9);
+    acc += accum96_2(6);
     acc += guard96_2(acc);
+    acc += pick96_2_0(acc, acc + 5);
     return clampi(acc);
 }

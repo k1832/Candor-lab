@@ -2,25 +2,28 @@
 // measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
 // via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
 use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
-use l1::m014::{f014};
+use l2::m031::{f031};
+use l2::m044::{f044};
+use l3::m056::{f056};
+use l3::m064::{f064};
 
 pub struct S109_0 {
     a: i64,
     n0: usize,
     n1: usize,
-    n2: i64,
+    n2: u32,
     flag: bool,
 }
 pub fn mk109_0(a: i64) -> S109_0 {
-    return S109_0 { a: a, n0: 0usize, n1: 0usize, n2: 0, flag: true };
+    return S109_0 { a: a, n0: 0usize, n1: 0usize, n2: 0u32, flag: true };
 }
 impl Probe for S109_0 {
     fn probe(read self) -> i64 {
-        return self.a + conv i64 self.n0 + conv i64 self.n1 + self.n2;
+        return self.a + conv i64 self.n0 + conv i64 self.n1 + conv i64 self.n2;
     }
 }
 pub fn read109_0(s: read S109_0) -> i64 {
-    return s.a * 7i64;
+    return s.a * 4i64;
 }
 pub fn bump109_0(s: write S109_0, d: i64) -> unit {
     s.*.a = s.a + d;
@@ -54,7 +57,7 @@ pub fn accum109_0(n: i64) -> i64 {
     let mut acc: i64 = 0i64;
     let mut i: i64 = 0i64;
     while i < n {
-        acc = acc + i * 3i64;
+        acc = acc + i * 4i64;
         i = i + 1i64;
     }
     return acc;
@@ -65,18 +68,20 @@ pub fn guard109_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
 pub struct S109_1 {
     a: i64,
     n0: i64,
+    n1: u32,
+    n2: i64,
     flag: bool,
 }
 pub fn mk109_1(a: i64) -> S109_1 {
-    return S109_1 { a: a, n0: 0, flag: true };
+    return S109_1 { a: a, n0: 0, n1: 0u32, n2: 0, flag: true };
 }
 impl Probe for S109_1 {
     fn probe(read self) -> i64 {
-        return self.a + self.n0;
+        return self.a + self.n0 + conv i64 self.n1 + self.n2;
     }
 }
 pub fn read109_1(s: read S109_1) -> i64 {
-    return s.a * 5i64;
+    return s.a * 7i64;
 }
 pub fn bump109_1(s: write S109_1, d: i64) -> unit {
     s.*.a = s.a + d;
@@ -84,7 +89,6 @@ pub fn bump109_1(s: write S109_1, d: i64) -> unit {
 pub enum E109_1 {
     V0,
     V1(i64),
-    V2(i64, i64),
 }
 pub fn classify109_1(e: E109_1) -> i64 {
     match e {
@@ -93,9 +97,6 @@ pub fn classify109_1(e: E109_1) -> i64 {
         },
         E109_1::V1(a) => {
             return a;
-        },
-        E109_1::V2(a, b) => {
-            return a + b;
         },
     }
 }
@@ -106,13 +107,13 @@ pub fn accum109_1(n: i64) -> i64 {
     let mut acc: i64 = 0i64;
     let mut i: i64 = 0i64;
     while i < n {
-        acc = acc + i * 2i64;
+        acc = acc + i * 4i64;
         i = i + 1i64;
     }
     return acc;
 }
 pub fn guard109_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
-    return x + 5i64;
+    return x + 9i64;
 }
 pub struct S109_2 {
     a: i64,
@@ -169,29 +170,37 @@ pub fn accum109_2(n: i64) -> i64 {
     return acc;
 }
 pub fn guard109_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
-    return x + 1i64;
+    return x + 8i64;
 }
 pub fn f109(x: i64) -> i64 {
     let mut acc: i64 = x;
-    acc = acc + f014(x + 1i64);
+    acc = acc + f031(x + 1i64);
+    acc = acc + f044(x + 2i64);
+    acc = acc + f056(x + 3i64);
+    acc = acc + f064(x + 4i64);
     let mut s0: S109_0 = mk109_0(acc);
-    bump109_0(write s0, 9i64);
+    bump109_0(write s0, 4i64);
     acc = acc + s0.probe();
     acc = acc + read109_0(read s0);
     acc = acc + classify109_0(E109_0::V1(acc));
     acc = acc + accum109_0(4i64);
+    acc = acc + pick109_0(1i64, 3i64);
     let mut s1: S109_1 = mk109_1(acc);
-    bump109_1(write s1, 6i64);
+    bump109_1(write s1, 9i64);
     acc = acc + s1.probe();
     acc = acc + read109_1(read s1);
     acc = acc + classify109_1(E109_1::V1(acc));
-    acc = acc + accum109_1(9i64);
+    acc = acc + accum109_1(8i64);
+    acc = acc + pick109_1(3i64, 3i64);
+    acc = acc + conv i64 (pick109_1(8u32, 9u32));
+    acc = acc + conv i64 (pick109_1(4usize, 3usize));
     let mut s2: S109_2 = mk109_2(acc);
-    bump109_2(write s2, 3i64);
+    bump109_2(write s2, 9i64);
     acc = acc + s2.probe();
     acc = acc + read109_2(read s2);
     acc = acc + classify109_2(E109_2::V1(acc));
-    acc = acc + accum109_2(8i64);
+    acc = acc + accum109_2(5i64);
+    acc = acc + pick109_2(4i64, 7i64);
     acc = maxof(acc, x);
     acc = minof(acc, x + 1i64);
     return clampi(acc);

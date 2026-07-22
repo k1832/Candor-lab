@@ -4,6 +4,8 @@
 typedef struct {
     long a;
     long n0;
+    long n1;
+    long n2;
     int flag;
 } S108_0;
 
@@ -11,14 +13,16 @@ static S108_0 mk108_0(long a) {
     S108_0 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
+    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe108_0(const S108_0 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read108_0(const S108_0 *s) {
-    return s->a * 4;
+    return s->a * 6;
 }
 static void bump108_0(S108_0 *s, long d) {
     s->a = s->a + d;
@@ -44,14 +48,15 @@ static long accum108_0(long n) {
     return acc;
 }
 static long guard108_0(long x) {
-    return x + 7;
+    return x + 9;
 }
 
+static long pick108_0_0(long a, long b) { return a > b ? a : b; }
+static long pick108_0_1(long a, long b) { return a > b ? a : b; }
+static long pick108_0_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
-    long n1;
-    long n2;
     int flag;
 } S108_1;
 
@@ -59,16 +64,14 @@ static S108_1 mk108_1(long a) {
     S108_1 s;
     s.a = a;
     s.n0 = 0;
-    s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe108_1(const S108_1 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0;
 }
 static long read108_1(const S108_1 *s) {
-    return s->a * 5;
+    return s->a * 3;
 }
 static void bump108_1(S108_1 *s, long d) {
     s->a = s->a + d;
@@ -89,18 +92,22 @@ static long accum108_1(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard108_1(long x) {
-    return x + 6;
+    return x + 2;
 }
 
+static long pick108_1_0(long a, long b) { return a > b ? a : b; }
+static long pick108_1_1(long a, long b) { return a > b ? a : b; }
+static long pick108_1_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
     long n1;
+    long n2;
     int flag;
 } S108_2;
 
@@ -109,14 +116,15 @@ static S108_2 mk108_2(long a) {
     s.a = a;
     s.n0 = 0;
     s.n1 = 0;
+    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe108_2(const S108_2 *s) {
-    return s->a + s->n0 + s->n1;
+    return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read108_2(const S108_2 *s) {
-    return s->a * 7;
+    return s->a * 5;
 }
 static void bump108_2(S108_2 *s, long d) {
     s->a = s->a + d;
@@ -142,32 +150,45 @@ static long accum108_2(long n) {
     return acc;
 }
 static long guard108_2(long x) {
-    return x + 7;
+    return x + 1;
 }
 
+static long pick108_2_0(long a, long b) { return a > b ? a : b; }
+static long pick108_2_1(long a, long b) { return a > b ? a : b; }
+static long pick108_2_2(long a, long b) { return a > b ? a : b; }
 long f108(long x) {
     long acc = x;
-    acc += f043(x + 1);
+    acc += f000(x + 1);
+    acc += f006(x + 2);
     S108_0 s0 = mk108_0(acc);
-    bump108_0(&s0, 6);
+    bump108_0(&s0, 9);
     acc += probe108_0(&s0);
     acc += read108_0(&s0);
     acc += classify108_0(1, acc, acc);
-    acc += accum108_0(8);
+    acc += accum108_0(5);
     acc += guard108_0(acc);
+    acc += pick108_0_0(acc, acc + 2);
+    acc += pick108_0_1(acc, acc + 3);
+    acc += pick108_0_2(acc, acc + 4);
     S108_1 s1 = mk108_1(acc);
-    bump108_1(&s1, 9);
+    bump108_1(&s1, 1);
     acc += probe108_1(&s1);
     acc += read108_1(&s1);
     acc += classify108_1(1, acc, acc);
-    acc += accum108_1(6);
+    acc += accum108_1(3);
     acc += guard108_1(acc);
+    acc += pick108_1_0(acc, acc + 1);
+    acc += pick108_1_1(acc, acc + 2);
+    acc += pick108_1_2(acc, acc + 6);
     S108_2 s2 = mk108_2(acc);
     bump108_2(&s2, 5);
     acc += probe108_2(&s2);
     acc += read108_2(&s2);
     acc += classify108_2(1, acc, acc);
-    acc += accum108_2(8);
+    acc += accum108_2(6);
     acc += guard108_2(acc);
+    acc += pick108_2_0(acc, acc + 8);
+    acc += pick108_2_1(acc, acc + 9);
+    acc += pick108_2_2(acc, acc + 4);
     return clampi(acc);
 }

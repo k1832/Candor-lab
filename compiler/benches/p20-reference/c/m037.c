@@ -4,6 +4,7 @@
 typedef struct {
     long a;
     long n0;
+    long n1;
     int flag;
 } S37_0;
 
@@ -11,14 +12,15 @@ static S37_0 mk37_0(long a) {
     S37_0 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
     s.flag = 1;
     return s;
 }
 static long probe37_0(const S37_0 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1;
 }
 static long read37_0(const S37_0 *s) {
-    return s->a * 6;
+    return s->a * 4;
 }
 static void bump37_0(S37_0 *s, long d) {
     s->a = s->a + d;
@@ -39,7 +41,7 @@ static long accum37_0(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 2;
     }
     return acc;
 }
@@ -47,11 +49,12 @@ static long guard37_0(long x) {
     return x + 2;
 }
 
+static long pick37_0_0(long a, long b) { return a > b ? a : b; }
+static long pick37_0_1(long a, long b) { return a > b ? a : b; }
+static long pick37_0_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
-    long n1;
-    long n2;
     int flag;
 } S37_1;
 
@@ -59,16 +62,14 @@ static S37_1 mk37_1(long a) {
     S37_1 s;
     s.a = a;
     s.n0 = 0;
-    s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe37_1(const S37_1 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0;
 }
 static long read37_1(const S37_1 *s) {
-    return s->a * 6;
+    return s->a * 3;
 }
 static void bump37_1(S37_1 *s, long d) {
     s->a = s->a + d;
@@ -89,18 +90,22 @@ static long accum37_1(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 5;
+        acc += i * 3;
     }
     return acc;
 }
 static long guard37_1(long x) {
-    return x + 7;
+    return x + 8;
 }
 
+static long pick37_1_0(long a, long b) { return a > b ? a : b; }
+static long pick37_1_1(long a, long b) { return a > b ? a : b; }
+static long pick37_1_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
     long n1;
+    long n2;
     int flag;
 } S37_2;
 
@@ -109,14 +114,15 @@ static S37_2 mk37_2(long a) {
     s.a = a;
     s.n0 = 0;
     s.n1 = 0;
+    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe37_2(const S37_2 *s) {
-    return s->a + s->n0 + s->n1;
+    return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read37_2(const S37_2 *s) {
-    return s->a * 3;
+    return s->a * 6;
 }
 static void bump37_2(S37_2 *s, long d) {
     s->a = s->a + d;
@@ -137,19 +143,18 @@ static long accum37_2(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 2;
+        acc += i * 4;
     }
     return acc;
 }
 static long guard37_2(long x) {
-    return x + 7;
+    return x + 5;
 }
 
+static long pick37_2_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
-    long n1;
-    long n2;
     int flag;
 } S37_3;
 
@@ -157,16 +162,14 @@ static S37_3 mk37_3(long a) {
     S37_3 s;
     s.a = a;
     s.n0 = 0;
-    s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe37_3(const S37_3 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0;
 }
 static long read37_3(const S37_3 *s) {
-    return s->a * 2;
+    return s->a * 3;
 }
 static void bump37_3(S37_3 *s, long d) {
     s->a = s->a + d;
@@ -187,24 +190,33 @@ static long accum37_3(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 4;
     }
     return acc;
 }
 static long guard37_3(long x) {
-    return x + 2;
+    return x + 7;
 }
 
+static long pick37_3_0(long a, long b) { return a > b ? a : b; }
+static long pick37_3_1(long a, long b) { return a > b ? a : b; }
+static long pick37_3_2(long a, long b) { return a > b ? a : b; }
 long f037(long x) {
     long acc = x;
-    acc += f008(x + 1);
+    acc += f001(x + 1);
+    acc += f003(x + 2);
+    acc += f009(x + 3);
+    acc += f018(x + 4);
     S37_0 s0 = mk37_0(acc);
-    bump37_0(&s0, 4);
+    bump37_0(&s0, 6);
     acc += probe37_0(&s0);
     acc += read37_0(&s0);
     acc += classify37_0(1, acc, acc);
-    acc += accum37_0(4);
+    acc += accum37_0(7);
     acc += guard37_0(acc);
+    acc += pick37_0_0(acc, acc + 4);
+    acc += pick37_0_1(acc, acc + 6);
+    acc += pick37_0_2(acc, acc + 6);
     S37_1 s1 = mk37_1(acc);
     bump37_1(&s1, 3);
     acc += probe37_1(&s1);
@@ -212,19 +224,26 @@ long f037(long x) {
     acc += classify37_1(1, acc, acc);
     acc += accum37_1(7);
     acc += guard37_1(acc);
+    acc += pick37_1_0(acc, acc + 8);
+    acc += pick37_1_1(acc, acc + 6);
+    acc += pick37_1_2(acc, acc + 8);
     S37_2 s2 = mk37_2(acc);
-    bump37_2(&s2, 6);
+    bump37_2(&s2, 8);
     acc += probe37_2(&s2);
     acc += read37_2(&s2);
     acc += classify37_2(1, acc, acc);
-    acc += accum37_2(9);
+    acc += accum37_2(5);
     acc += guard37_2(acc);
+    acc += pick37_2_0(acc, acc + 1);
     S37_3 s3 = mk37_3(acc);
-    bump37_3(&s3, 7);
+    bump37_3(&s3, 5);
     acc += probe37_3(&s3);
     acc += read37_3(&s3);
     acc += classify37_3(1, acc, acc);
-    acc += accum37_3(5);
+    acc += accum37_3(8);
     acc += guard37_3(acc);
+    acc += pick37_3_0(acc, acc + 7);
+    acc += pick37_3_1(acc, acc + 8);
+    acc += pick37_3_2(acc, acc + 6);
     return clampi(acc);
 }

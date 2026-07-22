@@ -4,8 +4,6 @@
 typedef struct {
     long a;
     long n0;
-    long n1;
-    long n2;
     int flag;
 } S57_0;
 
@@ -13,13 +11,11 @@ static S57_0 mk57_0(long a) {
     S57_0 s;
     s.a = a;
     s.n0 = 0;
-    s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe57_0(const S57_0 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0;
 }
 static long read57_0(const S57_0 *s) {
     return s->a * 5;
@@ -48,9 +44,12 @@ static long accum57_0(long n) {
     return acc;
 }
 static long guard57_0(long x) {
-    return x + 6;
+    return x + 4;
 }
 
+static long pick57_0_0(long a, long b) { return a > b ? a : b; }
+static long pick57_0_1(long a, long b) { return a > b ? a : b; }
+static long pick57_0_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -70,7 +69,7 @@ static long probe57_1(const S57_1 *s) {
     return s->a + s->n0 + s->n1;
 }
 static long read57_1(const S57_1 *s) {
-    return s->a * 7;
+    return s->a * 3;
 }
 static void bump57_1(S57_1 *s, long d) {
     s->a = s->a + d;
@@ -99,9 +98,13 @@ static long guard57_1(long x) {
     return x + 6;
 }
 
+static long pick57_1_0(long a, long b) { return a > b ? a : b; }
+static long pick57_1_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
+    long n1;
+    long n2;
     int flag;
 } S57_2;
 
@@ -109,14 +112,16 @@ static S57_2 mk57_2(long a) {
     S57_2 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
+    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe57_2(const S57_2 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read57_2(const S57_2 *s) {
-    return s->a * 6;
+    return s->a * 7;
 }
 static void bump57_2(S57_2 *s, long d) {
     s->a = s->a + d;
@@ -142,33 +147,41 @@ static long accum57_2(long n) {
     return acc;
 }
 static long guard57_2(long x) {
-    return x + 3;
+    return x + 9;
 }
 
+static long pick57_2_0(long a, long b) { return a > b ? a : b; }
 long f057(long x) {
     long acc = x;
-    acc += f032(x + 1);
-    acc += f046(x + 2);
+    acc += f002(x + 1);
+    acc += f036(x + 2);
+    acc += f042(x + 3);
     S57_0 s0 = mk57_0(acc);
-    bump57_0(&s0, 4);
+    bump57_0(&s0, 9);
     acc += probe57_0(&s0);
     acc += read57_0(&s0);
     acc += classify57_0(1, acc, acc);
-    acc += accum57_0(6);
+    acc += accum57_0(9);
     acc += guard57_0(acc);
+    acc += pick57_0_0(acc, acc + 9);
+    acc += pick57_0_1(acc, acc + 8);
+    acc += pick57_0_2(acc, acc + 4);
     S57_1 s1 = mk57_1(acc);
-    bump57_1(&s1, 6);
+    bump57_1(&s1, 1);
     acc += probe57_1(&s1);
     acc += read57_1(&s1);
     acc += classify57_1(1, acc, acc);
-    acc += accum57_1(7);
+    acc += accum57_1(6);
     acc += guard57_1(acc);
+    acc += pick57_1_0(acc, acc + 6);
+    acc += pick57_1_1(acc, acc + 2);
     S57_2 s2 = mk57_2(acc);
-    bump57_2(&s2, 2);
+    bump57_2(&s2, 1);
     acc += probe57_2(&s2);
     acc += read57_2(&s2);
     acc += classify57_2(1, acc, acc);
     acc += accum57_2(3);
     acc += guard57_2(acc);
+    acc += pick57_2_0(acc, acc + 8);
     return clampi(acc);
 }

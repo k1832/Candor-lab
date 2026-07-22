@@ -43,17 +43,19 @@ static long accum99_0(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 2;
     }
     return acc;
 }
 static long guard99_0(long x) {
-    return x + 7;
+    return x + 4;
 }
 
+static long pick99_0_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
+    long n1;
     int flag;
 } S99_1;
 
@@ -61,14 +63,15 @@ static S99_1 mk99_1(long a) {
     S99_1 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
     s.flag = 1;
     return s;
 }
 static long probe99_1(const S99_1 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1;
 }
 static long read99_1(const S99_1 *s) {
-    return s->a * 3;
+    return s->a * 7;
 }
 static void bump99_1(S99_1 *s, long d) {
     s->a = s->a + d;
@@ -89,19 +92,21 @@ static long accum99_1(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 5;
+        acc += i * 4;
     }
     return acc;
 }
 static long guard99_1(long x) {
-    return x + 4;
+    return x + 1;
 }
 
+static long pick99_1_0(long a, long b) { return a > b ? a : b; }
+static long pick99_1_1(long a, long b) { return a > b ? a : b; }
+static long pick99_1_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
     long n1;
-    long n2;
     int flag;
 } S99_2;
 
@@ -110,15 +115,14 @@ static S99_2 mk99_2(long a) {
     s.a = a;
     s.n0 = 0;
     s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe99_2(const S99_2 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0 + s->n1;
 }
 static long read99_2(const S99_2 *s) {
-    return s->a * 3;
+    return s->a * 4;
 }
 static void bump99_2(S99_2 *s, long d) {
     s->a = s->a + d;
@@ -139,18 +143,21 @@ static long accum99_2(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard99_2(long x) {
-    return x + 3;
+    return x + 9;
 }
 
+static long pick99_2_0(long a, long b) { return a > b ? a : b; }
+static long pick99_2_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
     long n1;
+    long n2;
     int flag;
 } S99_3;
 
@@ -159,11 +166,12 @@ static S99_3 mk99_3(long a) {
     s.a = a;
     s.n0 = 0;
     s.n1 = 0;
+    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe99_3(const S99_3 *s) {
-    return s->a + s->n0 + s->n1;
+    return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read99_3(const S99_3 *s) {
     return s->a * 6;
@@ -192,13 +200,16 @@ static long accum99_3(long n) {
     return acc;
 }
 static long guard99_3(long x) {
-    return x + 9;
+    return x + 2;
 }
 
+static long pick99_3_0(long a, long b) { return a > b ? a : b; }
+static long pick99_3_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
     long n1;
+    long n2;
     int flag;
 } S99_4;
 
@@ -207,14 +218,15 @@ static S99_4 mk99_4(long a) {
     s.a = a;
     s.n0 = 0;
     s.n1 = 0;
+    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe99_4(const S99_4 *s) {
-    return s->a + s->n0 + s->n1;
+    return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read99_4(const S99_4 *s) {
-    return s->a * 6;
+    return s->a * 4;
 }
 static void bump99_4(S99_4 *s, long d) {
     s->a = s->a + d;
@@ -235,52 +247,67 @@ static long accum99_4(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard99_4(long x) {
-    return x + 3;
+    return x + 2;
 }
 
+static long pick99_4_0(long a, long b) { return a > b ? a : b; }
+static long pick99_4_1(long a, long b) { return a > b ? a : b; }
+static long pick99_4_2(long a, long b) { return a > b ? a : b; }
 long f099(long x) {
     long acc = x;
-    acc += f005(x + 1);
-    acc += f037(x + 2);
+    acc += f020(x + 1);
+    acc += f053(x + 2);
+    acc += f065(x + 3);
     S99_0 s0 = mk99_0(acc);
-    bump99_0(&s0, 2);
+    bump99_0(&s0, 5);
     acc += probe99_0(&s0);
     acc += read99_0(&s0);
     acc += classify99_0(1, acc, acc);
     acc += accum99_0(7);
     acc += guard99_0(acc);
+    acc += pick99_0_0(acc, acc + 2);
     S99_1 s1 = mk99_1(acc);
-    bump99_1(&s1, 8);
+    bump99_1(&s1, 5);
     acc += probe99_1(&s1);
     acc += read99_1(&s1);
     acc += classify99_1(1, acc, acc);
-    acc += accum99_1(7);
+    acc += accum99_1(6);
     acc += guard99_1(acc);
+    acc += pick99_1_0(acc, acc + 4);
+    acc += pick99_1_1(acc, acc + 1);
+    acc += pick99_1_2(acc, acc + 1);
     S99_2 s2 = mk99_2(acc);
     bump99_2(&s2, 1);
     acc += probe99_2(&s2);
     acc += read99_2(&s2);
     acc += classify99_2(1, acc, acc);
-    acc += accum99_2(9);
+    acc += accum99_2(8);
     acc += guard99_2(acc);
+    acc += pick99_2_0(acc, acc + 8);
+    acc += pick99_2_1(acc, acc + 5);
     S99_3 s3 = mk99_3(acc);
-    bump99_3(&s3, 7);
+    bump99_3(&s3, 8);
     acc += probe99_3(&s3);
     acc += read99_3(&s3);
     acc += classify99_3(1, acc, acc);
-    acc += accum99_3(5);
+    acc += accum99_3(3);
     acc += guard99_3(acc);
+    acc += pick99_3_0(acc, acc + 4);
+    acc += pick99_3_1(acc, acc + 7);
     S99_4 s4 = mk99_4(acc);
-    bump99_4(&s4, 9);
+    bump99_4(&s4, 2);
     acc += probe99_4(&s4);
     acc += read99_4(&s4);
     acc += classify99_4(1, acc, acc);
-    acc += accum99_4(9);
+    acc += accum99_4(6);
     acc += guard99_4(acc);
+    acc += pick99_4_0(acc, acc + 7);
+    acc += pick99_4_1(acc, acc + 4);
+    acc += pick99_4_2(acc, acc + 9);
     return clampi(acc);
 }

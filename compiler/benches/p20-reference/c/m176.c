@@ -43,17 +43,20 @@ static long accum176_0(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard176_0(long x) {
-    return x + 1;
+    return x + 2;
 }
 
+static long pick176_0_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
+    long n1;
+    long n2;
     int flag;
 } S176_1;
 
@@ -61,14 +64,16 @@ static S176_1 mk176_1(long a) {
     S176_1 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
+    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe176_1(const S176_1 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read176_1(const S176_1 *s) {
-    return s->a * 3;
+    return s->a * 6;
 }
 static void bump176_1(S176_1 *s, long d) {
     s->a = s->a + d;
@@ -94,9 +99,11 @@ static long accum176_1(long n) {
     return acc;
 }
 static long guard176_1(long x) {
-    return x + 1;
+    return x + 4;
 }
 
+static long pick176_1_0(long a, long b) { return a > b ? a : b; }
+static long pick176_1_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -116,7 +123,7 @@ static long probe176_2(const S176_2 *s) {
     return s->a + s->n0 + s->n1;
 }
 static long read176_2(const S176_2 *s) {
-    return s->a * 2;
+    return s->a * 3;
 }
 static void bump176_2(S176_2 *s, long d) {
     s->a = s->a + d;
@@ -137,14 +144,16 @@ static long accum176_2(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 3;
     }
     return acc;
 }
 static long guard176_2(long x) {
-    return x + 5;
+    return x + 2;
 }
 
+static long pick176_2_0(long a, long b) { return a > b ? a : b; }
+static long pick176_2_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -166,7 +175,7 @@ static long probe176_3(const S176_3 *s) {
     return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read176_3(const S176_3 *s) {
-    return s->a * 6;
+    return s->a * 3;
 }
 static void bump176_3(S176_3 *s, long d) {
     s->a = s->a + d;
@@ -187,47 +196,53 @@ static long accum176_3(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 2;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard176_3(long x) {
-    return x + 8;
+    return x + 3;
 }
 
+static long pick176_3_0(long a, long b) { return a > b ? a : b; }
+static long pick176_3_1(long a, long b) { return a > b ? a : b; }
 long f176(long x) {
     long acc = x;
-    acc += f071(x + 1);
-    acc += f087(x + 2);
-    acc += f141(x + 3);
-    acc += f158(x + 4);
+    acc += f163(x + 1);
     S176_0 s0 = mk176_0(acc);
-    bump176_0(&s0, 4);
+    bump176_0(&s0, 9);
     acc += probe176_0(&s0);
     acc += read176_0(&s0);
     acc += classify176_0(1, acc, acc);
-    acc += accum176_0(3);
+    acc += accum176_0(4);
     acc += guard176_0(acc);
+    acc += pick176_0_0(acc, acc + 8);
     S176_1 s1 = mk176_1(acc);
-    bump176_1(&s1, 2);
+    bump176_1(&s1, 8);
     acc += probe176_1(&s1);
     acc += read176_1(&s1);
     acc += classify176_1(1, acc, acc);
-    acc += accum176_1(7);
+    acc += accum176_1(8);
     acc += guard176_1(acc);
+    acc += pick176_1_0(acc, acc + 6);
+    acc += pick176_1_1(acc, acc + 3);
     S176_2 s2 = mk176_2(acc);
-    bump176_2(&s2, 3);
+    bump176_2(&s2, 5);
     acc += probe176_2(&s2);
     acc += read176_2(&s2);
     acc += classify176_2(1, acc, acc);
-    acc += accum176_2(7);
+    acc += accum176_2(3);
     acc += guard176_2(acc);
+    acc += pick176_2_0(acc, acc + 4);
+    acc += pick176_2_1(acc, acc + 6);
     S176_3 s3 = mk176_3(acc);
-    bump176_3(&s3, 7);
+    bump176_3(&s3, 4);
     acc += probe176_3(&s3);
     acc += read176_3(&s3);
     acc += classify176_3(1, acc, acc);
-    acc += accum176_3(3);
+    acc += accum176_3(4);
     acc += guard176_3(acc);
+    acc += pick176_3_0(acc, acc + 5);
+    acc += pick176_3_1(acc, acc + 6);
     return clampi(acc);
 }

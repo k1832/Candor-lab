@@ -2,26 +2,25 @@
 // measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
 // via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
 use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
-use l1::m012::{f012};
-use l2::m027::{f027};
+use l0::m003::{f003};
 
 pub struct S054_0 {
     a: i64,
-    n0: usize,
-    n1: usize,
-    n2: u32,
+    n0: i64,
+    n1: u32,
+    n2: i64,
     flag: bool,
 }
 pub fn mk054_0(a: i64) -> S054_0 {
-    return S054_0 { a: a, n0: 0usize, n1: 0usize, n2: 0u32, flag: true };
+    return S054_0 { a: a, n0: 0, n1: 0u32, n2: 0, flag: true };
 }
 impl Probe for S054_0 {
     fn probe(read self) -> i64 {
-        return self.a + conv i64 self.n0 + conv i64 self.n1 + conv i64 self.n2;
+        return self.a + self.n0 + conv i64 self.n1 + self.n2;
     }
 }
 pub fn read054_0(s: read S054_0) -> i64 {
-    return s.a * 7i64;
+    return s.a * 5i64;
 }
 pub fn bump054_0(s: write S054_0, d: i64) -> unit {
     s.*.a = s.a + d;
@@ -29,6 +28,8 @@ pub fn bump054_0(s: write S054_0, d: i64) -> unit {
 pub enum E054_0 {
     V0,
     V1(i64),
+    V2(i64, i64),
+    V3(i64),
 }
 pub fn classify054_0(e: E054_0) -> i64 {
     match e {
@@ -37,6 +38,12 @@ pub fn classify054_0(e: E054_0) -> i64 {
         },
         E054_0::V1(a) => {
             return a;
+        },
+        E054_0::V2(a, b) => {
+            return a + b;
+        },
+        E054_0::V3(a) => {
+            return a * 2i64;
         },
     }
 }
@@ -47,30 +54,31 @@ pub fn accum054_0(n: i64) -> i64 {
     let mut acc: i64 = 0i64;
     let mut i: i64 = 0i64;
     while i < n {
-        acc = acc + i * 2i64;
+        acc = acc + i * 3i64;
         i = i + 1i64;
     }
     return acc;
 }
 pub fn guard054_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
-    return x + 7i64;
+    return x + 4i64;
 }
 pub struct S054_1 {
     a: i64,
-    n0: u32,
-    n1: i64,
+    n0: usize,
+    n1: u32,
+    n2: i64,
     flag: bool,
 }
 pub fn mk054_1(a: i64) -> S054_1 {
-    return S054_1 { a: a, n0: 0u32, n1: 0, flag: true };
+    return S054_1 { a: a, n0: 0usize, n1: 0u32, n2: 0, flag: true };
 }
 impl Probe for S054_1 {
     fn probe(read self) -> i64 {
-        return self.a + conv i64 self.n0 + self.n1;
+        return self.a + conv i64 self.n0 + conv i64 self.n1 + self.n2;
     }
 }
 pub fn read054_1(s: read S054_1) -> i64 {
-    return s.a * 4i64;
+    return s.a * 3i64;
 }
 pub fn bump054_1(s: write S054_1, d: i64) -> unit {
     s.*.a = s.a + d;
@@ -78,6 +86,8 @@ pub fn bump054_1(s: write S054_1, d: i64) -> unit {
 pub enum E054_1 {
     V0,
     V1(i64),
+    V2(i64, i64),
+    V3(i64),
 }
 pub fn classify054_1(e: E054_1) -> i64 {
     match e {
@@ -86,6 +96,12 @@ pub fn classify054_1(e: E054_1) -> i64 {
         },
         E054_1::V1(a) => {
             return a;
+        },
+        E054_1::V2(a, b) => {
+            return a + b;
+        },
+        E054_1::V3(a) => {
+            return a * 2i64;
         },
     }
 }
@@ -96,31 +112,29 @@ pub fn accum054_1(n: i64) -> i64 {
     let mut acc: i64 = 0i64;
     let mut i: i64 = 0i64;
     while i < n {
-        acc = acc + i * 5i64;
+        acc = acc + i * 3i64;
         i = i + 1i64;
     }
     return acc;
 }
 pub fn guard054_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
-    return x + 9i64;
+    return x + 3i64;
 }
 pub struct S054_2 {
     a: i64,
-    n0: i64,
-    n1: i64,
-    n2: usize,
+    n0: u32,
     flag: bool,
 }
 pub fn mk054_2(a: i64) -> S054_2 {
-    return S054_2 { a: a, n0: 0, n1: 0, n2: 0usize, flag: true };
+    return S054_2 { a: a, n0: 0u32, flag: true };
 }
 impl Probe for S054_2 {
     fn probe(read self) -> i64 {
-        return self.a + self.n0 + self.n1 + conv i64 self.n2;
+        return self.a + conv i64 self.n0;
     }
 }
 pub fn read054_2(s: read S054_2) -> i64 {
-    return s.a * 2i64;
+    return s.a * 7i64;
 }
 pub fn bump054_2(s: write S054_2, d: i64) -> unit {
     s.*.a = s.a + d;
@@ -129,7 +143,6 @@ pub enum E054_2 {
     V0,
     V1(i64),
     V2(i64, i64),
-    V3(i64),
 }
 pub fn classify054_2(e: E054_2) -> i64 {
     match e {
@@ -142,9 +155,6 @@ pub fn classify054_2(e: E054_2) -> i64 {
         E054_2::V2(a, b) => {
             return a + b;
         },
-        E054_2::V3(a) => {
-            return a * 2i64;
-        },
     }
 }
 pub fn pick054_2[T: Ord2 + copy](a: T, b: T) -> T {
@@ -154,29 +164,31 @@ pub fn accum054_2(n: i64) -> i64 {
     let mut acc: i64 = 0i64;
     let mut i: i64 = 0i64;
     while i < n {
-        acc = acc + i * 3i64;
+        acc = acc + i * 2i64;
         i = i + 1i64;
     }
     return acc;
 }
 pub fn guard054_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
-    return x + 9i64;
+    return x + 5i64;
 }
 pub struct S054_3 {
     a: i64,
-    n0: u32,
+    n0: i64,
+    n1: i64,
+    n2: u32,
     flag: bool,
 }
 pub fn mk054_3(a: i64) -> S054_3 {
-    return S054_3 { a: a, n0: 0u32, flag: true };
+    return S054_3 { a: a, n0: 0, n1: 0, n2: 0u32, flag: true };
 }
 impl Probe for S054_3 {
     fn probe(read self) -> i64 {
-        return self.a + conv i64 self.n0;
+        return self.a + self.n0 + self.n1 + conv i64 self.n2;
     }
 }
 pub fn read054_3(s: read S054_3) -> i64 {
-    return s.a * 4i64;
+    return s.a * 6i64;
 }
 pub fn bump054_3(s: write S054_3, d: i64) -> unit {
     s.*.a = s.a + d;
@@ -184,7 +196,6 @@ pub fn bump054_3(s: write S054_3, d: i64) -> unit {
 pub enum E054_3 {
     V0,
     V1(i64),
-    V2(i64, i64),
 }
 pub fn classify054_3(e: E054_3) -> i64 {
     match e {
@@ -194,54 +205,61 @@ pub fn classify054_3(e: E054_3) -> i64 {
         E054_3::V1(a) => {
             return a;
         },
-        E054_3::V2(a, b) => {
-            return a + b;
-        },
     }
 }
 pub fn pick054_3[T: Ord2 + copy](a: T, b: T) -> T {
-    return minof(a, b);
+    return maxof(a, b);
 }
 pub fn accum054_3(n: i64) -> i64 {
     let mut acc: i64 = 0i64;
     let mut i: i64 = 0i64;
     while i < n {
-        acc = acc + i * 4i64;
+        acc = acc + i * 2i64;
         i = i + 1i64;
     }
     return acc;
 }
 pub fn guard054_3(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
-    return x + 1i64;
+    return x + 8i64;
 }
 pub fn f054(x: i64) -> i64 {
     let mut acc: i64 = x;
-    acc = acc + f012(x + 1i64);
-    acc = acc + f027(x + 2i64);
+    acc = acc + f003(x + 1i64);
     let mut s0: S054_0 = mk054_0(acc);
-    bump054_0(write s0, 3i64);
+    bump054_0(write s0, 5i64);
     acc = acc + s0.probe();
     acc = acc + read054_0(read s0);
     acc = acc + classify054_0(E054_0::V1(acc));
-    acc = acc + accum054_0(3i64);
+    acc = acc + accum054_0(7i64);
+    acc = acc + pick054_0(8i64, 3i64);
+    acc = acc + conv i64 (pick054_0(5u32, 3u32));
+    acc = acc + conv i64 (pick054_0(3usize, 2usize));
     let mut s1: S054_1 = mk054_1(acc);
-    bump054_1(write s1, 6i64);
+    bump054_1(write s1, 7i64);
     acc = acc + s1.probe();
     acc = acc + read054_1(read s1);
     acc = acc + classify054_1(E054_1::V1(acc));
-    acc = acc + accum054_1(4i64);
+    acc = acc + accum054_1(3i64);
+    acc = acc + pick054_1(9i64, 1i64);
+    acc = acc + conv i64 (pick054_1(7u32, 2u32));
+    acc = acc + conv i64 (pick054_1(2usize, 5usize));
     let mut s2: S054_2 = mk054_2(acc);
-    bump054_2(write s2, 4i64);
+    bump054_2(write s2, 6i64);
     acc = acc + s2.probe();
     acc = acc + read054_2(read s2);
     acc = acc + classify054_2(E054_2::V1(acc));
-    acc = acc + accum054_2(9i64);
+    acc = acc + accum054_2(5i64);
+    acc = acc + pick054_2(4i64, 9i64);
+    acc = acc + conv i64 (pick054_2(5u32, 7u32));
+    acc = acc + conv i64 (pick054_2(2usize, 2usize));
     let mut s3: S054_3 = mk054_3(acc);
-    bump054_3(write s3, 7i64);
+    bump054_3(write s3, 3i64);
     acc = acc + s3.probe();
     acc = acc + read054_3(read s3);
     acc = acc + classify054_3(E054_3::V1(acc));
-    acc = acc + accum054_3(7i64);
+    acc = acc + accum054_3(8i64);
+    acc = acc + pick054_3(4i64, 8i64);
+    acc = acc + conv i64 (pick054_3(4u32, 3u32));
     acc = maxof(acc, x);
     acc = minof(acc, x + 1i64);
     return clampi(acc);

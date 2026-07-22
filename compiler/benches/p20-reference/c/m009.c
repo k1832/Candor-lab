@@ -4,6 +4,8 @@
 typedef struct {
     long a;
     long n0;
+    long n1;
+    long n2;
     int flag;
 } S9_0;
 
@@ -11,14 +13,16 @@ static S9_0 mk9_0(long a) {
     S9_0 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
+    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe9_0(const S9_0 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read9_0(const S9_0 *s) {
-    return s->a * 4;
+    return s->a * 2;
 }
 static void bump9_0(S9_0 *s, long d) {
     s->a = s->a + d;
@@ -44,13 +48,14 @@ static long accum9_0(long n) {
     return acc;
 }
 static long guard9_0(long x) {
-    return x + 9;
+    return x + 4;
 }
 
+static long pick9_0_0(long a, long b) { return a > b ? a : b; }
+static long pick9_0_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
-    long n1;
     int flag;
 } S9_1;
 
@@ -58,15 +63,14 @@ static S9_1 mk9_1(long a) {
     S9_1 s;
     s.a = a;
     s.n0 = 0;
-    s.n1 = 0;
     s.flag = 1;
     return s;
 }
 static long probe9_1(const S9_1 *s) {
-    return s->a + s->n0 + s->n1;
+    return s->a + s->n0;
 }
 static long read9_1(const S9_1 *s) {
-    return s->a * 3;
+    return s->a * 4;
 }
 static void bump9_1(S9_1 *s, long d) {
     s->a = s->a + d;
@@ -92,14 +96,14 @@ static long accum9_1(long n) {
     return acc;
 }
 static long guard9_1(long x) {
-    return x + 8;
+    return x + 2;
 }
 
+static long pick9_1_0(long a, long b) { return a > b ? a : b; }
+static long pick9_1_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
-    long n1;
-    long n2;
     int flag;
 } S9_2;
 
@@ -107,16 +111,14 @@ static S9_2 mk9_2(long a) {
     S9_2 s;
     s.a = a;
     s.n0 = 0;
-    s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe9_2(const S9_2 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0;
 }
 static long read9_2(const S9_2 *s) {
-    return s->a * 2;
+    return s->a * 3;
 }
 static void bump9_2(S9_2 *s, long d) {
     s->a = s->a + d;
@@ -137,7 +139,7 @@ static long accum9_2(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 2;
+        acc += i * 5;
     }
     return acc;
 }
@@ -145,6 +147,8 @@ static long guard9_2(long x) {
     return x + 3;
 }
 
+static long pick9_2_0(long a, long b) { return a > b ? a : b; }
+static long pick9_2_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -166,7 +170,7 @@ static long probe9_3(const S9_3 *s) {
     return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read9_3(const S9_3 *s) {
-    return s->a * 5;
+    return s->a * 3;
 }
 static void bump9_3(S9_3 *s, long d) {
     s->a = s->a + d;
@@ -187,44 +191,59 @@ static long accum9_3(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 2;
     }
     return acc;
 }
 static long guard9_3(long x) {
-    return x + 1;
+    return x + 2;
 }
 
+static long pick9_3_0(long a, long b) { return a > b ? a : b; }
+static long pick9_3_1(long a, long b) { return a > b ? a : b; }
+static long pick9_3_2(long a, long b) { return a > b ? a : b; }
 long f009(long x) {
     long acc = x;
-    acc += f007(x + 1);
+    acc += f001(x + 1);
+    acc += f003(x + 2);
+    acc += f005(x + 3);
+    acc += f007(x + 4);
     S9_0 s0 = mk9_0(acc);
-    bump9_0(&s0, 5);
+    bump9_0(&s0, 4);
     acc += probe9_0(&s0);
     acc += read9_0(&s0);
     acc += classify9_0(1, acc, acc);
     acc += accum9_0(6);
     acc += guard9_0(acc);
+    acc += pick9_0_0(acc, acc + 8);
+    acc += pick9_0_1(acc, acc + 4);
     S9_1 s1 = mk9_1(acc);
     bump9_1(&s1, 5);
     acc += probe9_1(&s1);
     acc += read9_1(&s1);
     acc += classify9_1(1, acc, acc);
-    acc += accum9_1(5);
+    acc += accum9_1(3);
     acc += guard9_1(acc);
+    acc += pick9_1_0(acc, acc + 4);
+    acc += pick9_1_1(acc, acc + 6);
     S9_2 s2 = mk9_2(acc);
-    bump9_2(&s2, 4);
+    bump9_2(&s2, 9);
     acc += probe9_2(&s2);
     acc += read9_2(&s2);
     acc += classify9_2(1, acc, acc);
     acc += accum9_2(9);
     acc += guard9_2(acc);
+    acc += pick9_2_0(acc, acc + 2);
+    acc += pick9_2_1(acc, acc + 7);
     S9_3 s3 = mk9_3(acc);
-    bump9_3(&s3, 6);
+    bump9_3(&s3, 1);
     acc += probe9_3(&s3);
     acc += read9_3(&s3);
     acc += classify9_3(1, acc, acc);
-    acc += accum9_3(4);
+    acc += accum9_3(7);
     acc += guard9_3(acc);
+    acc += pick9_3_0(acc, acc + 9);
+    acc += pick9_3_1(acc, acc + 1);
+    acc += pick9_3_2(acc, acc + 8);
     return clampi(acc);
 }

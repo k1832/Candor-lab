@@ -4,6 +4,7 @@
 typedef struct {
     long a;
     long n0;
+    long n1;
     int flag;
 } S22_0;
 
@@ -11,14 +12,15 @@ static S22_0 mk22_0(long a) {
     S22_0 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
     s.flag = 1;
     return s;
 }
 static long probe22_0(const S22_0 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1;
 }
 static long read22_0(const S22_0 *s) {
-    return s->a * 4;
+    return s->a * 7;
 }
 static void bump22_0(S22_0 *s, long d) {
     s->a = s->a + d;
@@ -44,12 +46,17 @@ static long accum22_0(long n) {
     return acc;
 }
 static long guard22_0(long x) {
-    return x + 2;
+    return x + 5;
 }
 
+static long pick22_0_0(long a, long b) { return a > b ? a : b; }
+static long pick22_0_1(long a, long b) { return a > b ? a : b; }
+static long pick22_0_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
+    long n1;
+    long n2;
     int flag;
 } S22_1;
 
@@ -57,14 +64,16 @@ static S22_1 mk22_1(long a) {
     S22_1 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
+    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe22_1(const S22_1 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read22_1(const S22_1 *s) {
-    return s->a * 3;
+    return s->a * 2;
 }
 static void bump22_1(S22_1 *s, long d) {
     s->a = s->a + d;
@@ -90,9 +99,11 @@ static long accum22_1(long n) {
     return acc;
 }
 static long guard22_1(long x) {
-    return x + 9;
+    return x + 4;
 }
 
+static long pick22_1_0(long a, long b) { return a > b ? a : b; }
+static long pick22_1_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -112,7 +123,7 @@ static long probe22_2(const S22_2 *s) {
     return s->a + s->n0 + s->n1;
 }
 static long read22_2(const S22_2 *s) {
-    return s->a * 2;
+    return s->a * 4;
 }
 static void bump22_2(S22_2 *s, long d) {
     s->a = s->a + d;
@@ -133,38 +144,45 @@ static long accum22_2(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 2;
     }
     return acc;
 }
 static long guard22_2(long x) {
-    return x + 2;
+    return x + 6;
 }
 
+static long pick22_2_0(long a, long b) { return a > b ? a : b; }
 long f022(long x) {
     long acc = x;
-    acc += f000(x + 1);
-    acc += f006(x + 2);
+    acc += f003(x + 1);
+    acc += f005(x + 2);
     S22_0 s0 = mk22_0(acc);
-    bump22_0(&s0, 5);
+    bump22_0(&s0, 7);
     acc += probe22_0(&s0);
     acc += read22_0(&s0);
     acc += classify22_0(1, acc, acc);
-    acc += accum22_0(6);
+    acc += accum22_0(3);
     acc += guard22_0(acc);
+    acc += pick22_0_0(acc, acc + 2);
+    acc += pick22_0_1(acc, acc + 8);
+    acc += pick22_0_2(acc, acc + 9);
     S22_1 s1 = mk22_1(acc);
-    bump22_1(&s1, 7);
+    bump22_1(&s1, 2);
     acc += probe22_1(&s1);
     acc += read22_1(&s1);
     acc += classify22_1(1, acc, acc);
     acc += accum22_1(9);
     acc += guard22_1(acc);
+    acc += pick22_1_0(acc, acc + 5);
+    acc += pick22_1_1(acc, acc + 9);
     S22_2 s2 = mk22_2(acc);
-    bump22_2(&s2, 7);
+    bump22_2(&s2, 9);
     acc += probe22_2(&s2);
     acc += read22_2(&s2);
     acc += classify22_2(1, acc, acc);
-    acc += accum22_2(6);
+    acc += accum22_2(4);
     acc += guard22_2(acc);
+    acc += pick22_2_0(acc, acc + 7);
     return clampi(acc);
 }

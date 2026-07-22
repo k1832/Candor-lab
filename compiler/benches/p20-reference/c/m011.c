@@ -18,7 +18,7 @@ static long probe11_0(const S11_0 *s) {
     return s->a + s->n0;
 }
 static long read11_0(const S11_0 *s) {
-    return s->a * 5;
+    return s->a * 6;
 }
 static void bump11_0(S11_0 *s, long d) {
     s->a = s->a + d;
@@ -39,19 +39,20 @@ static long accum11_0(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard11_0(long x) {
-    return x + 6;
+    return x + 1;
 }
 
+static long pick11_0_0(long a, long b) { return a > b ? a : b; }
+static long pick11_0_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
     long n1;
-    long n2;
     int flag;
 } S11_1;
 
@@ -60,15 +61,14 @@ static S11_1 mk11_1(long a) {
     s.a = a;
     s.n0 = 0;
     s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe11_1(const S11_1 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0 + s->n1;
 }
 static long read11_1(const S11_1 *s) {
-    return s->a * 3;
+    return s->a * 6;
 }
 static void bump11_1(S11_1 *s, long d) {
     s->a = s->a + d;
@@ -89,14 +89,17 @@ static long accum11_1(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 4;
     }
     return acc;
 }
 static long guard11_1(long x) {
-    return x + 3;
+    return x + 2;
 }
 
+static long pick11_1_0(long a, long b) { return a > b ? a : b; }
+static long pick11_1_1(long a, long b) { return a > b ? a : b; }
+static long pick11_1_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -118,7 +121,7 @@ static long probe11_2(const S11_2 *s) {
     return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read11_2(const S11_2 *s) {
-    return s->a * 6;
+    return s->a * 4;
 }
 static void bump11_2(S11_2 *s, long d) {
     s->a = s->a + d;
@@ -139,17 +142,22 @@ static long accum11_2(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 2;
     }
     return acc;
 }
 static long guard11_2(long x) {
-    return x + 2;
+    return x + 1;
 }
 
+static long pick11_2_0(long a, long b) { return a > b ? a : b; }
+static long pick11_2_1(long a, long b) { return a > b ? a : b; }
+static long pick11_2_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
+    long n1;
+    long n2;
     int flag;
 } S11_3;
 
@@ -157,14 +165,16 @@ static S11_3 mk11_3(long a) {
     S11_3 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
+    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe11_3(const S11_3 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read11_3(const S11_3 *s) {
-    return s->a * 6;
+    return s->a * 2;
 }
 static void bump11_3(S11_3 *s, long d) {
     s->a = s->a + d;
@@ -185,44 +195,59 @@ static long accum11_3(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 5;
+        acc += i * 2;
     }
     return acc;
 }
 static long guard11_3(long x) {
-    return x + 7;
+    return x + 6;
 }
 
+static long pick11_3_0(long a, long b) { return a > b ? a : b; }
+static long pick11_3_1(long a, long b) { return a > b ? a : b; }
+static long pick11_3_2(long a, long b) { return a > b ? a : b; }
 long f011(long x) {
     long acc = x;
-    acc += f005(x + 1);
+    acc += f002(x + 1);
+    acc += f003(x + 2);
     S11_0 s0 = mk11_0(acc);
-    bump11_0(&s0, 4);
+    bump11_0(&s0, 1);
     acc += probe11_0(&s0);
     acc += read11_0(&s0);
     acc += classify11_0(1, acc, acc);
-    acc += accum11_0(6);
+    acc += accum11_0(8);
     acc += guard11_0(acc);
+    acc += pick11_0_0(acc, acc + 6);
+    acc += pick11_0_1(acc, acc + 5);
     S11_1 s1 = mk11_1(acc);
-    bump11_1(&s1, 7);
+    bump11_1(&s1, 8);
     acc += probe11_1(&s1);
     acc += read11_1(&s1);
     acc += classify11_1(1, acc, acc);
-    acc += accum11_1(8);
+    acc += accum11_1(6);
     acc += guard11_1(acc);
+    acc += pick11_1_0(acc, acc + 1);
+    acc += pick11_1_1(acc, acc + 8);
+    acc += pick11_1_2(acc, acc + 4);
     S11_2 s2 = mk11_2(acc);
     bump11_2(&s2, 7);
     acc += probe11_2(&s2);
     acc += read11_2(&s2);
     acc += classify11_2(1, acc, acc);
-    acc += accum11_2(6);
+    acc += accum11_2(4);
     acc += guard11_2(acc);
+    acc += pick11_2_0(acc, acc + 7);
+    acc += pick11_2_1(acc, acc + 4);
+    acc += pick11_2_2(acc, acc + 6);
     S11_3 s3 = mk11_3(acc);
-    bump11_3(&s3, 9);
+    bump11_3(&s3, 1);
     acc += probe11_3(&s3);
     acc += read11_3(&s3);
     acc += classify11_3(1, acc, acc);
-    acc += accum11_3(8);
+    acc += accum11_3(5);
     acc += guard11_3(acc);
+    acc += pick11_3_0(acc, acc + 9);
+    acc += pick11_3_1(acc, acc + 7);
+    acc += pick11_3_2(acc, acc + 1);
     return clampi(acc);
 }

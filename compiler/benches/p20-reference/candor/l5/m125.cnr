@@ -2,26 +2,23 @@
 // measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
 // via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
 use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
-use l3::m058::{f058};
-use l3::m064::{f064};
-use l4::m088::{f088};
+use l3::m060::{f060};
 
 pub struct S125_0 {
     a: i64,
     n0: i64,
-    n1: usize,
     flag: bool,
 }
 pub fn mk125_0(a: i64) -> S125_0 {
-    return S125_0 { a: a, n0: 0, n1: 0usize, flag: true };
+    return S125_0 { a: a, n0: 0, flag: true };
 }
 impl Probe for S125_0 {
     fn probe(read self) -> i64 {
-        return self.a + self.n0 + conv i64 self.n1;
+        return self.a + self.n0;
     }
 }
 pub fn read125_0(s: read S125_0) -> i64 {
-    return s.a * 4i64;
+    return s.a * 7i64;
 }
 pub fn bump125_0(s: write S125_0, d: i64) -> unit {
     s.*.a = s.a + d;
@@ -65,15 +62,16 @@ pub fn guard125_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
 }
 pub struct S125_1 {
     a: i64,
-    n0: u32,
+    n0: i64,
+    n1: usize,
     flag: bool,
 }
 pub fn mk125_1(a: i64) -> S125_1 {
-    return S125_1 { a: a, n0: 0u32, flag: true };
+    return S125_1 { a: a, n0: 0, n1: 0usize, flag: true };
 }
 impl Probe for S125_1 {
     fn probe(read self) -> i64 {
-        return self.a + conv i64 self.n0;
+        return self.a + self.n0 + conv i64 self.n1;
     }
 }
 pub fn read125_1(s: read S125_1) -> i64 {
@@ -97,7 +95,7 @@ pub fn classify125_1(e: E125_1) -> i64 {
     }
 }
 pub fn pick125_1[T: Ord2 + copy](a: T, b: T) -> T {
-    return minof(a, b);
+    return maxof(a, b);
 }
 pub fn accum125_1(n: i64) -> i64 {
     let mut acc: i64 = 0i64;
@@ -109,25 +107,24 @@ pub fn accum125_1(n: i64) -> i64 {
     return acc;
 }
 pub fn guard125_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
-    return x + 6i64;
+    return x + 4i64;
 }
 pub struct S125_2 {
     a: i64,
-    n0: usize,
-    n1: i64,
-    n2: i64,
+    n0: i64,
+    n1: u32,
     flag: bool,
 }
 pub fn mk125_2(a: i64) -> S125_2 {
-    return S125_2 { a: a, n0: 0usize, n1: 0, n2: 0, flag: true };
+    return S125_2 { a: a, n0: 0, n1: 0u32, flag: true };
 }
 impl Probe for S125_2 {
     fn probe(read self) -> i64 {
-        return self.a + conv i64 self.n0 + self.n1 + self.n2;
+        return self.a + self.n0 + conv i64 self.n1;
     }
 }
 pub fn read125_2(s: read S125_2) -> i64 {
-    return s.a * 4i64;
+    return s.a * 6i64;
 }
 pub fn bump125_2(s: write S125_2, d: i64) -> unit {
     s.*.a = s.a + d;
@@ -135,6 +132,7 @@ pub fn bump125_2(s: write S125_2, d: i64) -> unit {
 pub enum E125_2 {
     V0,
     V1(i64),
+    V2(i64, i64),
 }
 pub fn classify125_2(e: E125_2) -> i64 {
     match e {
@@ -144,10 +142,13 @@ pub fn classify125_2(e: E125_2) -> i64 {
         E125_2::V1(a) => {
             return a;
         },
+        E125_2::V2(a, b) => {
+            return a + b;
+        },
     }
 }
 pub fn pick125_2[T: Ord2 + copy](a: T, b: T) -> T {
-    return minof(a, b);
+    return maxof(a, b);
 }
 pub fn accum125_2(n: i64) -> i64 {
     let mut acc: i64 = 0i64;
@@ -159,31 +160,37 @@ pub fn accum125_2(n: i64) -> i64 {
     return acc;
 }
 pub fn guard125_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
-    return x + 3i64;
+    return x + 1i64;
 }
 pub fn f125(x: i64) -> i64 {
     let mut acc: i64 = x;
-    acc = acc + f058(x + 1i64);
-    acc = acc + f064(x + 2i64);
-    acc = acc + f088(x + 3i64);
+    acc = acc + f060(x + 1i64);
     let mut s0: S125_0 = mk125_0(acc);
-    bump125_0(write s0, 1i64);
+    bump125_0(write s0, 6i64);
     acc = acc + s0.probe();
     acc = acc + read125_0(read s0);
     acc = acc + classify125_0(E125_0::V1(acc));
-    acc = acc + accum125_0(3i64);
+    acc = acc + accum125_0(5i64);
+    acc = acc + pick125_0(6i64, 9i64);
+    acc = acc + conv i64 (pick125_0(7u32, 5u32));
+    acc = acc + conv i64 (pick125_0(2usize, 9usize));
     let mut s1: S125_1 = mk125_1(acc);
-    bump125_1(write s1, 1i64);
+    bump125_1(write s1, 4i64);
     acc = acc + s1.probe();
     acc = acc + read125_1(read s1);
     acc = acc + classify125_1(E125_1::V1(acc));
     acc = acc + accum125_1(8i64);
+    acc = acc + pick125_1(2i64, 9i64);
+    acc = acc + conv i64 (pick125_1(9u32, 9u32));
     let mut s2: S125_2 = mk125_2(acc);
-    bump125_2(write s2, 2i64);
+    bump125_2(write s2, 9i64);
     acc = acc + s2.probe();
     acc = acc + read125_2(read s2);
     acc = acc + classify125_2(E125_2::V1(acc));
     acc = acc + accum125_2(7i64);
+    acc = acc + pick125_2(4i64, 4i64);
+    acc = acc + conv i64 (pick125_2(5u32, 6u32));
+    acc = acc + conv i64 (pick125_2(1usize, 3usize));
     acc = maxof(acc, x);
     acc = minof(acc, x + 1i64);
     return clampi(acc);

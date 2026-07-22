@@ -22,7 +22,7 @@ static long probe34_0(const S34_0 *s) {
     return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read34_0(const S34_0 *s) {
-    return s->a * 3;
+    return s->a * 7;
 }
 static void bump34_0(S34_0 *s, long d) {
     s->a = s->a + d;
@@ -43,14 +43,15 @@ static long accum34_0(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard34_0(long x) {
-    return x + 6;
+    return x + 9;
 }
 
+static long pick34_0_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -70,7 +71,7 @@ static long probe34_1(const S34_1 *s) {
     return s->a + s->n0 + s->n1;
 }
 static long read34_1(const S34_1 *s) {
-    return s->a * 7;
+    return s->a * 2;
 }
 static void bump34_1(S34_1 *s, long d) {
     s->a = s->a + d;
@@ -91,14 +92,17 @@ static long accum34_1(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard34_1(long x) {
-    return x + 3;
+    return x + 1;
 }
 
+static long pick34_1_0(long a, long b) { return a > b ? a : b; }
+static long pick34_1_1(long a, long b) { return a > b ? a : b; }
+static long pick34_1_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -137,18 +141,20 @@ static long accum34_2(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 5;
+        acc += i * 2;
     }
     return acc;
 }
 static long guard34_2(long x) {
-    return x + 9;
+    return x + 7;
 }
 
+static long pick34_2_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
     long n1;
+    long n2;
     int flag;
 } S34_3;
 
@@ -157,14 +163,15 @@ static S34_3 mk34_3(long a) {
     s.a = a;
     s.n0 = 0;
     s.n1 = 0;
+    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe34_3(const S34_3 *s) {
-    return s->a + s->n0 + s->n1;
+    return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read34_3(const S34_3 *s) {
-    return s->a * 3;
+    return s->a * 2;
 }
 static void bump34_3(S34_3 *s, long d) {
     s->a = s->a + d;
@@ -185,44 +192,58 @@ static long accum34_3(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 5;
+        acc += i * 3;
     }
     return acc;
 }
 static long guard34_3(long x) {
-    return x + 9;
+    return x + 8;
 }
 
+static long pick34_3_0(long a, long b) { return a > b ? a : b; }
+static long pick34_3_1(long a, long b) { return a > b ? a : b; }
+static long pick34_3_2(long a, long b) { return a > b ? a : b; }
 long f034(long x) {
     long acc = x;
-    acc += f011(x + 1);
+    acc += f012(x + 1);
+    acc += f013(x + 2);
+    acc += f016(x + 3);
+    acc += f018(x + 4);
     S34_0 s0 = mk34_0(acc);
-    bump34_0(&s0, 4);
+    bump34_0(&s0, 8);
     acc += probe34_0(&s0);
     acc += read34_0(&s0);
     acc += classify34_0(1, acc, acc);
-    acc += accum34_0(4);
+    acc += accum34_0(3);
     acc += guard34_0(acc);
+    acc += pick34_0_0(acc, acc + 5);
     S34_1 s1 = mk34_1(acc);
-    bump34_1(&s1, 1);
+    bump34_1(&s1, 9);
     acc += probe34_1(&s1);
     acc += read34_1(&s1);
     acc += classify34_1(1, acc, acc);
-    acc += accum34_1(7);
+    acc += accum34_1(5);
     acc += guard34_1(acc);
+    acc += pick34_1_0(acc, acc + 8);
+    acc += pick34_1_1(acc, acc + 7);
+    acc += pick34_1_2(acc, acc + 2);
     S34_2 s2 = mk34_2(acc);
-    bump34_2(&s2, 4);
+    bump34_2(&s2, 3);
     acc += probe34_2(&s2);
     acc += read34_2(&s2);
     acc += classify34_2(1, acc, acc);
-    acc += accum34_2(3);
+    acc += accum34_2(4);
     acc += guard34_2(acc);
+    acc += pick34_2_0(acc, acc + 3);
     S34_3 s3 = mk34_3(acc);
-    bump34_3(&s3, 2);
+    bump34_3(&s3, 6);
     acc += probe34_3(&s3);
     acc += read34_3(&s3);
     acc += classify34_3(1, acc, acc);
-    acc += accum34_3(7);
+    acc += accum34_3(4);
     acc += guard34_3(acc);
+    acc += pick34_3_0(acc, acc + 4);
+    acc += pick34_3_1(acc, acc + 4);
+    acc += pick34_3_2(acc, acc + 4);
     return clampi(acc);
 }

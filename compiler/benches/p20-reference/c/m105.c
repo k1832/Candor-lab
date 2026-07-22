@@ -5,7 +5,6 @@ typedef struct {
     long a;
     long n0;
     long n1;
-    long n2;
     int flag;
 } S105_0;
 
@@ -14,15 +13,14 @@ static S105_0 mk105_0(long a) {
     s.a = a;
     s.n0 = 0;
     s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe105_0(const S105_0 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0 + s->n1;
 }
 static long read105_0(const S105_0 *s) {
-    return s->a * 3;
+    return s->a * 4;
 }
 static void bump105_0(S105_0 *s, long d) {
     s->a = s->a + d;
@@ -43,17 +41,19 @@ static long accum105_0(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 5;
+        acc += i * 3;
     }
     return acc;
 }
 static long guard105_0(long x) {
-    return x + 4;
+    return x + 6;
 }
 
+static long pick105_0_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
+    long n1;
     int flag;
 } S105_1;
 
@@ -61,14 +61,15 @@ static S105_1 mk105_1(long a) {
     S105_1 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
     s.flag = 1;
     return s;
 }
 static long probe105_1(const S105_1 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1;
 }
 static long read105_1(const S105_1 *s) {
-    return s->a * 5;
+    return s->a * 2;
 }
 static void bump105_1(S105_1 *s, long d) {
     s->a = s->a + d;
@@ -89,19 +90,18 @@ static long accum105_1(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 5;
+        acc += i * 3;
     }
     return acc;
 }
 static long guard105_1(long x) {
-    return x + 1;
+    return x + 6;
 }
 
+static long pick105_1_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
-    long n1;
-    long n2;
     int flag;
 } S105_2;
 
@@ -109,16 +109,14 @@ static S105_2 mk105_2(long a) {
     S105_2 s;
     s.a = a;
     s.n0 = 0;
-    s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe105_2(const S105_2 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0;
 }
 static long read105_2(const S105_2 *s) {
-    return s->a * 4;
+    return s->a * 7;
 }
 static void bump105_2(S105_2 *s, long d) {
     s->a = s->a + d;
@@ -139,14 +137,15 @@ static long accum105_2(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard105_2(long x) {
-    return x + 8;
+    return x + 9;
 }
 
+static long pick105_2_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -166,7 +165,7 @@ static long probe105_3(const S105_3 *s) {
     return s->a + s->n0 + s->n1;
 }
 static long read105_3(const S105_3 *s) {
-    return s->a * 7;
+    return s->a * 4;
 }
 static void bump105_3(S105_3 *s, long d) {
     s->a = s->a + d;
@@ -187,18 +186,21 @@ static long accum105_3(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard105_3(long x) {
-    return x + 7;
+    return x + 4;
 }
 
+static long pick105_3_0(long a, long b) { return a > b ? a : b; }
+static long pick105_3_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
     long n1;
+    long n2;
     int flag;
 } S105_4;
 
@@ -207,14 +209,15 @@ static S105_4 mk105_4(long a) {
     s.a = a;
     s.n0 = 0;
     s.n1 = 0;
+    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe105_4(const S105_4 *s) {
-    return s->a + s->n0 + s->n1;
+    return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read105_4(const S105_4 *s) {
-    return s->a * 5;
+    return s->a * 7;
 }
 static void bump105_4(S105_4 *s, long d) {
     s->a = s->a + d;
@@ -235,7 +238,7 @@ static long accum105_4(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 5;
+        acc += i * 4;
     }
     return acc;
 }
@@ -243,45 +246,55 @@ static long guard105_4(long x) {
     return x + 7;
 }
 
+static long pick105_4_0(long a, long b) { return a > b ? a : b; }
+static long pick105_4_1(long a, long b) { return a > b ? a : b; }
+static long pick105_4_2(long a, long b) { return a > b ? a : b; }
 long f105(long x) {
     long acc = x;
-    acc += f002(x + 1);
-    acc += f029(x + 2);
-    acc += f046(x + 3);
+    acc += f040(x + 1);
+    acc += f053(x + 2);
     S105_0 s0 = mk105_0(acc);
-    bump105_0(&s0, 8);
+    bump105_0(&s0, 1);
     acc += probe105_0(&s0);
     acc += read105_0(&s0);
     acc += classify105_0(1, acc, acc);
-    acc += accum105_0(9);
+    acc += accum105_0(5);
     acc += guard105_0(acc);
+    acc += pick105_0_0(acc, acc + 6);
     S105_1 s1 = mk105_1(acc);
     bump105_1(&s1, 2);
     acc += probe105_1(&s1);
     acc += read105_1(&s1);
     acc += classify105_1(1, acc, acc);
-    acc += accum105_1(8);
+    acc += accum105_1(7);
     acc += guard105_1(acc);
+    acc += pick105_1_0(acc, acc + 3);
     S105_2 s2 = mk105_2(acc);
-    bump105_2(&s2, 9);
+    bump105_2(&s2, 2);
     acc += probe105_2(&s2);
     acc += read105_2(&s2);
     acc += classify105_2(1, acc, acc);
-    acc += accum105_2(3);
+    acc += accum105_2(9);
     acc += guard105_2(acc);
+    acc += pick105_2_0(acc, acc + 3);
     S105_3 s3 = mk105_3(acc);
-    bump105_3(&s3, 8);
+    bump105_3(&s3, 4);
     acc += probe105_3(&s3);
     acc += read105_3(&s3);
     acc += classify105_3(1, acc, acc);
-    acc += accum105_3(8);
+    acc += accum105_3(6);
     acc += guard105_3(acc);
+    acc += pick105_3_0(acc, acc + 1);
+    acc += pick105_3_1(acc, acc + 5);
     S105_4 s4 = mk105_4(acc);
-    bump105_4(&s4, 4);
+    bump105_4(&s4, 2);
     acc += probe105_4(&s4);
     acc += read105_4(&s4);
     acc += classify105_4(1, acc, acc);
-    acc += accum105_4(5);
+    acc += accum105_4(4);
     acc += guard105_4(acc);
+    acc += pick105_4_0(acc, acc + 7);
+    acc += pick105_4_1(acc, acc + 6);
+    acc += pick105_4_2(acc, acc + 2);
     return clampi(acc);
 }

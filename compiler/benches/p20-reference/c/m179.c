@@ -5,7 +5,6 @@ typedef struct {
     long a;
     long n0;
     long n1;
-    long n2;
     int flag;
 } S179_0;
 
@@ -14,15 +13,14 @@ static S179_0 mk179_0(long a) {
     s.a = a;
     s.n0 = 0;
     s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe179_0(const S179_0 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0 + s->n1;
 }
 static long read179_0(const S179_0 *s) {
-    return s->a * 5;
+    return s->a * 3;
 }
 static void bump179_0(S179_0 *s, long d) {
     s->a = s->a + d;
@@ -43,7 +41,7 @@ static long accum179_0(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 2;
     }
     return acc;
 }
@@ -51,6 +49,7 @@ static long guard179_0(long x) {
     return x + 9;
 }
 
+static long pick179_0_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -70,7 +69,7 @@ static long probe179_1(const S179_1 *s) {
     return s->a + s->n0 + s->n1;
 }
 static long read179_1(const S179_1 *s) {
-    return s->a * 6;
+    return s->a * 5;
 }
 static void bump179_1(S179_1 *s, long d) {
     s->a = s->a + d;
@@ -91,17 +90,19 @@ static long accum179_1(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 5;
+        acc += i * 4;
     }
     return acc;
 }
 static long guard179_1(long x) {
-    return x + 9;
+    return x + 5;
 }
 
+static long pick179_1_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
+    long n1;
     int flag;
 } S179_2;
 
@@ -109,11 +110,12 @@ static S179_2 mk179_2(long a) {
     S179_2 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
     s.flag = 1;
     return s;
 }
 static long probe179_2(const S179_2 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1;
 }
 static long read179_2(const S179_2 *s) {
     return s->a * 6;
@@ -137,39 +139,44 @@ static long accum179_2(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard179_2(long x) {
-    return x + 4;
+    return x + 2;
 }
 
+static long pick179_2_0(long a, long b) { return a > b ? a : b; }
+static long pick179_2_1(long a, long b) { return a > b ? a : b; }
 long f179(long x) {
     long acc = x;
-    acc += f019(x + 1);
-    acc += f069(x + 2);
-    acc += f149(x + 3);
+    acc += f018(x + 1);
+    acc += f102(x + 2);
     S179_0 s0 = mk179_0(acc);
-    bump179_0(&s0, 5);
+    bump179_0(&s0, 4);
     acc += probe179_0(&s0);
     acc += read179_0(&s0);
     acc += classify179_0(1, acc, acc);
-    acc += accum179_0(9);
+    acc += accum179_0(3);
     acc += guard179_0(acc);
+    acc += pick179_0_0(acc, acc + 2);
     S179_1 s1 = mk179_1(acc);
-    bump179_1(&s1, 4);
+    bump179_1(&s1, 2);
     acc += probe179_1(&s1);
     acc += read179_1(&s1);
     acc += classify179_1(1, acc, acc);
-    acc += accum179_1(3);
+    acc += accum179_1(8);
     acc += guard179_1(acc);
+    acc += pick179_1_0(acc, acc + 7);
     S179_2 s2 = mk179_2(acc);
-    bump179_2(&s2, 4);
+    bump179_2(&s2, 7);
     acc += probe179_2(&s2);
     acc += read179_2(&s2);
     acc += classify179_2(1, acc, acc);
-    acc += accum179_2(7);
+    acc += accum179_2(9);
     acc += guard179_2(acc);
+    acc += pick179_2_0(acc, acc + 1);
+    acc += pick179_2_1(acc, acc + 9);
     return clampi(acc);
 }

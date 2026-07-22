@@ -5,6 +5,7 @@ typedef struct {
     long a;
     long n0;
     long n1;
+    long n2;
     int flag;
 } S18_0;
 
@@ -13,14 +14,15 @@ static S18_0 mk18_0(long a) {
     s.a = a;
     s.n0 = 0;
     s.n1 = 0;
+    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe18_0(const S18_0 *s) {
-    return s->a + s->n0 + s->n1;
+    return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read18_0(const S18_0 *s) {
-    return s->a * 3;
+    return s->a * 6;
 }
 static void bump18_0(S18_0 *s, long d) {
     s->a = s->a + d;
@@ -41,19 +43,18 @@ static long accum18_0(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard18_0(long x) {
-    return x + 2;
+    return x + 5;
 }
 
+static long pick18_0_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
-    long n1;
-    long n2;
     int flag;
 } S18_1;
 
@@ -61,16 +62,14 @@ static S18_1 mk18_1(long a) {
     S18_1 s;
     s.a = a;
     s.n0 = 0;
-    s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe18_1(const S18_1 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0;
 }
 static long read18_1(const S18_1 *s) {
-    return s->a * 4;
+    return s->a * 6;
 }
 static void bump18_1(S18_1 *s, long d) {
     s->a = s->a + d;
@@ -96,12 +95,16 @@ static long accum18_1(long n) {
     return acc;
 }
 static long guard18_1(long x) {
-    return x + 1;
+    return x + 2;
 }
 
+static long pick18_1_0(long a, long b) { return a > b ? a : b; }
+static long pick18_1_1(long a, long b) { return a > b ? a : b; }
+static long pick18_1_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
+    long n1;
     int flag;
 } S18_2;
 
@@ -109,14 +112,15 @@ static S18_2 mk18_2(long a) {
     S18_2 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
     s.flag = 1;
     return s;
 }
 static long probe18_2(const S18_2 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1;
 }
 static long read18_2(const S18_2 *s) {
-    return s->a * 6;
+    return s->a * 3;
 }
 static void bump18_2(S18_2 *s, long d) {
     s->a = s->a + d;
@@ -137,18 +141,19 @@ static long accum18_2(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 2;
+        acc += i * 3;
     }
     return acc;
 }
 static long guard18_2(long x) {
-    return x + 1;
+    return x + 9;
 }
 
+static long pick18_2_0(long a, long b) { return a > b ? a : b; }
+static long pick18_2_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
-    long n1;
     int flag;
 } S18_3;
 
@@ -156,15 +161,14 @@ static S18_3 mk18_3(long a) {
     S18_3 s;
     s.a = a;
     s.n0 = 0;
-    s.n1 = 0;
     s.flag = 1;
     return s;
 }
 static long probe18_3(const S18_3 *s) {
-    return s->a + s->n0 + s->n1;
+    return s->a + s->n0;
 }
 static long read18_3(const S18_3 *s) {
-    return s->a * 2;
+    return s->a * 3;
 }
 static void bump18_3(S18_3 *s, long d) {
     s->a = s->a + d;
@@ -190,13 +194,15 @@ static long accum18_3(long n) {
     return acc;
 }
 static long guard18_3(long x) {
-    return x + 6;
+    return x + 3;
 }
 
+static long pick18_3_0(long a, long b) { return a > b ? a : b; }
+static long pick18_3_1(long a, long b) { return a > b ? a : b; }
+static long pick18_3_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
-    long n1;
     int flag;
 } S18_4;
 
@@ -204,15 +210,14 @@ static S18_4 mk18_4(long a) {
     S18_4 s;
     s.a = a;
     s.n0 = 0;
-    s.n1 = 0;
     s.flag = 1;
     return s;
 }
 static long probe18_4(const S18_4 *s) {
-    return s->a + s->n0 + s->n1;
+    return s->a + s->n0;
 }
 static long read18_4(const S18_4 *s) {
-    return s->a * 6;
+    return s->a * 7;
 }
 static void bump18_4(S18_4 *s, long d) {
     s->a = s->a + d;
@@ -233,51 +238,64 @@ static long accum18_4(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 3;
     }
     return acc;
 }
 static long guard18_4(long x) {
-    return x + 6;
+    return x + 3;
 }
 
+static long pick18_4_0(long a, long b) { return a > b ? a : b; }
 long f018(long x) {
     long acc = x;
-    acc += f005(x + 1);
+    acc += f001(x + 1);
+    acc += f004(x + 2);
+    acc += f005(x + 3);
     S18_0 s0 = mk18_0(acc);
-    bump18_0(&s0, 9);
+    bump18_0(&s0, 7);
     acc += probe18_0(&s0);
     acc += read18_0(&s0);
     acc += classify18_0(1, acc, acc);
     acc += accum18_0(6);
     acc += guard18_0(acc);
+    acc += pick18_0_0(acc, acc + 5);
     S18_1 s1 = mk18_1(acc);
-    bump18_1(&s1, 1);
+    bump18_1(&s1, 7);
     acc += probe18_1(&s1);
     acc += read18_1(&s1);
     acc += classify18_1(1, acc, acc);
-    acc += accum18_1(7);
+    acc += accum18_1(6);
     acc += guard18_1(acc);
+    acc += pick18_1_0(acc, acc + 8);
+    acc += pick18_1_1(acc, acc + 8);
+    acc += pick18_1_2(acc, acc + 6);
     S18_2 s2 = mk18_2(acc);
-    bump18_2(&s2, 2);
+    bump18_2(&s2, 3);
     acc += probe18_2(&s2);
     acc += read18_2(&s2);
     acc += classify18_2(1, acc, acc);
-    acc += accum18_2(3);
+    acc += accum18_2(4);
     acc += guard18_2(acc);
+    acc += pick18_2_0(acc, acc + 2);
+    acc += pick18_2_1(acc, acc + 3);
     S18_3 s3 = mk18_3(acc);
-    bump18_3(&s3, 3);
+    bump18_3(&s3, 9);
     acc += probe18_3(&s3);
     acc += read18_3(&s3);
     acc += classify18_3(1, acc, acc);
     acc += accum18_3(9);
     acc += guard18_3(acc);
+    acc += pick18_3_0(acc, acc + 6);
+    acc += pick18_3_1(acc, acc + 8);
+    acc += pick18_3_2(acc, acc + 4);
     S18_4 s4 = mk18_4(acc);
-    bump18_4(&s4, 1);
+    bump18_4(&s4, 4);
     acc += probe18_4(&s4);
     acc += read18_4(&s4);
     acc += classify18_4(1, acc, acc);
-    acc += accum18_4(8);
+    acc += accum18_4(3);
     acc += guard18_4(acc);
+    acc += pick18_4_0(acc, acc + 4);
     return clampi(acc);
 }

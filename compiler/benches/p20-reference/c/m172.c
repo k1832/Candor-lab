@@ -5,7 +5,6 @@ typedef struct {
     long a;
     long n0;
     long n1;
-    long n2;
     int flag;
 } S172_0;
 
@@ -14,15 +13,14 @@ static S172_0 mk172_0(long a) {
     s.a = a;
     s.n0 = 0;
     s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe172_0(const S172_0 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0 + s->n1;
 }
 static long read172_0(const S172_0 *s) {
-    return s->a * 2;
+    return s->a * 3;
 }
 static void bump172_0(S172_0 *s, long d) {
     s->a = s->a + d;
@@ -48,12 +46,15 @@ static long accum172_0(long n) {
     return acc;
 }
 static long guard172_0(long x) {
-    return x + 8;
+    return x + 3;
 }
 
+static long pick172_0_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
+    long n1;
+    long n2;
     int flag;
 } S172_1;
 
@@ -61,14 +62,16 @@ static S172_1 mk172_1(long a) {
     S172_1 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
+    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe172_1(const S172_1 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1 + s->n2;
 }
 static long read172_1(const S172_1 *s) {
-    return s->a * 4;
+    return s->a * 2;
 }
 static void bump172_1(S172_1 *s, long d) {
     s->a = s->a + d;
@@ -89,7 +92,7 @@ static long accum172_1(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 2;
+        acc += i * 3;
     }
     return acc;
 }
@@ -97,6 +100,8 @@ static long guard172_1(long x) {
     return x + 4;
 }
 
+static long pick172_1_0(long a, long b) { return a > b ? a : b; }
+static long pick172_1_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -137,19 +142,18 @@ static long accum172_2(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 2;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard172_2(long x) {
-    return x + 6;
+    return x + 4;
 }
 
+static long pick172_2_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
-    long n1;
-    long n2;
     int flag;
 } S172_3;
 
@@ -157,13 +161,11 @@ static S172_3 mk172_3(long a) {
     S172_3 s;
     s.a = a;
     s.n0 = 0;
-    s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe172_3(const S172_3 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0;
 }
 static long read172_3(const S172_3 *s) {
     return s->a * 7;
@@ -187,45 +189,54 @@ static long accum172_3(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard172_3(long x) {
-    return x + 1;
+    return x + 9;
 }
 
+static long pick172_3_0(long a, long b) { return a > b ? a : b; }
+static long pick172_3_1(long a, long b) { return a > b ? a : b; }
 long f172(long x) {
     long acc = x;
-    acc += f092(x + 1);
-    acc += f141(x + 2);
+    acc += f009(x + 1);
+    acc += f108(x + 2);
+    acc += f145(x + 3);
     S172_0 s0 = mk172_0(acc);
-    bump172_0(&s0, 3);
+    bump172_0(&s0, 6);
     acc += probe172_0(&s0);
     acc += read172_0(&s0);
     acc += classify172_0(1, acc, acc);
-    acc += accum172_0(4);
+    acc += accum172_0(6);
     acc += guard172_0(acc);
+    acc += pick172_0_0(acc, acc + 4);
     S172_1 s1 = mk172_1(acc);
-    bump172_1(&s1, 5);
+    bump172_1(&s1, 2);
     acc += probe172_1(&s1);
     acc += read172_1(&s1);
     acc += classify172_1(1, acc, acc);
     acc += accum172_1(8);
     acc += guard172_1(acc);
+    acc += pick172_1_0(acc, acc + 4);
+    acc += pick172_1_1(acc, acc + 3);
     S172_2 s2 = mk172_2(acc);
-    bump172_2(&s2, 3);
+    bump172_2(&s2, 9);
     acc += probe172_2(&s2);
     acc += read172_2(&s2);
     acc += classify172_2(1, acc, acc);
-    acc += accum172_2(6);
+    acc += accum172_2(9);
     acc += guard172_2(acc);
+    acc += pick172_2_0(acc, acc + 5);
     S172_3 s3 = mk172_3(acc);
-    bump172_3(&s3, 6);
+    bump172_3(&s3, 2);
     acc += probe172_3(&s3);
     acc += read172_3(&s3);
     acc += classify172_3(1, acc, acc);
-    acc += accum172_3(4);
+    acc += accum172_3(9);
     acc += guard172_3(acc);
+    acc += pick172_3_0(acc, acc + 9);
+    acc += pick172_3_1(acc, acc + 2);
     return clampi(acc);
 }

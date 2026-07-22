@@ -2,24 +2,26 @@
 // measurement subject (design 0010 §3). DO NOT EDIT BY HAND — regenerate
 // via `cargo run --release --bin p20-gen`. Non-`alloc` scalar core.
 use base::prelude::{Probe, Ord2, maxof, minof, clampi, Cmp};
-use l3::m076::{f076};
+use l2::m031::{f031};
+use l3::m063::{f063};
 
 pub struct S182_0 {
     a: i64,
-    n0: usize,
-    n1: i64,
+    n0: i64,
+    n1: u32,
+    n2: usize,
     flag: bool,
 }
 pub fn mk182_0(a: i64) -> S182_0 {
-    return S182_0 { a: a, n0: 0usize, n1: 0, flag: true };
+    return S182_0 { a: a, n0: 0, n1: 0u32, n2: 0usize, flag: true };
 }
 impl Probe for S182_0 {
     fn probe(read self) -> i64 {
-        return self.a + conv i64 self.n0 + self.n1;
+        return self.a + self.n0 + conv i64 self.n1 + conv i64 self.n2;
     }
 }
 pub fn read182_0(s: read S182_0) -> i64 {
-    return s.a * 3i64;
+    return s.a * 5i64;
 }
 pub fn bump182_0(s: write S182_0, d: i64) -> unit {
     s.*.a = s.a + d;
@@ -28,7 +30,6 @@ pub enum E182_0 {
     V0,
     V1(i64),
     V2(i64, i64),
-    V3(i64),
 }
 pub fn classify182_0(e: E182_0) -> i64 {
     match e {
@@ -41,42 +42,39 @@ pub fn classify182_0(e: E182_0) -> i64 {
         E182_0::V2(a, b) => {
             return a + b;
         },
-        E182_0::V3(a) => {
-            return a * 2i64;
-        },
     }
 }
 pub fn pick182_0[T: Ord2 + copy](a: T, b: T) -> T {
-    return maxof(a, b);
+    return minof(a, b);
 }
 pub fn accum182_0(n: i64) -> i64 {
     let mut acc: i64 = 0i64;
     let mut i: i64 = 0i64;
     while i < n {
-        acc = acc + i * 3i64;
+        acc = acc + i * 2i64;
         i = i + 1i64;
     }
     return acc;
 }
 pub fn guard182_0(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
-    return x + 6i64;
+    return x + 4i64;
 }
 pub struct S182_1 {
     a: i64,
-    n0: usize,
-    n1: i64,
+    n0: u32,
+    n1: usize,
     flag: bool,
 }
 pub fn mk182_1(a: i64) -> S182_1 {
-    return S182_1 { a: a, n0: 0usize, n1: 0, flag: true };
+    return S182_1 { a: a, n0: 0u32, n1: 0usize, flag: true };
 }
 impl Probe for S182_1 {
     fn probe(read self) -> i64 {
-        return self.a + conv i64 self.n0 + self.n1;
+        return self.a + conv i64 self.n0 + conv i64 self.n1;
     }
 }
 pub fn read182_1(s: read S182_1) -> i64 {
-    return s.a * 3i64;
+    return s.a * 4i64;
 }
 pub fn bump182_1(s: write S182_1, d: i64) -> unit {
     s.*.a = s.a + d;
@@ -85,6 +83,7 @@ pub enum E182_1 {
     V0,
     V1(i64),
     V2(i64, i64),
+    V3(i64),
 }
 pub fn classify182_1(e: E182_1) -> i64 {
     match e {
@@ -97,39 +96,41 @@ pub fn classify182_1(e: E182_1) -> i64 {
         E182_1::V2(a, b) => {
             return a + b;
         },
+        E182_1::V3(a) => {
+            return a * 2i64;
+        },
     }
 }
 pub fn pick182_1[T: Ord2 + copy](a: T, b: T) -> T {
-    return maxof(a, b);
+    return minof(a, b);
 }
 pub fn accum182_1(n: i64) -> i64 {
     let mut acc: i64 = 0i64;
     let mut i: i64 = 0i64;
     while i < n {
-        acc = acc + i * 4i64;
+        acc = acc + i * 3i64;
         i = i + 1i64;
     }
     return acc;
 }
 pub fn guard182_1(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
-    return x + 5i64;
+    return x + 1i64;
 }
 pub struct S182_2 {
     a: i64,
-    n0: usize,
-    n1: i64,
+    n0: u32,
     flag: bool,
 }
 pub fn mk182_2(a: i64) -> S182_2 {
-    return S182_2 { a: a, n0: 0usize, n1: 0, flag: true };
+    return S182_2 { a: a, n0: 0u32, flag: true };
 }
 impl Probe for S182_2 {
     fn probe(read self) -> i64 {
-        return self.a + conv i64 self.n0 + self.n1;
+        return self.a + conv i64 self.n0;
     }
 }
 pub fn read182_2(s: read S182_2) -> i64 {
-    return s.a * 6i64;
+    return s.a * 7i64;
 }
 pub fn bump182_2(s: write S182_2, d: i64) -> unit {
     s.*.a = s.a + d;
@@ -137,8 +138,6 @@ pub fn bump182_2(s: write S182_2, d: i64) -> unit {
 pub enum E182_2 {
     V0,
     V1(i64),
-    V2(i64, i64),
-    V3(i64),
 }
 pub fn classify182_2(e: E182_2) -> i64 {
     match e {
@@ -148,16 +147,10 @@ pub fn classify182_2(e: E182_2) -> i64 {
         E182_2::V1(a) => {
             return a;
         },
-        E182_2::V2(a, b) => {
-            return a + b;
-        },
-        E182_2::V3(a) => {
-            return a * 2i64;
-        },
     }
 }
 pub fn pick182_2[T: Ord2 + copy](a: T, b: T) -> T {
-    return minof(a, b);
+    return maxof(a, b);
 }
 pub fn accum182_2(n: i64) -> i64 {
     let mut acc: i64 = 0i64;
@@ -169,29 +162,35 @@ pub fn accum182_2(n: i64) -> i64 {
     return acc;
 }
 pub fn guard182_2(x: i64) requires(x >= 0i64) ensures(result >= x) -> i64 {
-    return x + 6i64;
+    return x + 5i64;
 }
 pub fn f182(x: i64) -> i64 {
     let mut acc: i64 = x;
-    acc = acc + f076(x + 1i64);
+    acc = acc + f031(x + 1i64);
+    acc = acc + f063(x + 2i64);
     let mut s0: S182_0 = mk182_0(acc);
-    bump182_0(write s0, 1i64);
+    bump182_0(write s0, 6i64);
     acc = acc + s0.probe();
     acc = acc + read182_0(read s0);
     acc = acc + classify182_0(E182_0::V1(acc));
-    acc = acc + accum182_0(9i64);
+    acc = acc + accum182_0(6i64);
+    acc = acc + pick182_0(7i64, 9i64);
     let mut s1: S182_1 = mk182_1(acc);
-    bump182_1(write s1, 9i64);
+    bump182_1(write s1, 3i64);
     acc = acc + s1.probe();
     acc = acc + read182_1(read s1);
     acc = acc + classify182_1(E182_1::V1(acc));
-    acc = acc + accum182_1(3i64);
+    acc = acc + accum182_1(7i64);
+    acc = acc + pick182_1(1i64, 1i64);
+    acc = acc + conv i64 (pick182_1(1u32, 8u32));
     let mut s2: S182_2 = mk182_2(acc);
-    bump182_2(write s2, 6i64);
+    bump182_2(write s2, 1i64);
     acc = acc + s2.probe();
     acc = acc + read182_2(read s2);
     acc = acc + classify182_2(E182_2::V1(acc));
-    acc = acc + accum182_2(9i64);
+    acc = acc + accum182_2(7i64);
+    acc = acc + pick182_2(3i64, 2i64);
+    acc = acc + conv i64 (pick182_2(3u32, 9u32));
     acc = maxof(acc, x);
     acc = minof(acc, x + 1i64);
     return clampi(acc);

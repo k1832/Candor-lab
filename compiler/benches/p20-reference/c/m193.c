@@ -4,7 +4,6 @@
 typedef struct {
     long a;
     long n0;
-    long n1;
     int flag;
 } S193_0;
 
@@ -12,15 +11,14 @@ static S193_0 mk193_0(long a) {
     S193_0 s;
     s.a = a;
     s.n0 = 0;
-    s.n1 = 0;
     s.flag = 1;
     return s;
 }
 static long probe193_0(const S193_0 *s) {
-    return s->a + s->n0 + s->n1;
+    return s->a + s->n0;
 }
 static long read193_0(const S193_0 *s) {
-    return s->a * 5;
+    return s->a * 4;
 }
 static void bump193_0(S193_0 *s, long d) {
     s->a = s->a + d;
@@ -41,14 +39,16 @@ static long accum193_0(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 5;
+        acc += i * 2;
     }
     return acc;
 }
 static long guard193_0(long x) {
-    return x + 8;
+    return x + 1;
 }
 
+static long pick193_0_0(long a, long b) { return a > b ? a : b; }
+static long pick193_0_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -66,7 +66,7 @@ static long probe193_1(const S193_1 *s) {
     return s->a + s->n0;
 }
 static long read193_1(const S193_1 *s) {
-    return s->a * 3;
+    return s->a * 4;
 }
 static void bump193_1(S193_1 *s, long d) {
     s->a = s->a + d;
@@ -87,14 +87,16 @@ static long accum193_1(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 5;
+        acc += i * 2;
     }
     return acc;
 }
 static long guard193_1(long x) {
-    return x + 7;
+    return x + 5;
 }
 
+static long pick193_1_0(long a, long b) { return a > b ? a : b; }
+static long pick193_1_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -112,7 +114,7 @@ static long probe193_2(const S193_2 *s) {
     return s->a + s->n0;
 }
 static long read193_2(const S193_2 *s) {
-    return s->a * 4;
+    return s->a * 3;
 }
 static void bump193_2(S193_2 *s, long d) {
     s->a = s->a + d;
@@ -133,14 +135,15 @@ static long accum193_2(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 4;
     }
     return acc;
 }
 static long guard193_2(long x) {
-    return x + 6;
+    return x + 9;
 }
 
+static long pick193_2_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -181,17 +184,20 @@ static long accum193_3(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 2;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard193_3(long x) {
-    return x + 1;
+    return x + 9;
 }
 
+static long pick193_3_0(long a, long b) { return a > b ? a : b; }
+static long pick193_3_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
+    long n1;
     int flag;
 } S193_4;
 
@@ -199,14 +205,15 @@ static S193_4 mk193_4(long a) {
     S193_4 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
     s.flag = 1;
     return s;
 }
 static long probe193_4(const S193_4 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1;
 }
 static long read193_4(const S193_4 *s) {
-    return s->a * 2;
+    return s->a * 6;
 }
 static void bump193_4(S193_4 *s, long d) {
     s->a = s->a + d;
@@ -227,52 +234,65 @@ static long accum193_4(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 4;
     }
     return acc;
 }
 static long guard193_4(long x) {
-    return x + 2;
+    return x + 9;
 }
 
+static long pick193_4_0(long a, long b) { return a > b ? a : b; }
+static long pick193_4_1(long a, long b) { return a > b ? a : b; }
+static long pick193_4_2(long a, long b) { return a > b ? a : b; }
 long f193(long x) {
     long acc = x;
-    acc += f134(x + 1);
-    acc += f151(x + 2);
+    acc += f070(x + 1);
+    acc += f096(x + 2);
     S193_0 s0 = mk193_0(acc);
-    bump193_0(&s0, 3);
+    bump193_0(&s0, 6);
     acc += probe193_0(&s0);
     acc += read193_0(&s0);
     acc += classify193_0(1, acc, acc);
     acc += accum193_0(5);
     acc += guard193_0(acc);
+    acc += pick193_0_0(acc, acc + 8);
+    acc += pick193_0_1(acc, acc + 3);
     S193_1 s1 = mk193_1(acc);
-    bump193_1(&s1, 4);
+    bump193_1(&s1, 8);
     acc += probe193_1(&s1);
     acc += read193_1(&s1);
     acc += classify193_1(1, acc, acc);
     acc += accum193_1(3);
     acc += guard193_1(acc);
+    acc += pick193_1_0(acc, acc + 5);
+    acc += pick193_1_1(acc, acc + 2);
     S193_2 s2 = mk193_2(acc);
-    bump193_2(&s2, 5);
+    bump193_2(&s2, 8);
     acc += probe193_2(&s2);
     acc += read193_2(&s2);
     acc += classify193_2(1, acc, acc);
     acc += accum193_2(4);
     acc += guard193_2(acc);
+    acc += pick193_2_0(acc, acc + 8);
     S193_3 s3 = mk193_3(acc);
-    bump193_3(&s3, 5);
+    bump193_3(&s3, 6);
     acc += probe193_3(&s3);
     acc += read193_3(&s3);
     acc += classify193_3(1, acc, acc);
     acc += accum193_3(4);
     acc += guard193_3(acc);
+    acc += pick193_3_0(acc, acc + 8);
+    acc += pick193_3_1(acc, acc + 8);
     S193_4 s4 = mk193_4(acc);
-    bump193_4(&s4, 3);
+    bump193_4(&s4, 1);
     acc += probe193_4(&s4);
     acc += read193_4(&s4);
     acc += classify193_4(1, acc, acc);
-    acc += accum193_4(3);
+    acc += accum193_4(6);
     acc += guard193_4(acc);
+    acc += pick193_4_0(acc, acc + 5);
+    acc += pick193_4_1(acc, acc + 6);
+    acc += pick193_4_2(acc, acc + 2);
     return clampi(acc);
 }

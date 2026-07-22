@@ -20,7 +20,7 @@ static long probe177_0(const S177_0 *s) {
     return s->a + s->n0 + s->n1;
 }
 static long read177_0(const S177_0 *s) {
-    return s->a * 4;
+    return s->a * 7;
 }
 static void bump177_0(S177_0 *s, long d) {
     s->a = s->a + d;
@@ -46,14 +46,14 @@ static long accum177_0(long n) {
     return acc;
 }
 static long guard177_0(long x) {
-    return x + 3;
+    return x + 9;
 }
 
+static long pick177_0_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
     long n1;
-    long n2;
     int flag;
 } S177_1;
 
@@ -62,15 +62,14 @@ static S177_1 mk177_1(long a) {
     s.a = a;
     s.n0 = 0;
     s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe177_1(const S177_1 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0 + s->n1;
 }
 static long read177_1(const S177_1 *s) {
-    return s->a * 2;
+    return s->a * 6;
 }
 static void bump177_1(S177_1 *s, long d) {
     s->a = s->a + d;
@@ -91,7 +90,7 @@ static long accum177_1(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 3;
+        acc += i * 4;
     }
     return acc;
 }
@@ -99,6 +98,9 @@ static long guard177_1(long x) {
     return x + 9;
 }
 
+static long pick177_1_0(long a, long b) { return a > b ? a : b; }
+static long pick177_1_1(long a, long b) { return a > b ? a : b; }
+static long pick177_1_2(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -118,7 +120,7 @@ static long probe177_2(const S177_2 *s) {
     return s->a + s->n0 + s->n1;
 }
 static long read177_2(const S177_2 *s) {
-    return s->a * 7;
+    return s->a * 5;
 }
 static void bump177_2(S177_2 *s, long d) {
     s->a = s->a + d;
@@ -147,11 +149,11 @@ static long guard177_2(long x) {
     return x + 3;
 }
 
+static long pick177_2_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
     long n1;
-    long n2;
     int flag;
 } S177_3;
 
@@ -160,15 +162,14 @@ static S177_3 mk177_3(long a) {
     s.a = a;
     s.n0 = 0;
     s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe177_3(const S177_3 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0 + s->n1;
 }
 static long read177_3(const S177_3 *s) {
-    return s->a * 6;
+    return s->a * 3;
 }
 static void bump177_3(S177_3 *s, long d) {
     s->a = s->a + d;
@@ -189,44 +190,51 @@ static long accum177_3(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 2;
     }
     return acc;
 }
 static long guard177_3(long x) {
-    return x + 3;
+    return x + 6;
 }
 
+static long pick177_3_0(long a, long b) { return a > b ? a : b; }
 long f177(long x) {
     long acc = x;
-    acc += f125(x + 1);
+    acc += f016(x + 1);
     S177_0 s0 = mk177_0(acc);
-    bump177_0(&s0, 3);
+    bump177_0(&s0, 5);
     acc += probe177_0(&s0);
     acc += read177_0(&s0);
     acc += classify177_0(1, acc, acc);
-    acc += accum177_0(5);
+    acc += accum177_0(3);
     acc += guard177_0(acc);
+    acc += pick177_0_0(acc, acc + 7);
     S177_1 s1 = mk177_1(acc);
-    bump177_1(&s1, 4);
+    bump177_1(&s1, 2);
     acc += probe177_1(&s1);
     acc += read177_1(&s1);
     acc += classify177_1(1, acc, acc);
-    acc += accum177_1(7);
+    acc += accum177_1(4);
     acc += guard177_1(acc);
+    acc += pick177_1_0(acc, acc + 8);
+    acc += pick177_1_1(acc, acc + 9);
+    acc += pick177_1_2(acc, acc + 8);
     S177_2 s2 = mk177_2(acc);
-    bump177_2(&s2, 3);
+    bump177_2(&s2, 5);
     acc += probe177_2(&s2);
     acc += read177_2(&s2);
     acc += classify177_2(1, acc, acc);
-    acc += accum177_2(7);
+    acc += accum177_2(4);
     acc += guard177_2(acc);
+    acc += pick177_2_0(acc, acc + 3);
     S177_3 s3 = mk177_3(acc);
-    bump177_3(&s3, 9);
+    bump177_3(&s3, 5);
     acc += probe177_3(&s3);
     acc += read177_3(&s3);
     acc += classify177_3(1, acc, acc);
     acc += accum177_3(6);
     acc += guard177_3(acc);
+    acc += pick177_3_0(acc, acc + 4);
     return clampi(acc);
 }

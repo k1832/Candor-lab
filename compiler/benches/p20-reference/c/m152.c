@@ -4,7 +4,6 @@
 typedef struct {
     long a;
     long n0;
-    long n1;
     int flag;
 } S152_0;
 
@@ -12,15 +11,14 @@ static S152_0 mk152_0(long a) {
     S152_0 s;
     s.a = a;
     s.n0 = 0;
-    s.n1 = 0;
     s.flag = 1;
     return s;
 }
 static long probe152_0(const S152_0 *s) {
-    return s->a + s->n0 + s->n1;
+    return s->a + s->n0;
 }
 static long read152_0(const S152_0 *s) {
-    return s->a * 7;
+    return s->a * 4;
 }
 static void bump152_0(S152_0 *s, long d) {
     s->a = s->a + d;
@@ -41,14 +39,16 @@ static long accum152_0(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 2;
     }
     return acc;
 }
 static long guard152_0(long x) {
-    return x + 6;
+    return x + 4;
 }
 
+static long pick152_0_0(long a, long b) { return a > b ? a : b; }
+static long pick152_0_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -87,14 +87,16 @@ static long accum152_1(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 2;
+        acc += i * 3;
     }
     return acc;
 }
 static long guard152_1(long x) {
-    return x + 9;
+    return x + 5;
 }
 
+static long pick152_1_0(long a, long b) { return a > b ? a : b; }
+static long pick152_1_1(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
@@ -114,7 +116,7 @@ static long probe152_2(const S152_2 *s) {
     return s->a + s->n0 + s->n1;
 }
 static long read152_2(const S152_2 *s) {
-    return s->a * 5;
+    return s->a * 7;
 }
 static void bump152_2(S152_2 *s, long d) {
     s->a = s->a + d;
@@ -135,19 +137,18 @@ static long accum152_2(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 2;
     }
     return acc;
 }
 static long guard152_2(long x) {
-    return x + 1;
+    return x + 3;
 }
 
+static long pick152_2_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
-    long n1;
-    long n2;
     int flag;
 } S152_3;
 
@@ -155,16 +156,14 @@ static S152_3 mk152_3(long a) {
     S152_3 s;
     s.a = a;
     s.n0 = 0;
-    s.n1 = 0;
-    s.n2 = 0;
     s.flag = 1;
     return s;
 }
 static long probe152_3(const S152_3 *s) {
-    return s->a + s->n0 + s->n1 + s->n2;
+    return s->a + s->n0;
 }
 static long read152_3(const S152_3 *s) {
-    return s->a * 2;
+    return s->a * 5;
 }
 static void bump152_3(S152_3 *s, long d) {
     s->a = s->a + d;
@@ -185,17 +184,19 @@ static long accum152_3(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 3;
     }
     return acc;
 }
 static long guard152_3(long x) {
-    return x + 6;
+    return x + 2;
 }
 
+static long pick152_3_0(long a, long b) { return a > b ? a : b; }
 typedef struct {
     long a;
     long n0;
+    long n1;
     int flag;
 } S152_4;
 
@@ -203,11 +204,12 @@ static S152_4 mk152_4(long a) {
     S152_4 s;
     s.a = a;
     s.n0 = 0;
+    s.n1 = 0;
     s.flag = 1;
     return s;
 }
 static long probe152_4(const S152_4 *s) {
-    return s->a + s->n0;
+    return s->a + s->n0 + s->n1;
 }
 static long read152_4(const S152_4 *s) {
     return s->a * 5;
@@ -231,52 +233,61 @@ static long accum152_4(long n) {
     long acc = 0;
     long i = 0;
     for (i = 0; i < n; i++) {
-        acc += i * 4;
+        acc += i * 5;
     }
     return acc;
 }
 static long guard152_4(long x) {
-    return x + 5;
+    return x + 6;
 }
 
+static long pick152_4_0(long a, long b) { return a > b ? a : b; }
+static long pick152_4_1(long a, long b) { return a > b ? a : b; }
 long f152(long x) {
     long acc = x;
-    acc += f015(x + 1);
-    acc += f119(x + 2);
+    acc += f114(x + 1);
     S152_0 s0 = mk152_0(acc);
-    bump152_0(&s0, 8);
+    bump152_0(&s0, 3);
     acc += probe152_0(&s0);
     acc += read152_0(&s0);
     acc += classify152_0(1, acc, acc);
-    acc += accum152_0(8);
+    acc += accum152_0(3);
     acc += guard152_0(acc);
+    acc += pick152_0_0(acc, acc + 8);
+    acc += pick152_0_1(acc, acc + 8);
     S152_1 s1 = mk152_1(acc);
-    bump152_1(&s1, 9);
+    bump152_1(&s1, 6);
     acc += probe152_1(&s1);
     acc += read152_1(&s1);
     acc += classify152_1(1, acc, acc);
-    acc += accum152_1(6);
+    acc += accum152_1(8);
     acc += guard152_1(acc);
+    acc += pick152_1_0(acc, acc + 3);
+    acc += pick152_1_1(acc, acc + 6);
     S152_2 s2 = mk152_2(acc);
-    bump152_2(&s2, 1);
+    bump152_2(&s2, 4);
     acc += probe152_2(&s2);
     acc += read152_2(&s2);
     acc += classify152_2(1, acc, acc);
-    acc += accum152_2(4);
+    acc += accum152_2(7);
     acc += guard152_2(acc);
+    acc += pick152_2_0(acc, acc + 4);
     S152_3 s3 = mk152_3(acc);
-    bump152_3(&s3, 5);
+    bump152_3(&s3, 7);
     acc += probe152_3(&s3);
     acc += read152_3(&s3);
     acc += classify152_3(1, acc, acc);
-    acc += accum152_3(6);
+    acc += accum152_3(7);
     acc += guard152_3(acc);
+    acc += pick152_3_0(acc, acc + 5);
     S152_4 s4 = mk152_4(acc);
-    bump152_4(&s4, 8);
+    bump152_4(&s4, 3);
     acc += probe152_4(&s4);
     acc += read152_4(&s4);
     acc += classify152_4(1, acc, acc);
-    acc += accum152_4(8);
+    acc += accum152_4(5);
     acc += guard152_4(acc);
+    acc += pick152_4_0(acc, acc + 5);
+    acc += pick152_4_1(acc, acc + 5);
     return clampi(acc);
 }
