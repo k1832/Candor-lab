@@ -41,6 +41,11 @@ echo "-> toolchain/  (from compiler/: src, Cargo.toml, Cargo.lock, benches)"
 mkdir -p "$TARGET/toolchain"
 cp -R "$LAB_ROOT/compiler/src"        "$TARGET/toolchain/src"
 cp -R "$LAB_ROOT/compiler/benches"    "$TARGET/toolchain/benches"
+# The P20 reference trees (~96kL of GENERATED candor + C) are the lab's frozen
+# measurement subject, not user material — the preview ships the bench harness
+# and generator, but regenerating the trees is one command (cargo run --bin
+# p20-gen) for anyone who wants to run the full-scale bench.
+rm -rf "$TARGET/toolchain/benches/p20-reference"
 cp    "$LAB_ROOT/compiler/Cargo.toml" "$TARGET/toolchain/Cargo.toml"
 cp    "$LAB_ROOT/compiler/Cargo.lock" "$TARGET/toolchain/Cargo.lock"
 cp    "$LAB_ROOT/compiler/.gitignore" "$TARGET/toolchain/.gitignore"
