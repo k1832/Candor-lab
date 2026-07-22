@@ -22,6 +22,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The job's cumulative artifacts (full-suite debug builds, coverage
+      # instrumentation, the P20 release build + 202 C objects, the lsp build)
+      # overflowed the runner's default free space once. Drop preinstalled
+      # bloat we never use (~20 GB) before building.
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/hostedtoolcache/CodeQL                       /usr/local/.ghcup /usr/share/dotnet
+          df -h / | tail -1
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, llvm-tools-preview
@@ -64,6 +73,11 @@ jobs:
       # tools/candor-lsp path-deps on the compiler crate (../../compiler).
       - name: Build tools (candor-lsp)
         working-directory: tools/candor-lsp
+        env:
+          # Reuse the compiler workspace's target dir: the lsp path-deps on the
+          # compiler crate, and building it a second time into its own target
+          # dir doubles multi-GB artifacts (the disk-overflow culprit).
+          CARGO_TARGET_DIR: ${{ github.workspace }}/compiler/target
         run: cargo build
 
       # P20 targets RATIFIED 2026-07-21 (docs/1.0-GATE-TRIAGE.md, Rulings), now
