@@ -46,7 +46,15 @@ jobs:
           ../../toolchain/target/release/candor compile main.cnr -o httpd
           ./httpd & PID=$!
           sleep 1
-          BODY=$(exec 3<>/dev/tcp/127.0.0.1/8080; printf 'GET /hello.txt HTTP/1.0\r\n\r\n' >&3; cat <&3)
+          # curl with retries: the raw /dev/tcp client proved racy against the
+          # server's close (one flaky RST on a runner); the server budgets 8
+          # requests, so retrying is safe. -si includes the status line.
+          BODY=""
+          for i in 1 2 3; do
+            BODY=$(curl -si --max-time 5 http://127.0.0.1:8080/hello.txt || true)
+            echo "$BODY" | grep -q "200 OK" && break
+            sleep 1
+          done
           echo "$BODY" | grep -q "200 OK"
           echo "$BODY" | grep -q "Hello, Candor!"
           # let the server finish its request budget or kill it; either is fine
