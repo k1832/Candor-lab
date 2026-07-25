@@ -1279,3 +1279,23 @@ once you add the literal node). Key design/impl facts worth reusing:
   running it, list it in dist/README.md (Showcase + examples table) and add a
   sentinel line to dist/prod-ci.yml; seed.sh copies examples/ wholesale and
   LANGUAGE-TOUR/INSTALL/MANIFEST carry no per-example list. (2026-07-25)
+
+- **Both interpreters now reclaim stack eagerly (supersedes the 2026-07-25 leak
+  entry): MIR pops to a per-frame locals watermark after every statement and
+  copies call returns down to the caller's pre-call top (overlap-safe, `Mem::copy`
+  materializes first); the tree-walker pops each block's bytes at block exit,
+  except on the `Ctl::Return` unwind (the parked return slot must survive until
+  `call` reads it — `call` then resets the bump wholesale).** Two invariants keep
+  this sound: (1) MIR's lowering emits an aggregate call's `Assign` and its
+  consuming `CopyVal` adjacently with no allocating statement between (a popped
+  slot's bytes stay intact until the next allocation, and only calls allocate);
+  (2) nothing allocated inside a tree-walker block outlives it — blocks yield
+  unit, match arms materialize OUTSIDE `exec_block`. The million-'a' SHA-256
+  vector now runs on MIR (pinned in tests/sha256.rs `sha256_million_a`,
+  MIR-only); `interp_stack_reclamation` (ex `mir_leak_repro`) faults on any
+  regression. The fixture's repeated vector stays 10,000: NOT for reclamation
+  anymore, but because MIR unrolls `[97u8; N]` into N CopyVals, and the
+  Cranelift/LLVM gates pay that at COMPILE time (a million-store `main` takes
+  the JIT tens of minutes; 100k already costs ~50 s per native engine). The
+  native engines' atomic bump still never rolls back by design (task-shared),
+  so the reclamation repro stays interpreter-only. (2026-07-25)

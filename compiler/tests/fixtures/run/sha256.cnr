@@ -6,9 +6,11 @@
 // big-endian byte marshalling through masked narrowing `conv`s. The program
 // hashes the official test vectors — the empty string, "abc", the 448-bit and
 // 896-bit NIST two-block messages — plus a repeated-input vector of 10,000 'a's
-// (the official million-'a' vector runs green on the tree-walk oracle but trips
-// the MIR interpreter's per-call stack leak into the 256 MiB model cap — see
-// tests/sha256.rs; the shorter repeat exercises the same multi-block loop),
+// (the official million-'a' vector runs green on both interpreters since their
+// stack reclamation was fixed and is pinned by `sha256_million_a` in
+// tests/sha256.rs; the fixture keeps the short repeat because MIR unrolls an
+// array-repeat into one CopyVal per element, so a large `reps` buffer makes the
+// native gates that re-run this fixture pay JIT/clang compile time per element),
 // asserts each digest
 // against its expected lowercase-hex string IN-PROGRAM, traces every digest word,
 // and returns a byte-sum checksum folded to 0..=255 (the process engines observe
@@ -252,9 +254,11 @@ fn main() -> i64 {
         b"cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1",
     );
 
-    // Repeated-input vector: 10,000 'a's (157 blocks — same multi-block loop as
-    // the official million-'a' vector, which the MIR engine cannot yet finish
-    // (per-call stack leak, see tests/sha256.rs). Expected digest:
+    // Repeated-input vector: 10,000 'a's (157 blocks — the same multi-block
+    // loop as the official million-'a' vector, which tests/sha256.rs pins on
+    // the MIR interpreter separately; the short repeat stays because the
+    // array-repeat below is unrolled per element in MIR, which the native
+    // backends pay at compile time). Expected digest:
     // hashlib.sha256(b"a"*10000).hexdigest().
     let reps: [10000]u8 = [97u8; 10000];
     total = total + check_vector(

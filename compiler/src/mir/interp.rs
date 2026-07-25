@@ -137,6 +137,9 @@ const MAX_DEPTH: usize = 4096;
 /// A concrete call frame: the base address of every local's slot.
 struct Frame {
     addrs: Vec<u64>,
+    /// Stack top after this frame's locals: `run_cfg` pops back to it after each
+    /// statement, reclaiming call-return slots once the statement consumed them.
+    top: u64,
 }
 
 impl<'a> Engine<'a> {
@@ -237,11 +240,12 @@ impl<'a> Engine<'a> {
             .get(name)
             .ok_or_else(|| Fault::new(FaultKind::Panic, Span::point(0), format!("no MIR fn `{name}`")))?;
         let base_sp = self.mem.stack_bump;
-        let mut frame = Frame { addrs: Vec::with_capacity(mf.locals.len()) };
+        let mut frame = Frame { addrs: Vec::with_capacity(mf.locals.len()), top: base_sp };
         for l in &mf.locals {
             let a = self.alloc_slot(&l.ty);
             frame.addrs.push(a);
         }
+        frame.top = self.mem.stack_bump;
         // Bind params _1..=n. A word-sized param (scalar / borrow / rawptr / fn-ptr)
         // receives its value directly; an aggregate-by-value param receives the
         // *address* of the caller's argument and byte-copies it into its slot.
@@ -285,12 +289,18 @@ impl<'a> Engine<'a> {
             }
         }
         self.depth -= 1;
-        // Copy the return value out before popping the stack frame.
+        // Reclaim the callee frame: pop the stack to the caller's pre-call top
+        // and copy the return value down to it, so a call leaves behind exactly
+        // the return slot instead of the whole frame. The value may live inside
+        // the frame being reclaimed (`ret_addr` is local `_0`, usually exactly
+        // `out`); `Mem::copy` materializes the source before writing, so the
+        // overlapping copy-down is safe. Every caller consumes the returned
+        // address before its next stack allocation.
         let rty = mf.locals[0].ty.clone();
         let rsize = self.size_of(&rty).max(1);
+        self.mem.stack_bump = base_sp;
         let out = self.mem.stack_alloc(rsize, self.align_of(&rty).max(1));
         self.copy_bytes(out, ret_addr, self.size_of(&rty))?;
-        self.mem.stack_bump = base_sp.max(out + rsize);
         Ok(out)
     }
 
@@ -379,6 +389,14 @@ impl<'a> Engine<'a> {
                     }
                     StatementKind::ScopeBegin | StatementKind::ScopeEnd => {}
                 }
+                // Pop per-statement call-return slots (the only stack growth
+                // after frame entry — locals are all pre-allocated). A wordy
+                // return was read within its statement; an aggregate return's
+                // slot is consumed by the CopyVal the lowering emits directly
+                // after the call's Assign (with no allocating statement
+                // between), and popping only moves the bump, so those bytes
+                // stay intact until the CopyVal reads them.
+                self.mem.stack_bump = frame.top;
             }
             match &block.term {
                 Terminator::Goto(next) => bb = *next,

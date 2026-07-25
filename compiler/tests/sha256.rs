@@ -11,15 +11,23 @@
 //! auto-enlists in the corpus gates (tests/stage_d.rs, tests/aot.rs,
 //! tests/llvm.rs) by living in `tests/fixtures/run/`.
 //!
-//! The official million-'a' vector is deliberately NOT in the fixture: it runs
-//! green on the tree-walking oracle (~13 s) but faults `bad_pointer` on the MIR
-//! interpreter — `mir::interp::call` parks the return-value copy ABOVE the
-//! callee frame and sets `stack_bump = base_sp.max(out + rsize)`, so every call
-//! leaks its callee frame (plus that frame's own internal call leaks) into the
-//! caller's region until the caller returns; 15,625 compress calls under one
-//! `sha256` frame cross the 256 MiB model cap (`interp::mem::MAX_ADDR`). The
-//! tree-walker leaks less per call and stays under the cap, so the engines
-//! diverge on that input. See `mir_leak_repro` below for the minimal shape.
+//! The official million-'a' vector lives in `sha256_million_a` below (pinned to
+//! the NIST reference digest), not in the fixture — MIR unrolls the fixture's
+//! `[97u8; N]` array-repeat into one CopyVal per element, so the corpus gates
+//! that re-run the fixture through Cranelift/clang would pay a million-store
+//! `main` at compile time; the fixture keeps the 10,000 repeat.
+//! Both interpreters used to leak stack per call until the
+//! caller's frame returned (MIR parked the whole callee frame plus the return
+//! slot above the caller's region; the tree-walker never popped block locals or
+//! statement temporaries), so call-heavy loops crossed the 256 MiB model cap
+//! (`interp::mem::MAX_ADDR`) and faulted `bad_pointer` on safe programs — MIR
+//! at 15,625 compress calls (million-'a'), the tree-walker at repro scale.
+//! `interp_stack_reclamation` below pins the fix: MIR pops to the frame's
+//! locals watermark after every statement and copies call returns down to the
+//! caller's pre-call stack top; the tree-walker pops each block's bytes at
+//! block exit. The Cranelift/native engines deliberately never roll their
+//! (atomic, task-shared) bump back, so the reclamation repro is
+//! interpreter-only.
 
 use candor::{
     compile_path_llvm, run_source_real, run_source_real_mir, run_source_real_native,
@@ -148,16 +156,57 @@ fn sha256_vectors_all_engines() {
     assert_eq!(ret, 247);
 }
 
-/// The MIR per-call stack leak that keeps the million-'a' vector out of the
-/// fixture, boiled down: an aggregate-returning callee in a hot caller loop
-/// leaks (callee frame + return slot) per call until the caller returns. At
-/// this scale BOTH interpreters exhaust the 256 MiB model (the tree-walker
-/// leaks the return temporary per call-statement too, just less per call than
-/// MIR's whole-frame parking) — the gate documents today's behaviour and trips
-/// when either engine's reclamation is fixed, at which point the fixture's
-/// repeated vector should be promoted back toward the official million-'a'.
+/// SHA-256("a" * 1,000,000) — the official NIST CAVP long vector.
+const MILLION_A_HEX: &str = "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0";
+
+/// The official million-'a' vector on the MIR interpreter, pinned to the NIST
+/// reference digest. This input used to fault `bad_pointer` on MIR (per-call
+/// stack leak, see the module docs); it must now hash byte-exact. The MIR
+/// engine runs it alone deliberately: the fixture's `[97u8; N]` array-repeat
+/// is unrolled into one CopyVal per element, so the Cranelift/LLVM backends
+/// pay per-element COMPILE time (a million-store `main` takes the JIT tens of
+/// minutes), and the tree-walking oracle would add ~2 debug-build minutes for
+/// no extra coverage — the reference digest referees this test,
+/// `sha256_vectors_all_engines` does the all-engine differential comparison,
+/// and `interp_stack_reclamation` stresses the oracle's reclamation harder
+/// than this vector does.
 #[test]
-fn mir_leak_repro() {
+fn sha256_million_a() {
+    let src = fixture()
+        .replace("[97u8; 10000]", "[97u8; 1000000]")
+        .replace("[10000]u8", "[1000000]u8")
+        .replace(
+            "27dd1f61b867b6a0f6e9d8a41c43231de52107e53ae424de8f847b821db4b711",
+            MILLION_A_HEX,
+        );
+    // Expected trace: the four official vectors' digest words, the million-'a'
+    // digest words, then the summed byte checksum of all five digests.
+    let mut want_trace = Vec::new();
+    let mut total: i64 = 0;
+    for hex in EXPECTED_HEX[..4].iter().chain([&MILLION_A_HEX]) {
+        let bytes: Vec<u8> =
+            (0..32).map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap()).collect();
+        for w in bytes.chunks(4) {
+            want_trace.push(u32::from_be_bytes(w.try_into().unwrap()) as i64);
+        }
+        total += bytes.iter().map(|b| *b as i64).sum::<i64>();
+    }
+    want_trace.push(total);
+    let (ret, trace) = mir_out(run_source_real_mir(&src), "mir");
+    assert_eq!(trace, want_trace, "mir trace diverged from the reference digests");
+    assert_eq!(ret, total % 256, "mir ret is the byte-folded digest checksum");
+}
+
+/// Regression gate for interpreter stack reclamation (formerly `mir_leak_repro`,
+/// which pinned the pre-fix fault): an aggregate-returning callee in a hot
+/// caller loop moves 40,000 x 8 KiB of call returns — over 320 MiB of frame +
+/// return-slot traffic against the 256 MiB model cap. Any regression to
+/// caller-frame-exit reclamation (MIR's per-statement watermark pop, the
+/// tree-walker's per-block pop) faults `bad_pointer` here on a safe program.
+/// The native engines are deliberately absent: their task-shared atomic bump
+/// never rolls back, so this scale still exceeds their model by design.
+#[test]
+fn interp_stack_reclamation() {
     let src = "\
         fn blob() -> [8192]u8 { let b: [8192]u8 = [1u8; 8192]; return b; }\n\
         fn main() -> i64 {\n\
@@ -171,25 +220,17 @@ fn mir_leak_repro() {
             return acc % 256;\n\
         }\n";
     match run_source_real_mir(src) {
+        MirRunResult::Ok(r) => assert_eq!(r.ret, 40000 % 256, "MIR ret"),
         MirRunResult::Fault(f) => {
-            assert!(f.to_json().contains("bad_pointer"), "unexpected MIR fault: {}", f.to_json())
+            panic!("MIR stack reclamation regressed (leak repro faulted): {}", f.to_json())
         }
-        MirRunResult::Ok(r) => panic!(
-            "MIR per-call stack leak appears fixed (ret {}); promote the sha256 fixture's \
-             repeated vector toward the official million-'a' input",
-            r.ret
-        ),
         _ => panic!("unexpected MIR outcome (check/parse error or unsupported)"),
     }
     match run_source_real(src) {
+        RunResult::Ok(r) => assert_eq!(r.ret, 40000 % 256, "oracle ret"),
         RunResult::Fault(f) => {
-            assert!(f.to_json().contains("bad_pointer"), "unexpected oracle fault: {}", f.to_json())
+            panic!("tree-walker stack reclamation regressed (leak repro faulted): {}", f.to_json())
         }
-        RunResult::Ok(r) => panic!(
-            "tree-walker per-statement stack leak appears fixed (ret {}); revisit the sha256 \
-             fixture's repeated-vector size",
-            r.ret
-        ),
         _ => panic!("unexpected oracle outcome (check/parse error)"),
     }
 }
