@@ -1,0 +1,267 @@
+// SHA-256 (FIPS 180-4) in pure Candor — a dogfood stress test for the arithmetic
+// model: every mod-2^32 addition sits in an explicit `wrapping` block (checked
+// arithmetic is the default and would fault), right-rotation is composed from the
+// shift/or operators (rotation amounts are constants < 32, so the compositions
+// never trip the checked shift-amount rule), and all message/digest traffic is
+// big-endian byte marshalling through masked narrowing `conv`s. The program
+// hashes the official test vectors — the empty string, "abc", the 448-bit and
+// 896-bit NIST two-block messages — plus a repeated-input vector of 10,000 'a's
+// (the official million-'a' vector runs green on the tree-walk oracle but trips
+// the MIR interpreter's per-call stack leak into the 256 MiB model cap — see
+// tests/sha256.rs; the shorter repeat exercises the same multi-block loop),
+// asserts each digest
+// against its expected lowercase-hex string IN-PROGRAM, traces every digest word,
+// and returns a byte-sum checksum folded to 0..=255 (the process engines observe
+// `ret` as an exit byte). Every engine — the tree-walking oracle, the MIR
+// interpreter, and the Cranelift / LLVM native backends — must agree byte-exact
+// on the traced words and the returned checksum.
+
+fn k_table() -> [64]u32 {
+    let t: [64]u32 = [
+        0x428a2f98u32, 0x71374491u32, 0xb5c0fbcfu32, 0xe9b5dba5u32,
+        0x3956c25bu32, 0x59f111f1u32, 0x923f82a4u32, 0xab1c5ed5u32,
+        0xd807aa98u32, 0x12835b01u32, 0x243185beu32, 0x550c7dc3u32,
+        0x72be5d74u32, 0x80deb1feu32, 0x9bdc06a7u32, 0xc19bf174u32,
+        0xe49b69c1u32, 0xefbe4786u32, 0x0fc19dc6u32, 0x240ca1ccu32,
+        0x2de92c6fu32, 0x4a7484aau32, 0x5cb0a9dcu32, 0x76f988dau32,
+        0x983e5152u32, 0xa831c66du32, 0xb00327c8u32, 0xbf597fc7u32,
+        0xc6e00bf3u32, 0xd5a79147u32, 0x06ca6351u32, 0x14292967u32,
+        0x27b70a85u32, 0x2e1b2138u32, 0x4d2c6dfcu32, 0x53380d13u32,
+        0x650a7354u32, 0x766a0abbu32, 0x81c2c92eu32, 0x92722c85u32,
+        0xa2bfe8a1u32, 0xa81a664bu32, 0xc24b8b70u32, 0xc76c51a3u32,
+        0xd192e819u32, 0xd6990624u32, 0xf40e3585u32, 0x106aa070u32,
+        0x19a4c116u32, 0x1e376c08u32, 0x2748774cu32, 0x34b0bcb5u32,
+        0x391c0cb3u32, 0x4ed8aa4au32, 0x5b9cca4fu32, 0x682e6ff3u32,
+        0x748f82eeu32, 0x78a5636fu32, 0x84c87814u32, 0x8cc70208u32,
+        0x90befffau32, 0xa4506cebu32, 0xbef9a3f7u32, 0xc67178f2u32,
+    ];
+    return t;
+}
+
+// Right-rotate by a constant amount 0 < n < 32: both composed shifts stay under
+// the 32-bit width, so the default checked regime never faults here.
+fn rotr(x: u32, n: u32) -> u32 {
+    return x >> n | x << (32u32 - n);
+}
+
+// Load one 64-byte block at byte offset `off` as 16 big-endian u32 words.
+fn load_block(msg: [u8], off: usize) -> [16]u32 {
+    let mut w: [16]u32 = [0u32; 16];
+    let mut i: usize = 0;
+    while i < 16 {
+        let p: usize = off + i * 4usize;
+        w[i] = conv u32 msg[p] << 24u32
+            | conv u32 msg[p + 1usize] << 16u32
+            | conv u32 msg[p + 2usize] << 8u32
+            | conv u32 msg[p + 3usize];
+        i = i + 1usize;
+    }
+    return w;
+}
+
+// One compression round (FIPS 180-4 §6.2.2): expand the 64-word schedule, run 64
+// rounds over the working variables, add back into the chaining state. All the
+// mod-2^32 sums sit in `wrapping` blocks; the schedule sigmas and round
+// choose/majority mixes are pure rotate/shift/xor and stay checked.
+fn compress(state: [8]u32, block: [16]u32) -> [8]u32 {
+    let k: [64]u32 = k_table();
+    let mut w: [64]u32 = [0u32; 64];
+    let mut i: usize = 0;
+    while i < 16 {
+        w[i] = block[i];
+        i = i + 1usize;
+    }
+    wrapping {
+        while i < 64 {
+            let x15: u32 = w[i - 15usize];
+            let x2: u32 = w[i - 2usize];
+            let s0: u32 = rotr(x15, 7u32) ^ rotr(x15, 18u32) ^ x15 >> 3u32;
+            let s1: u32 = rotr(x2, 17u32) ^ rotr(x2, 19u32) ^ x2 >> 10u32;
+            w[i] = w[i - 16usize] + s0 + w[i - 7usize] + s1;
+            i = i + 1usize;
+        }
+    }
+    let mut a: u32 = state[0];
+    let mut b: u32 = state[1];
+    let mut c: u32 = state[2];
+    let mut d: u32 = state[3];
+    let mut e: u32 = state[4];
+    let mut f: u32 = state[5];
+    let mut g: u32 = state[6];
+    let mut h: u32 = state[7];
+    wrapping {
+        let mut j: usize = 0;
+        while j < 64 {
+            let s1: u32 = rotr(e, 6u32) ^ rotr(e, 11u32) ^ rotr(e, 25u32);
+            let ch: u32 = e & f ^ ~e & g;
+            let t1: u32 = h + s1 + ch + k[j] + w[j];
+            let s0: u32 = rotr(a, 2u32) ^ rotr(a, 13u32) ^ rotr(a, 22u32);
+            let maj: u32 = a & b ^ a & c ^ b & c;
+            let t2: u32 = s0 + maj;
+            h = g;
+            g = f;
+            f = e;
+            e = d + t1;
+            d = c;
+            c = b;
+            b = a;
+            a = t1 + t2;
+            j = j + 1usize;
+        }
+    }
+    let mut nx: [8]u32 = [0u32; 8];
+    wrapping {
+        nx[0] = state[0] + a;
+        nx[1] = state[1] + b;
+        nx[2] = state[2] + c;
+        nx[3] = state[3] + d;
+        nx[4] = state[4] + e;
+        nx[5] = state[5] + f;
+        nx[6] = state[6] + g;
+        nx[7] = state[7] + h;
+    }
+    return nx;
+}
+
+// Full SHA-256 of a byte slice: full blocks straight off the input, then the
+// FIPS padding (0x80, zeros, 64-bit big-endian bit length) built in a two-block
+// local buffer — one padded block when the remainder is < 56 bytes, two otherwise.
+fn sha256(msg: [u8]) -> [32]u8 {
+    let mut st: [8]u32 = [
+        0x6a09e667u32, 0xbb67ae85u32, 0x3c6ef372u32, 0xa54ff53au32,
+        0x510e527fu32, 0x9b05688cu32, 0x1f83d9abu32, 0x5be0cd19u32,
+    ];
+    let total: usize = len(msg);
+    let nfull: usize = total / 64usize;
+    let mut bidx: usize = 0;
+    while bidx < nfull {
+        st = compress(st, load_block(msg, bidx * 64usize));
+        bidx = bidx + 1usize;
+    }
+    let rem: usize = total - nfull * 64usize;
+    let mut pad: [128]u8 = [0u8; 128];
+    let mut j: usize = 0;
+    while j < rem {
+        pad[j] = msg[nfull * 64usize + j];
+        j = j + 1usize;
+    }
+    pad[rem] = 0x80u8;
+    let mut padlen: usize = 64;
+    if rem >= 56usize {
+        padlen = 128usize;
+    }
+    let bits: usize = total * 8usize;
+    let mut t: usize = 0;
+    while t < 8 {
+        pad[padlen - 1usize - t] = conv u8 (bits >> t * 8usize & 255usize);
+        t = t + 1usize;
+    }
+    st = compress(st, load_block(slice_of(pad), 0usize));
+    if padlen == 128usize {
+        st = compress(st, load_block(slice_of(pad), 64usize));
+    }
+    let mut d: [32]u8 = [0u8; 32];
+    let mut i: usize = 0;
+    while i < 8 {
+        let wv: u32 = st[i];
+        d[i * 4usize] = conv u8 (wv >> 24u32 & 255u32);
+        d[i * 4usize + 1usize] = conv u8 (wv >> 16u32 & 255u32);
+        d[i * 4usize + 2usize] = conv u8 (wv >> 8u32 & 255u32);
+        d[i * 4usize + 3usize] = conv u8 (wv & 255u32);
+        i = i + 1usize;
+    }
+    return d;
+}
+
+fn hex_digit(v: u8) -> u8 {
+    if v < 10u8 {
+        return 48u8 + v;
+    }
+    return 87u8 + v;
+}
+
+// Lowercase-hex rendering of a digest: 64 ASCII bytes.
+fn digest_hex(d: [32]u8) -> [64]u8 {
+    let mut hx: [64]u8 = [0u8; 64];
+    let mut i: usize = 0;
+    while i < 32 {
+        hx[i * 2usize] = hex_digit(d[i] >> 4u8);
+        hx[i * 2usize + 1usize] = hex_digit(d[i] & 15u8);
+        i = i + 1usize;
+    }
+    return hx;
+}
+
+fn bytes_eq(a: [u8], b: [u8]) -> bool {
+    if len(a) != len(b) {
+        return false;
+    }
+    let mut i: usize = 0;
+    while i < len(a) {
+        if a[i] != b[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+// Hash one vector, assert its lowercase-hex digest equals the embedded expected
+// string, trace the 8 digest words (big-endian, zero-extended), and return the
+// digest's byte sum as this vector's checksum contribution.
+fn check_vector(msg: [u8], expect_hex: [u8]) -> i64 {
+    let d: [32]u8 = sha256(msg);
+    let hx: [64]u8 = digest_hex(d);
+    assert(bytes_eq(slice_of(hx), expect_hex));
+    let mut sum: i64 = 0;
+    let mut i: usize = 0;
+    while i < 8 {
+        let wv: u32 = conv u32 d[i * 4usize] << 24u32
+            | conv u32 d[i * 4usize + 1usize] << 16u32
+            | conv u32 d[i * 4usize + 2usize] << 8u32
+            | conv u32 d[i * 4usize + 3usize];
+        trace(conv i64 wv);
+        i = i + 1usize;
+    }
+    i = 0usize;
+    while i < 32 {
+        sum = sum + conv i64 d[i];
+        i = i + 1usize;
+    }
+    return sum;
+}
+
+fn main() -> i64 {
+    let mut total: i64 = 0;
+
+    // FIPS 180-4 / NIST CAVP official vectors.
+    total = total + check_vector(
+        b"",
+        b"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    );
+    total = total + check_vector(
+        b"abc",
+        b"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    );
+    total = total + check_vector(
+        b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+        b"248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+    );
+    total = total + check_vector(
+        b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu",
+        b"cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1",
+    );
+
+    // Repeated-input vector: 10,000 'a's (157 blocks — same multi-block loop as
+    // the official million-'a' vector, which the MIR engine cannot yet finish
+    // (per-call stack leak, see tests/sha256.rs). Expected digest:
+    // hashlib.sha256(b"a"*10000).hexdigest().
+    let reps: [10000]u8 = [97u8; 10000];
+    total = total + check_vector(
+        slice_of(reps),
+        b"27dd1f61b867b6a0f6e9d8a41c43231de52107e53ae424de8f847b821db4b711",
+    );
+
+    trace(total);
+    return total % 256;
+}

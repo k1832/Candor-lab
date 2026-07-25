@@ -1239,3 +1239,16 @@ once you add the literal node). Key design/impl facts worth reusing:
   scalars). Runtime coverage of corelib algorithms lives in the `tests/ord.rs` /
   `tests/sort.rs` prelude copies, which must be kept in sync with
   `fixtures/corelib/core/cmp.cnr` by hand. (2026-07-25)
+
+- **Both prototype engines reclaim call-temporary stack only at caller-frame
+  exit, so call-heavy loops leak toward the 256 MiB model cap at engine-specific
+  rates.** `mir::interp::call` parks the return copy ABOVE the callee frame
+  (`stack_bump = base_sp.max(out + rsize)`), leaking the whole callee frame plus
+  its internal call leaks per call; the tree-walker leaks only the per-statement
+  return temporary. SHA-256 over the official million-'a' vector (15,625
+  `compress` calls under one `sha256` frame) therefore runs green on the oracle
+  (~13 s) but faults `bad_pointer` on MIR — a safe program on which engines
+  diverge near the cap. The corpus fixture ships the 10,000-'a' repeated vector
+  instead; `tests/sha256.rs mir_leak_repro` pins today's behaviour on both
+  engines and trips when reclamation is fixed (promote the vector then).
+  (2026-07-25)

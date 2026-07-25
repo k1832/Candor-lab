@@ -11,7 +11,8 @@
 # a couple of minutes each.
 #
 # The `fast` profile drops those slow integration binaries (self-host, the
-# native AOT/LLVM/stage gates, freestanding, native concurrency, golden) for
+# native AOT/LLVM/stage gates, freestanding, native concurrency, golden, the
+# sha256 dogfood gate) for
 # a sub-second edit-check loop. It changes NOTHING that runs in CI — the
 # default profile still runs the entire suite. Plain `cargo test` is
 # unaffected by this file.
@@ -23,4 +24,4 @@
 slow-timeout = "150s"
 
 [profile.fast]
-default-filter = "not (binary(/selfhost/) | binary(aot) | binary(llvm) | binary(/stage_/) | binary(freestanding) | binary(concurrency_native) | binary(golden) | binary(run_golden))"
+default-filter = "not (binary(/selfhost/) | binary(aot) | binary(llvm) | binary(/stage_/) | binary(freestanding) | binary(concurrency_native) | binary(golden) | binary(run_golden) | binary(sha256))"
