@@ -1267,3 +1267,21 @@ once you add the literal node). Key design/impl facts worth reusing:
   `borrow borrow`), while a `write Vec[T]` param forwards as `write v.*` /
   `read v.*`; owners always pass explicit `read v`/`write v`. (json dogfood,
   2026-07-25)
+
+- **Bit-by-bit canonical-Huffman decode over an INCOMPLETE code must stop at
+  the code's longest used length, or a dead bit pattern misreports truncation.**
+  The DEFLATE dogfood (`tests/fixtures/run/deflate.cnr`, puff.c-style
+  count/symbol decode) initially walked lengths 1..15 unconditionally; the two
+  unused fixed-distance 5-bit patterns then kept reading toward length 15, ran
+  off the input, and returned "truncated" where zlib says "invalid distance
+  code". Scanning `count[]` for the max nonzero length first and bailing R_HUFF
+  past it fixes the classification with no lookahead. Two more probe-pinned
+  facts from the same session: `subslice(s, a, b)` takes (start, END) — not
+  (start, len); the fault message prints `[a..b)` — and puff.c's `construct`
+  returns the left-shift-accumulated residual for an incomplete code (2048 for
+  the 30-symbol fixed distance code, not 32-30=2), so assert on sign, never on
+  a hand-computed gap. Corrupt-vector methodology that worked first try:
+  hand-assemble malformed streams with a python bit-writer and require
+  `zlib.decompress(data, -15)` to REJECT each one before embedding — every
+  in-Candor error-code expectation then matched the real decoder's class.
+  (deflate dogfood, 2026-07-25)
