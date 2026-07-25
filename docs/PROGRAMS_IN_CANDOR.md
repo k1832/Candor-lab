@@ -86,6 +86,28 @@ if deliberately tiny, web server (HTTP/1.0, serves N requests then exits).
 
 ---
 
+## 1c. A JSON parser + pretty-printer — in Candor
+
+**`compiler/tests/fixtures/run/json.cnr`** (~1,270 lines with its embedded test
+harness). Full RFC 8259 JSON over the native `String`/`Vec` surface: every string
+escape (`\uXXXX` incl. surrogate pairs, decoded to UTF-8), the full number grammar
+(i64-fitting integers become canonical i64; fractions/exponents/big integers keep
+their exact lexeme), compact + pretty printers, and structural equality. Malformed
+input never faults — errors are values (`Err { code, pos }`) with pinned byte
+positions. The parser/printers walk with explicit stacks (no recursion in document
+depth), and every valid document is round-trip-checked: `parse(print(v)) == v`.
+
+**How it's verified:** `compiler/tests/json.rs` pins 68 checks + a printed-byte
+checksum on the oracle and requires the MIR and both Cranelift engines to agree
+byte-for-byte; living in `tests/fixtures/run/` auto-enlists it in the AOT-ELF,
+LLVM `clang -O2`, four-engine, and format-preservation corpus gates.
+
+```
+cd compiler && cargo nextest run -E 'binary(json)'
+```
+
+---
+
 ## 2. The self-hosted compiler — Candor compiling Candor  ⭐
 
 **`selfhost/*.cnr`** (~19,300 lines). The Candor toolchain, written in
@@ -201,6 +223,7 @@ $CANDOR audit compiler/tests/fixtures/std_io
 |---|---|---|
 | WebAssembly runtime | `compiler/tests/fixtures/wasm/interp.cnr` | 1,900 |
 | HTTP/1.0 static-file server | `compiler/tests/fixtures/http_server/main.cnr` | 600 |
+| JSON parser + printers | `compiler/tests/fixtures/run/json.cnr` | 1,270 |
 | Self-hosted compiler | `selfhost/*.cnr` | 19,300 |
 | Standard library | `compiler/tests/fixtures/corelib/`, `std_*.cnr` | — |
 | Systems corpus | `compiler/tests/fixtures/11_*.cnr` etc. | — |
