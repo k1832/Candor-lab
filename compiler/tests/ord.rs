@@ -196,25 +196,49 @@ fn max[T: Ord + copy](v: read Vec[T]) -> Opt[T] {
     }
     return Opt::Some(best);
 }
-fn sort_ord[T: Ord + copy](v: write Vec[T]) alloc -> unit {
-    let n: usize = len(read v.*);
-    let mut i: usize = 1usize;
-    while i < n {
-        let key: T = get(read v.*, i).*;
-        let mut j: usize = i;
-        while j > 0usize {
-            let prev: T = get(read v.*, j - 1usize).*;
-            match key.cmp(prev) {
-                Ordering::Less => {
-                    set(write v.*, j, prev);
-                    j = j - 1usize;
-                },
-                Ordering::Equal => { break; },
-                Ordering::Greater => { break; },
+fn sift_down_ord[T: Ord + copy](v: write Vec[T], root: usize, end: usize) alloc -> unit {
+    let mut i: usize = root;
+    while i < end / 2usize {
+        let left: usize = 2usize * i + 1usize;
+        let mut child: usize = left;
+        if left + 1usize < end {
+            let l: T = get(read v.*, left).*;
+            let r: T = get(read v.*, left + 1usize).*;
+            match l.cmp(r) {
+                Ordering::Less => { child = left + 1usize; },
+                Ordering::Equal => {},
+                Ordering::Greater => {},
             }
         }
-        set(write v.*, j, key);
-        i = i + 1usize;
+        let cur: T = get(read v.*, i).*;
+        let big: T = get(read v.*, child).*;
+        match cur.cmp(big) {
+            Ordering::Less => {
+                set(write v.*, i, big);
+                set(write v.*, child, cur);
+                i = child;
+            },
+            Ordering::Equal => { return; },
+            Ordering::Greater => { return; },
+        }
+    }
+}
+fn sort_ord[T: Ord + copy](v: write Vec[T]) alloc -> unit {
+    let n: usize = len(read v.*);
+    if n < 2usize { return; }
+    let mut start: usize = n / 2usize;
+    while start > 0usize {
+        start = start - 1usize;
+        sift_down_ord(write v.*, start, n);
+    }
+    let mut end: usize = n;
+    while end > 1usize {
+        end = end - 1usize;
+        let top: T = get(read v.*, 0usize).*;
+        let last: T = get(read v.*, end).*;
+        set(write v.*, 0usize, last);
+        set(write v.*, end, top);
+        sift_down_ord(write v.*, 0usize, end);
     }
 }
 "#;
@@ -299,6 +323,14 @@ fn i64_reverse_sorted_all_engines() {
 }
 
 #[test]
+fn i64_already_sorted_all_engines() {
+    let src = i64_program(&[1, 2, 3, 4, 5]);
+    let (ret, trace) = all_engines(&src, "i64_sorted");
+    assert_eq!(ret, 5);
+    assert_eq!(trace, vec![1, 2, 3, 4, 5, 1, 5]);
+}
+
+#[test]
 fn i64_single_all_engines() {
     let src = i64_program(&[42]);
     let (ret, trace) = all_engines(&src, "i64_single");
@@ -313,6 +345,78 @@ fn i64_empty_all_engines() {
     let (ret, trace) = all_engines(&src, "i64_empty");
     assert_eq!(ret, 0);
     assert_eq!(trace, vec![-1000, -1000]);
+}
+
+// ---- runtime: deterministic pseudo-random large input (LCG) -----------------
+
+/// Build an `n`-element `Vec[i64]` from a deterministic LCG evaluated INSIDE the
+/// Candor program (no randomness at test time), `sort_ord` it, then trace the
+/// count of adjacent inversions (must be 0), the element sum, and a
+/// position-weighted sum that pins the exact sorted sequence. Expectations are
+/// recomputed in Rust from the same LCG (`lcg_sorted`).
+fn i64_lcg_program(n: usize, seed: i64) -> String {
+    format!(
+        "{PRELUDE}\n\
+         fn run(al: Alloc) alloc -> i64 {{\n\
+           let mut v: Vec[i64] = vec_new(read al);\n\
+           let mut s: i64 = {seed};\n\
+           let mut k: usize = 0usize;\n\
+           while k < {n}usize {{\n\
+             s = (s * 1103515245 + 12345) % 2147483648;\n\
+             push(write v, s % 1000);\n\
+             k = k + 1usize;\n\
+           }}\n\
+           sort_ord(write v);\n\
+           let mut inv: i64 = 0;\n\
+           let mut sum: i64 = 0;\n\
+           let mut wsum: i64 = 0;\n\
+           let mut j: usize = 0usize;\n\
+           while j < len(read v) {{\n\
+             let x: i64 = get(read v, j).*;\n\
+             let w: i64 = conv i64 (j + 1usize);\n\
+             sum = sum + x;\n\
+             wsum = wsum + w * x;\n\
+             if j > 0usize {{\n\
+               let prev: i64 = get(read v, j - 1usize).*;\n\
+               if x < prev {{ inv = inv + 1; }}\n\
+             }}\n\
+             j = j + 1usize;\n\
+           }}\n\
+           trace(inv);\n\
+           trace(sum);\n\
+           trace(wsum);\n\
+           return conv i64 len(read v);\n\
+         }}\n\
+         fn main() alloc -> i64 {{\n\
+           let mut bs: Bump = with_window(16777216, 1048576);\n\
+           let al: Alloc = mk_alloc(write bs);\n\
+           return run(al);\n\
+         }}"
+    )
+}
+
+/// The Rust mirror of the in-program LCG stream, sorted ascending.
+fn lcg_sorted(n: usize, seed: i64) -> Vec<i64> {
+    let mut s = seed;
+    let mut vals: Vec<i64> = Vec::with_capacity(n);
+    for _ in 0..n {
+        s = (s * 1103515245 + 12345) % 2147483648;
+        vals.push(s % 1000);
+    }
+    vals.sort();
+    vals
+}
+
+#[test]
+fn i64_lcg_large_all_engines() {
+    let (n, seed) = (500, 42);
+    let src = i64_lcg_program(n, seed);
+    let (ret, trace) = all_engines(&src, "i64_lcg");
+    let vals = lcg_sorted(n, seed);
+    let sum: i64 = vals.iter().sum();
+    let wsum: i64 = vals.iter().enumerate().map(|(i, x)| (i as i64 + 1) * x).sum();
+    assert_eq!(ret, n as i64);
+    assert_eq!(trace, vec![0, sum, wsum]);
 }
 
 // ---- runtime: the second scalar instantiation (u32) -------------------------

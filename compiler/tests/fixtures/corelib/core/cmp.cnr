@@ -108,51 +108,116 @@ pub fn max[T: Ord + copy](v: read Vec[T]) -> Opt[T] {
     return Opt::Some(best);
 }
 
-pub fn sort_ord[T: Ord + copy](v: write Vec[T]) alloc -> unit {
-    let n: usize = len(read v.*);
-    let mut i: usize = 1usize;
-    while i < n {
-        let key: T = get(read v.*, i).*;
-        let mut j: usize = i;
-        while j > 0usize {
-            let prev: T = get(read v.*, j - 1usize).*;
-            match key.cmp(prev) {
+// Both sorts are in-place bottom-up heapsorts: O(n log n) worst case with no
+// scratch buffer. The signatures carry no allocator handle and a `Vec` does not
+// expose its own, so the algorithm must work entirely inside the given `Vec`.
+//
+// `sift_down_ord` restores the max-heap property (under `Ord::cmp`) for the
+// subtree rooted at `root`; `end` is one past the last heap slot.
+fn sift_down_ord[T: Ord + copy](v: write Vec[T], root: usize, end: usize) alloc -> unit {
+    let mut i: usize = root;
+    // `i` has a left child iff `i < end / 2`; the guard also keeps the child
+    // index math (at most `end`) inside checked-arithmetic bounds.
+    while i < end / 2usize {
+        let left: usize = 2usize * i + 1usize;
+        let mut child: usize = left;
+        if left + 1usize < end {
+            let l: T = get(read v.*, left).*;
+            let r: T = get(read v.*, left + 1usize).*;
+            match l.cmp(r) {
                 Ordering::Less => {
-                    set(write v.*, j, prev);
-                    j = j - 1usize;
+                    child = left + 1usize;
                 },
-                Ordering::Equal => {
-                    break;
-                },
-                Ordering::Greater => {
-                    break;
-                },
+                Ordering::Equal => {},
+                Ordering::Greater => {},
             }
         }
-        set(write v.*, j, key);
-        i = i + 1usize;
+        let cur: T = get(read v.*, i).*;
+        let big: T = get(read v.*, child).*;
+        match cur.cmp(big) {
+            Ordering::Less => {
+                set(write v.*, i, big);
+                set(write v.*, child, cur);
+                i = child;
+            },
+            Ordering::Equal => {
+                return;
+            },
+            Ordering::Greater => {
+                return;
+            },
+        }
     }
 }
 
-// A comparator-driven insertion sort: the SAME `Vec` sorts ascending or
-// descending purely by which `less` comparator is passed (design: the order is
-// comparator-driven, not hard-coded).
-pub fn sort[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool) alloc -> unit {
+pub fn sort_ord[T: Ord + copy](v: write Vec[T]) alloc -> unit {
     let n: usize = len(read v.*);
-    let mut i: usize = 1usize;
-    while i < n {
-        let key: T = get(read v.*, i).*;
-        let mut j: usize = i;
-        while j > 0usize {
-            let prev: T = get(read v.*, j - 1usize).*;
-            if less(read key, read prev) {
-                set(write v.*, j, prev);
-                j = j - 1usize;
-            } else {
-                break;
+    if n < 2usize {
+        return;
+    }
+    // Heapify: sift every internal node down, last parent first.
+    let mut start: usize = n / 2usize;
+    while start > 0usize {
+        start = start - 1usize;
+        sift_down_ord(write v.*, start, n);
+    }
+    // Repeatedly move the heap max into the growing sorted suffix.
+    let mut end: usize = n;
+    while end > 1usize {
+        end = end - 1usize;
+        let top: T = get(read v.*, 0usize).*;
+        let last: T = get(read v.*, end).*;
+        set(write v.*, 0usize, last);
+        set(write v.*, end, top);
+        sift_down_ord(write v.*, 0usize, end);
+    }
+}
+
+// A comparator-driven heapsort: the SAME `Vec` sorts ascending or descending
+// purely by which `less` comparator is passed (design: the order is
+// comparator-driven, not hard-coded). `sift_down_by` is `sift_down_ord` with
+// `less` in place of `Ord::cmp`.
+fn sift_down_by[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool, root: usize, end: usize) alloc -> unit {
+    let mut i: usize = root;
+    while i < end / 2usize {
+        let left: usize = 2usize * i + 1usize;
+        let mut child: usize = left;
+        if left + 1usize < end {
+            let l: T = get(read v.*, left).*;
+            let r: T = get(read v.*, left + 1usize).*;
+            if less(read l, read r) {
+                child = left + 1usize;
             }
         }
-        set(write v.*, j, key);
-        i = i + 1usize;
+        let cur: T = get(read v.*, i).*;
+        let big: T = get(read v.*, child).*;
+        if less(read cur, read big) {
+            set(write v.*, i, big);
+            set(write v.*, child, cur);
+            i = child;
+        } else {
+            return;
+        }
+    }
+}
+
+pub fn sort[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool) alloc -> unit {
+    let n: usize = len(read v.*);
+    if n < 2usize {
+        return;
+    }
+    let mut start: usize = n / 2usize;
+    while start > 0usize {
+        start = start - 1usize;
+        sift_down_by(write v.*, less, start, n);
+    }
+    let mut end: usize = n;
+    while end > 1usize {
+        end = end - 1usize;
+        let top: T = get(read v.*, 0usize).*;
+        let last: T = get(read v.*, end).*;
+        set(write v.*, 0usize, last);
+        set(write v.*, end, top);
+        sift_down_by(write v.*, less, 0usize, end);
     }
 }

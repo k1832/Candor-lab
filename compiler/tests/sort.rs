@@ -1,6 +1,7 @@
-//! In-place generic `sort[T: copy]` over `Vec[T]` by a first-class comparator. Insertion
-//! sort (simple, obviously correct, easy to verify byte-exact; an O(n log n)
-//! variant is a follow-up). The comparator is an ordinary
+//! In-place generic `sort[T: copy]` over `Vec[T]` by a first-class comparator.
+//! Bottom-up heapsort: O(n log n) worst case with no scratch buffer, which
+//! matters because the signature carries no allocator handle and a `Vec` does
+//! not expose its own. The comparator is an ordinary
 //! `fn(read i64, read i64) -> bool` value, so the
 //! SAME Vec sorts ascending or descending purely by which comparator is passed —
 //! the ascending/descending pair below proves the order is comparator-driven and
@@ -8,8 +9,8 @@
 //! (tree-walk oracle, MIR interp, Cranelift no-opt, Cranelift opt, LLVM -O2) via
 //! the same trace-channel harness as `tests/iteration.rs`.
 //!
-//! `sort` is generic over the element type `T` (bounded `copy`, since insertion
-//! sort shuffles elements by value). It is exercised at two instantiations: the
+//! `sort` is generic over the element type `T` (bounded `copy`, since heapsort
+//! shuffles elements by value). It is exercised at two instantiations: the
 //! integer cases below (`Vec[i64]`, `T` inferred at the call) prove byte-exact
 //! agreement with the earlier monomorphic form, and the `Item`-struct cases
 //! (`Vec[Item]`, sorted by a field) prove the generic form lowers correctly for
@@ -106,7 +107,7 @@ fn all_engines(src: &str, tag: &str) -> (i64, Vec<i64>) {
     (o_ret, o_trace)
 }
 
-// A counting bump allocator (mirrors tests/vec.rs) plus the generic insertion
+// A counting bump allocator (mirrors tests/vec.rs) plus the generic heapsort
 // `sort` and two i64 comparators. `less_int` orders ascending; `greater_int` is
 // its exact reverse, so passing one or the other flips the result — proving the
 // comparator genuinely drives the order.
@@ -138,23 +139,45 @@ fn bump_realloc(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize
 static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free, realloc: bump_realloc };
 fn mk_alloc(state: write Bump) -> Alloc { unsafe "outlives every alloc" { return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) }; } }
 
-fn sort[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool) alloc -> unit {
-    let n: usize = len(read v.*);
-    let mut i: usize = 1usize;
-    while i < n {
-        let key: T = get(read v.*, i).*;
-        let mut j: usize = i;
-        while j > 0usize {
-            let prev: T = get(read v.*, j - 1usize).*;
-            if (less)(read key, read prev) {
-                set(write v.*, j, prev);
-                j = j - 1usize;
-            } else {
-                break;
+fn sift_down_by[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool, root: usize, end: usize) alloc -> unit {
+    let mut i: usize = root;
+    while i < end / 2usize {
+        let left: usize = 2usize * i + 1usize;
+        let mut child: usize = left;
+        if left + 1usize < end {
+            let l: T = get(read v.*, left).*;
+            let r: T = get(read v.*, left + 1usize).*;
+            if (less)(read l, read r) {
+                child = left + 1usize;
             }
         }
-        set(write v.*, j, key);
-        i = i + 1usize;
+        let cur: T = get(read v.*, i).*;
+        let big: T = get(read v.*, child).*;
+        if (less)(read cur, read big) {
+            set(write v.*, i, big);
+            set(write v.*, child, cur);
+            i = child;
+        } else {
+            return;
+        }
+    }
+}
+fn sort[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool) alloc -> unit {
+    let n: usize = len(read v.*);
+    if n < 2usize { return; }
+    let mut start: usize = n / 2usize;
+    while start > 0usize {
+        start = start - 1usize;
+        sift_down_by(write v.*, less, start, n);
+    }
+    let mut end: usize = n;
+    while end > 1usize {
+        end = end - 1usize;
+        let top: T = get(read v.*, 0usize).*;
+        let last: T = get(read v.*, end).*;
+        set(write v.*, 0usize, last);
+        set(write v.*, end, top);
+        sift_down_by(write v.*, less, 0usize, end);
     }
 }
 fn less_int(a: read i64, b: read i64) -> bool { if a.* < b.* { return true; } return false; }
@@ -270,6 +293,97 @@ fn sort_with_duplicates_all_engines() {
     let (ret, trace) = all_engines(&src, "dups");
     assert_eq!(ret, 7);
     assert_eq!(trace, vec![1, 1, 2, 2, 3, 3, 3]);
+}
+
+/// Build an `n`-element `Vec[i64]` from a deterministic LCG evaluated INSIDE the
+/// Candor program (no randomness at test time), sort with `cmp`, then trace the
+/// count of adjacent pairs violating the requested order (`viol` is `<` for
+/// ascending, `>` for descending; the count must be 0), the element sum, and a
+/// position-weighted sum that pins the exact sequence. Expectations are
+/// recomputed in Rust from the same LCG (`lcg_vals`).
+fn sort_lcg_program(n: usize, seed: i64, cmp: &str, viol: &str) -> String {
+    format!(
+        "{PRELUDE}\n\
+         fn run(al: Alloc) alloc -> i64 {{\n\
+           let mut v: Vec[i64] = vec_new(read al);\n\
+           let mut s: i64 = {seed};\n\
+           let mut k: usize = 0usize;\n\
+           while k < {n}usize {{\n\
+             s = (s * 1103515245 + 12345) % 2147483648;\n\
+             push(write v, s % 1000);\n\
+             k = k + 1usize;\n\
+           }}\n\
+           sort(write v, {cmp});\n\
+           let mut inv: i64 = 0;\n\
+           let mut sum: i64 = 0;\n\
+           let mut wsum: i64 = 0;\n\
+           let mut j: usize = 0usize;\n\
+           while j < len(read v) {{\n\
+             let x: i64 = get(read v, j).*;\n\
+             let w: i64 = conv i64 (j + 1usize);\n\
+             sum = sum + x;\n\
+             wsum = wsum + w * x;\n\
+             if j > 0usize {{\n\
+               let prev: i64 = get(read v, j - 1usize).*;\n\
+               if x {viol} prev {{ inv = inv + 1; }}\n\
+             }}\n\
+             j = j + 1usize;\n\
+           }}\n\
+           trace(inv);\n\
+           trace(sum);\n\
+           trace(wsum);\n\
+           return conv i64 len(read v);\n\
+         }}\n\
+         fn main() alloc -> i64 {{\n\
+           let mut bs: Bump = with_window(16777216, 1048576);\n\
+           let al: Alloc = mk_alloc(write bs);\n\
+           return run(al);\n\
+         }}"
+    )
+}
+
+/// The Rust mirror of the in-program LCG stream (unsorted).
+fn lcg_vals(n: usize, seed: i64) -> Vec<i64> {
+    let mut s = seed;
+    let mut vals: Vec<i64> = Vec::with_capacity(n);
+    for _ in 0..n {
+        s = (s * 1103515245 + 12345) % 2147483648;
+        vals.push(s % 1000);
+    }
+    vals
+}
+
+fn sum_and_weighted(vals: &[i64]) -> (i64, i64) {
+    let sum = vals.iter().sum();
+    let wsum = vals.iter().enumerate().map(|(i, x)| (i as i64 + 1) * x).sum();
+    (sum, wsum)
+}
+
+#[test]
+fn sort_lcg_large_ascending_all_engines() {
+    let (n, seed) = (500, 42);
+    let src = sort_lcg_program(n, seed, "less_int", "<");
+    let (ret, trace) = all_engines(&src, "lcg_asc");
+    let mut vals = lcg_vals(n, seed);
+    vals.sort();
+    let (sum, wsum) = sum_and_weighted(&vals);
+    assert_eq!(ret, n as i64);
+    assert_eq!(trace, vec![0, sum, wsum]);
+}
+
+#[test]
+fn sort_lcg_large_descending_all_engines() {
+    // SAME LCG input, comparator reversed: the sequence (pinned by the weighted
+    // sum) reverses too.
+    let (n, seed) = (500, 42);
+    let src = sort_lcg_program(n, seed, "greater_int", ">");
+    let (ret, trace) = all_engines(&src, "lcg_desc");
+    let mut vals = lcg_vals(n, seed);
+    vals.sort();
+    vals.reverse();
+    let (sum, wsum) = sum_and_weighted(&vals);
+    assert_eq!(ret, n as i64);
+    assert_eq!(trace, vec![0, sum, wsum]);
 }
 
 #[test]
