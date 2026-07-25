@@ -33,6 +33,7 @@ jobs:
           [ "$($C run ../examples/01_hello.cnr | tail -1)" = "42" ]
           [ "$($C run ../examples/08_ordering.cnr | tail -1)" = "18" ]
           [ "$($C run ../examples/11_wasm_interp.cnr | tail -1)" = "42" ]
+          [ "$($C run ../examples/13_json.cnr | tail -1)" = "42" ]
           echo "examples OK"
       - name: Run the stdlib seed
         working-directory: toolchain

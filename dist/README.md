@@ -71,7 +71,7 @@ candor compile --freestanding hello.cnr -o hello && ldd hello   # => "not a dyna
 
 ---
 
-## Showcase — two real programs, written in Candor
+## Showcase — three real programs, written in Candor
 
 Not snippets — substantial programs you can read, run, and point at:
 
@@ -101,6 +101,18 @@ It serves 8 requests and exits itself. (A compiled `candor compile main.cnr -o
 httpd && ./httpd` serves identically. If you relaunch immediately and port 8080
 is still in TIME_WAIT, wait a moment and retry.)
 
+**A JSON parser + pretty-printer** (`examples/13_json.cnr`, ~1,100 lines): full
+RFC 8259 — every string escape (`\uXXXX` incl. surrogate pairs, decoded to
+UTF-8), the full number grammar, compact + pretty printers, structural
+equality. Malformed input never faults: errors are values with an exact code
+and byte position. The demo parses an embedded document, prints it both ways,
+proves `parse(print(v)) == v`, and pins one malformed input's error value:
+
+```sh
+candor run examples/13_json.cnr               # -> 42
+candor compile examples/13_json.cnr -o json && ./json   # exits 42
+```
+
 And the parts too big to ship as examples, on the public record in the
 [lab repository](https://github.com/k1832/Candor-lab): the **self-hosted
 compiler** (~19,300 lines of Candor that check, interpret, lower, and compile
@@ -129,6 +141,7 @@ this toolchain:
 | `10_iterators.cnr` | `candor run` | iterator adapters + terminals composing (`take_n`/`enumerate`/`fold`/`find`) |
 | `11_wasm_interp.cnr` | `candor run` / `candor compile` | ⭐ a from-scratch WebAssembly interpreter (see Showcase) |
 | `12_http_server/` | `candor run` (from its dir) | ⭐ an HTTP/1.0 static-file server over the audited TCP boundary (see Showcase) |
+| `13_json.cnr` | `candor run` / `candor compile` | ⭐ a full RFC 8259 JSON parser + pretty-printer, errors as values (see Showcase) |
 
 ---
 

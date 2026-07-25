@@ -1267,3 +1267,15 @@ once you add the literal node). Key design/impl facts worth reusing:
   `borrow borrow`), while a `write Vec[T]` param forwards as `write v.*` /
   `read v.*`; owners always pass explicit `read v`/`write v`. (json dogfood,
   2026-07-25)
+
+- **dist/examples must pass `candor fmt --check`; run/ fixtures need not.**
+  Promoting a fixture to a shipped example (the 13_json cut of run/json.cnr,
+  following the 11_wasm_interp canonical-plus-gated-twin pattern) surfaced that
+  fixture code is not canonically formatted — `candor fmt` expands one-line
+  struct decls, adds match-arm trailing commas, and strips redundant parens
+  (`(cp / 64) % 64` -> `cp / 64 % 64`), all semantics-preserving (re-verified
+  by rerunning). Promotion checklist: trim the harness to a short demo main,
+  `candor fmt` the file, pin the demo's actual traced values in comments by
+  running it, list it in dist/README.md (Showcase + examples table) and add a
+  sentinel line to dist/prod-ci.yml; seed.sh copies examples/ wholesale and
+  LANGUAGE-TOUR/INSTALL/MANIFEST carry no per-example list. (2026-07-25)
