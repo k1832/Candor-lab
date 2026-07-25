@@ -24,11 +24,11 @@ fn arena_get(ar: read Arena, i: u32) -> read Node {
 }
 
 fn fold_consts(ar: write Arena, root: u32) -> i64 {
-    match arena_get(ar, root) {
+    match arena_get(read ar.*, root) {
         Node::leaf(v) => return v,
         Node::binop(op, l, r) => {
-            let lv: i64 = fold_consts(ar, l);
-            let rv: i64 = fold_consts(ar, r);
+            let lv: i64 = fold_consts(write ar.*, l);
+            let rv: i64 = fold_consts(write ar.*, r);
             return apply(op, lv, rv);
         },
     }

@@ -19,6 +19,7 @@ const CHECK: &[&str] = &[
     "11_3_mmio",
     "11_4_parser",
     "11_5_arena",
+    "reborrow_return",
 ];
 const RUN: &[&str] = &[
     "11_1_allocator",
@@ -26,6 +27,7 @@ const RUN: &[&str] = &[
     "11_3_mmio",
     "11_4_parser",
     "11_5_arena",
+    "reborrow_return",
 ];
 
 fn read(rel: &str) -> String {
@@ -154,8 +156,16 @@ fn mechanical_rewrites_are_applied() {
     assert!(arena.contains("let i: u32 = ar.count;"), "read auto-deref");
     assert!(arena.contains("ar.*.mem[conv usize i] = n;"), "write `.*` + conv without parens");
     assert!(arena.contains("Node::leaf(v) => return v,"), "`case` removed from arms");
-    // reborrow collapse: `write (deref ar)` -> `ar`.
-    assert!(arena.contains("fold_consts(ar, l)"), "reborrow collapse");
+    // The reborrow collapse is REMOVED (unsound in return position; mirrors the
+    // fmt removal in d4e0fb4): the explicit reborrow is preserved as `write ar.*`.
+    assert!(arena.contains("fold_consts(write ar.*, l)"), "reborrow preserved, re-spelled");
+    // Return-position regression: `return read (deref c)` must keep the reborrow
+    // (collapsing to bare `c` fails E0703 -- the exact bug this pins).
+    let reborrow = migrate_source(&read("check/reborrow_return.cn")).unwrap();
+    assert!(reborrow.contains("return read c.*;"), "return-position reborrow preserved");
+    // Postfix-base regression: the grouping parens around a borrow used as a
+    // field base are load-bearing (`read c.*.v` borrows the field -- E0703).
+    assert!(reborrow.contains("return (read c.*).v;"), "borrow-as-base parens preserved");
     assert!(!arena.contains("deref"), "no residual `deref` keyword");
     assert!(!arena.contains("case "), "no residual `case` keyword");
     assert!(!arena.contains("slice"), "no residual `slice` keyword");

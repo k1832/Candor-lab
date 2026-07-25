@@ -1,0 +1,19 @@
+// Runnable variant of check/reborrow_return.cn: RETURN-position reborrow only.
+// The postfix-BASE case ((read (deref c)).v) lives in the check/ variant -- its
+// place shape is outside the native AOT backend subset, and every fixture here
+// must compile on all engines.
+
+struct Cell { v: i64 }
+
+fn as_read(c: write Cell) -> read Cell {
+    return read (deref c);
+}
+
+fn get_v(c: read Cell) -> i64 {
+    return (deref c).v;
+}
+
+fn main() -> i64 {
+    let mut cell: Cell = Cell { v: 7 };
+    return get_v(as_read(write cell));
+}

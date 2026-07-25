@@ -33,13 +33,13 @@ fn parse_term(a: read Alloc, s: [u8], pos: write usize) alloc -> BoxResult Expr 
 
 fn parse_expr(a: read Alloc, s: [u8], pos: write usize) alloc -> BoxResult Expr {
     // MIGRATE: two-arm BoxResult match -> `box(a, v)?` (author-assisted, design 0006 §5)
-    match parse_term(a, s, pos) {
+    match parse_term(a, s, write pos.*) {
         BoxResult::oom => return BoxResult::oom,
         BoxResult::boxed(lhs) => {
-            if peek(s, pos) == PLUS {
-                advance(pos);
+            if peek(s, read pos.*) == PLUS {
+                advance(write pos.*);
                 // MIGRATE: two-arm BoxResult match -> `box(a, v)?` (author-assisted, design 0006 §5)
-                match parse_expr(a, s, pos) {
+                match parse_expr(a, s, write pos.*) {
                     BoxResult::oom => return BoxResult::oom,
                     BoxResult::boxed(rhs) => return box(a, Expr::add(lhs, rhs)),
                 }

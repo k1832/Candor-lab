@@ -261,6 +261,41 @@ fn show_float_composes_through_bound() {
 // ---- formatter must NOT collapse `read <write-borrow>.*` (semantics gate) -----
 
 #[test]
+fn fmt_preserves_parens_around_borrow_used_as_base() {
+    // `(read c.*).v` -- a reborrow used as a field BASE. The parens are
+    // load-bearing: `read c.*.v` borrows the *field* (a different type), so the
+    // formatter must keep the grouping. Before the expr_bp fix, fmt reported the
+    // borrow at postfix level (a leftover of the removed reborrow collapse) and
+    // dropped the parens, reformatting working code into an E0703.
+    let src = "\
+struct Cell { v: i64 }
+fn base(c: write Cell) -> i64 {
+    return (read c.*).v;
+}
+fn main() -> i64 {
+    let mut cell: Cell = Cell { v: 3 };
+    return base(write cell);
+}
+";
+    let formatted = candor::format_source_real(src).expect("format ok");
+    assert!(
+        formatted.contains("(read c.*).v"),
+        "parens around a borrow used as a postfix base are load-bearing:\n{formatted}"
+    );
+    let twice = candor::format_source_real(&formatted).expect("format idempotent");
+    assert_eq!(twice, formatted, "formatter must be idempotent");
+    match run_source_real(&formatted) {
+        RunResult::Ok(r) => assert_eq!(r.ret, 3, "formatted output must run correctly"),
+        RunResult::Fault(f) => panic!("formatted output faulted: {}", f.to_json()),
+        RunResult::CheckErrors(d) => panic!(
+            "formatted output failed to check: {:?}",
+            d.iter().map(|x| &x.code).collect::<Vec<_>>()
+        ),
+        RunResult::ParseError(d) => panic!("formatted output parse error: {}", d.to_json()),
+    }
+}
+
+#[test]
 fn fmt_preserves_read_reborrow_of_write_borrow() {
     // `read (c.*)` over a `write c` borrow is a non-moving read-reborrow, while
     // bare `c` MOVES the write borrow (a later use then fails E0301). Lacking a

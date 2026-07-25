@@ -9,10 +9,12 @@
 //! Canonical rules realized here are exactly spec 02 §9 / design 0006 §4:
 //! 4-space indent, K&R braces, mandatory blocks, one statement per line, the
 //! §9.2 spacing, trailing commas in multi-line lists (none in single-line), and
-//! the §9.3 normalizations (reborrow collapse, read-only auto-deref collapse,
-//! uniform redundant-paren removal, throwaway-spelling rewrite). The precedence-
-//! keyed paren logic and the reborrow/auto-deref collapses are shared with the
-//! migrator ([`super::emit`]) so the two never diverge.
+//! the §9.3 normalizations (read-only auto-deref collapse, uniform redundant-
+//! paren removal, throwaway-spelling rewrite). The reborrow collapse is NOT
+//! among them — removed as unsound without a type table (d4e0fb4; see
+//! [`Fmt::emit_borrow_op`]), and likewise removed from the migrator
+//! ([`super::emit`]) so the two do not diverge. The precedence-keyed paren
+//! logic is shared with the migrator.
 //!
 //! ## Silent-rule decisions (spec 02 §9 is silent; minimal consistent choices,
 //! recorded here as future §9 amendments — NN#11):
@@ -886,16 +888,15 @@ impl Fmt<'_> {
         match &e.kind {
             ExprKind::Binary { op, .. } => bin_bp(*op),
             ExprKind::Unary { .. } | ExprKind::Conv { .. } | ExprKind::Bitcast { .. } => BP_PREFIX,
-            ExprKind::Prefix { op, expr } => match op {
+            ExprKind::Prefix { op, .. } => match op {
                 PrefixOp::Deref => BP_POSTFIX,
                 PrefixOp::Clone => BP_PREFIX,
-                PrefixOp::Read | PrefixOp::Write => {
-                    if as_deref_inner(expr).is_some() {
-                        BP_POSTFIX
-                    } else {
-                        BP_PREFIX
-                    }
-                }
+                // Always prefix-level: `read b.*` is a borrow operator even when
+                // the operand is a bare deref (the d4e0fb4 collapse removal left
+                // this branch behind, so fmt reformatted `(read b.*).v` into the
+                // borrow-broken `read b.*.v`). Under a postfix parent the parens
+                // are load-bearing and must be kept.
+                PrefixOp::Read | PrefixOp::Write => BP_PREFIX,
             },
             ExprKind::Try(_)
             | ExprKind::Call { .. }

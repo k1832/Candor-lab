@@ -1,0 +1,27 @@
+// Regression fixture: reborrows of a `write` borrow in the two positions the
+// old reborrow collapse mistranslated.
+//   1. RETURN position: `read (deref c)` must NOT collapse to bare `c` (return
+//      is not an implicit-reborrow position; bare `c` fails E0703).
+//   2. Postfix BASE position: `(read (deref c)).v` must keep its grouping
+//      parens (`read c.*.v` borrows the field instead -- E0703).
+
+struct Cell { v: i64 }
+
+fn as_read(c: write Cell) -> read Cell {
+    return read (deref c);
+}
+
+fn get_v(c: read Cell) -> i64 {
+    return (deref c).v;
+}
+
+fn base_v(c: write Cell) -> i64 {
+    return (read (deref c)).v;
+}
+
+fn main() -> i64 {
+    let mut cell: Cell = Cell { v: 7 };
+    let a: i64 = get_v(as_read(write cell));
+    let b: i64 = base_v(write cell);
+    return a + b;
+}

@@ -10,9 +10,15 @@
 //!   * dereference: prefix `deref` -> postfix `.*`, with **read-only auto-deref**
 //!     (a `.*` before a field/index on a read path is dropped; a write target and
 //!     a bare-value deref keep `.*`) — spec 02 §6.3/§9.3;
-//!   * explicit reborrow collapse: `read (deref b)` / `write (deref b)` in an
-//!     argument position -> bare `b` (design 0005);
 //!   * `case P => e` -> `P => e`; `conv T (e)` -> `conv T e`.
+//!
+//! The design-0005 reborrow collapse (`read (deref b)` -> bare `b`) is NOT
+//! applied, mirroring the same removal from the canonical formatter (d4e0fb4):
+//! the emitter has no type table, and the collapse is unsound outside implicit-
+//! reborrow (call-argument) positions — in return position, collapsing a read
+//! reborrow of a `write` borrow emits `return b;`, which fails E0703 where the
+//! original checked clean. Keeping the explicit reborrow preserves the header
+//! guarantee above: the emitter only re-spells.
 //!
 //! Author-assisted rows (design 0006 §5, the "author-assisted" rows) are NOT
 //! rewritten; a `// MIGRATE:` marker is emitted where one is detectable — namely
@@ -408,16 +414,14 @@ impl Emitter {
         match &e.kind {
             ExprKind::Binary { op, .. } => bin_bp(*op),
             ExprKind::Unary { .. } | ExprKind::Conv { .. } | ExprKind::Bitcast { .. } => BP_PREFIX,
-            ExprKind::Prefix { op, expr } => match op {
+            ExprKind::Prefix { op, .. } => match op {
                 PrefixOp::Deref => BP_POSTFIX,
                 PrefixOp::Clone => BP_PREFIX,
-                PrefixOp::Read | PrefixOp::Write => {
-                    if as_deref_inner(expr).is_some() {
-                        BP_POSTFIX // reborrow collapses to a bare place
-                    } else {
-                        BP_PREFIX
-                    }
-                }
+                // Always prefix-level: `read b.*` is a borrow operator even when
+                // the operand is a bare deref (the collapse that once made it a
+                // bare place is removed). Under a postfix parent this forces the
+                // load-bearing parens: `(read b.*).v`, never `read b.*.v`.
+                PrefixOp::Read | PrefixOp::Write => BP_PREFIX,
             },
             ExprKind::Try(_)
             | ExprKind::Call { .. }
@@ -636,18 +640,21 @@ impl Emitter {
         }
     }
 
-    /// A `read`/`write` borrow *operator*. An explicit reborrow of a bare deref
-    /// (`read (deref b)`) collapses to the bare place `b` (design 0005); a fresh
-    /// borrow of a sub-place (`read (deref ar).mem[i]`) keeps the keyword and lets
-    /// the place auto-deref.
+    /// A `read`/`write` borrow *operator*. The keyword and operand are always
+    /// preserved — the design-0005 reborrow collapse (`read (deref b)` -> bare
+    /// `b`) is deliberately NOT applied, for the same reason it was removed from
+    /// the canonical formatter (d4e0fb4): without a type table the emitter cannot
+    /// tell where bare `b` is an implicit reborrow (call arguments) from where it
+    /// is a move or a type mismatch (return position, bindings). `read (deref b)`
+    /// re-spells as `read b.*`, which preserves semantics in every position —
+    /// PROVIDED the precedence table treats the borrow as prefix-level so the
+    /// grouping parens survive where they are load-bearing (`(read b.*).v`, a
+    /// borrow used as a field/index base; see `expr_bp`). Redundant parens still
+    /// drop because `.*` binds tighter than the borrow operator.
     fn emit_borrow_op(&mut self, kw: &str, operand: &Expr) {
-        if let Some(inner) = as_deref_inner(operand) {
-            self.emit_expr(inner, BP_MIN, false);
-        } else {
-            self.push(kw);
-            self.push(" ");
-            self.emit_expr(operand, BP_PREFIX, false);
-        }
+        self.push(kw);
+        self.push(" ");
+        self.emit_expr(operand, BP_PREFIX, false);
     }
 
     fn emit_type_arg_call(&mut self, name: &str, ty: &Ty, arg: Option<&Expr>) {
