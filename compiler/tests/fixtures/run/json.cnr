@@ -1,0 +1,1267 @@
+// JSON parser + pretty/compact printer, written in Candor as a dogfood program.
+//
+// Full JSON grammar (RFC 8259): objects, arrays, strings with every escape
+// (incl. \uXXXX and surrogate pairs, decoded to UTF-8 bytes), numbers with
+// fraction/exponent, true/false/null. Malformed input never faults: `json_parse`
+// returns the Res-style `PRes` — `Ok(node index)` or `Err(PErr { code, pos })`.
+//
+// NUMBER POLICY: the full number grammar is validated, but the language-level
+// representation is split. An integer-form token (no fraction, no exponent) that
+// fits i64 becomes K_INT (canonical decimal on output; "-0" prints "0"). Every
+// other number — fraction, exponent, or an integer beyond i64 — keeps its RAW
+// LEXEME verbatim (K_LEX) and is printed byte-identically. Candor has f64/f32,
+// but correctly-rounded decimal<->f64 conversion is a bignum problem orthogonal
+// to this program; the lexeme form is exact, total, and round-trips by
+// construction.
+//
+// ERROR CODES (PErr.code, PErr.pos = byte offset):
+//   1 E_EOF    input ended inside a value (pos = input length)
+//   2 E_CHAR   unexpected byte (pos = that byte; a broken true/false/null
+//              literal reports the literal's start)
+//   3 E_STR    bad string content (pos = the escape's backslash — incl. bad \u
+//              hex and unpaired surrogates — or the raw control byte)
+//   4 E_NUM    bad number (pos = the number's first byte)
+//   5 E_TRAIL  trailing bytes after the top-level value (pos = first extra byte)
+//   6 E_DEEP   containers nested deeper than 24 (pos = where the 25th level
+//              would open)
+//
+// CANONICAL OUTPUT: compact has no whitespace; pretty indents 2 spaces, puts
+// ": " after keys, and keeps empty containers inline ("[]", "{}"). Strings
+// escape `"` `\` and controls (\b \f \n \r \t, else \u00xx lowercase); all
+// other bytes pass through raw, so \uXXXX input comes back out as UTF-8.
+// Object member order is preserved; equality (`json_eq`) is order-sensitive.
+//
+// SHAPE NOTE: the parser, both printers, and `json_eq` walk with EXPLICIT
+// stacks (fixed frame arrays sized to the depth cap) rather than Candor-level
+// recursion. The tree-walking oracle's host stack is the scarce resource under
+// the test harness — the same lesson the WASM interpreter's activation stack
+// encodes — so nothing here recurses in proportion to document depth.
+//
+// The round-trip property parse(print(v)) == v is checked for compact AND
+// pretty output on every valid document; specific printed bytes and specific
+// (code, pos) error values are pinned against embedded expectations. main
+// traces 1 per passing check plus a final byte checksum of every printed
+// output, and returns the passing-check count — all engines must agree
+// byte-for-byte (tests/json.rs pins the values; the run/ corpus gates in
+// tests/stage_d.rs, tests/aot.rs and tests/llvm.rs auto-discover this file).
+
+// ---- allocator preamble (verbatim from str_utils.cnr) -----------------------
+
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+    realloc: fn(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) alloc -> rawptr u8,
+}
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+
+struct FreeList { next: usize, end: usize, head: rawptr u8 }
+struct FreeBlock { next: rawptr u8, size: usize }
+
+fn with_window(base: usize, size: usize) -> FreeList {
+    unsafe "the empty free list starts with a null head; no block is threaded yet" {
+        return FreeList { next: base, end: base + size, head: ptr_null[u8]() };
+    }
+}
+
+fn block_span(size: usize, align: usize) -> usize {
+    let mut need: usize = size;
+    if need < 16usize {
+        need = 16usize;
+    }
+    return (need + align - 1usize) / align * align;
+}
+
+fn freelist_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live FreeList whose [next, end) window and address-ordered free chain are reserved to this arena alone; every carved block stays inside [next, end) and is >= header-sized, and a split remainder (kept only when >= MIN_SPLIT) is written into the block's own tail" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let need: usize = block_span(size, align);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) {
+            let blk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if blk.size >= need {
+                if blk.size - need >= 32usize {
+                    let rem: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(cur) + need);
+                    ptr_write(cast_ptr[FreeBlock](rem), FreeBlock { next: blk.next, size: blk.size - need });
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: rem });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: rem, size: pblk.size });
+                    }
+                } else {
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: blk.next });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: blk.next, size: pblk.size });
+                    }
+                }
+                return cur;
+            }
+            prev = cur;
+            cur = blk.next;
+        }
+        let aligned: usize = (st.next + align - 1usize) / align * align;
+        if aligned + need > st.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: aligned + need, end: st.end, head: st.head });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+
+fn freelist_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    unsafe "the free list is kept ADDRESS-ORDERED; the freed block's own storage (>= header-sized, guaranteed by block_span in alloc) holds its FreeBlock header {next, size}, and a merge joins two blocks ONLY when their byte spans are exactly adjacent (addr + size == neighbour addr), so a merge can never overlap live memory nor bridge a gap" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let mut cap: usize = block_span(size, align);
+        let a: usize = ptr_to_addr(ptr);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) && ptr_to_addr(cur) < a {
+            let cblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            prev = cur;
+            cur = cblk.next;
+        }
+        let mut link: rawptr u8 = cur;
+        if !is_null(cur) {
+            let nblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if a + cap == ptr_to_addr(cur) {
+                cap = cap + nblk.size;
+                link = nblk.next;
+            }
+        }
+        if !is_null(prev) {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            if ptr_to_addr(prev) + pblk.size == a {
+                ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: link, size: pblk.size + cap });
+                return;
+            }
+        }
+        ptr_write(cast_ptr[FreeBlock](ptr), FreeBlock { next: link, size: cap });
+        if is_null(prev) {
+            ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: ptr });
+        } else {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: ptr, size: pblk.size });
+        }
+    }
+}
+
+fn freelist_realloc(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live FreeList; [ptr, ptr+old_span) is the block carved for old_size (block_span rounds identically on alloc/free). Growing in place either extends the bump frontier inside [next, end) or absorbs the physically-adjacent free block beginning exactly at ptr+old_span (splitting its tail when the remainder is >= MIN_SPLIT); the fallback carves a fresh block, copies old_size bytes into it, and frees the old block" {
+        let old_span: usize = block_span(old_size, align);
+        let new_span: usize = block_span(new_size, align);
+        if new_span <= old_span {
+            return ptr;
+        }
+        let a: usize = ptr_to_addr(ptr);
+        let tail: usize = a + old_span;
+        let extra: usize = new_span - old_span;
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        if tail == st.next {
+            if tail + extra <= st.end {
+                ptr_write(cast_ptr[FreeList](ctx), FreeList { next: tail + extra, end: st.end, head: st.head });
+                return ptr;
+            }
+        } else {
+            let mut prev: rawptr u8 = ptr_null[u8]();
+            let mut cur: rawptr u8 = st.head;
+            while !is_null(cur) && ptr_to_addr(cur) < tail {
+                let cblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+                prev = cur;
+                cur = cblk.next;
+            }
+            if !is_null(cur) && ptr_to_addr(cur) == tail {
+                let fblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+                if fblk.size >= extra {
+                    let mut link: rawptr u8 = fblk.next;
+                    if fblk.size - extra >= 32usize {
+                        let rem: rawptr u8 = addr_to_ptr[u8](tail + extra);
+                        ptr_write(cast_ptr[FreeBlock](rem), FreeBlock { next: fblk.next, size: fblk.size - extra });
+                        link = rem;
+                    }
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: link });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: link, size: pblk.size });
+                    }
+                    return ptr;
+                }
+            }
+        }
+        let newp: rawptr u8 = freelist_alloc(ctx, new_size, align);
+        if is_null(newp) {
+            return newp;
+        }
+        let mut i: usize = 0usize;
+        while i < old_size {
+            let s: rawptr u8 = addr_to_ptr[u8](a + i);
+            let d: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(newp) + i);
+            let v: u8 = ptr_read(s);
+            ptr_write(d, v);
+            i = i + 1usize;
+        }
+        freelist_free(ctx, ptr, old_size, align);
+        return newp;
+    }
+}
+
+static FREELIST_VT: AllocVtable = AllocVtable { alloc: freelist_alloc, free: freelist_free, realloc: freelist_realloc };
+
+fn mk_alloc(state: write FreeList) -> Alloc {
+    unsafe "ctx (the caller's FreeList local) and vt (the static FREELIST_VT) outlive every collection this handle serves; the caller keeps the window and FREELIST_VT alive for the whole run and drops every collection before the window dies" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(FREELIST_VT) };
+    }
+}
+
+// ---- JSON value tree --------------------------------------------------------
+
+// Node kinds. A node arena (`Vec[Node]`) plus a byte pool (`Vec[u8]`) hold the
+// whole tree; indices are i64, -1 is the null link.
+static K_NULL: i64 = 0;
+static K_FALSE: i64 = 1;
+static K_TRUE: i64 = 2;
+static K_INT: i64 = 3; // a = the i64 value
+static K_LEX: i64 = 4; // a/b = raw number lexeme start/len in the pool
+static K_STR: i64 = 5; // a/b = decoded UTF-8 bytes start/len in the pool
+static K_ARR: i64 = 6; // a = first child (-1 if empty), b = child count
+static K_OBJ: i64 = 7; // a = first member (-1 if empty), b = member count
+
+// `next` chains siblings; `ka`/`kb` hold an object member's key bytes (pool
+// start/len) on the member's VALUE node, -1/0 elsewhere.
+copy struct Node { kind: i64, a: i64, b: i64, next: i64, ka: i64, kb: i64 }
+
+copy struct PErr { code: i64, pos: i64 }
+enum PRes { Ok(i64), Err(PErr) }
+
+copy struct Sp { start: i64, len: i64 }
+enum SRes { Ok(Sp), Err(PErr) }
+
+static E_EOF: i64 = 1;
+static E_CHAR: i64 = 2;
+static E_STR: i64 = 3;
+static E_NUM: i64 = 4;
+static E_TRAIL: i64 = 5;
+static E_DEEP: i64 = 6;
+
+static MAX_DEPTH: i64 = 24;
+
+// ---- arena helpers ----------------------------------------------------------
+
+fn node_push(nodes: write Vec[Node], nd: Node) alloc -> i64 {
+    push(write nodes.*, nd);
+    return conv i64 len(read nodes.*) - 1;
+}
+
+fn mk_leaf(nodes: write Vec[Node], kind: i64, a: i64, b: i64) alloc -> i64 {
+    return node_push(write nodes.*, Node { kind: kind, a: a, b: b, next: 0 - 1, ka: 0 - 1, kb: 0 });
+}
+
+fn set_next(nodes: write Vec[Node], i: i64, nx: i64) alloc -> unit {
+    let mut nd: Node = get(read nodes.*, conv usize i).*;
+    nd.next = nx;
+    set(write nodes.*, conv usize i, nd);
+}
+
+fn set_key(nodes: write Vec[Node], i: i64, kstart: i64, klen: i64) alloc -> unit {
+    let mut nd: Node = get(read nodes.*, conv usize i).*;
+    nd.ka = kstart;
+    nd.kb = klen;
+    set(write nodes.*, conv usize i, nd);
+}
+
+// Fill a container's first-child link and count once its members are known.
+fn set_children(nodes: write Vec[Node], i: i64, first: i64, count: i64) alloc -> unit {
+    let mut nd: Node = get(read nodes.*, conv usize i).*;
+    nd.a = first;
+    nd.b = count;
+    set(write nodes.*, conv usize i, nd);
+}
+
+// ---- lexing helpers ---------------------------------------------------------
+
+fn is_ws(b: u8) -> bool {
+    return b == 32u8 || b == 9u8 || b == 10u8 || b == 13u8;
+}
+
+fn is_digit(b: u8) -> bool {
+    return b >= 48u8 && b <= 57u8;
+}
+
+fn skip_ws(s: [u8], pos: write usize) -> unit {
+    let n: usize = len(s);
+    while pos.* < n && is_ws(s[pos.*]) {
+        pos.* = pos.* + 1usize;
+    }
+}
+
+// Advance over `lit` if the input matches it exactly here; on mismatch leave
+// `pos` at the literal's start (the caller reports E_CHAR there).
+fn match_lit(s: [u8], pos: write usize, lit: str) -> bool {
+    let lb: [u8] = as_bytes(lit);
+    let m: usize = len(lb);
+    if pos.* + m > len(s) {
+        return false;
+    }
+    let mut i: usize = 0usize;
+    while i < m {
+        if s[pos.* + i] != lb[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    pos.* = pos.* + m;
+    return true;
+}
+
+fn hex_digit(b: u8) -> i64 {
+    if b >= 48u8 && b <= 57u8 {
+        return conv i64 b - 48;
+    }
+    if b >= 97u8 && b <= 102u8 {
+        return conv i64 b - 87;
+    }
+    if b >= 65u8 && b <= 70u8 {
+        return conv i64 b - 55;
+    }
+    return 0 - 1;
+}
+
+// Four hex digits at `at`, or -1 (also for out-of-range reads).
+fn hex4(s: [u8], at: usize) -> i64 {
+    if at + 4usize > len(s) {
+        return 0 - 1;
+    }
+    let mut v: i64 = 0;
+    let mut i: usize = 0usize;
+    while i < 4usize {
+        let d: i64 = hex_digit(s[at + i]);
+        if d < 0 {
+            return 0 - 1;
+        }
+        v = v * 16 + d;
+        i = i + 1usize;
+    }
+    return v;
+}
+
+// Append the UTF-8 encoding of scalar `cp` (caller guarantees a valid scalar).
+fn utf8_push(pool: write Vec[u8], cp: i64) alloc -> unit {
+    if cp < 128 {
+        push(write pool.*, conv u8 cp);
+        return;
+    }
+    if cp < 2048 {
+        push(write pool.*, conv u8 (192 + cp / 64));
+        push(write pool.*, conv u8 (128 + cp % 64));
+        return;
+    }
+    if cp < 65536 {
+        push(write pool.*, conv u8 (224 + cp / 4096));
+        push(write pool.*, conv u8 (128 + (cp / 64) % 64));
+        push(write pool.*, conv u8 (128 + cp % 64));
+        return;
+    }
+    push(write pool.*, conv u8 (240 + cp / 262144));
+    push(write pool.*, conv u8 (128 + (cp / 4096) % 64));
+    push(write pool.*, conv u8 (128 + (cp / 64) % 64));
+    push(write pool.*, conv u8 (128 + cp % 64));
+}
+
+// ---- parsing ----------------------------------------------------------------
+
+// A string body: `pos` sits on the opening quote. Decoded bytes go into the
+// pool; the result is their (start, len) span.
+fn parse_string(s: [u8], pos: write usize, pool: write Vec[u8]) alloc -> SRes {
+    let n: usize = len(s);
+    pos.* = pos.* + 1usize;
+    let start: i64 = conv i64 len(read pool.*);
+    loop {
+        if pos.* >= n {
+            return SRes::Err(PErr { code: E_EOF, pos: conv i64 n });
+        }
+        let b: u8 = s[pos.*];
+        if b == 34u8 {
+            pos.* = pos.* + 1usize;
+            return SRes::Ok(Sp { start: start, len: conv i64 len(read pool.*) - start });
+        }
+        if b == 92u8 {
+            let esc: usize = pos.*;
+            if esc + 1usize >= n {
+                return SRes::Err(PErr { code: E_EOF, pos: conv i64 n });
+            }
+            let e: u8 = s[esc + 1usize];
+            if e == 34u8 {
+                push(write pool.*, 34u8);
+                pos.* = esc + 2usize;
+            } else if e == 92u8 {
+                push(write pool.*, 92u8);
+                pos.* = esc + 2usize;
+            } else if e == 47u8 {
+                push(write pool.*, 47u8);
+                pos.* = esc + 2usize;
+            } else if e == 98u8 {
+                push(write pool.*, 8u8);
+                pos.* = esc + 2usize;
+            } else if e == 102u8 {
+                push(write pool.*, 12u8);
+                pos.* = esc + 2usize;
+            } else if e == 110u8 {
+                push(write pool.*, 10u8);
+                pos.* = esc + 2usize;
+            } else if e == 114u8 {
+                push(write pool.*, 13u8);
+                pos.* = esc + 2usize;
+            } else if e == 116u8 {
+                push(write pool.*, 9u8);
+                pos.* = esc + 2usize;
+            } else if e == 117u8 {
+                let hi: i64 = hex4(s, esc + 2usize);
+                if hi < 0 {
+                    return SRes::Err(PErr { code: E_STR, pos: conv i64 esc });
+                }
+                if hi >= 55296 && hi <= 56319 {
+                    // High surrogate D800..DBFF: a \uDC00..\uDFFF pair must follow.
+                    if esc + 8usize > n || s[esc + 6usize] != 92u8 || s[esc + 7usize] != 117u8 {
+                        return SRes::Err(PErr { code: E_STR, pos: conv i64 esc });
+                    }
+                    let lo: i64 = hex4(s, esc + 8usize);
+                    if lo < 56320 || lo > 57343 {
+                        return SRes::Err(PErr { code: E_STR, pos: conv i64 esc });
+                    }
+                    let cp: i64 = 65536 + (hi - 55296) * 1024 + (lo - 56320);
+                    utf8_push(write pool.*, cp);
+                    pos.* = esc + 12usize;
+                } else if hi >= 56320 && hi <= 57343 {
+                    // A lone low surrogate is not a scalar (strict, like serde_json).
+                    return SRes::Err(PErr { code: E_STR, pos: conv i64 esc });
+                } else {
+                    utf8_push(write pool.*, hi);
+                    pos.* = esc + 6usize;
+                }
+            } else {
+                return SRes::Err(PErr { code: E_STR, pos: conv i64 esc });
+            }
+        } else if b < 32u8 {
+            return SRes::Err(PErr { code: E_STR, pos: conv i64 pos.* });
+        } else {
+            // Raw byte (incl. multi-byte UTF-8) passes through unchanged.
+            push(write pool.*, b);
+            pos.* = pos.* + 1usize;
+        }
+    }
+}
+
+// A number: `pos` sits on '-' or the first digit. Grammar errors all report the
+// token's start. Integer-form tokens that fit i64 become K_INT (accumulated
+// NEGATIVELY so i64::MIN parses without overflow, with an explicit bound check
+// before each step — checked arithmetic never faults here); everything else
+// keeps the raw lexeme (K_LEX).
+fn parse_number(s: [u8], pos: write usize, nodes: write Vec[Node], pool: write Vec[u8]) alloc -> PRes {
+    let n: usize = len(s);
+    let start: usize = pos.*;
+    let mut neg: bool = false;
+    if s[pos.*] == 45u8 {
+        neg = true;
+        pos.* = pos.* + 1usize;
+    }
+    if pos.* >= n || !is_digit(s[pos.*]) {
+        return PRes::Err(PErr { code: E_NUM, pos: conv i64 start });
+    }
+    if s[pos.*] == 48u8 {
+        pos.* = pos.* + 1usize;
+        if pos.* < n && is_digit(s[pos.*]) {
+            // Leading zero ("01") is not JSON.
+            return PRes::Err(PErr { code: E_NUM, pos: conv i64 start });
+        }
+    } else {
+        while pos.* < n && is_digit(s[pos.*]) {
+            pos.* = pos.* + 1usize;
+        }
+    }
+    let int_end: usize = pos.*;
+    let mut is_int: bool = true;
+    if pos.* < n && s[pos.*] == 46u8 {
+        is_int = false;
+        pos.* = pos.* + 1usize;
+        if pos.* >= n || !is_digit(s[pos.*]) {
+            return PRes::Err(PErr { code: E_NUM, pos: conv i64 start });
+        }
+        while pos.* < n && is_digit(s[pos.*]) {
+            pos.* = pos.* + 1usize;
+        }
+    }
+    if pos.* < n && (s[pos.*] == 101u8 || s[pos.*] == 69u8) {
+        is_int = false;
+        pos.* = pos.* + 1usize;
+        if pos.* < n && (s[pos.*] == 43u8 || s[pos.*] == 45u8) {
+            pos.* = pos.* + 1usize;
+        }
+        if pos.* >= n || !is_digit(s[pos.*]) {
+            return PRes::Err(PErr { code: E_NUM, pos: conv i64 start });
+        }
+        while pos.* < n && is_digit(s[pos.*]) {
+            pos.* = pos.* + 1usize;
+        }
+    }
+    if is_int {
+        let min: i64 = (0 - 9223372036854775807) - 1;
+        let mut acc: i64 = 0;
+        let mut fits: bool = true;
+        let mut i: usize = start;
+        if neg {
+            i = start + 1usize;
+        }
+        while i < int_end {
+            let d: i64 = conv i64 s[i] - 48;
+            if acc < (min + d) / 10 {
+                fits = false;
+                break;
+            }
+            acc = acc * 10 - d;
+            i = i + 1usize;
+        }
+        // A positive magnitude of exactly 2^63 (acc == min, !neg) does not fit.
+        if fits && (neg || acc > min) {
+            let mut v: i64 = acc;
+            if !neg {
+                v = 0 - acc;
+            }
+            return PRes::Ok(mk_leaf(write nodes.*, K_INT, v, 0));
+        }
+    }
+    let ps: i64 = conv i64 len(read pool.*);
+    let mut j: usize = start;
+    while j < pos.* {
+        push(write pool.*, s[j]);
+        j = j + 1usize;
+    }
+    return PRes::Ok(mk_leaf(write nodes.*, K_LEX, ps, conv i64 len(read pool.*) - ps));
+}
+
+// An object key plus its ':' — used when a '{' opens non-empty and after every
+// member ','.
+fn parse_key_colon(s: [u8], pos: write usize, pool: write Vec[u8]) alloc -> SRes {
+    skip_ws(s, pos);
+    let n: usize = len(s);
+    if pos.* >= n {
+        return SRes::Err(PErr { code: E_EOF, pos: conv i64 n });
+    }
+    if s[pos.*] != 34u8 {
+        return SRes::Err(PErr { code: E_CHAR, pos: conv i64 pos.* });
+    }
+    let mut sp: Sp = Sp { start: 0, len: 0 };
+    match parse_string(s, pos, write pool.*) {
+        SRes::Err(e) => {
+            return SRes::Err(e);
+        }
+        SRes::Ok(k) => {
+            sp = k;
+        }
+    }
+    skip_ws(s, pos);
+    if pos.* >= n {
+        return SRes::Err(PErr { code: E_EOF, pos: conv i64 n });
+    }
+    if s[pos.*] != 58u8 {
+        return SRes::Err(PErr { code: E_CHAR, pos: conv i64 pos.* });
+    }
+    pos.* = pos.* + 1usize;
+    return SRes::Ok(sp);
+}
+
+// An in-flight container: its arena node, first/last child links, member count,
+// and (for objects) the pending member's key span.
+copy struct PFrame { kind: i64, node: i64, first: i64, last: i64, count: i64, ka: i64, kb: i64 }
+
+fn zero_pframe() -> PFrame {
+    return PFrame { kind: 0, node: 0 - 1, first: 0 - 1, last: 0 - 1, count: 0, ka: 0 - 1, kb: 0 };
+}
+
+// One value, iteratively: containers push a PFrame onto a fixed [MAX_DEPTH]
+// stack instead of recursing, so host stack use is O(1) in document depth.
+fn parse_value(s: [u8], pos: write usize, nodes: write Vec[Node], pool: write Vec[u8]) alloc -> PRes {
+    let n: usize = len(s);
+    let mut stk: [24]PFrame = [zero_pframe(); 24];
+    let mut depth: i64 = 0;
+    let mut cur: i64 = 0 - 1;
+    let mut have_value: bool = false;
+    loop {
+        if !have_value {
+            // Produce the next value, or open a container frame.
+            skip_ws(s, pos);
+            if pos.* >= n {
+                return PRes::Err(PErr { code: E_EOF, pos: conv i64 n });
+            }
+            let b: u8 = s[pos.*];
+            if b == 91u8 {
+                if depth >= MAX_DEPTH {
+                    return PRes::Err(PErr { code: E_DEEP, pos: conv i64 pos.* });
+                }
+                pos.* = pos.* + 1usize;
+                skip_ws(s, pos);
+                if pos.* < n && s[pos.*] == 93u8 {
+                    pos.* = pos.* + 1usize;
+                    cur = mk_leaf(write nodes.*, K_ARR, 0 - 1, 0);
+                    have_value = true;
+                } else {
+                    let mut f: PFrame = zero_pframe();
+                    f.kind = K_ARR;
+                    f.node = mk_leaf(write nodes.*, K_ARR, 0 - 1, 0);
+                    stk[conv usize depth] = f;
+                    depth = depth + 1;
+                }
+            } else if b == 123u8 {
+                if depth >= MAX_DEPTH {
+                    return PRes::Err(PErr { code: E_DEEP, pos: conv i64 pos.* });
+                }
+                pos.* = pos.* + 1usize;
+                skip_ws(s, pos);
+                if pos.* < n && s[pos.*] == 125u8 {
+                    pos.* = pos.* + 1usize;
+                    cur = mk_leaf(write nodes.*, K_OBJ, 0 - 1, 0);
+                    have_value = true;
+                } else {
+                    let mut f: PFrame = zero_pframe();
+                    f.kind = K_OBJ;
+                    f.node = mk_leaf(write nodes.*, K_OBJ, 0 - 1, 0);
+                    match parse_key_colon(s, pos, write pool.*) {
+                        SRes::Err(e) => {
+                            return PRes::Err(e);
+                        }
+                        SRes::Ok(sp) => {
+                            f.ka = sp.start;
+                            f.kb = sp.len;
+                        }
+                    }
+                    stk[conv usize depth] = f;
+                    depth = depth + 1;
+                }
+            } else if b == 34u8 {
+                match parse_string(s, pos, write pool.*) {
+                    SRes::Err(e) => {
+                        return PRes::Err(e);
+                    }
+                    SRes::Ok(sp) => {
+                        cur = mk_leaf(write nodes.*, K_STR, sp.start, sp.len);
+                    }
+                }
+                have_value = true;
+            } else if b == 116u8 {
+                if !match_lit(s, pos, "true") {
+                    return PRes::Err(PErr { code: E_CHAR, pos: conv i64 pos.* });
+                }
+                cur = mk_leaf(write nodes.*, K_TRUE, 0, 0);
+                have_value = true;
+            } else if b == 102u8 {
+                if !match_lit(s, pos, "false") {
+                    return PRes::Err(PErr { code: E_CHAR, pos: conv i64 pos.* });
+                }
+                cur = mk_leaf(write nodes.*, K_FALSE, 0, 0);
+                have_value = true;
+            } else if b == 110u8 {
+                if !match_lit(s, pos, "null") {
+                    return PRes::Err(PErr { code: E_CHAR, pos: conv i64 pos.* });
+                }
+                cur = mk_leaf(write nodes.*, K_NULL, 0, 0);
+                have_value = true;
+            } else if b == 45u8 || is_digit(b) {
+                match parse_number(s, pos, write nodes.*, write pool.*) {
+                    PRes::Err(e) => {
+                        return PRes::Err(e);
+                    }
+                    PRes::Ok(idx) => {
+                        cur = idx;
+                    }
+                }
+                have_value = true;
+            } else {
+                return PRes::Err(PErr { code: E_CHAR, pos: conv i64 pos.* });
+            }
+        } else {
+            // `cur` just completed. Attach it to the enclosing container (or
+            // finish), then look for a separator or closer.
+            if depth == 0 {
+                return PRes::Ok(cur);
+            }
+            let mut f: PFrame = stk[conv usize (depth - 1)];
+            if f.kind == K_OBJ {
+                set_key(write nodes.*, cur, f.ka, f.kb);
+            }
+            if f.first < 0 {
+                f.first = cur;
+            } else {
+                set_next(write nodes.*, f.last, cur);
+            }
+            f.last = cur;
+            f.count = f.count + 1;
+            stk[conv usize (depth - 1)] = f;
+            skip_ws(s, pos);
+            if pos.* >= n {
+                return PRes::Err(PErr { code: E_EOF, pos: conv i64 n });
+            }
+            let b: u8 = s[pos.*];
+            if f.kind == K_ARR && b == 93u8 {
+                pos.* = pos.* + 1usize;
+                set_children(write nodes.*, f.node, f.first, f.count);
+                depth = depth - 1;
+                cur = f.node;
+            } else if f.kind == K_OBJ && b == 125u8 {
+                pos.* = pos.* + 1usize;
+                set_children(write nodes.*, f.node, f.first, f.count);
+                depth = depth - 1;
+                cur = f.node;
+            } else if b == 44u8 {
+                pos.* = pos.* + 1usize;
+                if f.kind == K_OBJ {
+                    match parse_key_colon(s, pos, write pool.*) {
+                        SRes::Err(e) => {
+                            return PRes::Err(e);
+                        }
+                        SRes::Ok(sp) => {
+                            f.ka = sp.start;
+                            f.kb = sp.len;
+                            stk[conv usize (depth - 1)] = f;
+                        }
+                    }
+                }
+                have_value = false;
+            } else {
+                return PRes::Err(PErr { code: E_CHAR, pos: conv i64 pos.* });
+            }
+        }
+    }
+}
+
+// Parse a whole document from raw bytes.
+fn json_parse(s: [u8], nodes: write Vec[Node], pool: write Vec[u8]) alloc -> PRes {
+    let mut pos: usize = 0usize;
+    match parse_value(s, write pos, write nodes.*, write pool.*) {
+        PRes::Err(e) => {
+            return PRes::Err(e);
+        }
+        PRes::Ok(idx) => {
+            skip_ws(s, write pos);
+            if pos < len(s) {
+                return PRes::Err(PErr { code: E_TRAIL, pos: conv i64 pos });
+            }
+            return PRes::Ok(idx);
+        }
+    }
+}
+
+// Parse a whole document from a string view.
+fn json_parse_str(s: str, nodes: write Vec[Node], pool: write Vec[u8]) alloc -> PRes {
+    return json_parse(as_bytes(s), write nodes.*, write pool.*);
+}
+
+// ---- printing ---------------------------------------------------------------
+
+fn out_lit(dst: write Vec[u8], t: str) alloc -> unit {
+    let tb: [u8] = as_bytes(t);
+    let m: usize = len(tb);
+    let mut i: usize = 0usize;
+    while i < m {
+        push(write dst.*, tb[i]);
+        i = i + 1usize;
+    }
+}
+
+// Two lowercase hex digits of v (0..255).
+fn out_hex2(dst: write Vec[u8], v: i64) alloc -> unit {
+    let hi: i64 = v / 16;
+    let lo: i64 = v % 16;
+    if hi < 10 {
+        push(write dst.*, conv u8 (48 + hi));
+    } else {
+        push(write dst.*, conv u8 (87 + hi));
+    }
+    if lo < 10 {
+        push(write dst.*, conv u8 (48 + lo));
+    } else {
+        push(write dst.*, conv u8 (87 + lo));
+    }
+}
+
+// Canonical decimal. The magnitude is kept NEGATIVE (digits via -(m % 10)) so
+// i64::MIN prints without a faulting negation; digits collect in a small buffer
+// and flush in reverse — no recursion.
+fn emit_int(dst: write Vec[u8], v: i64) alloc -> unit {
+    if v < 0 {
+        push(write dst.*, 45u8);
+    }
+    let mut m: i64 = v;
+    if v >= 0 {
+        m = 0 - v;
+    }
+    let mut buf: [32]u8 = [0u8; 32];
+    let mut k: i64 = 0;
+    loop {
+        buf[conv usize k] = conv u8 (48 - m % 10);
+        k = k + 1;
+        m = m / 10;
+        if m == 0 {
+            break;
+        }
+    }
+    while k > 0 {
+        k = k - 1;
+        push(write dst.*, buf[conv usize k]);
+    }
+}
+
+fn emit_pool(dst: write Vec[u8], pool: read Vec[u8], start: i64, ln: i64) alloc -> unit {
+    let mut i: i64 = 0;
+    while i < ln {
+        push(write dst.*, get(read pool, conv usize (start + i)).*);
+        i = i + 1;
+    }
+}
+
+fn emit_jstring(dst: write Vec[u8], pool: read Vec[u8], start: i64, ln: i64) alloc -> unit {
+    push(write dst.*, 34u8);
+    let mut i: i64 = 0;
+    while i < ln {
+        let b: u8 = get(read pool, conv usize (start + i)).*;
+        if b == 34u8 {
+            out_lit(write dst.*, "\\\"");
+        } else if b == 92u8 {
+            out_lit(write dst.*, "\\\\");
+        } else if b == 8u8 {
+            out_lit(write dst.*, "\\b");
+        } else if b == 9u8 {
+            out_lit(write dst.*, "\\t");
+        } else if b == 10u8 {
+            out_lit(write dst.*, "\\n");
+        } else if b == 12u8 {
+            out_lit(write dst.*, "\\f");
+        } else if b == 13u8 {
+            out_lit(write dst.*, "\\r");
+        } else if b < 32u8 {
+            out_lit(write dst.*, "\\u00");
+            out_hex2(write dst.*, conv i64 b);
+        } else {
+            push(write dst.*, b);
+        }
+        i = i + 1;
+    }
+    push(write dst.*, 34u8);
+}
+
+fn emit_indent(dst: write Vec[u8], ind: i64) alloc -> unit {
+    let mut i: i64 = 0;
+    while i < ind {
+        out_lit(write dst.*, "  ");
+        i = i + 1;
+    }
+}
+
+// A container being printed: its arena node and the child currently rendered.
+copy struct WFrame { node: i64, child: i64 }
+
+// Print one value, iteratively (explicit [MAX_DEPTH] frame stack, like the
+// parser). `pretty` selects the indented form; compact emits no whitespace.
+fn print_value(nodes: read Vec[Node], pool: read Vec[u8], root: i64, dst: write Vec[u8], pretty: bool) alloc -> unit {
+    let mut stk: [24]WFrame = [WFrame { node: 0 - 1, child: 0 - 1 }; 24];
+    let mut depth: i64 = 0;
+    let mut item: i64 = root;
+    loop {
+        // Render `item`: leaves (incl. empty containers) emit bytes; non-empty
+        // containers open a frame and descend to their first child.
+        let nd: Node = get(read nodes, conv usize item).*;
+        let mut opened: bool = false;
+        if nd.kind == K_NULL {
+            out_lit(write dst.*, "null");
+        } else if nd.kind == K_FALSE {
+            out_lit(write dst.*, "false");
+        } else if nd.kind == K_TRUE {
+            out_lit(write dst.*, "true");
+        } else if nd.kind == K_INT {
+            emit_int(write dst.*, nd.a);
+        } else if nd.kind == K_LEX {
+            emit_pool(write dst.*, pool, nd.a, nd.b);
+        } else if nd.kind == K_STR {
+            emit_jstring(write dst.*, pool, nd.a, nd.b);
+        } else if nd.b == 0 {
+            if nd.kind == K_ARR {
+                out_lit(write dst.*, "[]");
+            } else {
+                out_lit(write dst.*, "{}");
+            }
+        } else {
+            if nd.kind == K_ARR {
+                push(write dst.*, 91u8);
+            } else {
+                push(write dst.*, 123u8);
+            }
+            stk[conv usize depth] = WFrame { node: item, child: nd.a };
+            depth = depth + 1;
+            if pretty {
+                push(write dst.*, 10u8);
+                emit_indent(write dst.*, depth);
+            }
+            if nd.kind == K_OBJ {
+                let cn: Node = get(read nodes, conv usize nd.a).*;
+                emit_jstring(write dst.*, pool, cn.ka, cn.kb);
+                push(write dst.*, 58u8);
+                if pretty {
+                    push(write dst.*, 32u8);
+                }
+            }
+            item = nd.a;
+            opened = true;
+        }
+        if !opened {
+            // `item` completed: move to a sibling, or close frames upward.
+            loop {
+                if depth == 0 {
+                    return;
+                }
+                let mut f: WFrame = stk[conv usize (depth - 1)];
+                let cn: Node = get(read nodes, conv usize f.child).*;
+                let nx: i64 = cn.next;
+                if nx >= 0 {
+                    f.child = nx;
+                    stk[conv usize (depth - 1)] = f;
+                    push(write dst.*, 44u8);
+                    if pretty {
+                        push(write dst.*, 10u8);
+                        emit_indent(write dst.*, depth);
+                    }
+                    let pn: Node = get(read nodes, conv usize f.node).*;
+                    if pn.kind == K_OBJ {
+                        let kn: Node = get(read nodes, conv usize nx).*;
+                        emit_jstring(write dst.*, pool, kn.ka, kn.kb);
+                        push(write dst.*, 58u8);
+                        if pretty {
+                            push(write dst.*, 32u8);
+                        }
+                    }
+                    item = nx;
+                    break;
+                }
+                if pretty {
+                    push(write dst.*, 10u8);
+                    emit_indent(write dst.*, depth - 1);
+                }
+                let pn: Node = get(read nodes, conv usize f.node).*;
+                if pn.kind == K_ARR {
+                    push(write dst.*, 93u8);
+                } else {
+                    push(write dst.*, 125u8);
+                }
+                depth = depth - 1;
+                // The closed container is itself a completed value; keep going.
+            }
+        }
+    }
+}
+
+// Compact printer: no whitespace at all.
+fn to_json(nodes: read Vec[Node], pool: read Vec[u8], root: i64, dst: write Vec[u8]) alloc -> unit {
+    print_value(nodes, pool, root, write dst.*, false);
+}
+
+// Pretty printer: 2-space indent, ": " after keys, empty containers inline.
+fn to_json_pretty(nodes: read Vec[Node], pool: read Vec[u8], root: i64, dst: write Vec[u8]) alloc -> unit {
+    print_value(nodes, pool, root, write dst.*, true);
+}
+
+// ---- structural equality ----------------------------------------------------
+
+fn bytes_eq_pool(pool: read Vec[u8], s1: i64, l1: i64, s2: i64, l2: i64) -> bool {
+    if l1 != l2 {
+        return false;
+    }
+    let mut i: i64 = 0;
+    while i < l1 {
+        if get(read pool, conv usize (s1 + i)).* != get(read pool, conv usize (s2 + i)).* {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+copy struct EqPair { x: i64, y: i64 }
+
+// Deep equality of two trees in the same arena, over an explicit pair worklist
+// (capacity 128 pairs — ample for the embedded documents; overflow answers
+// `false`, loudly failing the round-trip check rather than faulting). Object
+// member ORDER matters.
+fn json_eq(nodes: read Vec[Node], pool: read Vec[u8], x: i64, y: i64) -> bool {
+    let mut stk: [128]EqPair = [EqPair { x: 0 - 1, y: 0 - 1 }; 128];
+    let mut top: i64 = 0;
+    stk[0usize] = EqPair { x: x, y: y };
+    top = 1;
+    while top > 0 {
+        top = top - 1;
+        let p: EqPair = stk[conv usize top];
+        let a: Node = get(read nodes, conv usize p.x).*;
+        let b: Node = get(read nodes, conv usize p.y).*;
+        if a.kind != b.kind {
+            return false;
+        }
+        if a.kind == K_INT {
+            if a.a != b.a {
+                return false;
+            }
+        } else if a.kind == K_LEX || a.kind == K_STR {
+            if !bytes_eq_pool(pool, a.a, a.b, b.a, b.b) {
+                return false;
+            }
+        } else if a.kind == K_ARR || a.kind == K_OBJ {
+            if a.b != b.b {
+                return false;
+            }
+            let mut ca: i64 = a.a;
+            let mut cb: i64 = b.a;
+            while ca >= 0 && cb >= 0 {
+                let na: Node = get(read nodes, conv usize ca).*;
+                let nb: Node = get(read nodes, conv usize cb).*;
+                if a.kind == K_OBJ {
+                    if !bytes_eq_pool(pool, na.ka, na.kb, nb.ka, nb.kb) {
+                        return false;
+                    }
+                }
+                if top >= 128 {
+                    return false;
+                }
+                stk[conv usize top] = EqPair { x: ca, y: cb };
+                top = top + 1;
+                ca = na.next;
+                cb = nb.next;
+            }
+            if ca >= 0 || cb >= 0 {
+                return false;
+            }
+        }
+        // null/true/false: equal kinds suffice.
+    }
+    return true;
+}
+
+// ---- test harness -----------------------------------------------------------
+
+fn chk(cond: bool) -> i64 {
+    if cond {
+        return 1;
+    }
+    return 0;
+}
+
+// Fold a printed buffer into the running checksum (order-sensitive).
+fn mix(h: write i64, v: read Vec[u8]) -> unit {
+    let m: usize = len(read v);
+    let mut i: usize = 0usize;
+    while i < m {
+        let b: i64 = conv i64 get(read v, i).*;
+        wrapping {
+            h.* = h.* * 31 + b;
+        }
+        i = i + 1usize;
+    }
+}
+
+fn vec_eq_lit(v: read Vec[u8], e: str) -> bool {
+    let eb: [u8] = as_bytes(e);
+    let m: usize = len(eb);
+    if len(read v) != m {
+        return false;
+    }
+    let mut i: usize = 0usize;
+    while i < m {
+        if get(read v, i).* != eb[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+// Re-parse a printed buffer (bridged through a fixed stack array — there is no
+// Vec[u8] -> [u8] view builtin) and compare the new tree against `root`.
+fn reparse_matches(printed: read Vec[u8], root: i64, nodes: write Vec[Node], pool: write Vec[u8]) alloc -> bool {
+    let m: usize = len(read printed);
+    if m > 2048usize {
+        return false;
+    }
+    let mut buf: [2048]u8 = [0u8; 2048];
+    let mut i: usize = 0usize;
+    while i < m {
+        buf[i] = get(read printed, i).*;
+        i = i + 1usize;
+    }
+    let view: [u8] = subslice(slice_of(buf), 0usize, m);
+    match json_parse(view, write nodes.*, write pool.*) {
+        PRes::Err(e) => {
+            return false;
+        }
+        PRes::Ok(r2) => {
+            return json_eq(read nodes.*, read pool.*, root, r2);
+        }
+    }
+}
+
+// A valid document: parse must succeed, and both printers must round-trip
+// (parse(print(v)) == v). Three checks, three traces; both outputs feed the
+// checksum.
+fn check_doc(al: read Alloc, s: str, nodes: write Vec[Node], pool: write Vec[u8], h: write i64) alloc -> i64 {
+    match json_parse_str(s, write nodes.*, write pool.*) {
+        PRes::Err(e) => {
+            trace(0);
+            trace(0);
+            trace(0);
+            return 0;
+        }
+        PRes::Ok(root) => {
+            trace(1);
+            let mut c1: Vec[u8] = vec_new(al);
+            to_json(read nodes.*, read pool.*, root, write c1);
+            let r1: i64 = chk(reparse_matches(read c1, root, write nodes.*, write pool.*));
+            trace(r1);
+            let mut p1: Vec[u8] = vec_new(al);
+            to_json_pretty(read nodes.*, read pool.*, root, write p1);
+            let r2: i64 = chk(reparse_matches(read p1, root, write nodes.*, write pool.*));
+            trace(r2);
+            mix(h, read c1);
+            mix(h, read p1);
+            return 1 + r1 + r2;
+        }
+    }
+}
+
+// Pin the exact printed bytes of a document. One check, one trace.
+fn check_print(al: read Alloc, s: str, pretty: bool, expect: str, nodes: write Vec[Node], pool: write Vec[u8], h: write i64) alloc -> i64 {
+    match json_parse_str(s, write nodes.*, write pool.*) {
+        PRes::Err(e) => {
+            trace(0);
+            return 0;
+        }
+        PRes::Ok(root) => {
+            let mut dst: Vec[u8] = vec_new(al);
+            if pretty {
+                to_json_pretty(read nodes.*, read pool.*, root, write dst);
+            } else {
+                to_json(read nodes.*, read pool.*, root, write dst);
+            }
+            mix(h, read dst);
+            let c: i64 = chk(vec_eq_lit(read dst, expect));
+            trace(c);
+            return c;
+        }
+    }
+}
+
+// A malformed document: parse must return exactly (code, at). One check.
+fn expect_err(s: str, code: i64, at: i64, nodes: write Vec[Node], pool: write Vec[u8]) alloc -> i64 {
+    match json_parse_str(s, write nodes.*, write pool.*) {
+        PRes::Ok(root) => {
+            trace(0);
+            return 0;
+        }
+        PRes::Err(e) => {
+            let c: i64 = chk(e.code == code && e.pos == at);
+            trace(c);
+            return c;
+        }
+    }
+}
+
+fn main() alloc -> i64 {
+    let mut st: FreeList = with_window(16777216usize, 4194304usize);
+    let al: Alloc = mk_alloc(write st);
+    let mut nodes: Vec[Node] = vec_new(read al);
+    let mut pool: Vec[u8] = vec_new(read al);
+    let mut h: i64 = 17;
+    let mut acc: i64 = 0;
+
+    // ---- valid documents: parse + compact/pretty round-trip (3 checks each) --
+    let doc1: str = "{\"name\":\"Candor\",\"version\":1,\"tags\":[\"lang\",\"systems\"],\"strict\":true,\"parent\":null,\"scores\":[1,-2,42]}";
+    acc = acc + check_doc(read al, doc1, write nodes, write pool, write h);
+    let doc2: str = "{\"esc\":\"a\\\"b\\\\c\\/d\\b\\f\\n\\r\\t\",\"uni\":\"\\u0041\\u00e9\\u20ac\\ud83d\\ude00\",\"empty\":\"\"}";
+    acc = acc + check_doc(read al, doc2, write nodes, write pool, write h);
+    let doc3: str = "[0,-0,123,-123,9223372036854775807,-9223372036854775808,9223372036854775808,1.5,-0.25,1e3,1E+3,0.1e-2,3.141592653589793]";
+    acc = acc + check_doc(read al, doc3, write nodes, write pool, write h);
+    let doc4: str = "{\"a\":{\"b\":{\"c\":[[[{\"d\":[null]}]]]}}}";
+    acc = acc + check_doc(read al, doc4, write nodes, write pool, write h);
+    let doc5: str = "\t\n { \"k\" :\n [ 1 ,\t2 ] }\n";
+    acc = acc + check_doc(read al, doc5, write nodes, write pool, write h);
+    acc = acc + check_doc(read al, "true", write nodes, write pool, write h);
+    acc = acc + check_doc(read al, "null", write nodes, write pool, write h);
+    acc = acc + check_doc(read al, "42", write nodes, write pool, write h);
+    acc = acc + check_doc(read al, "\"hi\"", write nodes, write pool, write h);
+    acc = acc + check_doc(read al, "-1.5e-3", write nodes, write pool, write h);
+    acc = acc + check_doc(read al, "{\"a\":[],\"o\":{},\"s\":\"\"}", write nodes, write pool, write h);
+
+    // A document with \r whitespace (13 is not a Candor source escape, so the
+    // bytes are assembled at runtime): "[1<CR>,<SP>2<CR>]".
+    let mut crdoc: String = string_new(read al);
+    push(write crdoc, 91);
+    push(write crdoc, 49);
+    push(write crdoc, 13);
+    push(write crdoc, 44);
+    push(write crdoc, 32);
+    push(write crdoc, 50);
+    push(write crdoc, 13);
+    push(write crdoc, 93);
+    acc = acc + check_doc(read al, as_str(read crdoc), write nodes, write pool, write h);
+
+    // ---- pinned printer output (1 check each) --------------------------------
+    // Compact of an already-compact document is byte-identical to the input.
+    acc = acc + check_print(read al, doc1, false, doc1, write nodes, write pool, write h);
+    let doc1_pretty: str = "{\n  \"name\": \"Candor\",\n  \"version\": 1,\n  \"tags\": [\n    \"lang\",\n    \"systems\"\n  ],\n  \"strict\": true,\n  \"parent\": null,\n  \"scores\": [\n    1,\n    -2,\n    42\n  ]\n}";
+    acc = acc + check_print(read al, doc1, true, doc1_pretty, write nodes, write pool, write h);
+    // Canonical escapes: \/ becomes /, A becomes A, and the non-ASCII
+    // scalars come back as raw UTF-8 (é, €, and the surrogate-pair emoji).
+    let doc2_c: str = "{\"esc\":\"a\\\"b\\\\c/d\\b\\f\\n\\r\\t\",\"uni\":\"Aé€😀\",\"empty\":\"\"}";
+    acc = acc + check_print(read al, doc2, false, doc2_c, write nodes, write pool, write h);
+    // Numbers: -0 canonicalizes to 0; i64-range integers print canonically;
+    // the 2^63 integer and every fraction/exponent keep their raw lexeme.
+    let doc3_c: str = "[0,0,123,-123,9223372036854775807,-9223372036854775808,9223372036854775808,1.5,-0.25,1e3,1E+3,0.1e-2,3.141592653589793]";
+    acc = acc + check_print(read al, doc3, false, doc3_c, write nodes, write pool, write h);
+    // Pretty keeps empty containers inline.
+    acc = acc + check_print(read al, "{\"a\":[],\"o\":{}}", true, "{\n  \"a\": [],\n  \"o\": {}\n}", write nodes, write pool, write h);
+    // Control characters print as lowercase \u00xx.
+    acc = acc + check_print(read al, "\"\\u0000\\u001F\"", false, "\"\\u0000\\u001f\"", write nodes, write pool, write h);
+    acc = acc + check_print(read al, "[]", true, "[]", write nodes, write pool, write h);
+
+    // ---- malformed documents: exact (code, pos) error values (1 check each) --
+    acc = acc + expect_err("", E_EOF, 0, write nodes, write pool);
+    acc = acc + expect_err("{", E_EOF, 1, write nodes, write pool);
+    acc = acc + expect_err("[1,2", E_EOF, 4, write nodes, write pool);
+    acc = acc + expect_err("{\"a\":1,}", E_CHAR, 7, write nodes, write pool);
+    acc = acc + expect_err("[1 2]", E_CHAR, 3, write nodes, write pool);
+    acc = acc + expect_err("{\"a\" 1}", E_CHAR, 5, write nodes, write pool);
+    acc = acc + expect_err("tru", E_CHAR, 0, write nodes, write pool);
+    acc = acc + expect_err("nulx", E_CHAR, 0, write nodes, write pool);
+    acc = acc + expect_err("falsy", E_CHAR, 0, write nodes, write pool);
+    acc = acc + expect_err("\"abc", E_EOF, 4, write nodes, write pool);
+    acc = acc + expect_err("\"a\\x\"", E_STR, 2, write nodes, write pool);
+    acc = acc + expect_err("\"a\\u12g4\"", E_STR, 2, write nodes, write pool);
+    acc = acc + expect_err("\"a\\ud800z\"", E_STR, 2, write nodes, write pool);
+    acc = acc + expect_err("\"a\\udc00\"", E_STR, 2, write nodes, write pool);
+    acc = acc + expect_err("01", E_NUM, 0, write nodes, write pool);
+    acc = acc + expect_err("1.", E_NUM, 0, write nodes, write pool);
+    acc = acc + expect_err("1e", E_NUM, 0, write nodes, write pool);
+    acc = acc + expect_err("- 1", E_NUM, 0, write nodes, write pool);
+    acc = acc + expect_err("+1", E_CHAR, 0, write nodes, write pool);
+    acc = acc + expect_err(".5", E_CHAR, 0, write nodes, write pool);
+    acc = acc + expect_err("[1]x", E_TRAIL, 3, write nodes, write pool);
+    acc = acc + expect_err("{\"a\":}", E_CHAR, 5, write nodes, write pool);
+    acc = acc + expect_err("[,", E_CHAR, 1, write nodes, write pool);
+    // A raw control byte inside a string (assembled at runtime: '"' BEL '"').
+    let mut ctldoc: String = string_new(read al);
+    push(write ctldoc, 34);
+    push(write ctldoc, 7);
+    push(write ctldoc, 34);
+    acc = acc + expect_err(as_str(read ctldoc), E_STR, 1, write nodes, write pool);
+    // 30 openers: the depth cap (24) fires where the 25th level would open.
+    acc = acc + expect_err("[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[", E_DEEP, 24, write nodes, write pool);
+
+    // The checksum over every printed byte, compared across all engines.
+    trace(h);
+    return acc;
+}
