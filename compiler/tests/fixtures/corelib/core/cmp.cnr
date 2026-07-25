@@ -108,13 +108,60 @@ pub fn max[T: Ord + copy](v: read Vec[T]) -> Opt[T] {
     return Opt::Some(best);
 }
 
-// Both sorts are in-place bottom-up heapsorts: O(n log n) worst case with no
+// Both sorts are in-place ITERATIVE introsorts: quicksort partitioning with a
+// median-of-three pivot, straight insertion below a 24-element cutoff (16/20/24
+// measured on LLVM -O2 native; 24 was fastest at both 1,000 and 100,000
+// elements), and a bottom-up-heapsort fallback once a range has spent its depth
+// budget of 2*floor(log2 n) splits — so the worst case stays O(n log n) with no
 // scratch buffer. The signatures carry no allocator handle and a `Vec` does not
-// expose its own, so the algorithm must work entirely inside the given `Vec`.
+// expose its own, so the algorithms work entirely inside the given `Vec` plus
+// fixed-size locals. There is NO recursion anywhere: the pending ranges live in
+// a fixed 64-entry stack in the driver (bound justified there), because engine
+// stack is the scarcest resource a corelib routine can spend.
 //
+// The `sort_ord`/`sort` pair stays structurally parallel helper-for-helper:
+// `*_ord` branches on `Ord::cmp` matches exactly where `*_by` calls `less`.
+
+// Straight insertion sort of `v[lo, hi)`; the sub-cutoff finisher. Caller
+// guarantees `lo <= hi <= len(v)`, so every index below is in bounds: `k` and
+// `j` stay in `[lo, hi)`, and `j - 1` is only formed while `j > lo >= 0`.
+fn insertion_ord[T: Ord + copy](v: write Vec[T], lo: usize, hi: usize) alloc -> unit {
+    if hi - lo < 2usize {
+        return;
+    }
+    // `lo + 1 <= hi <= len(v)`: no overflow, and the loop entry test is sound.
+    let mut k: usize = lo + 1usize;
+    while k < hi {
+        let x: T = get(read v.*, k).*;
+        // Shift the run `v[j, k)` right while its last element is above `x`;
+        // equal elements stop the scan, so shifts never pass an equal key.
+        let mut j: usize = k;
+        while j > lo {
+            let w: T = get(read v.*, j - 1usize).*;
+            match x.cmp(w) {
+                Ordering::Less => {
+                    set(write v.*, j, w);
+                    j = j - 1usize;
+                },
+                Ordering::Equal => {
+                    break;
+                },
+                Ordering::Greater => {
+                    break;
+                },
+            }
+        }
+        set(write v.*, j, x);
+        // `k < hi <= len(v)`: `k + 1` cannot overflow.
+        k = k + 1usize;
+    }
+}
+
 // `sift_down_ord` restores the max-heap property (under `Ord::cmp`) for the
-// subtree rooted at `root`; `end` is one past the last heap slot.
-fn sift_down_ord[T: Ord + copy](v: write Vec[T], root: usize, end: usize) alloc -> unit {
+// subtree rooted at `root`; `end` is one past the last heap slot. Heap indices
+// are RELATIVE: slot `i` lives at `v[base + i]`. Caller guarantees
+// `base + end <= len(v)`, so every `base + idx` with `idx < end` is in bounds.
+fn sift_down_ord[T: Ord + copy](v: write Vec[T], base: usize, root: usize, end: usize) alloc -> unit {
     let mut i: usize = root;
     // `i` has a left child iff `i < end / 2`; the guard also keeps the child
     // index math (at most `end`) inside checked-arithmetic bounds.
@@ -122,8 +169,8 @@ fn sift_down_ord[T: Ord + copy](v: write Vec[T], root: usize, end: usize) alloc 
         let left: usize = 2usize * i + 1usize;
         let mut child: usize = left;
         if left + 1usize < end {
-            let l: T = get(read v.*, left).*;
-            let r: T = get(read v.*, left + 1usize).*;
+            let l: T = get(read v.*, base + left).*;
+            let r: T = get(read v.*, base + left + 1usize).*;
             match l.cmp(r) {
                 Ordering::Less => {
                     child = left + 1usize;
@@ -132,12 +179,12 @@ fn sift_down_ord[T: Ord + copy](v: write Vec[T], root: usize, end: usize) alloc 
                 Ordering::Greater => {},
             }
         }
-        let cur: T = get(read v.*, i).*;
-        let big: T = get(read v.*, child).*;
+        let cur: T = get(read v.*, base + i).*;
+        let big: T = get(read v.*, base + child).*;
         match cur.cmp(big) {
             Ordering::Less => {
-                set(write v.*, i, big);
-                set(write v.*, child, cur);
+                set(write v.*, base + i, big);
+                set(write v.*, base + child, cur);
                 i = child;
             },
             Ordering::Equal => {
@@ -150,50 +197,258 @@ fn sift_down_ord[T: Ord + copy](v: write Vec[T], root: usize, end: usize) alloc 
     }
 }
 
+// The depth-budget fallback: bottom-up heapsort of `v[lo, hi)` — the whole-Vec
+// algorithm this file used before introsort, now offset by `lo`. Caller
+// guarantees `lo <= hi <= len(v)`.
+fn heapsort_range_ord[T: Ord + copy](v: write Vec[T], lo: usize, hi: usize) alloc -> unit {
+    let m: usize = hi - lo;
+    if m < 2usize {
+        return;
+    }
+    // Heapify: sift every internal node down, last parent first.
+    let mut start: usize = m / 2usize;
+    while start > 0usize {
+        start = start - 1usize;
+        sift_down_ord(write v.*, lo, start, m);
+    }
+    // Repeatedly move the heap max into the growing sorted suffix.
+    // `end < m`, so `lo + end < hi <= len(v)`.
+    let mut end: usize = m;
+    while end > 1usize {
+        end = end - 1usize;
+        let top: T = get(read v.*, lo).*;
+        let last: T = get(read v.*, lo + end).*;
+        set(write v.*, lo, last);
+        set(write v.*, lo + end, top);
+        sift_down_ord(write v.*, lo, 0usize, end);
+    }
+}
+
+// Median-of-three partition of `v[lo, hi)`. Caller guarantees
+// `hi <= len(v)` and `hi - lo` above the insertion cutoff (>= 25); the index
+// math below only needs `hi - lo >= 3`. Steps: order
+// `v[lo] <= v[mid] <= v[hi-1]` (three compare-swaps), park the median pivot at
+// `hi-2`, then run Hoare-style inward scans that STOP on equal elements — that
+// symmetric stopping is what keeps all-equal inputs splitting near the middle
+// instead of degenerating. Returns the pivot's final index `p` with
+// `v[lo, p) <= pivot <= v[p+1, hi)` and `lo < p < hi - 1`, so both subranges
+// are nonempty and strictly smaller: guaranteed progress.
+fn partition_ord[T: Ord + copy](v: write Vec[T], lo: usize, hi: usize) alloc -> usize {
+    // `hi - lo >= 3` makes `lo < mid < hi - 1`: three in-bounds slots.
+    let mid: usize = lo + (hi - lo) / 2usize;
+    let a0: T = get(read v.*, lo).*;
+    let a1: T = get(read v.*, mid).*;
+    match a1.cmp(a0) {
+        Ordering::Less => {
+            set(write v.*, lo, a1);
+            set(write v.*, mid, a0);
+        },
+        Ordering::Equal => {},
+        Ordering::Greater => {},
+    }
+    let b1: T = get(read v.*, mid).*;
+    let b2: T = get(read v.*, hi - 1usize).*;
+    match b2.cmp(b1) {
+        Ordering::Less => {
+            set(write v.*, mid, b2);
+            set(write v.*, hi - 1usize, b1);
+            let c0: T = get(read v.*, lo).*;
+            let c1: T = get(read v.*, mid).*;
+            match c1.cmp(c0) {
+                Ordering::Less => {
+                    set(write v.*, lo, c1);
+                    set(write v.*, mid, c0);
+                },
+                Ordering::Equal => {},
+                Ordering::Greater => {},
+            }
+        },
+        Ordering::Equal => {},
+        Ordering::Greater => {},
+    }
+    // Park the median at `hi - 2` (a self-swap when `mid == hi - 2`). From here
+    // `v[lo] <= p` and `v[hi-1] >= p` are sentinels the inner swaps never touch
+    // (swaps only happen at indices in `(lo, hi-2)`).
+    let p: T = get(read v.*, mid).*;
+    let park: T = get(read v.*, hi - 2usize).*;
+    set(write v.*, mid, park);
+    set(write v.*, hi - 2usize, p);
+    let mut i: usize = lo;
+    let mut j: usize = hi - 2usize;
+    loop {
+        // Pre-step then scan, Sedgewick style. `i + 1` stays `<= hi - 2`: the
+        // first pre-step lands on `lo + 1 <= hi - 2`, and later iterations only
+        // run after a swap, which requires `i < j <= hi - 3`. The scan's own
+        // guard caps `i` at `hi - 2` structurally (no reliance on comparator
+        // sanity for bounds; an honest `cmp` stops there anyway, at the pivot).
+        i = i + 1usize;
+        loop {
+            if i >= hi - 2usize {
+                break;
+            }
+            let xi: T = get(read v.*, i).*;
+            match xi.cmp(p) {
+                Ordering::Less => {
+                    i = i + 1usize;
+                },
+                Ordering::Equal => {
+                    break;
+                },
+                Ordering::Greater => {
+                    break;
+                },
+            }
+        }
+        // Mirror image: `j - 1` stays `>= lo` — the first pre-step lands on
+        // `hi - 3 >= lo`, later ones only run after a swap (`j > i >= lo + 1`),
+        // and the guard floors `j` at `lo` structurally.
+        j = j - 1usize;
+        loop {
+            if j <= lo {
+                break;
+            }
+            let xj: T = get(read v.*, j).*;
+            match p.cmp(xj) {
+                Ordering::Less => {
+                    j = j - 1usize;
+                },
+                Ordering::Equal => {
+                    break;
+                },
+                Ordering::Greater => {
+                    break;
+                },
+            }
+        }
+        if i >= j {
+            break;
+        }
+        // `lo < i < j < hi - 2`: swap the out-of-place pair and continue.
+        let xi: T = get(read v.*, i).*;
+        let xj: T = get(read v.*, j).*;
+        set(write v.*, i, xj);
+        set(write v.*, j, xi);
+    }
+    // The scans crossed at `i <= hi - 2` with `v[i] >= p` (its scan stopped on
+    // it, or `i` sits on the parked pivot itself): swap the pivot into place.
+    let piv: T = get(read v.*, hi - 2usize).*;
+    let xi: T = get(read v.*, i).*;
+    set(write v.*, hi - 2usize, xi);
+    set(write v.*, i, piv);
+    return i;
+}
+
 pub fn sort_ord[T: Ord + copy](v: write Vec[T]) alloc -> unit {
     let n: usize = len(read v.*);
     if n < 2usize {
         return;
     }
-    // Heapify: sift every internal node down, last parent first.
-    let mut start: usize = n / 2usize;
-    while start > 0usize {
-        start = start - 1usize;
-        sift_down_ord(write v.*, start, n);
+    // Depth budget: 2 * floor(log2 n) splits before a range falls back to
+    // heapsort. The halving loop runs at most 63 times (`n` fits in 64 bits),
+    // so `budget <= 126`: all budget arithmetic is far from overflow.
+    let mut budget: usize = 0usize;
+    let mut m: usize = n;
+    while m > 1usize {
+        m = m / 2usize;
+        budget = budget + 1usize;
     }
-    // Repeatedly move the heap max into the growing sorted suffix.
-    let mut end: usize = n;
-    while end > 1usize {
-        end = end - 1usize;
-        let top: T = get(read v.*, 0usize).*;
-        let last: T = get(read v.*, end).*;
-        set(write v.*, 0usize, last);
-        set(write v.*, end, top);
-        sift_down_ord(write v.*, 0usize, end);
+    budget = 2usize * budget;
+    // The explicit range stack (no recursion). 64 entries suffice for ANY
+    // `usize` length: a split pushes only the LARGER half and iterates the
+    // smaller (size <= m/2), so an entry pushed while a previous entry is live
+    // comes from a split at most HALF the previous entry's split size — live
+    // split sizes halve from n downward, and a split needs > 24 elements, so
+    // at most floor(log2(2^64 / 25)) + 1 = 60 entries can ever be live.
+    let mut st_lo: [64]usize = [0usize; 64];
+    let mut st_hi: [64]usize = [0usize; 64];
+    let mut st_bud: [64]usize = [0usize; 64];
+    st_lo[0usize] = 0usize;
+    st_hi[0usize] = n;
+    st_bud[0usize] = budget;
+    let mut sp: usize = 1usize;
+    while sp > 0usize {
+        // `0 < sp <= 60`: the pops and the bounded pushes below keep `sp`
+        // inside the array.
+        sp = sp - 1usize;
+        let mut lo: usize = st_lo[sp];
+        let mut hi: usize = st_hi[sp];
+        let mut bud: usize = st_bud[sp];
+        // Every range on the stack satisfies `lo <= hi <= n`, so `hi - lo` is
+        // checked-safe; `partition_ord`'s postcondition keeps it that way.
+        loop {
+            if hi - lo <= 24usize {
+                insertion_ord(write v.*, lo, hi);
+                break;
+            }
+            if bud == 0usize {
+                heapsort_range_ord(write v.*, lo, hi);
+                break;
+            }
+            bud = bud - 1usize;
+            let piv: usize = partition_ord(write v.*, lo, hi);
+            // `lo < piv < hi - 1`: `piv - lo` and `hi - (piv + 1)` cannot
+            // underflow, and both subranges are nonempty and strictly smaller.
+            if piv - lo < hi - (piv + 1usize) {
+                st_lo[sp] = piv + 1usize;
+                st_hi[sp] = hi;
+                st_bud[sp] = bud;
+                sp = sp + 1usize;
+                hi = piv;
+            } else {
+                st_lo[sp] = lo;
+                st_hi[sp] = piv;
+                st_bud[sp] = bud;
+                sp = sp + 1usize;
+                lo = piv + 1usize;
+            }
+        }
     }
 }
 
-// A comparator-driven heapsort: the SAME `Vec` sorts ascending or descending
+// The comparator-driven introsort: the SAME `Vec` sorts ascending or descending
 // purely by which `less` comparator is passed (design: the order is
-// comparator-driven, not hard-coded). `sift_down_by` is `sift_down_ord` with
-// `less` in place of `Ord::cmp`.
-fn sift_down_by[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool, root: usize, end: usize) alloc -> unit {
+// comparator-driven, not hard-coded). Each `*_by` helper is its `*_ord` twin
+// with `less` in place of `Ord::cmp`; the bounds justifications there apply
+// line for line and are not repeated.
+fn insertion_by[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool, lo: usize, hi: usize) alloc -> unit {
+    if hi - lo < 2usize {
+        return;
+    }
+    let mut k: usize = lo + 1usize;
+    while k < hi {
+        let x: T = get(read v.*, k).*;
+        let mut j: usize = k;
+        while j > lo {
+            let w: T = get(read v.*, j - 1usize).*;
+            if less(read x, read w) {
+                set(write v.*, j, w);
+                j = j - 1usize;
+            } else {
+                break;
+            }
+        }
+        set(write v.*, j, x);
+        k = k + 1usize;
+    }
+}
+
+fn sift_down_by[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool, base: usize, root: usize, end: usize) alloc -> unit {
     let mut i: usize = root;
     while i < end / 2usize {
         let left: usize = 2usize * i + 1usize;
         let mut child: usize = left;
         if left + 1usize < end {
-            let l: T = get(read v.*, left).*;
-            let r: T = get(read v.*, left + 1usize).*;
+            let l: T = get(read v.*, base + left).*;
+            let r: T = get(read v.*, base + left + 1usize).*;
             if less(read l, read r) {
                 child = left + 1usize;
             }
         }
-        let cur: T = get(read v.*, i).*;
-        let big: T = get(read v.*, child).*;
+        let cur: T = get(read v.*, base + i).*;
+        let big: T = get(read v.*, base + child).*;
         if less(read cur, read big) {
-            set(write v.*, i, big);
-            set(write v.*, child, cur);
+            set(write v.*, base + i, big);
+            set(write v.*, base + child, cur);
             i = child;
         } else {
             return;
@@ -201,23 +456,141 @@ fn sift_down_by[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool, root
     }
 }
 
+fn heapsort_range_by[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool, lo: usize, hi: usize) alloc -> unit {
+    let m: usize = hi - lo;
+    if m < 2usize {
+        return;
+    }
+    let mut start: usize = m / 2usize;
+    while start > 0usize {
+        start = start - 1usize;
+        sift_down_by(write v.*, less, lo, start, m);
+    }
+    let mut end: usize = m;
+    while end > 1usize {
+        end = end - 1usize;
+        let top: T = get(read v.*, lo).*;
+        let last: T = get(read v.*, lo + end).*;
+        set(write v.*, lo, last);
+        set(write v.*, lo + end, top);
+        sift_down_by(write v.*, less, lo, 0usize, end);
+    }
+}
+
+fn partition_by[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool, lo: usize, hi: usize) alloc -> usize {
+    let mid: usize = lo + (hi - lo) / 2usize;
+    let a0: T = get(read v.*, lo).*;
+    let a1: T = get(read v.*, mid).*;
+    if less(read a1, read a0) {
+        set(write v.*, lo, a1);
+        set(write v.*, mid, a0);
+    }
+    let b1: T = get(read v.*, mid).*;
+    let b2: T = get(read v.*, hi - 1usize).*;
+    if less(read b2, read b1) {
+        set(write v.*, mid, b2);
+        set(write v.*, hi - 1usize, b1);
+        let c0: T = get(read v.*, lo).*;
+        let c1: T = get(read v.*, mid).*;
+        if less(read c1, read c0) {
+            set(write v.*, lo, c1);
+            set(write v.*, mid, c0);
+        }
+    }
+    let p: T = get(read v.*, mid).*;
+    let park: T = get(read v.*, hi - 2usize).*;
+    set(write v.*, mid, park);
+    set(write v.*, hi - 2usize, p);
+    let mut i: usize = lo;
+    let mut j: usize = hi - 2usize;
+    loop {
+        i = i + 1usize;
+        loop {
+            if i >= hi - 2usize {
+                break;
+            }
+            let xi: T = get(read v.*, i).*;
+            if less(read xi, read p) {
+                i = i + 1usize;
+            } else {
+                break;
+            }
+        }
+        j = j - 1usize;
+        loop {
+            if j <= lo {
+                break;
+            }
+            let xj: T = get(read v.*, j).*;
+            if less(read p, read xj) {
+                j = j - 1usize;
+            } else {
+                break;
+            }
+        }
+        if i >= j {
+            break;
+        }
+        let xi: T = get(read v.*, i).*;
+        let xj: T = get(read v.*, j).*;
+        set(write v.*, i, xj);
+        set(write v.*, j, xi);
+    }
+    let piv: T = get(read v.*, hi - 2usize).*;
+    let xi: T = get(read v.*, i).*;
+    set(write v.*, hi - 2usize, xi);
+    set(write v.*, i, piv);
+    return i;
+}
+
 pub fn sort[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool) alloc -> unit {
     let n: usize = len(read v.*);
     if n < 2usize {
         return;
     }
-    let mut start: usize = n / 2usize;
-    while start > 0usize {
-        start = start - 1usize;
-        sift_down_by(write v.*, less, start, n);
+    let mut budget: usize = 0usize;
+    let mut m: usize = n;
+    while m > 1usize {
+        m = m / 2usize;
+        budget = budget + 1usize;
     }
-    let mut end: usize = n;
-    while end > 1usize {
-        end = end - 1usize;
-        let top: T = get(read v.*, 0usize).*;
-        let last: T = get(read v.*, end).*;
-        set(write v.*, 0usize, last);
-        set(write v.*, end, top);
-        sift_down_by(write v.*, less, 0usize, end);
+    budget = 2usize * budget;
+    let mut st_lo: [64]usize = [0usize; 64];
+    let mut st_hi: [64]usize = [0usize; 64];
+    let mut st_bud: [64]usize = [0usize; 64];
+    st_lo[0usize] = 0usize;
+    st_hi[0usize] = n;
+    st_bud[0usize] = budget;
+    let mut sp: usize = 1usize;
+    while sp > 0usize {
+        sp = sp - 1usize;
+        let mut lo: usize = st_lo[sp];
+        let mut hi: usize = st_hi[sp];
+        let mut bud: usize = st_bud[sp];
+        loop {
+            if hi - lo <= 24usize {
+                insertion_by(write v.*, less, lo, hi);
+                break;
+            }
+            if bud == 0usize {
+                heapsort_range_by(write v.*, less, lo, hi);
+                break;
+            }
+            bud = bud - 1usize;
+            let piv: usize = partition_by(write v.*, less, lo, hi);
+            if piv - lo < hi - (piv + 1usize) {
+                st_lo[sp] = piv + 1usize;
+                st_hi[sp] = hi;
+                st_bud[sp] = bud;
+                sp = sp + 1usize;
+                hi = piv;
+            } else {
+                st_lo[sp] = lo;
+                st_hi[sp] = piv;
+                st_bud[sp] = bud;
+                sp = sp + 1usize;
+                lo = piv + 1usize;
+            }
+        }
     }
 }
