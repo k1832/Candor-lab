@@ -1252,3 +1252,18 @@ once you add the literal node). Key design/impl facts worth reusing:
   instead; `tests/sha256.rs mir_leak_repro` pins today's behaviour on both
   engines and trips when reclamation is fixed (promote the vector then).
   (2026-07-25)
+
+- **A run/ fixture must not put Candor recursion in proportion to input depth:
+  the debug tree-walker burns roughly 100-250 KiB of HOST stack per Candor call
+  frame, so a recursive-descent JSON parser SIGABRTed nextest's 2 MiB test
+  thread at document depth 8 (~16 frames), while the 8 MiB CLI main thread ran
+  it fine.** Fixture-shaped rule of thumb: at most ~6 levels of input-driven
+  Candor recursion survive the harness; anything depth-proportional needs the
+  wasm-interp explicit-stack idiom (a fixed `[cap]Frame` array of copy structs +
+  a depth counter — `[zero_frame(); N]` array-repeat with a call initializer
+  works). Measure with `ulimit -s 2048` + `candor run` before trusting a CLI
+  green. Two borrow-forwarding spellings pinned by probe (`json.cnr`): a
+  `read Vec[T]` PARAM forwards BARE to a user fn (explicit `read v` is E0703
+  `borrow borrow`), while a `write Vec[T]` param forwards as `write v.*` /
+  `read v.*`; owners always pass explicit `read v`/`write v`. (json dogfood,
+  2026-07-25)
