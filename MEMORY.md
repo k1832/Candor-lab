@@ -1317,3 +1317,27 @@ once you add the literal node). Key design/impl facts worth reusing:
   `zlib.decompress(data, -15)` to REJECT each one before embedding — every
   in-Candor error-code expectation then matched the real decoder's class.
   (deflate dogfood, 2026-07-25)
+
+- **Corelib `sort`/`sort_ord` are now ITERATIVE introsorts (supersedes the
+  2026-07-25 "upgrade is bottom-up heapsort" entry); benching sorts natively
+  requires respecting the never-rollback stack bump or results silently
+  corrupt.** Shipped shape (`fixtures/corelib/core/cmp.cnr`, prelude copies in
+  `tests/sort.rs`/`tests/ord.rs` still hand-synced): median-of-3 pivot parked
+  at `hi-2`, Sedgewick scans that STOP on equal (this is what keeps all-equal
+  ~3.5x faster instead of degenerating), insertion sort at cutoff 24 (16/20/24
+  measured, 24 best at 1k AND 100k), heapsort-range fallback (base-offset
+  `sift_down_*`) at depth budget `2*floor(log2 n)`, explicit 64-entry range
+  stack (push larger half, iterate smaller → live split sizes halve → ≤60
+  entries for any usize n). Measured LLVM -O2 native, per-sort ms at 100k:
+  LCG 29.9→12.7 (2.36x), sorted 6.2x, reverse 3.3x, sawtooth 3.4x, all-equal
+  3.5x, organ-pipe ~par (+1%, budget-exhaust → fallback); 1k LCG 2.7x;
+  sort_ord 2.1-2.2x. Bench gotchas that cost hours: (1) on native, EVERY
+  `sift_down`/`cmp` call leaks ~85 B of model stack forever (`rt_stack_alloc`
+  never rolls back, by design) — a repeat-loop benchmark first grows the bump
+  THROUGH the allocator window (silent data corruption, `bad!=0` only if you
+  check) and then segfaults at `MAX_ADDR` 256 MiB; place the bump window HIGH
+  (e.g. base 192 MiB) and budget reps by call count (~10 reps of a 100k
+  heapsort). (2) an interface-method compare costs a real call per compare
+  natively — routing ord-introsort compares through a tiny `lt_ord[T]` helper
+  made it SLOWER than heapsort-ord (two leaked frames per compare); inlining
+  the `match cmp` at each site fixed it. (introsort ship, 2026-07-25)

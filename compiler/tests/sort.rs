@@ -1,7 +1,9 @@
 //! In-place generic `sort[T: copy]` over `Vec[T]` by a first-class comparator.
-//! Bottom-up heapsort: O(n log n) worst case with no scratch buffer, which
-//! matters because the signature carries no allocator handle and a `Vec` does
-//! not expose its own. The comparator is an ordinary
+//! Iterative introsort (median-of-three quicksort partitioning, insertion sort
+//! below a 24-element cutoff, bottom-up-heapsort fallback on depth-budget
+//! exhaustion, explicit range stack — no recursion): O(n log n) worst case with
+//! no scratch buffer, which matters because the signature carries no allocator
+//! handle and a `Vec` does not expose its own. The comparator is an ordinary
 //! `fn(read i64, read i64) -> bool` value, so the
 //! SAME Vec sorts ascending or descending purely by which comparator is passed —
 //! the ascending/descending pair below proves the order is comparator-driven and
@@ -9,12 +11,17 @@
 //! (tree-walk oracle, MIR interp, Cranelift no-opt, Cranelift opt, LLVM -O2) via
 //! the same trace-channel harness as `tests/iteration.rs`.
 //!
-//! `sort` is generic over the element type `T` (bounded `copy`, since heapsort
+//! `sort` is generic over the element type `T` (bounded `copy`, since the sort
 //! shuffles elements by value). It is exercised at two instantiations: the
 //! integer cases below (`Vec[i64]`, `T` inferred at the call) prove byte-exact
 //! agreement with the earlier monomorphic form, and the `Item`-struct cases
 //! (`Vec[Item]`, sorted by a field) prove the generic form lowers correctly for
 //! a non-scalar `T` — both byte-exact across all five engines.
+//!
+//! The adversarial-pattern cases (already-sorted, reverse-sorted, organ-pipe,
+//! all-equal, sawtooth) smoke the pivot selection and the equal-stopping scans
+//! at ~500 elements; the pinned `inv`/`sum`/`wsum` traces are recomputed in
+//! Rust from the same generators.
 
 use candor::{
     check_source_real, compile_path_llvm, run_source_real, run_source_real_mir,
@@ -107,10 +114,12 @@ fn all_engines(src: &str, tag: &str) -> (i64, Vec<i64>) {
     (o_ret, o_trace)
 }
 
-// A counting bump allocator (mirrors tests/vec.rs) plus the generic heapsort
+// A counting bump allocator (mirrors tests/vec.rs) plus the generic introsort
 // `sort` and two i64 comparators. `less_int` orders ascending; `greater_int` is
 // its exact reverse, so passing one or the other flips the result — proving the
-// comparator genuinely drives the order.
+// comparator genuinely drives the order. The sort body below is the hand-kept
+// prelude copy of `tests/fixtures/corelib/core/cmp.cnr`'s comparator family
+// (see that file for the bounds justifications).
 const PRELUDE: &str = r#"
 struct AllocVtable { alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8, free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit, realloc: fn(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) alloc -> rawptr u8 }
 copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
@@ -139,45 +148,184 @@ fn bump_realloc(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize
 static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free, realloc: bump_realloc };
 fn mk_alloc(state: write Bump) -> Alloc { unsafe "outlives every alloc" { return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) }; } }
 
-fn sift_down_by[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool, root: usize, end: usize) alloc -> unit {
+fn insertion_by[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool, lo: usize, hi: usize) alloc -> unit {
+    if hi - lo < 2usize {
+        return;
+    }
+    let mut k: usize = lo + 1usize;
+    while k < hi {
+        let x: T = get(read v.*, k).*;
+        let mut j: usize = k;
+        while j > lo {
+            let w: T = get(read v.*, j - 1usize).*;
+            if less(read x, read w) {
+                set(write v.*, j, w);
+                j = j - 1usize;
+            } else {
+                break;
+            }
+        }
+        set(write v.*, j, x);
+        k = k + 1usize;
+    }
+}
+fn sift_down_by[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool, base: usize, root: usize, end: usize) alloc -> unit {
     let mut i: usize = root;
     while i < end / 2usize {
         let left: usize = 2usize * i + 1usize;
         let mut child: usize = left;
         if left + 1usize < end {
-            let l: T = get(read v.*, left).*;
-            let r: T = get(read v.*, left + 1usize).*;
-            if (less)(read l, read r) {
+            let l: T = get(read v.*, base + left).*;
+            let r: T = get(read v.*, base + left + 1usize).*;
+            if less(read l, read r) {
                 child = left + 1usize;
             }
         }
-        let cur: T = get(read v.*, i).*;
-        let big: T = get(read v.*, child).*;
-        if (less)(read cur, read big) {
-            set(write v.*, i, big);
-            set(write v.*, child, cur);
+        let cur: T = get(read v.*, base + i).*;
+        let big: T = get(read v.*, base + child).*;
+        if less(read cur, read big) {
+            set(write v.*, base + i, big);
+            set(write v.*, base + child, cur);
             i = child;
         } else {
             return;
         }
     }
 }
-fn sort[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool) alloc -> unit {
-    let n: usize = len(read v.*);
-    if n < 2usize { return; }
-    let mut start: usize = n / 2usize;
+fn heapsort_range_by[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool, lo: usize, hi: usize) alloc -> unit {
+    let m: usize = hi - lo;
+    if m < 2usize {
+        return;
+    }
+    let mut start: usize = m / 2usize;
     while start > 0usize {
         start = start - 1usize;
-        sift_down_by(write v.*, less, start, n);
+        sift_down_by(write v.*, less, lo, start, m);
     }
-    let mut end: usize = n;
+    let mut end: usize = m;
     while end > 1usize {
         end = end - 1usize;
-        let top: T = get(read v.*, 0usize).*;
-        let last: T = get(read v.*, end).*;
-        set(write v.*, 0usize, last);
-        set(write v.*, end, top);
-        sift_down_by(write v.*, less, 0usize, end);
+        let top: T = get(read v.*, lo).*;
+        let last: T = get(read v.*, lo + end).*;
+        set(write v.*, lo, last);
+        set(write v.*, lo + end, top);
+        sift_down_by(write v.*, less, lo, 0usize, end);
+    }
+}
+fn partition_by[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool, lo: usize, hi: usize) alloc -> usize {
+    let mid: usize = lo + (hi - lo) / 2usize;
+    let a0: T = get(read v.*, lo).*;
+    let a1: T = get(read v.*, mid).*;
+    if less(read a1, read a0) {
+        set(write v.*, lo, a1);
+        set(write v.*, mid, a0);
+    }
+    let b1: T = get(read v.*, mid).*;
+    let b2: T = get(read v.*, hi - 1usize).*;
+    if less(read b2, read b1) {
+        set(write v.*, mid, b2);
+        set(write v.*, hi - 1usize, b1);
+        let c0: T = get(read v.*, lo).*;
+        let c1: T = get(read v.*, mid).*;
+        if less(read c1, read c0) {
+            set(write v.*, lo, c1);
+            set(write v.*, mid, c0);
+        }
+    }
+    let p: T = get(read v.*, mid).*;
+    let park: T = get(read v.*, hi - 2usize).*;
+    set(write v.*, mid, park);
+    set(write v.*, hi - 2usize, p);
+    let mut i: usize = lo;
+    let mut j: usize = hi - 2usize;
+    loop {
+        i = i + 1usize;
+        loop {
+            if i >= hi - 2usize {
+                break;
+            }
+            let xi: T = get(read v.*, i).*;
+            if less(read xi, read p) {
+                i = i + 1usize;
+            } else {
+                break;
+            }
+        }
+        j = j - 1usize;
+        loop {
+            if j <= lo {
+                break;
+            }
+            let xj: T = get(read v.*, j).*;
+            if less(read p, read xj) {
+                j = j - 1usize;
+            } else {
+                break;
+            }
+        }
+        if i >= j {
+            break;
+        }
+        let xi: T = get(read v.*, i).*;
+        let xj: T = get(read v.*, j).*;
+        set(write v.*, i, xj);
+        set(write v.*, j, xi);
+    }
+    let piv: T = get(read v.*, hi - 2usize).*;
+    let xi: T = get(read v.*, i).*;
+    set(write v.*, hi - 2usize, xi);
+    set(write v.*, i, piv);
+    return i;
+}
+fn sort[T: copy](v: write Vec[T], less: fn(read T, read T) -> bool) alloc -> unit {
+    let n: usize = len(read v.*);
+    if n < 2usize {
+        return;
+    }
+    let mut budget: usize = 0usize;
+    let mut m: usize = n;
+    while m > 1usize {
+        m = m / 2usize;
+        budget = budget + 1usize;
+    }
+    budget = 2usize * budget;
+    let mut st_lo: [64]usize = [0usize; 64];
+    let mut st_hi: [64]usize = [0usize; 64];
+    let mut st_bud: [64]usize = [0usize; 64];
+    st_lo[0usize] = 0usize;
+    st_hi[0usize] = n;
+    st_bud[0usize] = budget;
+    let mut sp: usize = 1usize;
+    while sp > 0usize {
+        sp = sp - 1usize;
+        let mut lo: usize = st_lo[sp];
+        let mut hi: usize = st_hi[sp];
+        let mut bud: usize = st_bud[sp];
+        loop {
+            if hi - lo <= 24usize {
+                insertion_by(write v.*, less, lo, hi);
+                break;
+            }
+            if bud == 0usize {
+                heapsort_range_by(write v.*, less, lo, hi);
+                break;
+            }
+            bud = bud - 1usize;
+            let piv: usize = partition_by(write v.*, less, lo, hi);
+            if piv - lo < hi - (piv + 1usize) {
+                st_lo[sp] = piv + 1usize;
+                st_hi[sp] = hi;
+                st_bud[sp] = bud;
+                sp = sp + 1usize;
+                hi = piv;
+            } else {
+                st_lo[sp] = lo;
+                st_hi[sp] = piv;
+                st_bud[sp] = bud;
+                sp = sp + 1usize;
+                lo = piv + 1usize;
+            }
+        }
     }
 }
 fn less_int(a: read i64, b: read i64) -> bool { if a.* < b.* { return true; } return false; }
@@ -381,6 +529,117 @@ fn sort_lcg_large_descending_all_engines() {
     let mut vals = lcg_vals(n, seed);
     vals.sort();
     vals.reverse();
+    let (sum, wsum) = sum_and_weighted(&vals);
+    assert_eq!(ret, n as i64);
+    assert_eq!(trace, vec![0, sum, wsum]);
+}
+
+// ---- adversarial patterns: organ-pipe, all-equal, sawtooth ------------------
+
+/// Like `sort_lcg_program`, but the `n` elements come from an adversarial
+/// generator: `fill` is a Candor statement pushing element `k` (of `n`). These
+/// patterns smoke the median-of-three pivot selection and the equal-stopping
+/// partition scans; the traces pin violations (0), the sum, and the
+/// position-weighted sum against the Rust mirror.
+fn sort_pattern_program(n: usize, fill: &str, cmp: &str, viol: &str) -> String {
+    format!(
+        "{PRELUDE}\n\
+         fn run(al: Alloc) alloc -> i64 {{\n\
+           let mut v: Vec[i64] = vec_new(read al);\n\
+           let mut k: usize = 0usize;\n\
+           while k < {n}usize {{\n\
+             {fill}\n\
+             k = k + 1usize;\n\
+           }}\n\
+           sort(write v, {cmp});\n\
+           let mut inv: i64 = 0;\n\
+           let mut sum: i64 = 0;\n\
+           let mut wsum: i64 = 0;\n\
+           let mut j: usize = 0usize;\n\
+           while j < len(read v) {{\n\
+             let x: i64 = get(read v, j).*;\n\
+             let w: i64 = conv i64 (j + 1usize);\n\
+             sum = sum + x;\n\
+             wsum = wsum + w * x;\n\
+             if j > 0usize {{\n\
+               let prev: i64 = get(read v, j - 1usize).*;\n\
+               if x {viol} prev {{ inv = inv + 1; }}\n\
+             }}\n\
+             j = j + 1usize;\n\
+           }}\n\
+           trace(inv);\n\
+           trace(sum);\n\
+           trace(wsum);\n\
+           return conv i64 len(read v);\n\
+         }}\n\
+         fn main() alloc -> i64 {{\n\
+           let mut bs: Bump = with_window(16777216, 1048576);\n\
+           let al: Alloc = mk_alloc(write bs);\n\
+           return run(al);\n\
+         }}"
+    )
+}
+
+fn organ_pipe_vals(n: usize) -> Vec<i64> {
+    (0..n).map(|k| if k < n / 2 { k as i64 } else { (n - k) as i64 }).collect()
+}
+
+fn sawtooth_vals(n: usize) -> Vec<i64> {
+    (0..n).map(|k| (k % 32) as i64).collect()
+}
+
+#[test]
+fn sort_organ_pipe_ascending_all_engines() {
+    let n = 500;
+    let fill = format!(
+        "if k < {n}usize / 2usize {{ push(write v, conv i64 k); }} else {{ push(write v, conv i64 ({n}usize - k)); }}"
+    );
+    let src = sort_pattern_program(n, &fill, "less_int", "<");
+    let (ret, trace) = all_engines(&src, "organ_asc");
+    let mut vals = organ_pipe_vals(n);
+    vals.sort();
+    let (sum, wsum) = sum_and_weighted(&vals);
+    assert_eq!(ret, n as i64);
+    assert_eq!(trace, vec![0, sum, wsum]);
+}
+
+#[test]
+fn sort_organ_pipe_descending_all_engines() {
+    // SAME organ-pipe input, comparator reversed: the pinned weighted sum
+    // reverses too — comparator-driven order holds on adversarial input.
+    let n = 500;
+    let fill = format!(
+        "if k < {n}usize / 2usize {{ push(write v, conv i64 k); }} else {{ push(write v, conv i64 ({n}usize - k)); }}"
+    );
+    let src = sort_pattern_program(n, &fill, "greater_int", ">");
+    let (ret, trace) = all_engines(&src, "organ_desc");
+    let mut vals = organ_pipe_vals(n);
+    vals.sort();
+    vals.reverse();
+    let (sum, wsum) = sum_and_weighted(&vals);
+    assert_eq!(ret, n as i64);
+    assert_eq!(trace, vec![0, sum, wsum]);
+}
+
+#[test]
+fn sort_all_equal_all_engines() {
+    let n = 500;
+    let src = sort_pattern_program(n, "push(write v, 7);", "less_int", "<");
+    let (ret, trace) = all_engines(&src, "equal");
+    let vals = vec![7i64; n];
+    let (sum, wsum) = sum_and_weighted(&vals);
+    assert_eq!(ret, n as i64);
+    assert_eq!(trace, vec![0, sum, wsum]);
+}
+
+#[test]
+fn sort_sawtooth_all_engines() {
+    let n = 500;
+    let src =
+        sort_pattern_program(n, "push(write v, conv i64 (k % 32usize));", "less_int", "<");
+    let (ret, trace) = all_engines(&src, "saw");
+    let mut vals = sawtooth_vals(n);
+    vals.sort();
     let (sum, wsum) = sum_and_weighted(&vals);
     assert_eq!(ret, n as i64);
     assert_eq!(trace, vec![0, sum, wsum]);

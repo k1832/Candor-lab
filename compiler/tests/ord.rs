@@ -103,6 +103,10 @@ fn all_engines(src: &str, tag: &str) -> (i64, Vec<i64>) {
     (o_ret, o_trace)
 }
 
+// The counting bump allocator (mirrors tests/vec.rs) plus the `Ord` layer and
+// the generic introsort `sort_ord`. The `Ord`/`min`/`max`/sort bodies below are
+// the hand-kept prelude copy of `tests/fixtures/corelib/core/cmp.cnr`'s `Ord`
+// family (see that file for the bounds justifications).
 const PRELUDE: &str = r#"
 struct AllocVtable { alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8, free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit, realloc: fn(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) alloc -> rawptr u8 }
 copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
@@ -196,26 +200,47 @@ fn max[T: Ord + copy](v: read Vec[T]) -> Opt[T] {
     }
     return Opt::Some(best);
 }
-fn sift_down_ord[T: Ord + copy](v: write Vec[T], root: usize, end: usize) alloc -> unit {
+fn insertion_ord[T: Ord + copy](v: write Vec[T], lo: usize, hi: usize) alloc -> unit {
+    if hi - lo < 2usize { return; }
+    let mut k: usize = lo + 1usize;
+    while k < hi {
+        let x: T = get(read v.*, k).*;
+        let mut j: usize = k;
+        while j > lo {
+            let w: T = get(read v.*, j - 1usize).*;
+            match x.cmp(w) {
+                Ordering::Less => {
+                    set(write v.*, j, w);
+                    j = j - 1usize;
+                },
+                Ordering::Equal => { break; },
+                Ordering::Greater => { break; },
+            }
+        }
+        set(write v.*, j, x);
+        k = k + 1usize;
+    }
+}
+fn sift_down_ord[T: Ord + copy](v: write Vec[T], base: usize, root: usize, end: usize) alloc -> unit {
     let mut i: usize = root;
     while i < end / 2usize {
         let left: usize = 2usize * i + 1usize;
         let mut child: usize = left;
         if left + 1usize < end {
-            let l: T = get(read v.*, left).*;
-            let r: T = get(read v.*, left + 1usize).*;
+            let l: T = get(read v.*, base + left).*;
+            let r: T = get(read v.*, base + left + 1usize).*;
             match l.cmp(r) {
                 Ordering::Less => { child = left + 1usize; },
                 Ordering::Equal => {},
                 Ordering::Greater => {},
             }
         }
-        let cur: T = get(read v.*, i).*;
-        let big: T = get(read v.*, child).*;
+        let cur: T = get(read v.*, base + i).*;
+        let big: T = get(read v.*, base + child).*;
         match cur.cmp(big) {
             Ordering::Less => {
-                set(write v.*, i, big);
-                set(write v.*, child, cur);
+                set(write v.*, base + i, big);
+                set(write v.*, base + child, cur);
                 i = child;
             },
             Ordering::Equal => { return; },
@@ -223,22 +248,142 @@ fn sift_down_ord[T: Ord + copy](v: write Vec[T], root: usize, end: usize) alloc 
         }
     }
 }
+fn heapsort_range_ord[T: Ord + copy](v: write Vec[T], lo: usize, hi: usize) alloc -> unit {
+    let m: usize = hi - lo;
+    if m < 2usize { return; }
+    let mut start: usize = m / 2usize;
+    while start > 0usize {
+        start = start - 1usize;
+        sift_down_ord(write v.*, lo, start, m);
+    }
+    let mut end: usize = m;
+    while end > 1usize {
+        end = end - 1usize;
+        let top: T = get(read v.*, lo).*;
+        let last: T = get(read v.*, lo + end).*;
+        set(write v.*, lo, last);
+        set(write v.*, lo + end, top);
+        sift_down_ord(write v.*, lo, 0usize, end);
+    }
+}
+fn partition_ord[T: Ord + copy](v: write Vec[T], lo: usize, hi: usize) alloc -> usize {
+    let mid: usize = lo + (hi - lo) / 2usize;
+    let a0: T = get(read v.*, lo).*;
+    let a1: T = get(read v.*, mid).*;
+    match a1.cmp(a0) {
+        Ordering::Less => {
+            set(write v.*, lo, a1);
+            set(write v.*, mid, a0);
+        },
+        Ordering::Equal => {},
+        Ordering::Greater => {},
+    }
+    let b1: T = get(read v.*, mid).*;
+    let b2: T = get(read v.*, hi - 1usize).*;
+    match b2.cmp(b1) {
+        Ordering::Less => {
+            set(write v.*, mid, b2);
+            set(write v.*, hi - 1usize, b1);
+            let c0: T = get(read v.*, lo).*;
+            let c1: T = get(read v.*, mid).*;
+            match c1.cmp(c0) {
+                Ordering::Less => {
+                    set(write v.*, lo, c1);
+                    set(write v.*, mid, c0);
+                },
+                Ordering::Equal => {},
+                Ordering::Greater => {},
+            }
+        },
+        Ordering::Equal => {},
+        Ordering::Greater => {},
+    }
+    let p: T = get(read v.*, mid).*;
+    let park: T = get(read v.*, hi - 2usize).*;
+    set(write v.*, mid, park);
+    set(write v.*, hi - 2usize, p);
+    let mut i: usize = lo;
+    let mut j: usize = hi - 2usize;
+    loop {
+        i = i + 1usize;
+        loop {
+            if i >= hi - 2usize { break; }
+            let xi: T = get(read v.*, i).*;
+            match xi.cmp(p) {
+                Ordering::Less => { i = i + 1usize; },
+                Ordering::Equal => { break; },
+                Ordering::Greater => { break; },
+            }
+        }
+        j = j - 1usize;
+        loop {
+            if j <= lo { break; }
+            let xj: T = get(read v.*, j).*;
+            match p.cmp(xj) {
+                Ordering::Less => { j = j - 1usize; },
+                Ordering::Equal => { break; },
+                Ordering::Greater => { break; },
+            }
+        }
+        if i >= j { break; }
+        let xi: T = get(read v.*, i).*;
+        let xj: T = get(read v.*, j).*;
+        set(write v.*, i, xj);
+        set(write v.*, j, xi);
+    }
+    let piv: T = get(read v.*, hi - 2usize).*;
+    let xi: T = get(read v.*, i).*;
+    set(write v.*, hi - 2usize, xi);
+    set(write v.*, i, piv);
+    return i;
+}
 fn sort_ord[T: Ord + copy](v: write Vec[T]) alloc -> unit {
     let n: usize = len(read v.*);
     if n < 2usize { return; }
-    let mut start: usize = n / 2usize;
-    while start > 0usize {
-        start = start - 1usize;
-        sift_down_ord(write v.*, start, n);
+    let mut budget: usize = 0usize;
+    let mut m: usize = n;
+    while m > 1usize {
+        m = m / 2usize;
+        budget = budget + 1usize;
     }
-    let mut end: usize = n;
-    while end > 1usize {
-        end = end - 1usize;
-        let top: T = get(read v.*, 0usize).*;
-        let last: T = get(read v.*, end).*;
-        set(write v.*, 0usize, last);
-        set(write v.*, end, top);
-        sift_down_ord(write v.*, 0usize, end);
+    budget = 2usize * budget;
+    let mut st_lo: [64]usize = [0usize; 64];
+    let mut st_hi: [64]usize = [0usize; 64];
+    let mut st_bud: [64]usize = [0usize; 64];
+    st_lo[0usize] = 0usize;
+    st_hi[0usize] = n;
+    st_bud[0usize] = budget;
+    let mut sp: usize = 1usize;
+    while sp > 0usize {
+        sp = sp - 1usize;
+        let mut lo: usize = st_lo[sp];
+        let mut hi: usize = st_hi[sp];
+        let mut bud: usize = st_bud[sp];
+        loop {
+            if hi - lo <= 24usize {
+                insertion_ord(write v.*, lo, hi);
+                break;
+            }
+            if bud == 0usize {
+                heapsort_range_ord(write v.*, lo, hi);
+                break;
+            }
+            bud = bud - 1usize;
+            let piv: usize = partition_ord(write v.*, lo, hi);
+            if piv - lo < hi - (piv + 1usize) {
+                st_lo[sp] = piv + 1usize;
+                st_hi[sp] = hi;
+                st_bud[sp] = bud;
+                sp = sp + 1usize;
+                hi = piv;
+            } else {
+                st_lo[sp] = lo;
+                st_hi[sp] = piv;
+                st_bud[sp] = bud;
+                sp = sp + 1usize;
+                lo = piv + 1usize;
+            }
+        }
     }
 }
 "#;
@@ -415,6 +560,95 @@ fn i64_lcg_large_all_engines() {
     let vals = lcg_sorted(n, seed);
     let sum: i64 = vals.iter().sum();
     let wsum: i64 = vals.iter().enumerate().map(|(i, x)| (i as i64 + 1) * x).sum();
+    assert_eq!(ret, n as i64);
+    assert_eq!(trace, vec![0, sum, wsum]);
+}
+
+// ---- runtime: adversarial patterns (organ-pipe, all-equal, sawtooth) --------
+
+/// Like `i64_lcg_program`, but the `n` elements come from an adversarial
+/// generator: `fill` is a Candor statement pushing element `k` (of `n`). These
+/// patterns smoke `sort_ord`'s median-of-three pivot selection and its
+/// equal-stopping partition scans; `inv`/`sum`/`wsum` pin the sorted sequence
+/// against the Rust mirror.
+fn i64_pattern_program(n: usize, fill: &str) -> String {
+    format!(
+        "{PRELUDE}\n\
+         fn run(al: Alloc) alloc -> i64 {{\n\
+           let mut v: Vec[i64] = vec_new(read al);\n\
+           let mut k: usize = 0usize;\n\
+           while k < {n}usize {{\n\
+             {fill}\n\
+             k = k + 1usize;\n\
+           }}\n\
+           sort_ord(write v);\n\
+           let mut inv: i64 = 0;\n\
+           let mut sum: i64 = 0;\n\
+           let mut wsum: i64 = 0;\n\
+           let mut j: usize = 0usize;\n\
+           while j < len(read v) {{\n\
+             let x: i64 = get(read v, j).*;\n\
+             let w: i64 = conv i64 (j + 1usize);\n\
+             sum = sum + x;\n\
+             wsum = wsum + w * x;\n\
+             if j > 0usize {{\n\
+               let prev: i64 = get(read v, j - 1usize).*;\n\
+               if x < prev {{ inv = inv + 1; }}\n\
+             }}\n\
+             j = j + 1usize;\n\
+           }}\n\
+           trace(inv);\n\
+           trace(sum);\n\
+           trace(wsum);\n\
+           return conv i64 len(read v);\n\
+         }}\n\
+         fn main() alloc -> i64 {{\n\
+           let mut bs: Bump = with_window(16777216, 1048576);\n\
+           let al: Alloc = mk_alloc(write bs);\n\
+           return run(al);\n\
+         }}"
+    )
+}
+
+fn sum_and_weighted_sorted(mut vals: Vec<i64>) -> (i64, i64) {
+    vals.sort();
+    let sum = vals.iter().sum();
+    let wsum = vals.iter().enumerate().map(|(i, x)| (i as i64 + 1) * x).sum();
+    (sum, wsum)
+}
+
+#[test]
+fn i64_organ_pipe_all_engines() {
+    let n = 500;
+    let fill = format!(
+        "if k < {n}usize / 2usize {{ push(write v, conv i64 k); }} else {{ push(write v, conv i64 ({n}usize - k)); }}"
+    );
+    let src = i64_pattern_program(n, &fill);
+    let (ret, trace) = all_engines(&src, "i64_organ");
+    let vals: Vec<i64> =
+        (0..n).map(|k| if k < n / 2 { k as i64 } else { (n - k) as i64 }).collect();
+    let (sum, wsum) = sum_and_weighted_sorted(vals);
+    assert_eq!(ret, n as i64);
+    assert_eq!(trace, vec![0, sum, wsum]);
+}
+
+#[test]
+fn i64_all_equal_all_engines() {
+    let n = 500;
+    let src = i64_pattern_program(n, "push(write v, 7);");
+    let (ret, trace) = all_engines(&src, "i64_equal");
+    let (sum, wsum) = sum_and_weighted_sorted(vec![7i64; n]);
+    assert_eq!(ret, n as i64);
+    assert_eq!(trace, vec![0, sum, wsum]);
+}
+
+#[test]
+fn i64_sawtooth_all_engines() {
+    let n = 500;
+    let src = i64_pattern_program(n, "push(write v, conv i64 (k % 32usize));");
+    let (ret, trace) = all_engines(&src, "i64_saw");
+    let vals: Vec<i64> = (0..n).map(|k| (k % 32) as i64).collect();
+    let (sum, wsum) = sum_and_weighted_sorted(vals);
     assert_eq!(ret, n as i64);
     assert_eq!(trace, vec![0, sum, wsum]);
 }
