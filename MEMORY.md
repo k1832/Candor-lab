@@ -1230,3 +1230,12 @@ once you add the literal node). Key design/impl facts worth reusing:
   AND `check_iface_method_call` re-wraps by mode; the corelib never exercised a
   read/write non-self iface param. So `Ord` uses `fn cmp(read self, other: Self)`
   (by-value `Self`, natural for copy scalars), not `read Self`. (2026-07-17).
+
+- **Corelib `sort`/`sort_ord` can only use in-place algorithms.** Their signatures
+  carry no `Alloc` handle and a `Vec` does not expose its allocator (builtins are
+  only `vec_new(read Alloc)`/`push`/`pop`/`get`/`set`/`len`), so merge-sort scratch
+  is impossible without an API break; the O(n log n) upgrade is bottom-up heapsort
+  (stability was never promised — the duplicate tests are all on indistinguishable
+  scalars). Runtime coverage of corelib algorithms lives in the `tests/ord.rs` /
+  `tests/sort.rs` prelude copies, which must be kept in sync with
+  `fixtures/corelib/core/cmp.cnr` by hand. (2026-07-25)
