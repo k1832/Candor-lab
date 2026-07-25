@@ -3667,6 +3667,7 @@ impl<'a> Interp<'a> {
 
     // ---- statements ----
     fn exec_block(&mut self, b: &Block) -> R<()> {
+        let sp = self.mem.stack_bump;
         self.push_scope();
         let mut pending: R<()> = Ok(());
         for s in &b.stmts {
@@ -3680,6 +3681,15 @@ impl<'a> Interp<'a> {
             }
         }
         self.drop_scope()?;
+        // Reclaim the block's stack bytes (locals + statement temporaries) so a
+        // call- or block-heavy loop no longer leaks toward the model cap. Every
+        // block yields unit and its locals died with the scope just dropped, so
+        // nothing allocated inside outlives it — EXCEPT the `return` slot
+        // `do_return` parked for the frame, which `call` reads after the unwind;
+        // on that path the bump is left alone (`call` restores it wholesale).
+        if !matches!(pending, Err(Ctl::Return)) {
+            self.mem.stack_bump = sp;
+        }
         pending
     }
 
