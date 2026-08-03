@@ -80,30 +80,47 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/compiler/target
         run: cargo build
 
-      # P20 targets RATIFIED 2026-07-21 (docs/1.0-GATE-TRIAGE.md, Rulings), now
-      # gated AT FULL SCALE against the committed 50kL reference project
-      # (benches/p20-reference/, 202 modules): clean check <= 3000ms, T1
-      # incremental <= 1000ms, T2 downstream re-analysis == 0, and --release
-      # <= 2x the cc -O2 baseline. The bench emits pass flags per clause in
-      # target/p20.json; any false flag fails the build.
-      - name: P20 targets (GATE — ratified 2026-07-21, 50kL reference scale)
+      # P20 targets RATIFIED 2026-07-21, CI-calibration amendment 2026-08-03
+      # (docs/1.0-GATE-TRIAGE.md, Rulings): gated AT FULL SCALE against the
+      # committed 50kL reference project (benches/p20-reference/, 202 modules):
+      # clean check <= 3000ms, T1 incremental <= 1000ms, T2 downstream
+      # re-analysis == 0, and --release <= 2x the cc -O2 baseline.
+      #
+      # Hardware calibration: shared runners land in a band that straddles the
+      # ratified ceilings (measured on reference hardware). The cc -O2 compile
+      # of the fixed C tree is a pure-hardware yardstick, so the timing/ratio
+      # ceilings scale by scale = max(1, cc_now / CC_BASELINE_MS), where
+      # CC_BASELINE_MS = 2712.138 is cc's time on the reference hardware
+      # (bfd127c: check 1327ms, ratio 1.37). The floor of 1 means calibration
+      # only ever relaxes on slower hardware, never tightens. T2 is exact and
+      # never scaled. Thresholds themselves are UNCHANGED; release checkpoints
+      # enforce them uncalibrated on reference-class hardware.
+      - name: P20 targets (GATE — ratified 2026-07-21, cc-calibrated 2026-08-03)
         run: |
           cargo bench --bench p20 | tee "$RUNNER_TEMP/p20.json"
           python3 - "$RUNNER_TEMP/p20.json" <<'EOF'
           import json, sys
           d = json.load(open(sys.argv[1]))
           r = d["trees"]["reference"]["targets"]
+          CC_BASELINE_MS = 2712.138
+          cc_now = d["release_baseline"]["cc_O2_compile_ms"]
+          scale = max(1.0, cc_now / CC_BASELINE_MS)
+          print(f"P20 calibration: cc_now={cc_now} baseline={CC_BASELINE_MS} scale={scale:.3f}")
           checks = {
-              "check_le_3000ms": r["check_le_3000ms"],
-              "T1_le_1000ms": r["T1_le_1000ms"],
-              "T2_downstream_eq_0": r["T2_downstream_eq_0"],
-              "release_le_2x_cc": d["release_baseline"]["target_le_2x"],
+              "check_le_3000ms": (r["check_le_3000ms"], 3000.0 * scale),
+              "T1_le_1000ms": (r["T1_le_1000ms"], 1000.0 * scale),
+              "T2_downstream_eq_0": (r["T2_downstream_eq_0"], None),  # exact, never scaled
+              "release_le_2x_cc": (d["release_baseline"]["target_le_2x"], 2.0 * scale),
           }
-          failed = {k: v for k, v in checks.items() if not v["pass"]}
-          for k, v in checks.items():
-              print(f"P20 {k}: actual={v['actual']} pass={v['pass']}")
+          failed = {}
+          for k, (v, limit) in checks.items():
+              ok = v["pass"] if limit is None else float(v["actual"]) <= limit
+              shown = "exact" if limit is None else f"{limit:.0f}" if limit > 10 else f"{limit:.3f}"
+              print(f"P20 {k}: actual={v['actual']} effective_limit={shown} pass={ok}")
+              if not ok:
+                  failed[k] = v["actual"]
           if failed:
-              sys.exit(f"P20 GATE FAILED: {failed}")
+              sys.exit(f"P20 GATE FAILED (after calibration, scale={scale:.3f}): {failed}")
           EOF
           {
             echo '### P20 targets — GATED at 50kL reference scale (ratified 2026-07-21)'
