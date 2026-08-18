@@ -12,10 +12,12 @@
 //! tests/llvm.rs) by living in `tests/fixtures/run/`.
 //!
 //! The official million-'a' vector lives in `sha256_million_a` below (pinned to
-//! the NIST reference digest), not in the fixture — MIR unrolls the fixture's
-//! `[97u8; N]` array-repeat into one CopyVal per element, so the corpus gates
-//! that re-run the fixture through Cranelift/clang would pay a million-store
-//! `main` at compile time; the fixture keeps the 10,000 repeat.
+//! the NIST reference digest), not in the fixture. Historical note: MIR once
+//! unrolled `[97u8; N]` into one CopyVal per element, making a million-element
+//! repeat unaffordable at native COMPILE time; the lowering is now a counted
+//! loop, so promotion into the fixture is possible compile-wise — but the
+//! interpreter-side corpus gates would still pay minutes of RUNTIME per
+//! engine, so the fixture keeps the 10,000 repeat.
 //! Both interpreters used to leak stack per call until the
 //! caller's frame returned (MIR parked the whole callee frame plus the return
 //! slot above the caller's region; the tree-walker never popped block locals or
@@ -162,11 +164,10 @@ const MILLION_A_HEX: &str = "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046
 /// The official million-'a' vector on the MIR interpreter, pinned to the NIST
 /// reference digest. This input used to fault `bad_pointer` on MIR (per-call
 /// stack leak, see the module docs); it must now hash byte-exact. The MIR
-/// engine runs it alone deliberately: the fixture's `[97u8; N]` array-repeat
-/// is unrolled into one CopyVal per element, so the Cranelift/LLVM backends
-/// pay per-element COMPILE time (a million-store `main` takes the JIT tens of
-/// minutes), and the tree-walking oracle would add ~2 debug-build minutes for
-/// no extra coverage — the reference digest referees this test,
+/// engine runs it alone deliberately: the native engines could now compile it
+/// cheaply (the array-repeat lowering is a counted loop), but running it on
+/// every engine adds minutes of interpreter/JIT runtime for no extra coverage
+/// — and the tree-walking oracle alone would add ~2 debug-build minutes — the reference digest referees this test,
 /// `sha256_vectors_all_engines` does the all-engine differential comparison,
 /// and `interp_stack_reclamation` stresses the oracle's reclamation harder
 /// than this vector does.

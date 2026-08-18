@@ -1,0 +1,8 @@
+# Belt-and-suspenders for recursive host paths (#142): Rust spawns test threads
+# with 2 MiB by default, and the debug tree-walker costs ~100-250 KiB of host
+# stack per Candor frame (the parser and checker recurse too). The tree-walker's
+# eval entry grows its own stack via `stacker`; this raises every test thread to
+# 32 MiB for the recursive paths that don't (nextest and plain `cargo test`
+# both honor cargo's `[env]`).
+[env]
+RUST_MIN_STACK = "33554432"

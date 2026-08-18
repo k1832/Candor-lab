@@ -28,6 +28,7 @@ libc = "0.2"
 cranelift-object = "=0.132.3"
 cranelift-native = "=0.132.3"
 toml = "1"
+stacker = "0.1.25"
 
 [[bench]]
 name = "p20"
@@ -35,3 +36,13 @@ harness = false
 
 [dev-dependencies]
 wasmi = "1.1.0"
+
+# Light optimization for test builds (#142c). The suite's floor is interpreted
+# Candor (self-host gates, the wasm/float differentials, the reclamation gate),
+# and opt-level 1 cuts the full nextest suite 631s -> 88s (measured 2026-08-18)
+# for ~28s of extra candor-lib compile per edit-test cycle. debug-assertions
+# stay on (profile default), so the #141 debug tripwires still run everywhere.
+# The earlier decision to skip this (MEMORY 2026-07-12) predates the
+# interpreted-test floor growing past the compile cost.
+[profile.test]
+opt-level = 1
