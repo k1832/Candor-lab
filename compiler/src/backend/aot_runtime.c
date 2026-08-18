@@ -59,6 +59,11 @@
 static uint8_t *g_base;
 static atomic_uint_fast64_t g_stack_bump;
 
+/* Defined below; never returns (longjmp to this thread's landing pad). */
+/* noreturn+cold keeps clang -O2 from inlining the fault path into
+   rt_stack_alloc's hot loop (measured +1.4%% per call when inlined). */
+__attribute__((noreturn, cold)) void rt_fault(uint32_t kind, uint32_t s, uint32_t e);
+
 extern int64_t candor_entry(void);
 
 static uint64_t round_up(uint64_t x, uint64_t a) {
@@ -69,13 +74,22 @@ static uint64_t round_up(uint64_t x, uint64_t a) {
 /* Reserve + zero a stack slot; return its Candor address. A CAS-bumped atomic so
  * concurrent task threads each get a disjoint region (runtime-internal sync,
  * design 0012 §1.3 note); the bump never rolls back, so live frames stay
- * disjoint by construction (mirrors runtime.rs `rt_stack_alloc`). */
+ * disjoint by construction (mirrors runtime.rs `rt_stack_alloc`).
+ *
+ * Exhaustion guard (mirrors runtime.rs): zeroing [a, a+size) past MAX_ADDR would
+ * write outside the mapped flat buffer (a segfault, not a Candor fault). The
+ * MIR interpreter reports the first touch past the model as bad_pointer at span 0
+ * (the tree-walk oracle carries a real span; exhaustion is a native-only pin, so
+ * no differential comparison exists today),
+ * so deliver that same clean fault here. A size-0 reservation writes nothing
+ * and stays fault-free, exactly like the interpreters' lazy check. */
 uint64_t rt_stack_alloc(uint64_t size, uint64_t align) {
     if (align < 1) align = 1;
     for (;;) {
         uint64_t cur = atomic_load_explicit(&g_stack_bump, memory_order_relaxed);
         uint64_t a = round_up(cur, align);
         uint64_t next = a + size;
+        if (size && next > MAX_ADDR) rt_fault(8, 0, 0); /* bad_pointer; no return */
         if (atomic_compare_exchange_weak_explicit(
                 &g_stack_bump, &cur, next,
                 memory_order_seq_cst, memory_order_relaxed)) {

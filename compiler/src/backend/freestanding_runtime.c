@@ -109,8 +109,20 @@ static void write_dec(long fd, uint32_t v) {
 }
 
 /* ---- the six rt_* shims the Candor object imports ------------------------ */
+/* Defined below; never returns (freestanding fault policy: log + halt). */
+/* noreturn+cold keeps clang -O2 from inlining the fault path into
+   rt_stack_alloc's hot loop (measured +1.4%% per call when inlined). */
+__attribute__((noreturn, cold)) void rt_fault(uint32_t kind, uint32_t s, uint32_t e);
+
+/* Exhaustion guard (mirrors runtime.rs): zeroing [a, a+size) past MAX_ADDR would
+ * write outside the flat section (UB). The interpreters report the first touch
+ * past the model as bad_pointer at span 0 in the MIR engine (the tree-walk
+ * oracle carries a real span; exhaustion is a native-only pin). Deliver that
+ * clean fault shape here.
+ * A size-0 reservation writes nothing and stays fault-free. */
 uint64_t rt_stack_alloc(uint64_t size, uint64_t align) {
     uint64_t a = round_up(g_stack_bump, align < 1 ? 1 : align);
+    if (size && a + size > MAX_ADDR) rt_fault(8, 0, 0); /* bad_pointer; no return */
     g_stack_bump = a + size;
     if (size) memset(g_base + a, 0, size);
     return a;

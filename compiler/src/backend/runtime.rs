@@ -151,6 +151,14 @@ thread_local! {
 /// so concurrent task threads each get a disjoint region (runtime-internal
 /// synchronization, design 0012 §1.3 note). The bump never rolls back (as in the
 /// single-threaded engine), so disjointness of live frames holds by construction.
+///
+/// Exhaustion guard: zeroing `[a, a+size)` past `MAX_ADDR` would write outside
+/// the host buffer (UB — heap corruption or a segfault). The interpreters report
+/// the first touch past the model as `BadPointer` at span 0 in the MIR engine
+/// (`Mem::ensure`; the tree-walk oracle carries a real span -- exhaustion is a
+/// native-only pin, so no differential comparison exists today), so
+/// deliver that same clean fault here instead. A `size == 0` reservation writes
+/// nothing and stays fault-free, exactly like the interpreters' lazy check.
 pub extern "C" fn rt_stack_alloc(size: u64, align: u64) -> u64 {
     let r = rt();
     let align = align.max(1);
@@ -158,6 +166,10 @@ pub extern "C" fn rt_stack_alloc(size: u64, align: u64) -> u64 {
         let cur = r.stack_bump.load(Ordering::Relaxed);
         let a = round_up(cur, align);
         let next = a + size;
+        if size != 0 && next > MAX_ADDR {
+            let code = super::lower::kind_code(crate::interp::FaultKind::BadPointer);
+            rt_fault(code, 0, 0); // never returns (`_longjmp` to this thread's pad)
+        }
         if r
             .stack_bump
             .compare_exchange_weak(cur, next, Ordering::SeqCst, Ordering::Relaxed)

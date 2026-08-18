@@ -1101,3 +1101,25 @@ fn gate_llvm_native_wasm_print_off_disk() {
     assert_eq!(output.stdout, b"hello, wasm\n42\n", "print_str (linear memory) + print_i32 bytes");
     assert_eq!(exp_ret, 0, "main returns nothing -> 0");
 }
+
+// ---------------------------------------------------------------------------
+// Stack-bump exhaustion: the native bump never rolls back (task-shared, by
+// design), so a call-heavy program eventually crosses MAX_ADDR. The compiled
+// -O2 process must die with the interpreters' clean bad_pointer fault at span 0
+// (exit 2 + fault JSON) — never a segfault. Native-only pin: the reclaiming
+// oracle runs this same program to completion, so no oracle comparison.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn gate_llvm_stack_exhaustion_clean_fault() {
+    assert!(clang_available(), "clang unavailable");
+    let src = "struct S { a: i64, b: i64, c: i64 } \
+        fn burn(x: i64) -> i64 { let s: S = S { a: x, b: x, c: x }; return s.a; } \
+        fn main() -> i64 { let mut i: i64 = 0; let mut acc: i64 = 0; \
+        while i < 24000000 { acc = acc + burn(i); i = i + 1; } return acc; }";
+    let srcpath = std::env::temp_dir().join(format!("candor-llvm-src-{}-exhaust.cnr", std::process::id()));
+    std::fs::write(&srcpath, src).unwrap();
+    let a = llvm_outcome(&srcpath, "exhaust").expect("compile+run should succeed");
+    let _ = std::fs::remove_file(&srcpath);
+    assert_eq!(a, Outcome::Fault { kind: "bad_pointer".into(), start: 0, end: 0 });
+}

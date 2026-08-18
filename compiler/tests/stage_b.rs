@@ -327,3 +327,27 @@ fn gate_native_full_corpus_equality() {
     assert!(equal >= 30, "expected the full runnable corpus (>=30 fixtures), got {equal}");
 }
 
+// ---------------------------------------------------------------------------
+// 4. Stack-bump exhaustion: the native bump never rolls back (task-shared, by
+//    design), so a call-heavy program eventually crosses MAX_ADDR. That must be
+//    the interpreters' clean BadPointer fault at span 0 — never an out-of-bounds
+//    host write (which would corrupt this test process or segfault it).
+//    Native-only pin: the reclaiming interpreters run this same program to
+//    completion, so there is no oracle comparison here.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn native_stack_exhaustion_faults_cleanly() {
+    let src = "struct S { a: i64, b: i64, c: i64 } \
+        fn burn(x: i64) -> i64 { let s: S = S { a: x, b: x, c: x }; return s.a; } \
+        fn main() -> i64 { let mut i: i64 = 0; let mut acc: i64 = 0; \
+        while i < 12000000 { acc = acc + burn(i); i = i + 1; } return acc; }";
+    match candor::run_source_real_native(src) {
+        MirRunResult::Fault(f) => {
+            assert_eq!(faulted(f), Outcome::Fault { kind: "BadPointer".into(), start: 0, end: 0 });
+        }
+        MirRunResult::Ok(_) => panic!("expected model-stack exhaustion, but the program completed"),
+        _ => panic!("expected a clean BadPointer fault"),
+    }
+}
+
