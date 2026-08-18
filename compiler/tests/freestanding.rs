@@ -165,6 +165,25 @@ fn gate_freestanding_fault_axis() {
     }
 }
 
+// Stack-bump exhaustion: crossing MAX_ADDR must be the clean bad_pointer HALT
+// (exit 2 + fault line), never a wild store into the flat section's neighbours.
+// Native-only pin: the reclaiming oracle runs this same program to completion.
+#[test]
+fn gate_freestanding_stack_exhaustion_clean_fault() {
+    assert!(cc_available(), "cc/linker unavailable");
+    let src = "struct S { a: i64, b: i64, c: i64 } \
+        fn burn(x: i64) -> i64 { let s: S = S { a: x, b: x, c: x }; return s.a; } \
+        fn main() -> i64 { let mut i: i64 = 0; let mut acc: i64 = 0; \
+        while i < 12000000 { acc = acc + burn(i); i = i + 1; } return acc; }";
+    let srcpath = scratch("exhaustsrc").with_extension("cnr");
+    std::fs::write(&srcpath, src).unwrap();
+    let exe = compile_fs(&srcpath, "exhaust");
+    let got = run_outcome(&exe);
+    let _ = std::fs::remove_file(&exe);
+    let _ = std::fs::remove_file(&srcpath);
+    assert_eq!(got, Outcome::Fault { kind: "bad_pointer".into(), start: 0, end: 0 });
+}
+
 // ---------------------------------------------------------------------------
 // 3. THE PROOF (NN#6): the emitted ELF is statically linked with no libc. `ldd`
 //    reports "not a dynamic executable"; `nm` shows no undefined symbols and no

@@ -1341,3 +1341,21 @@ once you add the literal node). Key design/impl facts worth reusing:
   natively — routing ord-introsort compares through a tiny `lt_ord[T]` helper
   made it SLOWER than heapsort-ord (two leaked frames per compare); inlining
   the `match cmp` at each site fixed it. (introsort ship, 2026-07-25)
+
+- **The native no-rollback bump gives the compiled HTTP server a ~2,400-request
+  lifetime (LLVM; ~630 Cranelift), and `rt_stack_alloc` now traps the model edge
+  as a clean `bad_pointer (0,0)` fault instead of a segfault.** Measured leak:
+  Cranelift 32 B per ANY call (all locals flat); LLVM 0 B for scalar-only calls
+  (mem2reg) but 24 B+ whenever a frame has a Tier-F slot (any struct/enum —
+  field-less `Ordering` included — or address-taken scalar). Showcase rates:
+  http server 6.6 KB/request (LLVM) / 25 KB (clif); wasm interp 46 B / 545 B per
+  interpreted instruction. Corruption always precedes any crash: the examples'
+  free-list windows sit at 16 MiB, only 15 MiB above STACK_BASE, and the bump
+  memset-zeroes live heap crossing them — first wrong data, then wild rawptr
+  SIGSEGV (the guard cannot see user windows; only rollback fixes that — the
+  recommended design is caller save/restore gated on a live-task counter, see
+  docs/reviews/2026-08-03-native-stack-bump-assessment.md). A window placed
+  below STACK_BASE (~960 KiB between statics and 1 MiB) is never crossed.
+  Exhaustion regression tests: `*stack_exhaustion*` in stage_b/aot/llvm/
+  freestanding — they SIGSEGV, not fail, on regression. (bump assessment,
+  2026-08-03)
