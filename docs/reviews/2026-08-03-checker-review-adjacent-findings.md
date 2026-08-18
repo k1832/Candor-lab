@@ -56,3 +56,15 @@ into the overwrite-drop / assignment-drop workstream (same init-tracking
 substrate). None block the native-rollback launch precondition, but P1 and
 P4 should land before any 1.0 conversation — P4 is a borrow-model soundness
 hole and P1 silently computes wrong results in generic code.
+
+## P6 — Orphan-task crash on parent fault inside an open scope (from the rollback review)
+
+A parent that faults between `spawn` and the scope's join `_longjmp`s without
+joining; orphaned task threads then dereference the cleared `CURRENT` runtime
+pointer and abort the process (reproduced ~60-80% of runs, identical before
+and after the rollback change). A theoretical follow-on: an orphan surviving
+into the next in-process JIT run would see the new runtime's `live_tasks == 0`
+and could lower a live bump via `rt_stack_restore` — unreachable today because
+the null-`CURRENT` abort always wins first, but it becomes reachable if the
+orphan crash is ever "fixed" by making `rt()` null-tolerant. Fix the orphan
+lifecycle (join-or-detach on the fault path), not the symptom.
