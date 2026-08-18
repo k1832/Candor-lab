@@ -246,11 +246,7 @@ impl<'a> Resolver<'a> {
             ),
             TyKind::Proj { base, assoc } => Type::Proj(base.clone(), assoc.clone()),
             TyKind::Array { size, elem } => {
-                let len = match &size.kind {
-                    ExprKind::IntLit { value, .. } => ArrayLen::Lit(*value),
-                    ExprKind::Ident(n) => ArrayLen::Named(n.clone()),
-                    _ => ArrayLen::Unknown,
-                };
+                let len = crate::types::array_len_from_size(size);
                 Type::Array(Box::new(self.resolve_ty(elem)), len)
             }
             TyKind::Slice(e) => Type::Slice(Box::new(self.resolve_ty(e))),

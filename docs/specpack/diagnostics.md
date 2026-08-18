@@ -67,12 +67,14 @@ should make.** Grouped by family. (This doubles as the P4 diagnostic taxonomy.)
 | code | meaning | fix |
 |------|---------|-----|
 | E0601 | non-exhaustive match | add the missing variant arm(s) or `_` |
+| E0602 | overlapping pattern — the arm is unreachable | remove or reorder the shadowed arm |
 | E0603 | match scrutinee is not an enum | match only enums |
 | E0604 | pattern names a different enum than the scrutinee | use the scrutinee's enum |
 | E0605 | wrong variant payload arity | match the declared payload count |
+| E0606 | pattern kind does not fit the scrutinee (literal vs enum, variant vs integer, wrong literal) | write a pattern of the scrutinee's kind |
 | E0701 | `conv` operand must be an integer | convert only integer scalars |
 | E0702 | `result` only inside an `ensures` clause | remove/relocate `result` |
-| E0703 | cannot `deref` this type | only borrows/`Box` deref |
+| E0703 | type mismatch: expected `T`, found `U` | supply a value of the expected type |
 | E0704 | value is not callable | call a fn / fn-pointer only |
 | E0705 | `out` argument must be a place | pass a place, not a temporary |
 | E0706 | wrong argument count | match the declared arity |
@@ -83,6 +85,10 @@ should make.** Grouped by family. (This doubles as the P4 diagnostic taxonomy.)
 | E0711 | `?` applied to a non-enum | `?` only on result-shaped enums |
 | E0712 | `?` needs the fn to return the same result type / a `From` impl | make return types match, or (multi-module) widen explicitly |
 | E0713 | a write through a borrow needs an explicit `.*` | write `p.*.f = e`, not `p.f = e` |
+| E0714 | illegal `bitcast`: not a same-width float<->integer pair (or literal doesn't fit the bit pattern) | use f64<->{i64,u64,isize,usize} / f32<->{i32,u32}; suffix a high-bit literal |
+| E0715 | range pattern lower bound exceeds upper bound | order the bounds `lo ..= hi` |
+| E0716 | array repeat requires a `copy` element type (spec 03 §8.1) | use a `copy` element, or build the array element-by-element |
+| E0717 | array repeat length must be a compile-time constant (spec 03 §8.1) | write an integer literal or a named constant |
 
 ## E08xx — borrows, aliasing, regions, all-paths-return
 | code | meaning | fix |
@@ -107,6 +113,32 @@ should make.** Grouped by family. (This doubles as the P4 diagnostic taxonomy.)
 | E0903 | private item is not `pub` | mark it `pub` to export |
 | E0904 | import cycle | break the dependency cycle (DAG only) |
 | E0905 | no root `main.cnr` defining `fn main` | add the entry module |
+| E0906 | missing package entry file / re-check source absent | restore the package's `src/` entry file |
+
+## E091x–E093x — build cache & packages (design 0017)
+| code | meaning | fix |
+|------|---------|-----|
+| E0910 | cannot create the build cache dir | fix filesystem permissions/paths |
+| E0911 | cannot serialize a build artifact | environment error; retry or clear the cache |
+| E0912 | cannot write a build artifact | fix filesystem permissions/paths |
+| E0913 | cannot create the codegen cache dir | fix filesystem permissions/paths |
+| E0914 | cannot write a codegen cache entry | fix filesystem permissions/paths |
+| E0920 | internal: resolve on a manifest-less directory | add a `candor.toml` (design 0017 §1) |
+| E0921 | dependency directory has no `candor.toml` | point the dep at a real package |
+| E0922 | dependency `package = "..."` alias mismatches the dep's manifest name | align the alias with the dep's `package.name` |
+| E0923 | dependency conflict: one package required from two different sources | unify the two requirements |
+| E0925 | cannot resolve a dependency path | fix the path in the manifest |
+| E0926 | cannot read a source file | fix the file/permissions |
+| E0927 | package dependency cycle | break the cycle (packages form a DAG, design 0017 §8) |
+| E0928 | cannot serialize `candor.lock` | environment error; retry |
+| E0929 | cannot write `candor.lock` | fix filesystem permissions |
+| E0930 | dependency name collides with a local top-level module | rename the module or alias the dep |
+| E0931 | cannot run `git` for a git dependency | install git / fix PATH |
+| E0932 | git clone failed | check the URL and network |
+| E0933 | git rev/tag/branch does not resolve (or checkout failed) | pin an existing rev |
+| E0934 | cannot create/publish the git cache | fix filesystem permissions |
+| E0935 | freestanding composition imports the `std` package | drop the `std` dependency in freestanding builds |
+| E0936 | `candor.lock` update grows the dependency trust surface | review the delta; re-run with `CANDOR_ACCEPT_TRUST_DELTA=1` to accept |
 
 ## E10xx–E11xx — generics, interfaces, impls (designs 0007/0009)
 | code | meaning | fix |

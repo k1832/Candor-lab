@@ -556,11 +556,7 @@ impl<'a> Lowerer<'a> {
             TyKind::Named(n) if n == "str" => Type::Str,
             TyKind::Named(n) => Type::Named(n.clone()),
             TyKind::Array { size, elem } => {
-                let len = match &size.kind {
-                    ExprKind::IntLit { value, .. } => ArrayLen::Lit(*value),
-                    ExprKind::Ident(n) => ArrayLen::Named(n.clone()),
-                    _ => ArrayLen::Unknown,
-                };
+                let len = crate::types::array_len_from_size(size);
                 Type::Array(Box::new(self.resolve_ty(elem)?), len)
             }
             TyKind::Borrow(e) => Type::Borrow(Box::new(self.resolve_ty(e)?)),
@@ -1244,10 +1240,9 @@ impl<'a> Lowerer<'a> {
             ExprKind::EnumCtor { enum_name, .. } => Some(Type::Named(enum_name.clone())),
             ExprKind::ArrayRepeat { value, size } => {
                 let elem = self.infer_ty(value)?;
-                let n = match &size.kind {
-                    ExprKind::IntLit { value, .. } => ArrayLen::Lit(*value),
-                    ExprKind::Ident(nm) => ArrayLen::Named(nm.clone()),
-                    _ => return None,
+                let n = match crate::types::array_len_from_size(size) {
+                    ArrayLen::Unknown => return None,
+                    len => len,
                 };
                 Some(Type::Array(Box::new(elem), n))
             }
@@ -1778,10 +1773,10 @@ impl<'a> Lowerer<'a> {
                     Type::Array(x, _) => (**x).clone(),
                     _ => return unsupported("array-repeat of non-array type"),
                 };
-                let n = match &size.kind {
-                    ExprKind::IntLit { value, .. } => *value,
-                    ExprKind::Ident(nm) => *self.consts.get(nm).unwrap_or(&0),
-                    _ => return unsupported("non-constant array-repeat length"),
+                let n = match crate::types::array_len_from_size(size) {
+                    ArrayLen::Lit(v) => v,
+                    ArrayLen::Named(nm) => *self.consts.get(&nm).unwrap_or(&0),
+                    ArrayLen::Unknown => return unsupported("non-constant array-repeat length"),
                 };
                 let stride = self.stride_of(&elem);
                 // Evaluate the element once into a temp, then fill the slots.

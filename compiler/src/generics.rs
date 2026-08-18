@@ -155,11 +155,7 @@ pub fn resolve_gty(
             Type::App(name.clone(), ra)
         }
         TyKind::Array { size, elem } => {
-            let len = match &size.kind {
-                ExprKind::IntLit { value, .. } => ArrayLen::Lit(*value),
-                ExprKind::Ident(n) => ArrayLen::Named(n.clone()),
-                _ => ArrayLen::Unknown,
-            };
+            let len = crate::types::array_len_from_size(size);
             Type::Array(Box::new(resolve_gty(elem, params, known_types, generic_types, diags)), len)
         }
         TyKind::Slice(e) => Type::Slice(Box::new(resolve_gty(e, params, known_types, generic_types, diags))),

@@ -20,6 +20,23 @@ pub enum ArrayLen {
     Unknown,
 }
 
+/// The `ArrayLen` denoted by an array-size expression — a `[N]T` type's `N` or
+/// an `[e; N]` repeat's `N` — shared by every consumer (resolve, checker, both
+/// interpreters, generics, MIR). Parens peel; an integer literal is `Lit`, a
+/// bare name is `Named` (each consumer resolves it through its const table),
+/// anything else is `Unknown`. Arrays are compile-time-constant-length (design
+/// 0001 §5.1), so the checker rejects an `Unknown` (or runtime-local `Named`)
+/// size in repeat position.
+pub fn array_len_from_size(size: &crate::ast::Expr) -> ArrayLen {
+    use crate::ast::ExprKind;
+    match &size.kind {
+        ExprKind::Paren(inner) => array_len_from_size(inner),
+        ExprKind::IntLit { value, .. } => ArrayLen::Lit(*value),
+        ExprKind::Ident(n) => ArrayLen::Named(n.clone()),
+        _ => ArrayLen::Unknown,
+    }
+}
+
 /// A non-capturing function-pointer type: parameter modes + `alloc` effect are
 /// part of the type (design 0001 §6.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
