@@ -165,16 +165,58 @@ fn gate_freestanding_fault_axis() {
     }
 }
 
-// Stack-bump exhaustion: crossing MAX_ADDR must be the clean bad_pointer HALT
-// (exit 2 + fault line), never a wild store into the flat section's neighbours.
-// Native-only pin: the reclaiming oracle runs this same program to completion.
+// Stack-bump exhaustion: with the per-frame rollback (task #144) a loop of
+// calls stays flat, so exhaustion needs LIVE frames — deep recursion whose
+// frames (a ~64 KiB array each) overfill the 256 MiB model. Crossing MAX_ADDR
+// must be the clean bad_pointer HALT (exit 2 + fault line), never a wild store
+// into the flat section's neighbours. Native-only pin: the interpreters cap
+// recursion (MAX_DEPTH) long before the model fills.
 #[test]
-fn gate_freestanding_stack_exhaustion_clean_fault() {
+fn gate_freestanding_stack_bump_parity_flat_calls() {
+    // Task-#144 rollback parity on the freestanding runtime (unconditional
+    // restore, single-threaded): identical calls must reuse identical frame
+    // addresses -- delta 0 for an aggregate local, an aggregate-return chain,
+    // and a drop-hooked local.
     assert!(cc_available(), "cc/linker unavailable");
     let src = "struct S { a: i64, b: i64, c: i64 } \
-        fn burn(x: i64) -> i64 { let s: S = S { a: x, b: x, c: x }; return s.a; } \
-        fn main() -> i64 { let mut i: i64 = 0; let mut acc: i64 = 0; \
-        while i < 12000000 { acc = acc + burn(i); i = i + 1; } return acc; }";
+        struct D { v: i64 } drop(write self) { } \
+        fn withagg(x: i64) -> i64 { let s: S = S { a: x, b: x, c: x }; \
+            unsafe \"leak probe reads its own frame address\" { \
+                return conv i64 (ptr_to_addr(addr_of(s))); } } \
+        fn mkagg(x: i64) -> S { return S { a: x, b: x, c: x }; } \
+        fn chain(x: i64) -> i64 { let s: S = mkagg(x); return withagg(s.a); } \
+        fn withdrop(x: i64) -> i64 { let d: D = D { v: x }; \
+            unsafe \"leak probe reads its own frame address\" { \
+                return conv i64 (ptr_to_addr(addr_of(d))); } } \
+        fn main() -> i64 { \
+            let a1: i64 = withagg(1); let a2: i64 = withagg(2); trace(a2 - a1); \
+            let c1: i64 = chain(7); let c2: i64 = chain(8); trace(c2 - c1); \
+            let d1: i64 = withdrop(9); let d2: i64 = withdrop(10); trace(d2 - d1); \
+            return 0; }";
+    let srcpath = scratch("bumpparsrc").with_extension("cnr");
+    std::fs::write(&srcpath, src).unwrap();
+    let exe = compile_fs(&srcpath, "bumppar");
+    let got = run_outcome(&exe);
+    let _ = std::fs::remove_file(&exe);
+    let _ = std::fs::remove_file(&srcpath);
+    assert_eq!(got, Outcome::Ok { exit: 0, trace: vec![0, 0, 0] });
+}
+
+#[test]
+fn gate_freestanding_stack_exhaustion_clean_fault() {
+    // INTENT (review F5): the recursion is LIVE-frame on purpose -- no restore
+    // is reachable before the fault, so the guard (not rollback) is exercised.
+    // The ~4,075-deep native recursion rides the HOST stack too; if frame
+    // shape changes ever push host usage near the thread limit, a host
+    // overflow would abort instead of faulting -- keep depth*hostframe well
+    // under 8 MiB.
+    assert!(cc_available(), "cc/linker unavailable");
+    let src = "fn burn(d: i64) -> i64 { \
+        let s: [8192]i64 = [0i64; 8192]; \
+        if d <= 0 { return s[0]; } \
+        let r: i64 = burn(d - 1); \
+        return r + s[0]; } \
+        fn main() -> i64 { return burn(6000); }";
     let srcpath = scratch("exhaustsrc").with_extension("cnr");
     std::fs::write(&srcpath, src).unwrap();
     let exe = compile_fs(&srcpath, "exhaust");

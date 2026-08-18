@@ -54,6 +54,12 @@ pub struct Runtime {
     buf: Vec<u8>,
     pub base: *mut u8,
     pub stack_bump: AtomicU64,
+    /// Spawned-but-not-yet-joined task count (`rt_spawn` increments BEFORE the
+    /// thread exists; `rt_scope_end` decrements AFTER its join returns). When it
+    /// reads 0 exactly one thread is running, which gates every stack-bump
+    /// rollback (`rt_stack_restore`): restoring while tasks share the atomic
+    /// bump could reclaim a concurrent task's live frame.
+    pub live_tasks: AtomicU64,
     pub static_bump: u64,
     pub trace: Vec<i64>,
     /// The delivered fault `(kind, span.start, span.end)` (`None` == ran to return).
@@ -70,6 +76,7 @@ impl Runtime {
             buf,
             base,
             stack_bump: AtomicU64::new(crate::interp::mem::STACK_BASE),
+            live_tasks: AtomicU64::new(0),
             static_bump: crate::interp::mem::STATIC_BASE,
             trace: Vec::new(),
             fault: None,
@@ -135,8 +142,19 @@ struct Tls {
     fault: Option<(u32, usize, usize)>,
     /// This thread's `θ` fragment (per-task projection); merged at each join.
     trace: Vec<i64>,
-    /// The stack of open scope frames on this thread (nested `scope`s).
-    scopes: Vec<Vec<JoinHandle<TaskOutcome>>>,
+    /// The stack of open scope frames on this thread (nested `scope`s): the
+    /// stack-bump mark at the scope's `{` plus the spawned task handles.
+    scopes: Vec<ScopeFrame>,
+}
+
+/// One open `scope` on a thread: the bump mark recorded at `rt_scope_begin`
+/// (restored at the join iff no task remains live — memo option B riding along
+/// with option C, so a loop of scopes stays flat without waiting for the
+/// enclosing function to return) and the child task handles, joined in spawn
+/// order at the closing brace.
+struct ScopeFrame {
+    mark: u64,
+    tasks: Vec<JoinHandle<TaskOutcome>>,
 }
 
 thread_local! {
@@ -149,8 +167,11 @@ thread_local! {
 
 /// Reserve + zero a stack slot; returns its Candor address. A **CAS-bumped atomic**
 /// so concurrent task threads each get a disjoint region (runtime-internal
-/// synchronization, design 0012 §1.3 note). The bump never rolls back (as in the
-/// single-threaded engine), so disjointness of live frames holds by construction.
+/// synchronization, design 0012 §1.3 note). The bump ROLLS BACK per call frame
+/// via `rt_stack_save`/`rt_stack_restore` (task #144 rollback), gated on the
+/// live-task counter — see `rt_stack_restore` for the full scheme; while tasks
+/// are live no restore runs, so disjointness of concurrent live frames holds
+/// exactly as before.
 ///
 /// Exhaustion guard: zeroing `[a, a+size)` past `MAX_ADDR` would write outside
 /// the host buffer (UB — heap corruption or a segfault). The interpreters report
@@ -180,6 +201,50 @@ pub extern "C" fn rt_stack_alloc(size: u64, align: u64) -> u64 {
             }
             return a;
         }
+    }
+}
+
+/// Read the current stack bump — the frame mark an allocating function saves at
+/// entry, BEFORE its first `rt_stack_alloc`. The LLVM lowering emits the
+/// save/restore pair only for functions with model-stack locals (Tier-F-free
+/// functions emit neither and cost nothing); the Cranelift lowering emits the
+/// pair unconditionally, which is equivalent there because every local gets a
+/// flat model slot.
+pub extern "C" fn rt_stack_save() -> u64 {
+    rt().stack_bump.load(Ordering::SeqCst)
+}
+
+/// Roll the stack bump back to `mark` (the callee's entry mark) — the model
+/// stack's "pop", run at every function return (task #144, memo option C).
+///
+/// ## Gate: only when NO task is live
+/// `live_tasks == 0` means every spawned task has been joined, so exactly one
+/// thread is running — the check-then-store cannot race (only a running thread
+/// can spawn, and `rt_spawn` increments the counter before its thread exists).
+/// Everything above `mark` is then a returned frame: dead by the interpreters'
+/// watermark argument (returns are copied down, borrows cannot be returned).
+/// While tasks ARE live every restore is skipped — the old leak-until-idle
+/// behavior, whose cross-task disjointness proof is untouched. The enclosing
+/// scope's join (`rt_scope_end`) restores to its own mark once the counter
+/// returns to 0, reclaiming the tasks' dead frames.
+///
+/// ## The parked return value
+/// CALLEE-side placement makes the aggregate-return hand-off safe by the same
+/// invariant the reclaiming MIR interpreter relies on: the callee restores to
+/// its entry mark and returns the address of its `_0` slot, which now sits
+/// ABOVE the bump — stale but intact, exactly like the interpreter's popped
+/// parked slot. The MIR lowering keeps a call's `Assign` and its consuming
+/// `CopyVal` adjacent with no allocating statement between (tripwired by #141's
+/// debug asserts in `mir::interp`), and `rt_copy` never allocates, so the bytes
+/// are consumed before any allocation can clobber them. A fault path never
+/// restores: `rt_fault` unwinds by `_longjmp`. A main-thread fault terminates
+/// the program; a TASK fault is caught in `run_task` and the parent continues
+/// -- the dead task frames are then reclaimed by the scope-join restore before
+/// the fault is re-delivered, so a stale bump is unobservable either way.
+pub extern "C" fn rt_stack_restore(mark: u64) {
+    let r = rt();
+    if r.live_tasks.load(Ordering::SeqCst) == 0 {
+        r.stack_bump.store(mark, Ordering::SeqCst);
     }
 }
 
@@ -239,9 +304,13 @@ pub extern "C" fn rt_fault(kind: u32, span_start: u32, span_end: u32) {
 // Structured-concurrency hooks (design 0012 §1.1/§3.4, Stage 2).
 // ---------------------------------------------------------------------------
 
-/// The opening `{` of a `scope`: push a fresh frame onto this thread's scope stack.
+/// The opening `{` of a `scope`: push a fresh frame onto this thread's scope
+/// stack, recording the current bump as the scope's rollback mark. Everything
+/// allocated during the scope (parent calls — unrestored while tasks are live —
+/// and every task's frames) is dead at the join, so the mark is restorable then.
 pub extern "C" fn rt_scope_begin() {
-    TLS.with(|t| t.borrow_mut().scopes.push(Vec::new()));
+    let mark = rt().stack_bump.load(Ordering::SeqCst);
+    TLS.with(|t| t.borrow_mut().scopes.push(ScopeFrame { mark, tasks: Vec::new() }));
 }
 
 /// The task-thread body: establish this thread's own fault landing pad, run the
@@ -306,6 +375,9 @@ pub extern "C" fn rt_spawn(
     let args = [a0, a1, a2, a3, a4, a5];
     let argc = argc as usize;
     let faddr = faddr as usize;
+    // Count the task live BEFORE its thread can exist, so no thread ever runs
+    // while an `rt_stack_restore` observes the counter at 0 (the rollback gate).
+    rt().live_tasks.fetch_add(1, Ordering::SeqCst);
     // A generous per-task host stack so native (Cranelift) recursion inside a task
     // matches the interpreter's reach; the Candor "stack" itself lives in the flat
     // buffer via `rt_stack_alloc`, so tasks touch little host stack in practice.
@@ -318,6 +390,7 @@ pub extern "C" fn rt_spawn(
             .scopes
             .last_mut()
             .expect("rt_spawn outside a scope (checker E1201 should forbid)")
+            .tasks
             .push(handle);
     });
 }
@@ -327,13 +400,25 @@ pub extern "C" fn rt_spawn(
 /// deliver the **spawn-order-first** fault (§3.2) — recorded in this thread's fault
 /// slot and `_longjmp`d to this thread's landing pad — if any task faulted.
 pub extern "C" fn rt_scope_end() {
-    let handles = TLS.with(|t| {
+    let frame = TLS.with(|t| {
         t.borrow_mut().scopes.pop().expect("rt_scope_end without a matching rt_scope_begin")
     });
-    let mut outcomes: Vec<TaskOutcome> = Vec::with_capacity(handles.len());
-    for h in handles {
+    let r = rt();
+    let mut outcomes: Vec<TaskOutcome> = Vec::with_capacity(frame.tasks.len());
+    for h in frame.tasks {
         // Join in spawn order; a task thread never panics on a well-formed program.
         outcomes.push(h.join().expect("task thread panicked"));
+        // The task's thread is gone; only now may its liveness count drop (the
+        // rollback gate in `rt_stack_restore` relies on this ordering).
+        r.live_tasks.fetch_sub(1, Ordering::SeqCst);
+    }
+    // Scope-join rollback (memo option B): with every child joined, all frames
+    // the scope's tasks (and the parent's unrestored calls while they were live)
+    // allocated above the `rt_scope_begin` mark are dead — restore to it, unless
+    // an OUTER scope's tasks are still live (then this thread may be a task
+    // itself, or siblings share the bump, and the restore stays unsound).
+    if r.live_tasks.load(Ordering::SeqCst) == 0 {
+        r.stack_bump.store(frame.mark, Ordering::SeqCst);
     }
     // Merge every task's trace in spawn order (deterministic θ, regardless of fault
     // extent), then select the spawn-order-first fault.

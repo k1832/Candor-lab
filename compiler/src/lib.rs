@@ -478,7 +478,19 @@ fn lower_and_run_native(program: &ast::Program, optimize: bool) -> MirRunResult 
             // Stage D (native-opt engine): run the validated MIR-level R1 rewrite
             // (INV-R1-ONLY, `mir::opt`) before lowering, then compile with the
             // Cranelift optimizer on. The four-engine gate proves the trace survives.
-            let mp = if optimize { mir::opt::optimize(mp).prog } else { mp };
+            let mp = if optimize {
+                let mp = mir::opt::optimize(mp).prog;
+                // R1 only deletes dead pure assigns and never reorders, so it can
+                // only shrink the Assign(Call)+CopyVal window -- but the native
+                // rollback's soundness rides on that adjacency, so re-verify the
+                // optimized MIR rather than trusting the pass's contract.
+                for f in &mp.fns {
+                    mir::check_call_reclamation(f, &items);
+                }
+                mp
+            } else {
+                mp
+            };
             match backend::run(&mp, &items, &consts, optimize) {
                 Ok(run) => MirRunResult::Ok(run),
                 Err(f) => MirRunResult::Fault(f),

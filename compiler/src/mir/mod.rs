@@ -41,6 +41,7 @@ use crate::token::ScalarTy;
 use crate::types::Type;
 
 pub mod build;
+pub(crate) use build::check_call_reclamation;
 pub mod interp;
 pub mod opt;
 pub mod serial;

@@ -280,3 +280,86 @@ fn native_split_mut_bounds_fault() {
         ITERS,
     );
 }
+
+// ===========================================================================
+// Stack-bump rollback under concurrency (task #144). While tasks are live the
+// runtime SKIPS every per-frame restore (a shared atomic bump cannot roll back
+// under a concurrent task's live frame); at the scope's join, with every child
+// joined and the live-task counter back at 0, the runtime restores the bump to
+// its scope-begin mark. These pin (a) correctness is untouched under real
+// threads, and (b) a LOOP of allocating scopes stays flat — the memo's
+// leak-until-scope-exit residue does not accumulate across scopes.
+// ===========================================================================
+
+/// A scope loop whose tasks burn aggregate frames: results/trace equal the
+/// sequential oracle on every schedule-shaken iteration (the restore-skip
+/// while live and the join-restore are both invisible to semantics).
+#[test]
+fn native_scope_loop_allocating_tasks_matches_oracle() {
+    gate(
+        "struct S { a: i64, b: i64, c: i64 } \
+         fn mk(x: i64) -> S { return S { a: x, b: x + 1, c: x + 2 }; } \
+         fn work(o: write i64, x: i64) -> unit { \
+            let mut i: i64 = 0; let mut acc: i64 = 0; \
+            while i < 50 { let s: S = mk(x + i); acc = acc + s.b; i = i + 1; } \
+            o.* = acc; } \
+         fn main() -> i64 { let mut t: i64 = 0; let mut r: i64 = 0; \
+            while t < 8 { let mut a: i64 = 0; let mut b: i64 = 0; \
+                scope { spawn work(write a, t); spawn work(write b, t + 100); } \
+                r = r + a + b; t = t + 1; } \
+            trace(r); return 0; }",
+        ITERS,
+    );
+}
+
+/// The bump stays FLAT across a loop of allocating scopes: a frame-address
+/// probe taken after each scope join is identical every iteration (native-only
+/// assert — the address values are engine-internal, so no oracle comparison;
+/// the MIR interpreter's probe deltas are also all 0).
+#[test]
+fn native_scope_loop_bump_flat_at_joins() {
+    let src = "struct S { a: i64, b: i64, c: i64 } \
+         fn mk(x: i64) -> S { return S { a: x, b: x + 1, c: x + 2 }; } \
+         fn work(o: write i64, x: i64) -> unit { \
+            let mut i: i64 = 0; let mut acc: i64 = 0; \
+            while i < 50 { let s: S = mk(x + i); acc = acc + s.b; i = i + 1; } \
+            o.* = acc; } \
+         fn probe() -> i64 { let s: S = mk(7); \
+            unsafe \"reads its own frame slot address for the leak probe\" { \
+                return conv i64 (ptr_to_addr(addr_of(s))); } } \
+         fn main() -> i64 { let base: i64 = probe(); let mut t: i64 = 0; \
+            while t < 6 { let mut a: i64 = 0; let mut b: i64 = 0; \
+                scope { spawn work(write a, t); spawn work(write b, t + 100); } \
+                trace(probe() - base); t = t + 1; } \
+            return 0; }";
+    match run_source_real_native(src) {
+        MirRunResult::Ok(r) => {
+            assert_eq!(r.ret, 0);
+            assert_eq!(r.trace, vec![0i64; 6], "bump must return to its mark at every scope join");
+        }
+        MirRunResult::Fault(f) => panic!("probe faulted: {:?}@{}..{}", f.kind, f.span.start, f.span.end),
+        _ => panic!("probe did not run"),
+    }
+}
+
+/// Spawn INSIDE a called, allocating function: the callee's own restore is
+/// skipped while its scope's tasks are live (the counter is nonzero from its
+/// own spawns), and the parent-level calls after the join still see a sane
+/// bump. Semantics referee: oracle equality across shaken schedules.
+#[test]
+fn native_spawn_inside_allocating_callee() {
+    gate(
+        "struct S { a: i64, b: i64, c: i64 } \
+         fn mk(x: i64) -> S { return S { a: x, b: x + 1, c: x + 2 }; } \
+         fn work(o: write i64, x: i64) -> unit { \
+            let s: S = mk(x); o.* = s.a + s.b + s.c; } \
+         fn round(x: i64) -> i64 { \
+            let pre: S = mk(x); let mut a: i64 = 0; let mut b: i64 = 0; \
+            scope { spawn work(write a, x); spawn work(write b, x + 10); } \
+            let post: S = mk(a + b); return pre.c + post.a; } \
+         fn main() -> i64 { let mut t: i64 = 0; let mut r: i64 = 0; \
+            while t < 5 { r = r + round(t); t = t + 1; } \
+            trace(r); return 0; }",
+        ITERS,
+    );
+}

@@ -1,7 +1,7 @@
 /* Candor FREESTANDING runtime (design 0010 §5; LANG_PHILOSOPHY P7/P9/NN#6).
  *
  * The no-libc twin of `aot_runtime.c`. It links the SAME emitted Candor object
- * (imports the six `rt_*` shims, exports `candor_entry`) but depends on NO libc
+ * (imports the `rt_*` shims, exports `candor_entry`) but depends on NO libc
  * and no OS-facing runtime: the ONLY host services it uses are two raw Linux
  * syscalls — `write` (for the θ-trace and the fault line) and `exit` — issued
  * directly, never through a C library. This proves NN#6's "no mandatory runtime;
@@ -108,7 +108,7 @@ static void write_dec(long fd, uint32_t v) {
     sys_write(fd, &buf[i], (unsigned long)((int)sizeof(buf) - i));
 }
 
-/* ---- the six rt_* shims the Candor object imports ------------------------ */
+/* ---- the rt_* shims the Candor object imports ------------------------ */
 /* Defined below; never returns (freestanding fault policy: log + halt). */
 /* noreturn+cold keeps clang -O2 from inlining the fault path into
    rt_stack_alloc's hot loop (measured +1.4%% per call when inlined). */
@@ -127,6 +127,19 @@ uint64_t rt_stack_alloc(uint64_t size, uint64_t align) {
     if (size) memset(g_base + a, 0, size);
     return a;
 }
+
+/* Stack-bump rollback (task #144, mirrors aot_runtime.c): an allocating
+ * function saves the bump at entry (before its first rt_stack_alloc) and
+ * restores it at return, so the model stack behaves like a real stack. This
+ * runtime is single-threaded (no rt_spawn/rt_scope here — scope programs
+ * cannot link freestanding), so the hosted runtimes' live-task gate is
+ * vacuously 0 and the restore is unconditional. An aggregate return travels as
+ * the address of the callee's _0 slot, ABOVE the restored bump: stale but
+ * intact until the caller's adjacent CopyVal consumes it (the MIR lowering
+ * guarantees no allocating statement between; rt_copy never allocates). The
+ * fault path never restores: rt_fault halts the process. */
+uint64_t rt_stack_save(void) { return g_stack_bump; }
+void rt_stack_restore(uint64_t mark) { g_stack_bump = mark; }
 void rt_copy(uint64_t dst, uint64_t src, uint64_t len) {
     if (len) memmove(g_base + dst, g_base + src, len);
 }

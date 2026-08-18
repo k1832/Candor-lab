@@ -207,6 +207,10 @@ pub fn emit_ll(
     out.push_str("declare void @rt_trace(i64)\n");
     out.push_str("declare void @rt_fault(i32, i32, i32) #0\n");
     out.push_str("declare i64 @rt_stack_alloc(i64, i64)\n");
+    // Frame rollback (task #144): an allocating fn saves the bump at entry and
+    // restores it (runtime-gated on the live-task counter) at return.
+    out.push_str("declare i64 @rt_stack_save()\n");
+    out.push_str("declare void @rt_stack_restore(i64)\n");
     out.push_str("declare void @rt_copy(i64, i64, i64)\n");
     // Correctly-rounded IEEE square root (design 0016 §11): the native LLVM
     // intrinsic, emitted for the Candor `sqrt` builtin / WASM `f*.sqrt`.
@@ -3011,6 +3015,19 @@ fn emit_fn(
         .join(", ");
     e.raw(&format!("define internal i64 {}({params}) {{\n", cnf_sym(&mf.name)));
     e.label("entry");
+    // Frame rollback (task #144): iff this fn allocates model stack (has any
+    // Tier-F local), save the bump BEFORE the first `rt_stack_alloc` and
+    // restore it in the final-return block (runtime-gated on the live-task
+    // counter), so a returning frame pops like a real stack. An aggregate
+    // return in `_0` then sits above the restored bump — stale but intact —
+    // until the caller's adjacent `CopyVal` consumes it (the MIR lowering
+    // emits no allocating statement in between; see `rt_stack_restore` in
+    // `aot_runtime.c` for the full argument). A Tier-F-free fn emits neither
+    // call and keeps its zero model cost.
+    let allocates = e.tier_f.iter().any(|&f| f);
+    if allocates {
+        e.line("%stkmark = call i64 @rt_stack_save()");
+    }
     // Tier-R locals -> alloca (mem2reg-promotable); Tier-F locals -> flat slot.
     for i in 0..mf.locals.len() {
         if e.tier_f[i] {
@@ -3101,11 +3118,20 @@ fn emit_fn(
 
     e.label(&final_return);
     // Convention (B): a word return delivers _0's value; an aggregate return
-    // delivers the candor offset of _0's caller-visible slot.
+    // delivers the candor offset of _0's caller-visible slot. The value (or
+    // the `_0` bytes the offset points at) is read before the rollback, which
+    // only moves the bump — the bytes stay intact for the caller's immediate
+    // consumption (parked-return scheme, task #144).
     if is_wordy(&mf.locals[0].ty) {
         let v = e.load_local(0);
+        if allocates {
+            e.line("call void @rt_stack_restore(i64 %stkmark)");
+        }
         e.line(&format!("ret i64 {v}"));
     } else {
+        if allocates {
+            e.line("call void @rt_stack_restore(i64 %stkmark)");
+        }
         e.line("ret i64 %off0");
     }
 

@@ -58,6 +58,12 @@
 
 static uint8_t *g_base;
 static atomic_uint_fast64_t g_stack_bump;
+/* Spawned-but-not-yet-joined task count: rt_spawn increments BEFORE its thread
+ * exists, rt_scope_end decrements AFTER its join returns. When it reads 0
+ * exactly one thread is running, which gates every stack-bump rollback
+ * (rt_stack_restore): restoring while tasks share the atomic bump could
+ * reclaim a concurrent task's live frame. */
+static atomic_uint_fast64_t g_live_tasks;
 
 /* Defined below; never returns (longjmp to this thread's landing pad). */
 /* noreturn+cold keeps clang -O2 from inlining the fault path into
@@ -73,8 +79,10 @@ static uint64_t round_up(uint64_t x, uint64_t a) {
 
 /* Reserve + zero a stack slot; return its Candor address. A CAS-bumped atomic so
  * concurrent task threads each get a disjoint region (runtime-internal sync,
- * design 0012 §1.3 note); the bump never rolls back, so live frames stay
- * disjoint by construction (mirrors runtime.rs `rt_stack_alloc`).
+ * design 0012 §1.3 note); the bump ROLLS BACK per call frame via
+ * rt_stack_save/rt_stack_restore (task #144), gated on g_live_tasks == 0 —
+ * see rt_stack_restore; while tasks are live no restore runs, so disjointness
+ * of concurrent live frames holds exactly as before (mirrors runtime.rs).
  *
  * Exhaustion guard (mirrors runtime.rs): zeroing [a, a+size) past MAX_ADDR would
  * write outside the mapped flat buffer (a segfault, not a Candor fault). The
@@ -96,6 +104,44 @@ uint64_t rt_stack_alloc(uint64_t size, uint64_t align) {
             if (size) memset(g_base + a, 0, (size_t)size);
             return a;
         }
+    }
+}
+
+/* Read the current stack bump — the frame mark an allocating function saves at
+ * entry, BEFORE its first rt_stack_alloc. The LLVM lowering emits the pair
+ * only for functions with model-stack locals; the Cranelift lowering emits it
+ * unconditionally (every local gets a flat model slot there, so the pair is
+ * never dead). */
+uint64_t rt_stack_save(void) {
+    return atomic_load_explicit(&g_stack_bump, memory_order_seq_cst);
+}
+
+/* Roll the stack bump back to `mark` (the callee's entry mark) — the model
+ * stack's "pop", run at every function return (task #144, memo option C).
+ *
+ * Gate: only when NO task is live. g_live_tasks == 0 means every spawned task
+ * has been joined, so exactly one thread is running — the check-then-store
+ * cannot race (only a running thread can spawn, and rt_spawn increments the
+ * counter before its thread exists). Everything above `mark` is then a
+ * returned frame: dead by the interpreters' watermark argument (returns are
+ * copied down, borrows cannot be returned). While tasks ARE live every restore
+ * is skipped — the old leak-until-idle behavior, whose cross-task disjointness
+ * proof is untouched; the enclosing scope's join (rt_scope_end) restores to
+ * its own mark once the counter returns to 0.
+ *
+ * Parked return values: CALLEE-side placement makes the aggregate-return
+ * hand-off safe by the same invariant the reclaiming MIR interpreter relies
+ * on — the callee restores to its entry mark and returns the address of its
+ * _0 slot, now ABOVE the bump: stale but intact, exactly like the
+ * interpreter's popped parked slot. The MIR lowering keeps a call's Assign and
+ * its consuming CopyVal adjacent with no allocating statement between
+ * (tripwired by #141's debug asserts in mir::interp), and rt_copy never
+ * allocates, so the bytes are consumed before any allocation can clobber them.
+ * A fault path never restores: rt_fault longjmps and the program terminates,
+ * so a stale bump is unobservable. */
+void rt_stack_restore(uint64_t mark) {
+    if (atomic_load_explicit(&g_live_tasks, memory_order_seq_cst) == 0) {
+        atomic_store_explicit(&g_stack_bump, mark, memory_order_seq_cst);
     }
 }
 
@@ -254,10 +300,14 @@ typedef struct {
     pthread_t thread;
 } Task;
 
-/* An open `scope` frame: the tasks spawned into it, joined in spawn order. */
+/* An open `scope` frame: the tasks spawned into it, joined in spawn order, plus
+ * the stack-bump mark recorded at the scope's `{` (restored at the join iff no
+ * task remains live — memo option B riding along with option C, so a loop of
+ * scopes stays flat without waiting for the enclosing function to return). */
 typedef struct {
     Task **tasks;
     size_t len, cap;
+    uint64_t mark;
 } ScopeFrame;
 
 /* What a joined task hands back to its parent: its caught fault (if any) and its
@@ -369,6 +419,10 @@ void rt_scope_begin(void) {
     fr->tasks = NULL;
     fr->len = 0;
     fr->cap = 0;
+    /* The scope's rollback mark: everything allocated during the scope (parent
+     * calls — unrestored while tasks are live — and every task's frames) is
+     * dead at the join, so rt_scope_end may restore to it. */
+    fr->mark = atomic_load_explicit(&g_stack_bump, memory_order_seq_cst);
 }
 
 /* `spawn CALLEE(args)`: create a REAL OS thread running the task fn at `faddr`
@@ -385,6 +439,10 @@ void rt_spawn(int64_t faddr, int64_t argc,
     tk->argc = (int)argc;
     int64_t src[MAX_SPAWN_ARGS] = {a0, a1, a2, a3, a4, a5};
     memcpy(tk->args, src, sizeof(src));
+
+    /* Count the task live BEFORE its thread can exist, so no thread ever runs
+     * while an rt_stack_restore observes the counter at 0 (the rollback gate). */
+    atomic_fetch_add_explicit(&g_live_tasks, 1, memory_order_seq_cst);
 
     pthread_attr_t attr;
     pthread_attr_init(&attr);
@@ -417,6 +475,9 @@ void rt_scope_end(void) {
         Task *tk = fr.tasks[i];
         void *ret = NULL;
         pthread_join(tk->thread, &ret);
+        /* The task's thread is gone; only now may its liveness count drop (the
+         * rollback gate in rt_stack_restore relies on this ordering). */
+        atomic_fetch_sub_explicit(&g_live_tasks, 1, memory_order_seq_cst);
         TaskOutcome *o = (TaskOutcome *)ret;
         for (size_t j = 0; j < o->trace.len; j++) {
             trace_push(&t->trace, o->trace.data[j]);
@@ -429,6 +490,14 @@ void rt_scope_end(void) {
         free(tk);
     }
     free(fr.tasks);
+    /* Scope-join rollback (memo option B): with every child joined, all frames
+     * the scope's tasks (and the parent's unrestored calls while they were
+     * live) allocated above the rt_scope_begin mark are dead — restore to it,
+     * unless an OUTER scope's tasks are still live (then this thread may be a
+     * task itself, or siblings share the bump, and the restore stays unsound). */
+    if (atomic_load_explicit(&g_live_tasks, memory_order_seq_cst) == 0) {
+        atomic_store_explicit(&g_stack_bump, fr.mark, memory_order_seq_cst);
+    }
     if (first.has) {
         t->fault = first;
         longjmp(*t->land, 1);

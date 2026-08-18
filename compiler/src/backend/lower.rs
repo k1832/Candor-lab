@@ -310,6 +310,7 @@ pub(super) fn define_functions<M: Module>(
                 shimrefs: HashMap::new(),
                 externrefs: HashMap::new(),
                 addr: Vec::new(),
+                frame_mark: None,
             };
             cg.lower_fn(f);
             b.seal_all_blocks();
@@ -348,6 +349,7 @@ pub(super) fn define_functions<M: Module>(
                 shimrefs: HashMap::new(),
                 externrefs: HashMap::new(),
                 addr: Vec::new(),
+                frame_mark: None,
             };
             cg.lower_glue(ty);
             b.seal_all_blocks();
@@ -415,6 +417,7 @@ pub(super) fn define_entry<M: Module>(
             shimrefs: HashMap::new(),
             externrefs: HashMap::new(),
             addr: Vec::new(),
+            frame_mark: None,
         };
         cg.lower_entry(main_is_i64);
         b.seal_all_blocks();
@@ -452,6 +455,8 @@ pub fn compile(
         JITBuilder::new(default_libcall_names()).map_err(|e| e.to_string())?
     };
     builder.symbol("rt_stack_alloc", runtime::rt_stack_alloc as *const u8);
+    builder.symbol("rt_stack_save", runtime::rt_stack_save as *const u8);
+    builder.symbol("rt_stack_restore", runtime::rt_stack_restore as *const u8);
     builder.symbol("rt_copy", runtime::rt_copy as *const u8);
     builder.symbol("rt_trace", runtime::rt_trace as *const u8);
     builder.symbol("rt_mmio_load", runtime::rt_mmio_load as *const u8);
@@ -508,6 +513,10 @@ pub fn compile(
 /// Imported shim FuncIds.
 pub(super) struct Shims {
     stack_alloc: FuncId,
+    // Frame rollback (task #144): save the bump at an allocating fn's entry,
+    // restore it (gated on live tasks inside the runtime) at its return.
+    stack_save: FuncId,
+    stack_restore: FuncId,
     copy: FuncId,
     trace: FuncId,
     mmio_load: FuncId,
@@ -527,6 +536,19 @@ impl Shims {
         sig1.returns.push(AbiParam::new(types::I64));
         let stack_alloc = module
             .declare_function("rt_stack_alloc", Linkage::Import, &sig1)
+            .map_err(|e| e.to_string())?;
+
+        // rt_stack_save() -> i64 / rt_stack_restore(mark): the per-frame bump
+        // rollback pair (task #144).
+        let mut sigsv = module.make_signature();
+        sigsv.returns.push(AbiParam::new(types::I64));
+        let stack_save = module
+            .declare_function("rt_stack_save", Linkage::Import, &sigsv)
+            .map_err(|e| e.to_string())?;
+        let mut sigsr = module.make_signature();
+        sigsr.params.push(AbiParam::new(types::I64));
+        let stack_restore = module
+            .declare_function("rt_stack_restore", Linkage::Import, &sigsr)
             .map_err(|e| e.to_string())?;
 
         let mut sig3 = module.make_signature();
@@ -588,7 +610,19 @@ impl Shims {
             .declare_function("rt_spawn", Linkage::Import, &sigsp)
             .map_err(|e| e.to_string())?;
 
-        Ok(Shims { stack_alloc, copy, trace, mmio_load, mmio_store, fault, scope_begin, spawn, scope_end })
+        Ok(Shims {
+            stack_alloc,
+            stack_save,
+            stack_restore,
+            copy,
+            trace,
+            mmio_load,
+            mmio_store,
+            fault,
+            scope_begin,
+            spawn,
+            scope_end,
+        })
     }
 }
 
@@ -613,6 +647,11 @@ struct Cg<'a, 'b, M: Module> {
     externrefs: HashMap<String, FuncRef>,
     /// Candor address (SSA value) of each local's slot.
     addr: Vec<Value>,
+    /// The frame's entry stack-bump mark (`rt_stack_save` at fn entry, task
+    /// #144): `rt_stack_restore`d in the final-return block so the model stack
+    /// pops with the frame. `None` outside `lower_fn` (glue/entry never
+    /// model-allocate, so they save nothing and restore nothing).
+    frame_mark: Option<Value>,
 }
 
 impl<M: Module> Cg<'_, '_, M> {
@@ -1396,6 +1435,17 @@ impl<M: Module> Cg<'_, '_, M> {
         self.b.append_block_params_for_function_params(entry);
         let params: Vec<Value> = self.b.block_params(entry).to_vec();
 
+        // Frame rollback (task #144): save the bump BEFORE the first slot
+        // allocation; the final-return block restores it (runtime-gated on the
+        // live-task counter), so a returning frame pops like a real stack. The
+        // aggregate return in `_0` then sits above the restored bump — stale
+        // but intact — until the caller's adjacent `CopyVal` consumes it (the
+        // MIR lowering emits no allocating statement in between; see
+        // `runtime::rt_stack_restore` for the full argument).
+        let save_ref = self.shimref("stack_save", self.shims.stack_save);
+        let save_call = self.b.ins().call(save_ref, &[]);
+        self.frame_mark = Some(self.b.inst_results(save_call)[0]);
+
         // Allocate each local's stack slot (mirrors interp `alloc_slot`).
         self.addr = Vec::with_capacity(mf.locals.len());
         for l in &mf.locals {
@@ -1479,7 +1529,10 @@ impl<M: Module> Cg<'_, '_, M> {
             self.emit_fault(pred.kind, pred.span);
         }
 
-        // final_return: value per convention (B).
+        // final_return: value per convention (B). The return value (or the
+        // aggregate `_0` bytes the returned address points at) is read BEFORE
+        // the rollback, which only moves the bump — the bytes stay intact for
+        // the caller's immediate consumption (parked-return scheme, task #144).
         self.b.switch_to_block(final_return);
         let rty = mf.locals[0].ty.clone();
         let rv = if is_wordy(&rty) {
@@ -1487,6 +1540,9 @@ impl<M: Module> Cg<'_, '_, M> {
         } else {
             self.addr[0]
         };
+        let mark = self.frame_mark.expect("lower_fn saved the frame mark at entry");
+        let restore_ref = self.shimref("stack_restore", self.shims.stack_restore);
+        self.b.ins().call(restore_ref, &[mark]);
         self.b.ins().return_(&[rv]);
 
         // Fill each MIR block.

@@ -856,23 +856,59 @@ fn gate_aot_native_wasi_off_disk() {
 }
 
 // ---------------------------------------------------------------------------
-// Stack-bump exhaustion: the native bump never rolls back (task-shared, by
-// design), so a call-heavy program eventually crosses MAX_ADDR. The compiled
-// process must die with the interpreters' clean bad_pointer fault at span 0
-// (exit 2 + fault JSON) — never a segfault. Native-only pin: the reclaiming
-// oracle runs this same program to completion, so no oracle comparison.
+// Stack-bump exhaustion: with the per-frame rollback (task #144) a loop of
+// calls stays flat, so exhaustion now needs LIVE frames — deep recursion whose
+// frames (a ~64 KiB array each) genuinely overfill the 256 MiB model. The
+// compiled process must die with the interpreters' clean bad_pointer fault at
+// span 0 (exit 2 + fault JSON) — never a segfault. Native-only pin: the
+// interpreters cap recursion (MAX_DEPTH) long before the model fills, so no
+// oracle comparison.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn gate_aot_stack_exhaustion_clean_fault() {
+    // INTENT (review F5): the recursion is LIVE-frame on purpose -- no restore
+    // is reachable before the fault, so the guard (not rollback) is exercised.
+    // The ~4,075-deep native recursion rides the HOST stack too; if frame
+    // shape changes ever push host usage near the thread limit, a host
+    // overflow would abort instead of faulting -- keep depth*hostframe well
+    // under 8 MiB.
     assert!(cc_available(), "cc/linker unavailable");
-    let src = "struct S { a: i64, b: i64, c: i64 } \
-        fn burn(x: i64) -> i64 { let s: S = S { a: x, b: x, c: x }; return s.a; } \
-        fn main() -> i64 { let mut i: i64 = 0; let mut acc: i64 = 0; \
-        while i < 12000000 { acc = acc + burn(i); i = i + 1; } return acc; }";
+    let src = "fn burn(d: i64) -> i64 { \
+        let s: [8192]i64 = [0i64; 8192]; \
+        if d <= 0 { return s[0]; } \
+        let r: i64 = burn(d - 1); \
+        return r + s[0]; } \
+        fn main() -> i64 { return burn(6000); }";
     let srcpath = std::env::temp_dir().join(format!("candor-aot-src-{}-exhaust.cnr", std::process::id()));
     std::fs::write(&srcpath, src).unwrap();
     let a = aot_outcome(&srcpath, "exhaust").expect("compile+run should succeed");
     let _ = std::fs::remove_file(&srcpath);
     assert_eq!(a, Outcome::Fault { kind: "bad_pointer".into(), start: 0, end: 0 });
+}
+
+// Stack-bump rollback parity (task #144): a loop of aggregate-frame calls must
+// not grow the bump — the frame-local address of two identical calls is the
+// same (per-call growth == 0, the memo §1 shapes), matching the reclaiming MIR
+// interpreter. Native-only pin on the address deltas (engine-internal values).
+#[test]
+fn gate_aot_stack_bump_parity_flat_calls() {
+    assert!(cc_available(), "cc/linker unavailable");
+    let src = "struct S { a: i64, b: i64, c: i64 } struct D { v: i64 } drop(write self) { } \
+        fn withagg(x: i64) -> i64 { let s: S = S { a: x, b: x, c: x }; \
+            unsafe \"leak probe reads its own frame address\" { \
+                return conv i64 (ptr_to_addr(addr_of(s))); } } \
+        fn mkagg(x: i64) -> S { return S { a: x, b: x, c: x }; } \
+        fn chain(x: i64) -> i64 { let s: S = mkagg(x); return withagg(s.a); } fn withdrop(x: i64) -> i64 { let d: D = D { v: x }; unsafe \"leak probe reads its own frame address\" { return conv i64 (ptr_to_addr(addr_of(d))); } } \
+        fn main() -> i64 { \
+            let a1: i64 = withagg(1); let a2: i64 = withagg(2); trace(a2 - a1); \
+            let s1: S = mkagg(3); let s2: S = mkagg(4); \
+            let b1: i64 = withagg(5); let b2: i64 = withagg(6); trace(b2 - b1); \
+            let c1: i64 = chain(7); let c2: i64 = chain(8); trace(c2 - c1); let d1: i64 = withdrop(9); let d2: i64 = withdrop(10); trace(d2 - d1); \
+            return (s2.a - s1.a) - 1; }";
+    let srcpath = std::env::temp_dir().join(format!("candor-aot-src-{}-bumppar.cnr", std::process::id()));
+    std::fs::write(&srcpath, src).unwrap();
+    let a = aot_outcome(&srcpath, "bumppar").expect("compile+run should succeed");
+    let _ = std::fs::remove_file(&srcpath);
+    assert_eq!(a, Outcome::Ok { exit: 0, trace: vec![0, 0, 0, 0] });
 }
