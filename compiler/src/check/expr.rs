@@ -114,7 +114,41 @@ impl<'a> Checker<'a> {
             ExprKind::ArrayRepeat { value, size } => {
                 let t = self.check_expr(value, Use::Value);
                 let _ = self.check_expr(size, Use::Value);
-                Type::Array(Box::new(t), ArrayLen::Unknown)
+                // Repeating IS copying: the one element value is duplicated into
+                // every slot, so a non-`copy` (drop-hooked or owning) element
+                // would be dropped N times for one construction (§1.3/§1.5).
+                if !matches!(t, Type::Error) && !is_copy(&t, self.items) {
+                    self.diags.push(
+                        Diag::error(
+                            "E0716",
+                            format!(
+                                "array repeat requires a `copy` element type, found `{}`",
+                                t.display()
+                            ),
+                            e.span,
+                        )
+                        .with_note("repeating is copying: a drop-hooked or otherwise non-`copy` value cannot be duplicated into every slot (§1.3)", None),
+                    );
+                }
+                // The repeat length is part of the type, resolved exactly as a
+                // `[N]T` annotation resolves its length, so the usual
+                // assignability check reconciles it with the target slot. And
+                // `[N]T` is compile-time-constant-length (design 0001 §5.1):
+                // a size that is not an integer literal or a named constant is
+                // rejected here — an `Unknown` length would slip through the
+                // length check and clobber adjacent bytes at runtime.
+                let len = match array_len_from_size(size) {
+                    ArrayLen::Named(n) if self.lookup_local(&n).is_some() => {
+                        self.reject_nonconst_repeat_len(size.span);
+                        ArrayLen::Unknown
+                    }
+                    ArrayLen::Unknown => {
+                        self.reject_nonconst_repeat_len(size.span);
+                        ArrayLen::Unknown
+                    }
+                    l => l,
+                };
+                Type::Array(Box::new(t), len)
             }
             ExprKind::CastPtr { ty, arg } => {
                 self.require_unsafe(e.span, "cast_ptr");
@@ -897,9 +931,58 @@ impl<'a> Checker<'a> {
             let t = self.check_expr(el, Use::Value);
             if i == 0 {
                 ty = t;
+            } else {
+                ty = self.unify_array_elem(ty, t, el.span);
             }
         }
         Type::Array(Box::new(ty), ArrayLen::Lit(elems.len() as u64))
+    }
+
+    /// Unify one array-literal element type into the running element type,
+    /// mirroring `unify_int`'s literal flexibility: a bare `{integer}` element
+    /// is flexible until the first CONCRETE type grounds the element type;
+    /// after that every element must match it exactly (no implicit narrowing —
+    /// spec 03 §9.1), so `[1, 2u8]` is `[2]u8` but `[1, 2u8, 3i64]` is E0703.
+    fn unify_array_elem(&mut self, running: Type, t: Type, span: Span) -> Type {
+        match (&running, &t) {
+            (Type::Error, _) | (_, Type::Error) => Type::Error,
+            (Type::Never, _) => t,
+            (_, Type::Never) => running,
+            (Type::IntLit, Type::IntLit) => Type::IntLit,
+            (Type::IntLit, c) if c.is_integer() => t,
+            (c, Type::IntLit) if c.is_integer() => running,
+            (a, b) if a == b => running,
+            _ => {
+                self.diags.push(Diag::error(
+                    "E0703",
+                    format!(
+                        "array elements must share one type: expected `{}`, found `{}`",
+                        running.display(),
+                        t.display()
+                    ),
+                    span,
+                ));
+                running
+            }
+        }
+    }
+
+    /// E0717: an array-repeat size that is not a compile-time constant (an
+    /// integer literal or a named constant) — design 0001 §5.1 makes `[N]T`
+    /// compile-time-constant-length, and a non-constant length both defeats
+    /// the static length check and diverges across engines.
+    fn reject_nonconst_repeat_len(&mut self, span: Span) {
+        self.diags.push(
+            Diag::error(
+                "E0717",
+                "array repeat length must be a compile-time constant",
+                span,
+            )
+            .with_note(
+                "`[N]T` is compile-time-constant-length (design 0001 §5.1): write an integer literal or a named constant",
+                None,
+            ),
+        );
     }
 
     // ----- helpers used by control flow (in this file) --------------------

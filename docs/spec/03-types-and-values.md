@@ -176,7 +176,11 @@ normative clauses. Rationale is in design 0001; this chapter states rules only.
 
 8.1 `[N]T` is a fixed-size, contiguous, owned block of `N` values of `T`. It
     moves, or copies iff `T` is `copy` (§4.4). `a[i]` is a place. Indexing SHALL
-    be bounds-checked (chapter 06).
+    be bounds-checked (chapter 06). The length `N` SHALL be a compile-time
+    constant, and the array-repeat literal `[e; N]` SHALL require a `copy`
+    element type — repeating is a copy (§3.2), so a non-`copy` (e.g.
+    drop-hooked) element would receive `N` drops of one logical value. (Both
+    rules originate in design 0001 §5.1; ratified 2026-08.)
 
 8.2 A `[T]` is a shared borrow of a contiguous run of `T`; a `write [T]` is
     an exclusive borrow of one. Slices obey the borrow rules of chapter 04. They

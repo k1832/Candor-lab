@@ -259,6 +259,8 @@ map aids implementers and the diagnostic taxonomy (P4/P19); it is not normative.
 | 09-pattern exhaustiveness (04 §9.5) | E0601 |
 | 04 §9 pattern arity / wrong-variant | E0604 / E0605 |
 | 07 read-only contract clause | E0708 |
+| 03 §8.1 array repeat of non-`copy` element | E0716 |
+| 03 §8.1 non-constant array-repeat length | E0717 |
 | 04 §4 Borrow-vs-Borrow conflict | E0801 |
 | 04 §4.3 Move-vs-loan conflict | E0802 |
 | 04 §4.3 Write/`out`-vs-loan conflict | E0803 |

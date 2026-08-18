@@ -1246,3 +1246,187 @@ fn vec_new_rejects_non_allocator_struct() {
     );
     assert!(cs.iter().any(|c| c == "E0703"), "expected E0703: {cs:?}");
 }
+
+// ----- array lengths and the repeat copy rule (findings 2026-08-03) --------
+// A `[v; N]` repeat carries its length in its type — resolved exactly as a
+// `[N]T` annotation resolves its length — so a length mismatch is the standard
+// E0703 in every value position instead of silently clobbering adjacent bytes
+// at runtime. And repeating IS copying: a non-`copy` element would hand N drops
+// to one logical value, so it is rejected (E0716).
+
+#[test]
+fn array_repeat_length_mismatch_in_let() {
+    assert_has("fn f() -> unit { let a: [3]i64 = [0i64; 4]; }", "E0703");
+}
+
+#[test]
+fn array_repeat_length_mismatch_in_field_assign() {
+    assert_has(
+        "struct S { a: [3]i64, b: i64 } \
+         fn f() -> i64 { let mut s: S = S { a: [0i64; 3], b: 42 }; s.a = [7i64; 6]; return s.b; }",
+        "E0703",
+    );
+}
+
+#[test]
+fn array_repeat_length_mismatch_in_call_arg() {
+    assert_has(
+        "fn g(a: [3]i64) -> unit { } fn f() -> unit { g([0i64; 4]); }",
+        "E0703",
+    );
+}
+
+#[test]
+fn array_repeat_length_mismatch_in_return() {
+    assert_has("fn f() -> [3]i64 { return [0i64; 4]; }", "E0703");
+}
+
+#[test]
+fn array_repeat_length_mismatch_in_struct_lit() {
+    assert_has(
+        "struct T { a: [3]i64 } fn f() -> unit { let t: T = T { a: [0i64; 4] }; }",
+        "E0703",
+    );
+}
+
+#[test]
+fn array_lit_elements_must_share_one_type() {
+    assert_has("fn f() -> unit { let a: [2]i64 = [1i64, true]; }", "E0703");
+}
+
+#[test]
+fn array_lit_concrete_int_grounds_bare_literals() {
+    // `[1, x]` with `x: i64` is `[2]i64` — the concrete element grounds the
+    // bare literal, so the `[2]u8` slot is a mismatch (no implicit narrowing,
+    // spec 03 §9.1) instead of a silent runtime truncation.
+    assert_has("fn f(x: i64) -> unit { let a: [2]u8 = [1, x]; }", "E0703");
+}
+
+#[test]
+fn array_lit_distinct_concrete_ints_rejected() {
+    assert_has("fn f() -> unit { let a: [3]i64 = [1, 2u8, 3i64]; }", "E0703");
+}
+
+#[test]
+fn array_lit_intlit_elements_unify_with_a_suffixed_one() {
+    assert_clean("fn f() -> unit { let a: [3]u8 = [1, 2u8, 3]; }");
+}
+
+// A repeat size must be a compile-time constant (design 0001 §5.1) — a
+// computed or runtime-local size defeated the length check above ([7i64; 5+1]
+// still clobbered) and ran on the oracle but faulted on MIR/native.
+
+#[test]
+fn array_repeat_paren_size_is_constant_and_length_checked() {
+    assert_has("fn f() -> unit { let a: [3]i64 = [0i64; (4)]; }", "E0703");
+}
+
+#[test]
+fn array_repeat_computed_size_rejected() {
+    assert_has("fn f() -> unit { let a: [6]i64 = [7i64; 5 + 1]; }", "E0717");
+}
+
+#[test]
+fn array_repeat_runtime_local_size_rejected() {
+    assert_has(
+        "fn f() -> unit { let n: usize = 3; let a: [3]i64 = [0i64; n]; }",
+        "E0717",
+    );
+}
+
+#[test]
+fn array_repeat_named_length_is_compared_by_spelling() {
+    // Deliberate consistency tightening: a `Named` length equals only the same
+    // spelling, exactly as `[N]i64` vs `[4]i64` behaves in type position — the
+    // checker does not evaluate the constant.
+    assert_has(
+        "static N: usize = 4; fn f() -> unit { let a: [4]i64 = [0i64; N]; }",
+        "E0703",
+    );
+}
+
+#[test]
+fn array_repeat_matching_lengths_clean() {
+    // Literal, named-constant, and parenthesized lengths reconcile; a repeat
+    // is a legal index base.
+    assert_clean(
+        "static N: usize = 4; \
+         fn f() -> unit { let a: [N]i64 = [0i64; N]; let b: [3]i64 = [0i64; (3)]; let x: i64 = [5i64; 3][1]; }",
+    );
+}
+
+// Guards: pre-existing behavior these fixes must not disturb (each passed
+// before the 2026-08-03 changes).
+
+#[test]
+fn guard_array_lit_length_mismatch_in_let() {
+    assert_has("fn f() -> unit { let a: [3]i64 = [1i64, 2i64]; }", "E0703");
+}
+
+#[test]
+fn guard_conv_of_array_repeat_rejected() {
+    assert_has("fn f() -> i64 { return conv i64 ([0i64; 2]); }", "E0701");
+}
+
+#[test]
+fn array_repeat_of_drop_hooked_type_rejected() {
+    assert_has(
+        "struct E { id: i64 } drop(write self) { trace((deref self).id); } \
+         fn f() -> unit { let a: [3]E = [E { id: 7 }; 3]; }",
+        "E0716",
+    );
+}
+
+#[test]
+fn array_repeat_of_unmarked_struct_rejected() {
+    assert_has(
+        "struct M { x: i64 } fn f() -> unit { let a: [2]M = [M { x: 1 }; 2]; }",
+        "E0716",
+    );
+}
+
+#[test]
+fn array_repeat_of_box_rejected() {
+    assert_has("fn f(b: Box i64) -> unit { let a = [b; 2]; }", "E0716");
+}
+
+#[test]
+fn array_repeat_of_copy_struct_clean() {
+    assert_clean(
+        "copy struct P { x: i64, y: i64 } \
+         fn f() -> unit { let b: [4]P = [P { x: 1, y: 2 }; 4]; }",
+    );
+}
+
+// The same rules under the real (`.cnr`) front-end.
+
+#[test]
+fn real_array_repeat_length_mismatch_in_field_assign() {
+    let cs = real_codes(
+        "struct S { a: [3]i64, b: i64 } \
+         fn f() -> i64 { let mut s: S = S { a: [0i64; 3], b: 42 }; s.a = [7i64; 6]; return s.b; }",
+    );
+    assert!(cs.iter().any(|c| c == "E0703"), "expected E0703: {cs:?}");
+}
+
+#[test]
+fn real_array_repeat_of_drop_hooked_type_rejected() {
+    let cs = real_codes(
+        "struct E { id: i64 } drop(write self) { trace(self.id); } \
+         fn f() -> unit { let a: [3]E = [E { id: 7 }; 3]; }",
+    );
+    assert!(cs.iter().any(|c| c == "E0716"), "expected E0716: {cs:?}");
+}
+
+#[test]
+fn real_array_repeat_computed_size_rejected() {
+    let cs = real_codes("fn f() -> unit { let a: [6]i64 = [7i64; 5 + 1]; }");
+    assert!(cs.iter().any(|c| c == "E0717"), "expected E0717: {cs:?}");
+}
+
+#[test]
+fn guard_real_bitcast_of_array_rejected() {
+    // Pre-existing behavior: `bitcast` already rejected array operands.
+    let cs = real_codes("fn f() -> f64 { return bitcast f64 ([0i64; 1]); }");
+    assert!(cs.iter().any(|c| c == "E0714"), "expected E0714: {cs:?}");
+}
