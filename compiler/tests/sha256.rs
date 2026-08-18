@@ -27,9 +27,10 @@
 //! `interp_stack_reclamation` below pins the fix: MIR pops to the frame's
 //! locals watermark after every statement and copies call returns down to the
 //! caller's pre-call stack top; the tree-walker pops each block's bytes at
-//! block exit. The Cranelift/native engines deliberately never roll their
-//! (atomic, task-shared) bump back, so the reclamation repro is
-//! interpreter-only.
+//! block exit. Since task #144 the native engines roll their (atomic,
+//! task-shared) bump back per frame too — `rt_stack_save` at an allocating
+//! fn's entry, `rt_stack_restore` at its return, gated on no live tasks — so
+//! the reclamation repro now also pins the Cranelift JIT (run_source_real_native) alongside both interpreters; AOT/LLVM/freestanding flatness is pinned by the dedicated parity gates.
 
 use candor::{
     compile_path_llvm, run_source_real, run_source_real_mir, run_source_real_native,
@@ -198,14 +199,14 @@ fn sha256_million_a() {
     assert_eq!(ret, total % 256, "mir ret is the byte-folded digest checksum");
 }
 
-/// Regression gate for interpreter stack reclamation (formerly `mir_leak_repro`,
-/// which pinned the pre-fix fault): an aggregate-returning callee in a hot
-/// caller loop moves 40,000 x 8 KiB of call returns — over 320 MiB of frame +
+/// Regression gate for stack reclamation (formerly `mir_leak_repro`, which
+/// pinned the pre-fix fault): an aggregate-returning callee in a hot caller
+/// loop moves 40,000 x 8 KiB of call returns — over 320 MiB of frame +
 /// return-slot traffic against the 256 MiB model cap. Any regression to
 /// caller-frame-exit reclamation (MIR's per-statement watermark pop, the
-/// tree-walker's per-block pop) faults `bad_pointer` here on a safe program.
-/// The native engines are deliberately absent: their task-shared atomic bump
-/// never rolls back, so this scale still exceeds their model by design.
+/// tree-walker's per-block pop, and — since task #144 — the native engines'
+/// per-frame `rt_stack_save`/`rt_stack_restore` rollback) faults
+/// `bad_pointer` here on a safe program.
 #[test]
 fn interp_stack_reclamation() {
     let src = "\
@@ -233,5 +234,12 @@ fn interp_stack_reclamation() {
             panic!("tree-walker stack reclamation regressed (leak repro faulted): {}", f.to_json())
         }
         _ => panic!("unexpected oracle outcome (check/parse error)"),
+    }
+    match run_source_real_native(src) {
+        MirRunResult::Ok(r) => assert_eq!(r.ret, 40000 % 256, "native ret"),
+        MirRunResult::Fault(f) => {
+            panic!("native stack rollback regressed (leak repro faulted): {}", f.to_json())
+        }
+        _ => panic!("unexpected native outcome (check/parse error or unsupported)"),
     }
 }

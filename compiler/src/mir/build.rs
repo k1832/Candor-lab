@@ -125,8 +125,10 @@ fn resolve_impl_ty(ty: &Ty) -> Type {
 /// `Assign(Call)` must be consumed by its `CopyVal` (reading through the
 /// assigned rawptr temp) in the same block, with no possibly-allocating
 /// statement between.
-#[cfg(debug_assertions)]
-fn check_call_reclamation(f: &MirFn, items: &Items) {
+pub(crate) fn check_call_reclamation(f: &MirFn, items: &Items) {
+    // Unconditional (not debug-only): since native rollback, the adjacency
+    // invariant governs SHIPPED binaries on all three native backends, and this
+    // O(statements) static check is the only enforcement on that path.
     /// Can this statement enter `Interp::call` (and so `stack_alloc`)? Nested
     /// calls via the rvalue, spawn, drop glue/hooks, box/unbox through the
     /// allocator vtable, and collection growth/free all can.
@@ -245,7 +247,6 @@ pub fn lower_checked(program: &Program, items: &Items) -> Result<MirProgram, Low
                 let mut lw = Lowerer::new(items, &consts, &fn_ptr_id, &impls);
                 let mf = lw.lower_hook(&hook_name, &sd.name, block)?;
                 check_invariants(&mf);
-                #[cfg(debug_assertions)]
                 check_call_reclamation(&mf, items);
                 drop_hooks.insert(sd.name.clone(), hook_name.clone());
                 fn_index.insert(hook_name, fns.len());
@@ -265,7 +266,6 @@ pub fn lower_checked(program: &Program, items: &Items) -> Result<MirProgram, Low
             let mut lw = Lowerer::new(items, &consts, &fn_ptr_id, &impls);
             let mf = lw.lower_static_init(&init_name, &sty, &st.value)?;
             check_invariants(&mf);
-            #[cfg(debug_assertions)]
             check_call_reclamation(&mf, items);
             fn_index.insert(init_name.clone(), fns.len());
             fns.push(mf);
@@ -281,7 +281,6 @@ pub fn lower_checked(program: &Program, items: &Items) -> Result<MirProgram, Low
             let mf = lw.lower_fn(fnd)?;
             debug_assert_eq!(mf.name, fnd.name);
             check_invariants(&mf);
-            #[cfg(debug_assertions)]
             check_call_reclamation(&mf, items);
             fn_index.insert(mf.name.clone(), fns.len());
             fns.push(mf);

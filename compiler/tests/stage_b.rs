@@ -328,26 +328,71 @@ fn gate_native_full_corpus_equality() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Stack-bump exhaustion: the native bump never rolls back (task-shared, by
-//    design), so a call-heavy program eventually crosses MAX_ADDR. That must be
-//    the interpreters' clean BadPointer fault at span 0 — never an out-of-bounds
-//    host write (which would corrupt this test process or segfault it).
-//    Native-only pin: the reclaiming interpreters run this same program to
-//    completion, so there is no oracle comparison here.
+// 4. Stack-bump exhaustion: with the per-frame rollback (task #144) a loop of
+//    calls stays flat, so exhaustion now needs LIVE frames — deep recursion
+//    whose frames (a ~64 KiB array each) genuinely overfill the 256 MiB model.
+//    Crossing MAX_ADDR must be the interpreters' clean BadPointer fault at
+//    span 0 — never an out-of-bounds host write (which would corrupt this test
+//    process or segfault it). Native-only pin: the interpreters cap recursion
+//    (MAX_DEPTH) long before the model fills, so there is no oracle comparison.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn native_stack_exhaustion_faults_cleanly() {
-    let src = "struct S { a: i64, b: i64, c: i64 } \
-        fn burn(x: i64) -> i64 { let s: S = S { a: x, b: x, c: x }; return s.a; } \
-        fn main() -> i64 { let mut i: i64 = 0; let mut acc: i64 = 0; \
-        while i < 12000000 { acc = acc + burn(i); i = i + 1; } return acc; }";
+    // INTENT (review F5): the recursion is LIVE-frame on purpose -- no restore
+    // is reachable before the fault, so the guard (not rollback) is exercised.
+    // The ~4,075-deep native recursion rides the HOST stack too; if frame
+    // shape changes ever push host usage near the thread limit, a host
+    // overflow would abort instead of faulting -- keep depth*hostframe well
+    // under 8 MiB.
+    let src = "fn burn(d: i64) -> i64 { \
+        let s: [8192]i64 = [0i64; 8192]; \
+        if d <= 0 { return s[0]; } \
+        let r: i64 = burn(d - 1); \
+        return r + s[0]; } \
+        fn main() -> i64 { return burn(6000); }";
     match candor::run_source_real_native(src) {
         MirRunResult::Fault(f) => {
             assert_eq!(faulted(f), Outcome::Fault { kind: "BadPointer".into(), start: 0, end: 0 });
         }
         MirRunResult::Ok(_) => panic!("expected model-stack exhaustion, but the program completed"),
         _ => panic!("expected a clean BadPointer fault"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 5. Stack-bump rollback (task #144): a loop of aggregate-frame calls must not
+//    grow the bump — each call's frame is restored at its return, so the slot
+//    address of a fresh frame local is IDENTICAL call after call (per-call
+//    growth == 0), matching the reclaiming MIR interpreter.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn native_stack_bump_parity_flat_calls() {
+    // Shapes from the task-#144 memo §1: a scalar body, an aggregate local, an
+    // aggregate return, and a call-in-call chain. Each probe traces the DELTA
+    // between two identical calls' frame-local addresses; rollback makes all 0.
+    let src = "struct S { a: i64, b: i64, c: i64 } struct D { v: i64 } drop(write self) { } \
+        fn scalar(x: i64, y: i64) -> i64 { return x + y; } \
+        fn withagg(x: i64) -> i64 { let s: S = S { a: x, b: x, c: x }; \
+            unsafe \"leak probe reads its own frame address\" { \
+                return conv i64 (ptr_to_addr(addr_of(s))); } } \
+        fn mkagg(x: i64) -> S { return S { a: x, b: x, c: x }; } \
+        fn chain(x: i64) -> i64 { let s: S = mkagg(x); return withagg(s.a); } fn withdrop(x: i64) -> i64 { let d: D = D { v: x }; unsafe \"leak probe reads its own frame address\" { return conv i64 (ptr_to_addr(addr_of(d))); } } \
+        fn main() -> i64 { \
+            let a1: i64 = withagg(1); let a2: i64 = withagg(2); trace(a2 - a1); \
+            let s1: S = mkagg(3); let s2: S = mkagg(4); \
+            let b1: i64 = withagg(5); let b2: i64 = withagg(6); trace(b2 - b1); \
+            let c1: i64 = chain(7); let c2: i64 = chain(8); trace(c2 - c1); let d1: i64 = withdrop(9); let d2: i64 = withdrop(10); trace(d2 - d1); \
+            let z: i64 = scalar(s1.a, s2.a); \
+            return z - 7; }";
+    match candor::run_source_real_native(src) {
+        MirRunResult::Ok(run) => {
+            assert_eq!(run.trace, vec![0, 0, 0, 0], "per-call bump growth must be zero");
+            assert_eq!(run.ret, 0);
+        }
+        MirRunResult::Fault(f) => panic!("expected clean completion, faulted: {:?}", faulted(f)),
+        _ => panic!("expected clean completion"),
     }
 }
 

@@ -18,7 +18,7 @@
 //!   bump arithmetic the JIT driver uses; the emitted `candor_entry` writes the
 //!   string bytes and runs the static initializers at process start.
 //! * **Entry + runtime.** `candor_entry` (exported) is the emitted startup glue;
-//!   the six `rt_*` shims are imports the linker binds to the C runtime.
+//!   the `rt_*` shims are imports the linker binds to the C runtime.
 
 use std::collections::HashMap;
 use std::path::Path;
