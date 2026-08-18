@@ -738,7 +738,26 @@ impl<'a> Interp<'a> {
         }
     }
 
+    /// The tree-walker's host-stack valve (#142). Expression, statement/block,
+    /// and user-call recursion all pass through `eval_value`, so growing the
+    /// host stack here bounds host-stack use for arbitrarily deep Candor call
+    /// recursion. KNOWN GAP (found in adversarial review): the drop chain
+    /// (`drop_value` -> `drop_box` -> `drop_value`) recurses without entering
+    /// `eval_value`, so a pathologically deep owned chain (a ~20k-deep Box
+    /// list) can still overflow the host stack at drop time; and runaway call
+    /// recursion now grows segments until allocation fails instead of
+    /// aborting early — both tracked as the interpreter-recursion-budget
+    /// follow-up. The debug
+    /// tree-walker costs roughly 100-250 KiB of host stack per Candor call
+    /// frame while nextest test threads get 2 MiB; when less than 512 KiB (one
+    /// worst-case frame with margin) remains, `maybe_grow` runs the evaluation
+    /// on a fresh 16 MiB segment. Harness-level only: the interpreter logic
+    /// below is untouched.
     fn eval_value(&mut self, e: &Expr, expected: Option<&Type>) -> R<RVal> {
+        stacker::maybe_grow(512 * 1024, 16 * 1024 * 1024, || self.eval_value_inner(e, expected))
+    }
+
+    fn eval_value_inner(&mut self, e: &Expr, expected: Option<&Type>) -> R<RVal> {
         self.cur_span = e.span;
         match &e.kind {
             ExprKind::For { .. } => unreachable!("`for` is surface-only (formatter); the pipeline desugars it at parse (design 0009 §4.2)"),
@@ -3668,6 +3687,8 @@ impl<'a> Interp<'a> {
     // ---- statements ----
     fn exec_block(&mut self, b: &Block) -> R<()> {
         let sp = self.mem.stack_bump;
+        #[cfg(debug_assertions)]
+        let temps_base = self.f().temps.len();
         self.push_scope();
         let mut pending: R<()> = Ok(());
         for s in &b.stmts {
@@ -3688,6 +3709,15 @@ impl<'a> Interp<'a> {
         // `do_return` parked for the frame, which `call` reads after the unwind;
         // on that path the bump is left alone (`call` restores it wholesale).
         if !matches!(pending, Err(Ctl::Return)) {
+            // Tripwire (#141): a block yields unit on every non-`return` path —
+            // no statement temporary materialized inside it may survive, or the
+            // bump reset below would reclaim bytes a caller can still reach.
+            #[cfg(debug_assertions)]
+            debug_assert_eq!(
+                self.f().temps.len(),
+                temps_base,
+                "#141: a statement temporary escaped its block on a non-return path"
+            );
             self.mem.stack_bump = sp;
         }
         pending

@@ -28,6 +28,11 @@ pub struct Mem {
     init: Vec<bool>,
     pub static_bump: u64,
     pub stack_bump: u64,
+    /// Debug-only (#141): counts every `stack_alloc`, so the MIR interpreter's
+    /// reclamation tripwire can assert a parked call-return slot is consumed
+    /// before any later stack allocation could clobber its bytes.
+    #[cfg(debug_assertions)]
+    pub alloc_gen: u64,
 }
 
 impl Default for Mem {
@@ -43,6 +48,8 @@ impl Mem {
             init: Vec::new(),
             static_bump: STATIC_BASE,
             stack_bump: STACK_BASE,
+            #[cfg(debug_assertions)]
+            alloc_gen: 0,
         }
     }
 
@@ -62,6 +69,10 @@ impl Mem {
     pub fn stack_alloc(&mut self, size: u64, align: u64) -> u64 {
         let a = round_up(self.stack_bump, align.max(1));
         self.stack_bump = a + size;
+        #[cfg(debug_assertions)]
+        {
+            self.alloc_gen += 1;
+        }
         a
     }
 

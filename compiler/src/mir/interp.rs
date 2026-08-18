@@ -77,6 +77,8 @@ pub fn run(prog: &MirProgram, items: &Items, consts: &HashMap<String, u64>) -> R
         strings: HashMap::new(),
         alloc_struct,
         alloc_vtable_struct,
+        #[cfg(debug_assertions)]
+        parked_ret: None,
     };
 
     // Statics (design 0008): reserve every address first (forward references),
@@ -130,6 +132,13 @@ struct Engine<'a> {
     strings: HashMap<String, u64>,
     alloc_struct: Option<String>,
     alloc_vtable_struct: Option<String>,
+    /// Debug tripwire (#141): the byte range of the most recent call's parked
+    /// return slot plus `mem.alloc_gen` at parking. A `CopyVal` reading from the
+    /// parked range (above the frame watermark) asserts the generation is
+    /// unchanged — i.e. no stack allocation ran since the producing call, so the
+    /// popped slot's bytes are still intact.
+    #[cfg(debug_assertions)]
+    parked_ret: Option<(u64, u64, u64)>,
 }
 
 const MAX_DEPTH: usize = 4096;
@@ -301,6 +310,13 @@ impl<'a> Engine<'a> {
         self.mem.stack_bump = base_sp;
         let out = self.mem.stack_alloc(rsize, self.align_of(&rty).max(1));
         self.copy_bytes(out, ret_addr, self.size_of(&rty))?;
+        // Tripwire (#141): remember the parked slot and the allocation
+        // generation it was parked at, so a later consuming CopyVal can assert
+        // nothing allocated (and possibly clobbered it) in between.
+        #[cfg(debug_assertions)]
+        {
+            self.parked_ret = Some((out, out + rsize, self.mem.alloc_gen));
+        }
         Ok(out)
     }
 
@@ -344,6 +360,22 @@ impl<'a> Engine<'a> {
                     }
                     StatementKind::CopyVal { dst, src, ty } => {
                         let (saddr, _) = self.place_addr(src, mf, frame)?;
+                        // Tripwire (#141): a source above the frame watermark
+                        // inside the parked call-return range is only readable
+                        // if nothing stack-allocated since the producing call
+                        // (its slot was already popped; the bytes survive only
+                        // until the next allocation).
+                        #[cfg(debug_assertions)]
+                        if saddr >= frame.top {
+                            if let Some((lo, hi, parked_gen)) = self.parked_ret {
+                                if saddr >= lo && saddr < hi {
+                                    debug_assert_eq!(
+                                        self.mem.alloc_gen, parked_gen,
+                                        "#141: CopyVal reads a parked call return after an intervening stack allocation"
+                                    );
+                                }
+                            }
+                        }
                         let (daddr, _) = self.place_addr(dst, mf, frame)?;
                         let sz = self.size_of(ty);
                         self.copy_bytes(daddr, saddr, sz)?;

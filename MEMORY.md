@@ -14,7 +14,7 @@ One lesson per entry, one-line summary first.
   profile (`compiler/.config/nextest.toml`) drops the slow integration binaries
   (self-host, aot/llvm/stage native gates, freestanding, concurrency_native, golden)
   for a ~2.3 s / 518-test edit-check loop; CI still runs the full default profile.
-  Deliberately did NOT add `[profile.test] opt-level` — it speeds the interpreted
+  SUPERSEDED 2026-08-03 (opt-level=1 added when interpreted-heavy tests made the suite floor 631s; debug-assertions verified still on; suite now 88s). Originally: deliberately did NOT add `[profile.test] opt-level` — it speeds the interpreted
   self-host tests but slows every compile, and the fast profile already fixes the
   loop pain. nextest is process-per-test, and the suite is green under it with no
   serial group (the foreign-io/shell-out tests are already process-isolated). Do NOT

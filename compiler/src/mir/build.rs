@@ -117,6 +117,78 @@ fn resolve_impl_ty(ty: &Ty) -> Type {
 }
 
 
+/// Debug-only emission check for the eager-reclamation invariant (#141): the
+/// MIR interpreter parks an aggregate call's return value ABOVE the caller's
+/// frame watermark and pops the stack back to that watermark after every
+/// statement — the parked bytes stay intact only until the next stack
+/// allocation, and only calls allocate. So an aggregate-returning
+/// `Assign(Call)` must be consumed by its `CopyVal` (reading through the
+/// assigned rawptr temp) in the same block, with no possibly-allocating
+/// statement between.
+#[cfg(debug_assertions)]
+fn check_call_reclamation(f: &MirFn, items: &Items) {
+    /// Can this statement enter `Interp::call` (and so `stack_alloc`)? Nested
+    /// calls via the rvalue, spawn, drop glue/hooks, box/unbox through the
+    /// allocator vtable, and collection growth/free all can.
+    fn may_allocate(kind: &StatementKind) -> bool {
+        match kind {
+            StatementKind::Assign(_, rv) | StatementKind::Store(_, rv) => {
+                matches!(rv, Rvalue::Call { .. } | Rvalue::CallIndirect { .. })
+            }
+            StatementKind::Spawn { .. }
+            | StatementKind::Drop { .. }
+            | StatementKind::BoxOp { .. }
+            | StatementKind::UnboxOp { .. }
+            | StatementKind::CollectionOp { .. } => true,
+            StatementKind::CopyVal { .. }
+            | StatementKind::Trace(_)
+            | StatementKind::Subslice { .. }
+            | StatementKind::StrFrom { .. }
+            | StatementKind::Substr { .. }
+            | StatementKind::ScopeBegin
+            | StatementKind::ScopeEnd => false,
+        }
+    }
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for (si, s) in b.stmts.iter().enumerate() {
+            let StatementKind::Assign(l, Rvalue::Call { func, .. }) = &s.kind else {
+                continue;
+            };
+            // Only direct calls to known user fns can return an aggregate (the
+            // lowering rejects value-position and indirect aggregate calls);
+            // an unknown callee (extern) returns a scalar over the boundary.
+            let Some(sig) = items.fns.get(func.as_str()) else {
+                continue;
+            };
+            if matches!(
+                sig.ret,
+                Type::Scalar(_) | Type::Borrow(_) | Type::BorrowMut(_) | Type::RawPtr(_) | Type::FnPtr(_)
+            ) {
+                continue;
+            }
+            let mut consumed = false;
+            for s2 in &b.stmts[si + 1..] {
+                if let StatementKind::CopyVal { src, .. } = &s2.kind {
+                    if src.root == *l && matches!(src.proj.first(), Some(Proj::Deref { .. })) {
+                        consumed = true;
+                        break;
+                    }
+                }
+                assert!(
+                    !may_allocate(&s2.kind),
+                    "#141: aggregate call `{func}` in {}#bb{bi} has an allocating statement before its consuming CopyVal",
+                    f.name
+                );
+            }
+            assert!(
+                consumed,
+                "#141: aggregate call `{func}` in {}#bb{bi} has no consuming CopyVal in its block",
+                f.name
+            );
+        }
+    }
+}
+
 /// Lower a checked, resolved program to MIR. Generic programs must be
 /// monomorphized first; a still-generic item is reported as unsupported here.
 pub fn lower_checked(program: &Program, items: &Items) -> Result<MirProgram, LowerError> {
@@ -173,6 +245,8 @@ pub fn lower_checked(program: &Program, items: &Items) -> Result<MirProgram, Low
                 let mut lw = Lowerer::new(items, &consts, &fn_ptr_id, &impls);
                 let mf = lw.lower_hook(&hook_name, &sd.name, block)?;
                 check_invariants(&mf);
+                #[cfg(debug_assertions)]
+                check_call_reclamation(&mf, items);
                 drop_hooks.insert(sd.name.clone(), hook_name.clone());
                 fn_index.insert(hook_name, fns.len());
                 fns.push(mf);
@@ -191,6 +265,8 @@ pub fn lower_checked(program: &Program, items: &Items) -> Result<MirProgram, Low
             let mut lw = Lowerer::new(items, &consts, &fn_ptr_id, &impls);
             let mf = lw.lower_static_init(&init_name, &sty, &st.value)?;
             check_invariants(&mf);
+            #[cfg(debug_assertions)]
+            check_call_reclamation(&mf, items);
             fn_index.insert(init_name.clone(), fns.len());
             fns.push(mf);
             statics.push(StaticInit { name: st.name.clone(), ty: sty, init_fn: init_name });
@@ -205,6 +281,8 @@ pub fn lower_checked(program: &Program, items: &Items) -> Result<MirProgram, Low
             let mf = lw.lower_fn(fnd)?;
             debug_assert_eq!(mf.name, fnd.name);
             check_invariants(&mf);
+            #[cfg(debug_assertions)]
+            check_call_reclamation(&mf, items);
             fn_index.insert(mf.name.clone(), fns.len());
             fns.push(mf);
         }
@@ -1706,25 +1784,90 @@ impl<'a> Lowerer<'a> {
                     _ => return unsupported("non-constant array-repeat length"),
                 };
                 let stride = self.stride_of(&elem);
-                // Evaluate the element once into a temp, then copy it into each slot
-                // (mirrors the oracle: one `eval_value`, N byte-copies).
+                // Evaluate the element once into a temp, then fill the slots.
+                // Two strategies (#140): small repeats keep the straight-line
+                // per-element CopyVal unroll (Cranelift emits it as flat stores
+                // — a hot `[v; 4]` measured 1.6x faster than the loop form);
+                // larger repeats use a counted MIR loop, because the unroll
+                // made native COMPILE time O(N) — a `[_; 1_000_000]` repeat
+                // cost the Cranelift/LLVM backends tens of minutes. Both forms
+                // evaluate the element expression exactly once and byte-copy N
+                // times at RUN time, mirroring the oracle.
+                const UNROLL_MAX: u64 = 8;
                 let tmp = self.new_local(elem.clone(), None);
                 self.lower_into(value, &Place::local(tmp), &elem)?;
-                for i in 0..n {
-                    let mut sub = dst.clone();
-                    sub.proj.push(Proj::Index {
-                        index: Operand::Const(i as i128, ScalarTy::Usize),
-                        stride,
-                        len: n,
-                        span: self.cur_span,
-                        slice: false,
-                    });
-                    self.emit(
-                        StatementKind::CopyVal { dst: sub, src: Place::local(tmp), ty: elem.clone() },
-                        self.cur_span,
-                        false,
-                    );
+                let span = self.cur_span;
+                if n <= UNROLL_MAX {
+                    for k in 0..n {
+                        let mut sub = dst.clone();
+                        sub.proj.push(Proj::Index {
+                            index: Operand::Const(k as i128, ScalarTy::Usize),
+                            stride,
+                            len: n,
+                            span,
+                            slice: false,
+                        });
+                        self.emit(
+                            StatementKind::CopyVal { dst: sub, src: Place::local(tmp), ty: elem.clone() },
+                            span,
+                            false,
+                        );
+                    }
+                    return Ok(());
                 }
+                let usizet = Type::Scalar(ScalarTy::Usize);
+                let i = self.new_local(usizet.clone(), None);
+                self.emit(
+                    StatementKind::Assign(i, Rvalue::Use(Operand::Const(0, ScalarTy::Usize))),
+                    span,
+                    false,
+                );
+                let head_bb = self.new_block();
+                let body_bb = self.new_block();
+                let join = self.new_block();
+                self.terminate(Terminator::Goto(head_bb));
+
+                // Header: all slots filled (i >= n) -> done.
+                self.switch_to(head_bb);
+                let done = self.emit_temp(
+                    Type::bool(),
+                    Rvalue::Cmp {
+                        op: BinOp::Ge,
+                        l: Operand::Local(i),
+                        r: Operand::Const(n as i128, ScalarTy::Usize),
+                    },
+                    span,
+                );
+                self.terminate(Terminator::Branch { cond: Operand::Local(done), then_bb: join, else_bb: body_bb });
+
+                // Body: `dst[i] = tmp`. `i < n` here holds, so the INV-CHECK
+                // bounds edge the index carries is dead.
+                self.switch_to(body_bb);
+                let mut sub = dst.clone();
+                sub.proj.push(Proj::Index { index: Operand::Local(i), stride, len: n, span, slice: false });
+                self.emit(
+                    StatementKind::CopyVal { dst: sub, src: Place::local(tmp), ty: elem.clone() },
+                    span,
+                    false,
+                );
+                // Increment: `i < n <= u64::MAX`, so a wrapping add never wraps.
+                let next = self.emit_temp(
+                    usizet,
+                    Rvalue::Bin {
+                        op: BinOp::Add,
+                        regime: Regime::Wrapping,
+                        ty: ScalarTy::Usize,
+                        l: Operand::Local(i),
+                        r: Operand::Const(1, ScalarTy::Usize),
+                        span,
+                        fault: None,
+                    },
+                    span,
+                );
+                self.emit(StatementKind::Assign(i, Rvalue::Use(Operand::Local(next))), span, false);
+                self.terminate(Terminator::Goto(head_bb));
+
+                self.switch_to(join);
                 Ok(())
             }
             ExprKind::EnumCtor { variant, args, .. } => {
