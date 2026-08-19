@@ -61,6 +61,32 @@ jobs:
           # let the server finish its request budget or kill it; either is fine
           kill "$PID" 2>/dev/null || true
           echo "http OK"
+      - name: REST service create/read cycle (compiled, persisted)
+        working-directory: examples/14_rest_api
+        run: |
+          set -eu
+          ../../toolchain/target/release/candor compile main.cnr -o restd --release
+          rm -f records.json
+          ./restd & PID=$!
+          sleep 1
+          # create -> {"id":1}, read it back, then a clean shutdown
+          BODY=""
+          for i in 1 2 3; do
+            BODY=$(curl -s --max-time 5 -d '{"title":"ci probe","n":42}' http://127.0.0.1:8081/records || true)
+            [ "$BODY" = '{"id":1}' ] && break
+            sleep 1
+          done
+          [ "$BODY" = '{"id":1}' ]
+          [ "$(curl -s --max-time 5 http://127.0.0.1:8081/records/1)" = '{"title":"ci probe","n":42}' ]
+          curl -s --max-time 5 -X POST http://127.0.0.1:8081/shutdown >/dev/null
+          wait "$PID" || true
+          # the snapshot survives a restart
+          ./restd & PID=$!
+          sleep 1
+          [ "$(curl -s --max-time 5 http://127.0.0.1:8081/records/1)" = '{"title":"ci probe","n":42}' ]
+          curl -s --max-time 5 -X POST http://127.0.0.1:8081/shutdown >/dev/null
+          wait "$PID" || true
+          echo "rest OK"
       - name: Compile an example to native
         working-directory: toolchain
         run: |

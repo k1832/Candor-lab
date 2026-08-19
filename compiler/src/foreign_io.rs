@@ -145,12 +145,13 @@ pub fn register_std_io() {
     crate::foreign::register("sys_close", shim_close);
     crate::foreign::register("sys_read", shim_read);
     crate::foreign::register("sys_write", shim_write);
+    crate::foreign::register("sys_send", shim_send);
     crate::foreign::register("sys_listdir", shim_listdir);
 }
 
 /// Remove the std/io shims, restoring `no_foreign_runtime` for their symbols.
 pub fn unregister_std_io() {
-    for sym in ["sys_open", "sys_close", "sys_read", "sys_write", "sys_listdir"] {
+    for sym in ["sys_open", "sys_close", "sys_read", "sys_write", "sys_send", "sys_listdir"] {
         crate::foreign::unregister(sym);
     }
 }
@@ -188,6 +189,7 @@ pub fn register_std_io_production() {
     crate::foreign::register("sys_close", shim_close);
     crate::foreign::register("sys_read", shim_read_production);
     crate::foreign::register("sys_write", shim_write_production);
+    crate::foreign::register("sys_send", shim_send_production);
     crate::foreign::register("sys_listdir", shim_listdir);
     crate::foreign::register("sys_tcp_connect", shim_tcp_connect);
     crate::foreign::register("sys_tcp_listen", shim_tcp_listen);
@@ -350,6 +352,21 @@ fn shim_write_production(args: &[i128], mem: &mut Mem) -> i128 {
             }
         }
     }
+}
+
+/// `sys_send(fd, buf, count, flags) -> isize` — the socket-safe write: POSIX
+/// `send(2)` whose `MSG_NOSIGNAL` flag turns a fatal SIGPIPE into an ordinary
+/// `EPIPE` error return. In-process the flag is moot — Rust already ignores
+/// SIGPIPE, so a peer-reset write surfaces as `Err` -> `-1` — hence both shims
+/// delegate to their `sys_write` twin with the flags argument dropped. Native
+/// binaries bind the stripped symbol (`send`) straight to libc, where the flag
+/// does the work.
+fn shim_send(args: &[i128], mem: &mut Mem) -> i128 {
+    shim_write(&args[..3], mem)
+}
+
+fn shim_send_production(args: &[i128], mem: &mut Mem) -> i128 {
+    shim_write_production(&args[..3], mem)
 }
 
 /// Write `data` in full and flush, returning the byte count (`write_all` loops over
