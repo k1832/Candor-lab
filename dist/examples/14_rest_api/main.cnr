@@ -1,0 +1,2027 @@
+boundary
+// A JSON REST service written in pure Candor — the flagship composition
+// showcase. It joins the shipped pieces into one program: the audited TCP/file
+// boundary of examples/12_http_server, the RFC 8259 JSON core of
+// examples/13_json, and the std allocator shapes (free list + bump) — into a
+// create/read/update/delete record store served over HTTP, persisted to disk,
+// and built to run forever.
+//
+//   RUN IT FROM THIS DIRECTORY (the snapshot file resolves against the cwd):
+//     cd examples/14_rest_api
+//     candor compile main.cnr -o restd --release && ./restd
+//     # or interpreted (same behavior, much slower per request):
+//     candor run main.cnr
+//
+//   It prints one line — `restd: serving on http://127.0.0.1:8081, records
+//   loaded: N` — then, from another terminal:
+//     curl -d '{"title":"first note","done":false}' http://127.0.0.1:8081/records
+//                                             # -> 201 {"id":1}
+//     curl http://127.0.0.1:8081/records/1    # -> 200 the stored record
+//     curl http://127.0.0.1:8081/records      # -> 200 [{"id":1,"rec":{...}}]
+//     curl -X PUT -d '{"done":true}' http://127.0.0.1:8081/records/1  # -> {"id":1}
+//     curl -X DELETE http://127.0.0.1:8081/records/1                 # -> {"id":1}
+//     curl http://127.0.0.1:8081/stats        # -> memory probes (see below)
+//     curl -X POST http://127.0.0.1:8081/shutdown   # server exits cleanly
+//   Malformed JSON never faults — the parser's error VALUE crosses the HTTP
+//   boundary as a 400 body carrying the exact code and byte position:
+//     curl -d '{"a":1,}' http://127.0.0.1:8081/records
+//                        # -> 400 {"error":"bad_json","code":2,"pos":7}
+//   (codes: 1 EOF-inside-value, 2 unexpected byte, 3 bad string, 4 bad number,
+//   5 trailing bytes, 6 nested past depth 24 — examples/13_json documents them.)
+//
+// THE MEMORY PATTERN THIS EXAMPLE TEACHES: one long-lived arena, one
+// per-request arena. The record store (id vector + one canonical byte vector
+// per record) lives in a reclaiming FREE-LIST arena for the whole run, so
+// updates and deletes return their old bytes to the pool. Everything a single
+// request touches — the parsed JSON tree, response buffers, the snapshot image
+// — comes from a separate BUMP arena that main RESETS to its base after every
+// response (one store to the frontier; freeing is a no-op). Request memory
+// therefore cannot accumulate: the arena's high-water mark is per-request, not
+// per-lifetime. GET /stats reports the live probes — the store frontier, the
+// running peak of the per-request bump, and the model address of a stack local
+// (flat since the native model-stack rollback) — so a load test can WATCH
+// memory stay flat; load.py (this directory) drives 100,000+ requests and
+// checks exactly that, plus the final store contents.
+//
+// CAPACITY, stated up front: the store arena is a fixed 8 MiB window, budgeted
+// at 8,192 live records and 4 MiB of live body bytes — the budget refuses (507
+// {"error":"storage_full"}) long before the arena itself could fail, so a full
+// store is an HTTP status, never a fault. Reads and deletes keep working, and
+// a delete returns its bytes to the budget: delete one, create one, forever.
+//
+// PERSISTENCE: a whole-store snapshot, rewritten on every successful mutation
+// (POST/PUT/DELETE), reloaded on startup. The format is one record per line —
+// `<id> <compact JSON>\n` — which a compact-printed record can never break (the
+// printer escapes control bytes), and which reloads in one pass through the
+// same parser that serves requests. A snapshot beat an append-only log here
+// because the std file surface (open/read/write/close over the audited
+// boundary) has no append flag or rename, and a bounded rewrite of a small
+// store is simpler than log replay; the rewrite is best-effort (no fsync), a
+// documented demo trade-off.
+//
+// The HTTP surface is HTTP/1.0, one request per connection, `Connection:
+// close` — the shape example 12 established. Requests are read until the
+// header terminator plus Content-Length bytes arrive (8 KiB cap -> 413). The
+// serve loop is single-threaded by scope: one connection is read, answered,
+// and closed before the next accept, so an idle client stalls the loop (no
+// timeouts — a demo boundary stated plainly, not an oversight). A client that
+// DISCONNECTS early cannot hurt the server: responses go out through send(2)
+// with MSG_NOSIGNAL, so a peer reset is an EPIPE error value — one stderr line,
+// close, keep serving — never a fatal SIGPIPE. The externs are six of the
+// `sys_*` symbols example 12 audits plus `sys_send`; `candor audit` reports
+// all seven.
+
+extern "C" {
+    fn sys_tcp_listen(port: i32) -> i32
+        trust "TCP server listen (socket/bind/listen on 127.0.0.1:port, port 0 => ephemeral): touches no Candor memory; returns a listening descriptor (>= 0) or a negative error" {};
+    fn sys_tcp_accept(fd: i32) -> i32
+        trust "TCP server accept: blocks until a client connects to the listening fd; touches no Candor memory; returns a connected descriptor (>= 0) or a negative error" {};
+    fn sys_open(path: rawptr u8, flags: i32, mode: i32) -> i32
+        trust "POSIX open(2): reads a NUL-terminated path, retains no pointer, thread-confined to this call" {
+            valid_nul_terminated(path),
+            no_retain(path),
+        };
+    fn sys_close(fd: i32) -> i32
+        trust "POSIX close(2): closes a descriptor; touches no Candor memory" {};
+    fn sys_read(fd: i32, buf: rawptr u8, count: usize) -> isize
+        trust "POSIX read(2): writes at most count bytes into buf, retains no pointer, thread-confined" {
+            valid_for(buf, count),
+            no_retain(buf),
+            thread_confined(buf),
+        };
+    fn sys_write(fd: i32, buf: rawptr u8, count: usize) -> isize
+        trust "POSIX write(2): reads at most count bytes from buf, retains no pointer, thread-confined" {
+            valid_for(buf, count),
+            no_retain(buf),
+            thread_confined(buf),
+        };
+    fn sys_send(fd: i32, buf: rawptr u8, count: usize, flags: i32) -> isize
+        trust "POSIX send(2) on a connected socket: reads at most count bytes from buf, retains no pointer, thread-confined; MSG_NOSIGNAL in flags makes a peer reset an ordinary EPIPE error return instead of a fatal SIGPIPE" {
+            valid_for(buf, count),
+            no_retain(buf),
+            thread_confined(buf),
+        };
+}
+
+// ---- errors + result shapes (example 12's audited-boundary shapes) ----------
+
+pub enum IoError {
+    Errno(i32),
+}
+
+pub enum IoResult {
+    ok Ok(usize),
+    Err(IoError),
+}
+
+pub enum TcpResult {
+    ok Ok(i32),
+    Err(IoError),
+}
+
+interface From[E] {
+    fn from(e: E) -> Self;
+}
+impl From[IoError] for IoError {
+    fn from(e: IoError) -> Self {
+        return e;
+    }
+}
+enum StrIoResult {
+    ok Ok(String),
+    Err(IoError),
+}
+
+// ---- boundary wrappers (each discharges `foreign`) --------------------------
+
+pub fn stdout() -> i32 {
+    return 1i32;
+}
+
+pub fn stderr() -> i32 {
+    return 2i32;
+}
+
+// Bind a listening socket to 127.0.0.1:`port`. On a bind/listen failure the
+// extern returns a negative value, surfaced as `Err`.
+pub fn tcp_listen(port: i32) -> TcpResult {
+    unsafe "sys_tcp_listen trust discharged: touches no Candor memory; returns a descriptor or a negative error" {
+        let fd: i32 = sys_tcp_listen(port);
+        if fd < 0i32 {
+            return TcpResult::Err(IoError::Errno(fd));
+        }
+        return TcpResult::Ok(fd);
+    }
+}
+
+// Block until a client connects to the listening `fd`, returning the connected fd.
+pub fn tcp_accept(fd: i32) -> TcpResult {
+    unsafe "sys_tcp_accept trust discharged: fd is a listening descriptor; accept touches no Candor memory; returns a descriptor or a negative error" {
+        let cfd: i32 = sys_tcp_accept(fd);
+        if cfd < 0i32 {
+            return TcpResult::Err(IoError::Errno(cfd));
+        }
+        return TcpResult::Ok(cfd);
+    }
+}
+
+pub fn open_read(path: [u8]) -> IoResult {
+    unsafe "sys_open trust discharged: path is a live NUL-terminated [u8] view; open retains nothing (POSIX)" {
+        let fd: i32 = sys_open(addr_of(path[0]), 0i32, 0i32);
+        if fd < 0i32 {
+            return IoResult::Err(IoError::Errno(fd));
+        }
+        return IoResult::Ok(conv usize fd);
+    }
+}
+
+// Open the snapshot for writing: O_WRONLY|O_CREAT|O_TRUNC (577) mode 0644 (420).
+pub fn open_trunc(path: [u8]) -> IoResult {
+    unsafe "sys_open trust discharged: path is a live NUL-terminated [u8] view; flags create-or-truncate a regular file for writing; open retains nothing (POSIX)" {
+        let fd: i32 = sys_open(addr_of(path[0]), 577i32, 420i32);
+        if fd < 0i32 {
+            return IoResult::Err(IoError::Errno(fd));
+        }
+        return IoResult::Ok(conv usize fd);
+    }
+}
+
+pub fn close(fd: i32) -> IoResult {
+    unsafe "sys_close trust discharged: fd is a descriptor; close touches no Candor memory" {
+        let r: i32 = sys_close(fd);
+        if r < 0i32 {
+            return IoResult::Err(IoError::Errno(r));
+        }
+        return IoResult::Ok(0usize);
+    }
+}
+
+pub fn read_into(fd: i32, buf: write [u8]) -> IoResult {
+    unsafe "sys_read trust discharged: buf is a live [u8] view valid for len(buf) bytes; read retains nothing (POSIX), thread-confined" {
+        let n: isize = sys_read(fd, addr_of_mut(buf[0]), len(buf));
+        if n < 0isize {
+            return IoResult::Err(IoError::Errno(conv i32 n));
+        }
+        return IoResult::Ok(conv usize n);
+    }
+}
+
+pub fn write_all(fd: i32, s: [u8]) -> IoResult {
+    let total: usize = len(s);
+    if total == 0usize {
+        return IoResult::Ok(0usize);
+    }
+    unsafe "sys_write trust discharged: s is a live [u8] view valid for len(s) bytes; write retains nothing (POSIX), thread-confined" {
+        let n: isize = sys_write(fd, addr_of(s[0]), total);
+        if n < 0isize {
+            return IoResult::Err(IoError::Errno(conv i32 n));
+        }
+        if conv usize n < total {
+            return IoResult::Err(IoError::Errno(0i32 - 1i32));
+        }
+        return IoResult::Ok(total);
+    }
+}
+
+// Socket write: send(2) with MSG_NOSIGNAL (16384), looping over partial sends.
+// A peer that closed early surfaces as `Err` (EPIPE) — a value the serve loop
+// handles — never a process-killing SIGPIPE. This is why the service outlives
+// rude clients; plain write(2) on a reset socket would raise the fatal signal.
+pub fn send_all(fd: i32, s: [u8]) -> IoResult {
+    let total: usize = len(s);
+    let mut done: usize = 0usize;
+    unsafe "sys_send trust discharged: s is a live [u8] view and the [done, total) tail stays in bounds; send retains nothing (POSIX), thread-confined" {
+        while done < total {
+            let n: isize = sys_send(fd, addr_of(s[done]), total - done, 16384i32);
+            if n <= 0isize {
+                return IoResult::Err(IoError::Errno(conv i32 n));
+            }
+            done = done + conv usize n;
+        }
+    }
+    return IoResult::Ok(total);
+}
+
+// ---- allocator preamble (the std free-list allocator, reduced to one file) --
+
+struct AllocVtable {
+    alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8,
+    free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit,
+    realloc: fn(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) alloc -> rawptr u8,
+}
+copy struct Alloc {
+    ctx: rawptr u8,
+    vt: rawptr AllocVtable,
+}
+
+struct FreeList {
+    next: usize,
+    end: usize,
+    head: rawptr u8,
+}
+struct FreeBlock {
+    next: rawptr u8,
+    size: usize,
+}
+
+fn with_window(base: usize, size: usize) -> FreeList {
+    unsafe "the empty free list starts with a null head; no block is threaded yet" {
+        return FreeList { next: base, end: base + size, head: ptr_null[u8]() };
+    }
+}
+
+fn block_span(size: usize, align: usize) -> usize {
+    let mut need: usize = size;
+    if need < 16usize {
+        need = 16usize;
+    }
+    return (need + align - 1usize) / align * align;
+}
+
+fn freelist_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live FreeList whose [next, end) window and address-ordered free chain are reserved to this arena alone; every carved block stays inside [next, end) and is >= header-sized, and a split remainder (kept only when >= MIN_SPLIT) is written into the block's own tail" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let need: usize = block_span(size, align);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) {
+            let blk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if blk.size >= need {
+                if blk.size - need >= 32usize {
+                    let rem: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(cur) + need);
+                    ptr_write(cast_ptr[FreeBlock](rem), FreeBlock { next: blk.next, size: blk.size - need });
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: rem });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: rem, size: pblk.size });
+                    }
+                } else {
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: blk.next });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: blk.next, size: pblk.size });
+                    }
+                }
+                return cur;
+            }
+            prev = cur;
+            cur = blk.next;
+        }
+        let aligned: usize = (st.next + align - 1usize) / align * align;
+        if aligned + need > st.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: aligned + need, end: st.end, head: st.head });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+
+fn freelist_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {
+    unsafe "the free list is kept ADDRESS-ORDERED; the freed block's own storage (>= header-sized, guaranteed by block_span in alloc) holds its FreeBlock header {next, size}, and a merge joins two blocks ONLY when their byte spans are exactly adjacent (addr + size == neighbour addr), so a merge can never overlap live memory nor bridge a gap" {
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        let mut cap: usize = block_span(size, align);
+        let a: usize = ptr_to_addr(ptr);
+        let mut prev: rawptr u8 = ptr_null[u8]();
+        let mut cur: rawptr u8 = st.head;
+        while !is_null(cur) && ptr_to_addr(cur) < a {
+            let cblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            prev = cur;
+            cur = cblk.next;
+        }
+        let mut link: rawptr u8 = cur;
+        if !is_null(cur) {
+            let nblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+            if a + cap == ptr_to_addr(cur) {
+                cap = cap + nblk.size;
+                link = nblk.next;
+            }
+        }
+        if !is_null(prev) {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            if ptr_to_addr(prev) + pblk.size == a {
+                ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: link, size: pblk.size + cap });
+                return;
+            }
+        }
+        ptr_write(cast_ptr[FreeBlock](ptr), FreeBlock { next: link, size: cap });
+        if is_null(prev) {
+            ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: ptr });
+        } else {
+            let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+            ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: ptr, size: pblk.size });
+        }
+    }
+}
+
+fn freelist_realloc(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live FreeList; [ptr, ptr+old_span) is the block carved for old_size (block_span rounds identically on alloc/free). Growing in place either extends the bump frontier inside [next, end) or absorbs the physically-adjacent free block beginning exactly at ptr+old_span (splitting its tail when the remainder is >= MIN_SPLIT); the fallback carves a fresh block, copies old_size bytes into it, and frees the old block" {
+        let old_span: usize = block_span(old_size, align);
+        let new_span: usize = block_span(new_size, align);
+        if new_span <= old_span {
+            return ptr;
+        }
+        let a: usize = ptr_to_addr(ptr);
+        let tail: usize = a + old_span;
+        let extra: usize = new_span - old_span;
+        let st: FreeList = ptr_read(cast_ptr[FreeList](ctx));
+        if tail == st.next {
+            if tail + extra <= st.end {
+                ptr_write(cast_ptr[FreeList](ctx), FreeList { next: tail + extra, end: st.end, head: st.head });
+                return ptr;
+            }
+        } else {
+            let mut prev: rawptr u8 = ptr_null[u8]();
+            let mut cur: rawptr u8 = st.head;
+            while !is_null(cur) && ptr_to_addr(cur) < tail {
+                let cblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+                prev = cur;
+                cur = cblk.next;
+            }
+            if !is_null(cur) && ptr_to_addr(cur) == tail {
+                let fblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](cur));
+                if fblk.size >= extra {
+                    let mut link: rawptr u8 = fblk.next;
+                    if fblk.size - extra >= 32usize {
+                        let rem: rawptr u8 = addr_to_ptr[u8](tail + extra);
+                        ptr_write(cast_ptr[FreeBlock](rem), FreeBlock { next: fblk.next, size: fblk.size - extra });
+                        link = rem;
+                    }
+                    if is_null(prev) {
+                        ptr_write(cast_ptr[FreeList](ctx), FreeList { next: st.next, end: st.end, head: link });
+                    } else {
+                        let pblk: FreeBlock = ptr_read(cast_ptr[FreeBlock](prev));
+                        ptr_write(cast_ptr[FreeBlock](prev), FreeBlock { next: link, size: pblk.size });
+                    }
+                    return ptr;
+                }
+            }
+        }
+        let newp: rawptr u8 = freelist_alloc(ctx, new_size, align);
+        if is_null(newp) {
+            return newp;
+        }
+        let mut i: usize = 0usize;
+        while i < old_size {
+            let s: rawptr u8 = addr_to_ptr[u8](a + i);
+            let d: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(newp) + i);
+            let v: u8 = ptr_read(s);
+            ptr_write(d, v);
+            i = i + 1usize;
+        }
+        freelist_free(ctx, ptr, old_size, align);
+        return newp;
+    }
+}
+
+static FREELIST_VT: AllocVtable = AllocVtable { alloc: freelist_alloc, free: freelist_free, realloc: freelist_realloc };
+
+fn mk_alloc(state: write FreeList) -> Alloc {
+    unsafe "ctx (the caller's FreeList local) and vt (the static FREELIST_VT) outlive every collection this handle serves; the caller keeps the window and FREELIST_VT alive for the whole run and drops every collection before the window dies" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(FREELIST_VT) };
+    }
+}
+
+// ---- the per-request arena: a bump allocator (std bump shape) ---------------
+// Request-lived collections allocate by moving a frontier; free is a no-op;
+// main resets the frontier to the window base after every response. This is
+// the idiomatic fix for the leak a long-running request loop would otherwise
+// accumulate: nothing a request allocates can outlive the reset, because
+// everything long-lived allocates from the free-list store arena instead.
+
+struct Bump {
+    next: usize,
+    end: usize,
+}
+
+fn bump_window(base: usize, size: usize) -> Bump {
+    return Bump { next: base, end: base + size };
+}
+
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 {
+    unsafe "ctx points at the live Bump whose [next, end) window is reserved to this arena alone; the carved block stays inside [next, end)" {
+        let b: Bump = ptr_read(cast_ptr[Bump](ctx));
+        let aligned: usize = (b.next + align - 1usize) / align * align;
+        if aligned + size > b.end {
+            return ptr_null[u8]();
+        }
+        ptr_write(cast_ptr[Bump](ctx), Bump { next: aligned + size, end: b.end });
+        return addr_to_ptr[u8](aligned);
+    }
+}
+
+// A bump arena never frees an individual block; the whole window is released
+// at once by main's per-request frontier reset.
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit {}
+
+fn bump_realloc(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) -> rawptr u8 {
+    unsafe "a bump cannot grow in place: carve a fresh block and copy old_size bytes; the old block is leaked until the per-request reset, as bump semantics require" {
+        let newp: rawptr u8 = bump_alloc(ctx, new_size, align);
+        if is_null(newp) {
+            return newp;
+        }
+        let a: usize = ptr_to_addr(ptr);
+        let mut i: usize = 0usize;
+        while i < old_size {
+            let s: rawptr u8 = addr_to_ptr[u8](a + i);
+            let d: rawptr u8 = addr_to_ptr[u8](ptr_to_addr(newp) + i);
+            let v: u8 = ptr_read(s);
+            ptr_write(d, v);
+            i = i + 1usize;
+        }
+        return newp;
+    }
+}
+
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free, realloc: bump_realloc };
+
+fn mk_bump(state: write Bump) -> Alloc {
+    unsafe "ctx (the caller's Bump local) and vt (the static BUMP_VT) outlive every collection this handle serves; the caller drops every request-lived collection before resetting the frontier" {
+        return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) };
+    }
+}
+
+// ---- JSON value tree --------------------------------------------------------
+
+// Node kinds. A node arena (`Vec[Node]`) plus a byte pool (`Vec[u8]`) hold the
+// whole tree; indices are i64, -1 is the null link.
+static K_NULL: i64 = 0;
+static K_FALSE: i64 = 1;
+static K_TRUE: i64 = 2;
+static K_INT: i64 = 3; // a = the i64 value
+static K_LEX: i64 = 4; // a/b = raw number lexeme start/len in the pool
+static K_STR: i64 = 5; // a/b = decoded UTF-8 bytes start/len in the pool
+static K_ARR: i64 = 6; // a = first child (-1 if empty), b = child count
+static K_OBJ: i64 = 7; // a = first member (-1 if empty), b = member count
+
+// `next` chains siblings; `ka`/`kb` hold an object member's key bytes (pool
+// start/len) on the member's VALUE node, -1/0 elsewhere.
+copy struct Node {
+    kind: i64,
+    a: i64,
+    b: i64,
+    next: i64,
+    ka: i64,
+    kb: i64,
+}
+
+copy struct PErr {
+    code: i64,
+    pos: i64,
+}
+enum PRes {
+    Ok(i64),
+    Err(PErr),
+}
+
+copy struct Sp {
+    start: i64,
+    len: i64,
+}
+enum SRes {
+    Ok(Sp),
+    Err(PErr),
+}
+
+static E_EOF: i64 = 1;
+static E_CHAR: i64 = 2;
+static E_STR: i64 = 3;
+static E_NUM: i64 = 4;
+static E_TRAIL: i64 = 5;
+static E_DEEP: i64 = 6;
+
+static MAX_DEPTH: i64 = 24;
+
+// ---- arena helpers ----------------------------------------------------------
+
+fn node_push(nodes: write Vec[Node], nd: Node) alloc -> i64 {
+    push(write nodes.*, nd);
+    return conv i64 len(read nodes.*) - 1;
+}
+
+fn mk_leaf(nodes: write Vec[Node], kind: i64, a: i64, b: i64) alloc -> i64 {
+    return node_push(write nodes.*, Node { kind: kind, a: a, b: b, next: 0 - 1, ka: 0 - 1, kb: 0 });
+}
+
+fn set_next(nodes: write Vec[Node], i: i64, nx: i64) alloc -> unit {
+    let mut nd: Node = get(read nodes.*, conv usize i).*;
+    nd.next = nx;
+    set(write nodes.*, conv usize i, nd);
+}
+
+fn set_key(nodes: write Vec[Node], i: i64, kstart: i64, klen: i64) alloc -> unit {
+    let mut nd: Node = get(read nodes.*, conv usize i).*;
+    nd.ka = kstart;
+    nd.kb = klen;
+    set(write nodes.*, conv usize i, nd);
+}
+
+// Fill a container's first-child link and count once its members are known.
+fn set_children(nodes: write Vec[Node], i: i64, first: i64, count: i64) alloc -> unit {
+    let mut nd: Node = get(read nodes.*, conv usize i).*;
+    nd.a = first;
+    nd.b = count;
+    set(write nodes.*, conv usize i, nd);
+}
+
+// ---- lexing helpers ---------------------------------------------------------
+
+fn is_ws(b: u8) -> bool {
+    return b == 32u8 || b == 9u8 || b == 10u8 || b == 13u8;
+}
+
+fn is_digit(b: u8) -> bool {
+    return b >= 48u8 && b <= 57u8;
+}
+
+fn skip_ws(s: [u8], pos: write usize) -> unit {
+    let n: usize = len(s);
+    while pos.* < n && is_ws(s[pos.*]) {
+        pos.* = pos.* + 1usize;
+    }
+}
+
+// Advance over `lit` if the input matches it exactly here; on mismatch leave
+// `pos` at the literal's start (the caller reports E_CHAR there).
+fn match_lit(s: [u8], pos: write usize, lit: str) -> bool {
+    let lb: [u8] = as_bytes(lit);
+    let m: usize = len(lb);
+    if pos.* + m > len(s) {
+        return false;
+    }
+    let mut i: usize = 0usize;
+    while i < m {
+        if s[pos.* + i] != lb[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    pos.* = pos.* + m;
+    return true;
+}
+
+fn hex_digit(b: u8) -> i64 {
+    if b >= 48u8 && b <= 57u8 {
+        return conv i64 b - 48;
+    }
+    if b >= 97u8 && b <= 102u8 {
+        return conv i64 b - 87;
+    }
+    if b >= 65u8 && b <= 70u8 {
+        return conv i64 b - 55;
+    }
+    return 0 - 1;
+}
+
+// Four hex digits at `at`, or -1 (also for out-of-range reads).
+fn hex4(s: [u8], at: usize) -> i64 {
+    if at + 4usize > len(s) {
+        return 0 - 1;
+    }
+    let mut v: i64 = 0;
+    let mut i: usize = 0usize;
+    while i < 4usize {
+        let d: i64 = hex_digit(s[at + i]);
+        if d < 0 {
+            return 0 - 1;
+        }
+        v = v * 16 + d;
+        i = i + 1usize;
+    }
+    return v;
+}
+
+// Append the UTF-8 encoding of scalar `cp` (caller guarantees a valid scalar).
+fn utf8_push(pool: write Vec[u8], cp: i64) alloc -> unit {
+    if cp < 128 {
+        push(write pool.*, conv u8 cp);
+        return;
+    }
+    if cp < 2048 {
+        push(write pool.*, conv u8 (192 + cp / 64));
+        push(write pool.*, conv u8 (128 + cp % 64));
+        return;
+    }
+    if cp < 65536 {
+        push(write pool.*, conv u8 (224 + cp / 4096));
+        push(write pool.*, conv u8 (128 + cp / 64 % 64));
+        push(write pool.*, conv u8 (128 + cp % 64));
+        return;
+    }
+    push(write pool.*, conv u8 (240 + cp / 262144));
+    push(write pool.*, conv u8 (128 + cp / 4096 % 64));
+    push(write pool.*, conv u8 (128 + cp / 64 % 64));
+    push(write pool.*, conv u8 (128 + cp % 64));
+}
+
+// ---- parsing ----------------------------------------------------------------
+
+// A string body: `pos` sits on the opening quote. Decoded bytes go into the
+// pool; the result is their (start, len) span.
+fn parse_string(s: [u8], pos: write usize, pool: write Vec[u8]) alloc -> SRes {
+    let n: usize = len(s);
+    pos.* = pos.* + 1usize;
+    let start: i64 = conv i64 len(read pool.*);
+    loop {
+        if pos.* >= n {
+            return SRes::Err(PErr { code: E_EOF, pos: conv i64 n });
+        }
+        let b: u8 = s[pos.*];
+        if b == 34u8 {
+            pos.* = pos.* + 1usize;
+            return SRes::Ok(Sp { start: start, len: conv i64 len(read pool.*) - start });
+        }
+        if b == 92u8 {
+            let esc: usize = pos.*;
+            if esc + 1usize >= n {
+                return SRes::Err(PErr { code: E_EOF, pos: conv i64 n });
+            }
+            let e: u8 = s[esc + 1usize];
+            if e == 34u8 {
+                push(write pool.*, 34u8);
+                pos.* = esc + 2usize;
+            } else if e == 92u8 {
+                push(write pool.*, 92u8);
+                pos.* = esc + 2usize;
+            } else if e == 47u8 {
+                push(write pool.*, 47u8);
+                pos.* = esc + 2usize;
+            } else if e == 98u8 {
+                push(write pool.*, 8u8);
+                pos.* = esc + 2usize;
+            } else if e == 102u8 {
+                push(write pool.*, 12u8);
+                pos.* = esc + 2usize;
+            } else if e == 110u8 {
+                push(write pool.*, 10u8);
+                pos.* = esc + 2usize;
+            } else if e == 114u8 {
+                push(write pool.*, 13u8);
+                pos.* = esc + 2usize;
+            } else if e == 116u8 {
+                push(write pool.*, 9u8);
+                pos.* = esc + 2usize;
+            } else if e == 117u8 {
+                let hi: i64 = hex4(s, esc + 2usize);
+                if hi < 0 {
+                    return SRes::Err(PErr { code: E_STR, pos: conv i64 esc });
+                }
+                if hi >= 55296 && hi <= 56319 {
+                    // High surrogate D800..DBFF: a \uDC00..\uDFFF pair must follow.
+                    if esc + 8usize > n || s[esc + 6usize] != 92u8 || s[esc + 7usize] != 117u8 {
+                        return SRes::Err(PErr { code: E_STR, pos: conv i64 esc });
+                    }
+                    let lo: i64 = hex4(s, esc + 8usize);
+                    if lo < 56320 || lo > 57343 {
+                        return SRes::Err(PErr { code: E_STR, pos: conv i64 esc });
+                    }
+                    let cp: i64 = 65536 + (hi - 55296) * 1024 + (lo - 56320);
+                    utf8_push(write pool.*, cp);
+                    pos.* = esc + 12usize;
+                } else if hi >= 56320 && hi <= 57343 {
+                    // A lone low surrogate is not a scalar (strict, like serde_json).
+                    return SRes::Err(PErr { code: E_STR, pos: conv i64 esc });
+                } else {
+                    utf8_push(write pool.*, hi);
+                    pos.* = esc + 6usize;
+                }
+            } else {
+                return SRes::Err(PErr { code: E_STR, pos: conv i64 esc });
+            }
+        } else if b < 32u8 {
+            return SRes::Err(PErr { code: E_STR, pos: conv i64 pos.* });
+        } else {
+            // Raw byte (incl. multi-byte UTF-8) passes through unchanged.
+            push(write pool.*, b);
+            pos.* = pos.* + 1usize;
+        }
+    }
+}
+
+// A number: `pos` sits on '-' or the first digit. Grammar errors all report the
+// token's start. Integer-form tokens that fit i64 become K_INT (accumulated
+// NEGATIVELY so i64::MIN parses without overflow, with an explicit bound check
+// before each step — checked arithmetic never faults here); everything else
+// keeps the raw lexeme (K_LEX).
+fn parse_number(s: [u8], pos: write usize, nodes: write Vec[Node], pool: write Vec[u8]) alloc -> PRes {
+    let n: usize = len(s);
+    let start: usize = pos.*;
+    let mut neg: bool = false;
+    if s[pos.*] == 45u8 {
+        neg = true;
+        pos.* = pos.* + 1usize;
+    }
+    if pos.* >= n || !is_digit(s[pos.*]) {
+        return PRes::Err(PErr { code: E_NUM, pos: conv i64 start });
+    }
+    if s[pos.*] == 48u8 {
+        pos.* = pos.* + 1usize;
+        if pos.* < n && is_digit(s[pos.*]) {
+            // Leading zero ("01") is not JSON.
+            return PRes::Err(PErr { code: E_NUM, pos: conv i64 start });
+        }
+    } else {
+        while pos.* < n && is_digit(s[pos.*]) {
+            pos.* = pos.* + 1usize;
+        }
+    }
+    let int_end: usize = pos.*;
+    let mut is_int: bool = true;
+    if pos.* < n && s[pos.*] == 46u8 {
+        is_int = false;
+        pos.* = pos.* + 1usize;
+        if pos.* >= n || !is_digit(s[pos.*]) {
+            return PRes::Err(PErr { code: E_NUM, pos: conv i64 start });
+        }
+        while pos.* < n && is_digit(s[pos.*]) {
+            pos.* = pos.* + 1usize;
+        }
+    }
+    if pos.* < n && (s[pos.*] == 101u8 || s[pos.*] == 69u8) {
+        is_int = false;
+        pos.* = pos.* + 1usize;
+        if pos.* < n && (s[pos.*] == 43u8 || s[pos.*] == 45u8) {
+            pos.* = pos.* + 1usize;
+        }
+        if pos.* >= n || !is_digit(s[pos.*]) {
+            return PRes::Err(PErr { code: E_NUM, pos: conv i64 start });
+        }
+        while pos.* < n && is_digit(s[pos.*]) {
+            pos.* = pos.* + 1usize;
+        }
+    }
+    if is_int {
+        let min: i64 = 0 - 9223372036854775807 - 1;
+        let mut acc: i64 = 0;
+        let mut fits: bool = true;
+        let mut i: usize = start;
+        if neg {
+            i = start + 1usize;
+        }
+        while i < int_end {
+            let d: i64 = conv i64 s[i] - 48;
+            if acc < (min + d) / 10 {
+                fits = false;
+                break;
+            }
+            acc = acc * 10 - d;
+            i = i + 1usize;
+        }
+        // A positive magnitude of exactly 2^63 (acc == min, !neg) does not fit.
+        if fits && (neg || acc > min) {
+            let mut v: i64 = acc;
+            if !neg {
+                v = 0 - acc;
+            }
+            return PRes::Ok(mk_leaf(write nodes.*, K_INT, v, 0));
+        }
+    }
+    let ps: i64 = conv i64 len(read pool.*);
+    let mut j: usize = start;
+    while j < pos.* {
+        push(write pool.*, s[j]);
+        j = j + 1usize;
+    }
+    return PRes::Ok(mk_leaf(write nodes.*, K_LEX, ps, conv i64 len(read pool.*) - ps));
+}
+
+// An object key plus its ':' — used when a '{' opens non-empty and after every
+// member ','.
+fn parse_key_colon(s: [u8], pos: write usize, pool: write Vec[u8]) alloc -> SRes {
+    skip_ws(s, pos);
+    let n: usize = len(s);
+    if pos.* >= n {
+        return SRes::Err(PErr { code: E_EOF, pos: conv i64 n });
+    }
+    if s[pos.*] != 34u8 {
+        return SRes::Err(PErr { code: E_CHAR, pos: conv i64 pos.* });
+    }
+    let mut sp: Sp = Sp { start: 0, len: 0 };
+    match parse_string(s, pos, write pool.*) {
+        SRes::Err(e) => {
+            return SRes::Err(e);
+        },
+        SRes::Ok(k) => {
+            sp = k;
+        },
+    }
+    skip_ws(s, pos);
+    if pos.* >= n {
+        return SRes::Err(PErr { code: E_EOF, pos: conv i64 n });
+    }
+    if s[pos.*] != 58u8 {
+        return SRes::Err(PErr { code: E_CHAR, pos: conv i64 pos.* });
+    }
+    pos.* = pos.* + 1usize;
+    return SRes::Ok(sp);
+}
+
+// An in-flight container: its arena node, first/last child links, member count,
+// and (for objects) the pending member's key span.
+copy struct PFrame {
+    kind: i64,
+    node: i64,
+    first: i64,
+    last: i64,
+    count: i64,
+    ka: i64,
+    kb: i64,
+}
+
+fn zero_pframe() -> PFrame {
+    return PFrame { kind: 0, node: 0 - 1, first: 0 - 1, last: 0 - 1, count: 0, ka: 0 - 1, kb: 0 };
+}
+
+// One value, iteratively: containers push a PFrame onto a fixed [MAX_DEPTH]
+// stack instead of recursing, so host stack use is O(1) in document depth.
+fn parse_value(s: [u8], pos: write usize, nodes: write Vec[Node], pool: write Vec[u8]) alloc -> PRes {
+    let n: usize = len(s);
+    let mut stk: [24]PFrame = [zero_pframe(); 24];
+    let mut depth: i64 = 0;
+    let mut cur: i64 = 0 - 1;
+    let mut have_value: bool = false;
+    loop {
+        if !have_value {
+            // Produce the next value, or open a container frame.
+            skip_ws(s, pos);
+            if pos.* >= n {
+                return PRes::Err(PErr { code: E_EOF, pos: conv i64 n });
+            }
+            let b: u8 = s[pos.*];
+            if b == 91u8 {
+                if depth >= MAX_DEPTH {
+                    return PRes::Err(PErr { code: E_DEEP, pos: conv i64 pos.* });
+                }
+                pos.* = pos.* + 1usize;
+                skip_ws(s, pos);
+                if pos.* < n && s[pos.*] == 93u8 {
+                    pos.* = pos.* + 1usize;
+                    cur = mk_leaf(write nodes.*, K_ARR, 0 - 1, 0);
+                    have_value = true;
+                } else {
+                    let mut f: PFrame = zero_pframe();
+                    f.kind = K_ARR;
+                    f.node = mk_leaf(write nodes.*, K_ARR, 0 - 1, 0);
+                    stk[conv usize depth] = f;
+                    depth = depth + 1;
+                }
+            } else if b == 123u8 {
+                if depth >= MAX_DEPTH {
+                    return PRes::Err(PErr { code: E_DEEP, pos: conv i64 pos.* });
+                }
+                pos.* = pos.* + 1usize;
+                skip_ws(s, pos);
+                if pos.* < n && s[pos.*] == 125u8 {
+                    pos.* = pos.* + 1usize;
+                    cur = mk_leaf(write nodes.*, K_OBJ, 0 - 1, 0);
+                    have_value = true;
+                } else {
+                    let mut f: PFrame = zero_pframe();
+                    f.kind = K_OBJ;
+                    f.node = mk_leaf(write nodes.*, K_OBJ, 0 - 1, 0);
+                    match parse_key_colon(s, pos, write pool.*) {
+                        SRes::Err(e) => {
+                            return PRes::Err(e);
+                        },
+                        SRes::Ok(sp) => {
+                            f.ka = sp.start;
+                            f.kb = sp.len;
+                        },
+                    }
+                    stk[conv usize depth] = f;
+                    depth = depth + 1;
+                }
+            } else if b == 34u8 {
+                match parse_string(s, pos, write pool.*) {
+                    SRes::Err(e) => {
+                        return PRes::Err(e);
+                    },
+                    SRes::Ok(sp) => {
+                        cur = mk_leaf(write nodes.*, K_STR, sp.start, sp.len);
+                    },
+                }
+                have_value = true;
+            } else if b == 116u8 {
+                if !match_lit(s, pos, "true") {
+                    return PRes::Err(PErr { code: E_CHAR, pos: conv i64 pos.* });
+                }
+                cur = mk_leaf(write nodes.*, K_TRUE, 0, 0);
+                have_value = true;
+            } else if b == 102u8 {
+                if !match_lit(s, pos, "false") {
+                    return PRes::Err(PErr { code: E_CHAR, pos: conv i64 pos.* });
+                }
+                cur = mk_leaf(write nodes.*, K_FALSE, 0, 0);
+                have_value = true;
+            } else if b == 110u8 {
+                if !match_lit(s, pos, "null") {
+                    return PRes::Err(PErr { code: E_CHAR, pos: conv i64 pos.* });
+                }
+                cur = mk_leaf(write nodes.*, K_NULL, 0, 0);
+                have_value = true;
+            } else if b == 45u8 || is_digit(b) {
+                match parse_number(s, pos, write nodes.*, write pool.*) {
+                    PRes::Err(e) => {
+                        return PRes::Err(e);
+                    },
+                    PRes::Ok(idx) => {
+                        cur = idx;
+                    },
+                }
+                have_value = true;
+            } else {
+                return PRes::Err(PErr { code: E_CHAR, pos: conv i64 pos.* });
+            }
+        } else {
+            // `cur` just completed. Attach it to the enclosing container (or
+            // finish), then look for a separator or closer.
+            if depth == 0 {
+                return PRes::Ok(cur);
+            }
+            let mut f: PFrame = stk[conv usize (depth - 1)];
+            if f.kind == K_OBJ {
+                set_key(write nodes.*, cur, f.ka, f.kb);
+            }
+            if f.first < 0 {
+                f.first = cur;
+            } else {
+                set_next(write nodes.*, f.last, cur);
+            }
+            f.last = cur;
+            f.count = f.count + 1;
+            stk[conv usize (depth - 1)] = f;
+            skip_ws(s, pos);
+            if pos.* >= n {
+                return PRes::Err(PErr { code: E_EOF, pos: conv i64 n });
+            }
+            let b: u8 = s[pos.*];
+            if f.kind == K_ARR && b == 93u8 {
+                pos.* = pos.* + 1usize;
+                set_children(write nodes.*, f.node, f.first, f.count);
+                depth = depth - 1;
+                cur = f.node;
+            } else if f.kind == K_OBJ && b == 125u8 {
+                pos.* = pos.* + 1usize;
+                set_children(write nodes.*, f.node, f.first, f.count);
+                depth = depth - 1;
+                cur = f.node;
+            } else if b == 44u8 {
+                pos.* = pos.* + 1usize;
+                if f.kind == K_OBJ {
+                    match parse_key_colon(s, pos, write pool.*) {
+                        SRes::Err(e) => {
+                            return PRes::Err(e);
+                        },
+                        SRes::Ok(sp) => {
+                            f.ka = sp.start;
+                            f.kb = sp.len;
+                            stk[conv usize (depth - 1)] = f;
+                        },
+                    }
+                }
+                have_value = false;
+            } else {
+                return PRes::Err(PErr { code: E_CHAR, pos: conv i64 pos.* });
+            }
+        }
+    }
+}
+
+// Parse a whole document from raw bytes.
+fn json_parse(s: [u8], nodes: write Vec[Node], pool: write Vec[u8]) alloc -> PRes {
+    let mut pos: usize = 0usize;
+    match parse_value(s, write pos, write nodes.*, write pool.*) {
+        PRes::Err(e) => {
+            return PRes::Err(e);
+        },
+        PRes::Ok(idx) => {
+            skip_ws(s, write pos);
+            if pos < len(s) {
+                return PRes::Err(PErr { code: E_TRAIL, pos: conv i64 pos });
+            }
+            return PRes::Ok(idx);
+        },
+    }
+}
+
+// ---- printing ---------------------------------------------------------------
+
+fn out_lit(dst: write Vec[u8], t: str) alloc -> unit {
+    let tb: [u8] = as_bytes(t);
+    let m: usize = len(tb);
+    let mut i: usize = 0usize;
+    while i < m {
+        push(write dst.*, tb[i]);
+        i = i + 1usize;
+    }
+}
+
+// Two lowercase hex digits of v (0..255).
+fn out_hex2(dst: write Vec[u8], v: i64) alloc -> unit {
+    let hi: i64 = v / 16;
+    let lo: i64 = v % 16;
+    if hi < 10 {
+        push(write dst.*, conv u8 (48 + hi));
+    } else {
+        push(write dst.*, conv u8 (87 + hi));
+    }
+    if lo < 10 {
+        push(write dst.*, conv u8 (48 + lo));
+    } else {
+        push(write dst.*, conv u8 (87 + lo));
+    }
+}
+
+// Canonical decimal. The magnitude is kept NEGATIVE (digits via -(m % 10)) so
+// i64::MIN prints without a faulting negation; digits collect in a small buffer
+// and flush in reverse — no recursion.
+fn emit_int(dst: write Vec[u8], v: i64) alloc -> unit {
+    if v < 0 {
+        push(write dst.*, 45u8);
+    }
+    let mut m: i64 = v;
+    if v >= 0 {
+        m = 0 - v;
+    }
+    let mut buf: [32]u8 = [0u8; 32];
+    let mut k: i64 = 0;
+    loop {
+        buf[conv usize k] = conv u8 (48 - m % 10);
+        k = k + 1;
+        m = m / 10;
+        if m == 0 {
+            break;
+        }
+    }
+    while k > 0 {
+        k = k - 1;
+        push(write dst.*, buf[conv usize k]);
+    }
+}
+
+fn emit_pool(dst: write Vec[u8], pool: read Vec[u8], start: i64, ln: i64) alloc -> unit {
+    let mut i: i64 = 0;
+    while i < ln {
+        push(write dst.*, get(read pool, conv usize (start + i)).*);
+        i = i + 1;
+    }
+}
+
+fn emit_jstring(dst: write Vec[u8], pool: read Vec[u8], start: i64, ln: i64) alloc -> unit {
+    push(write dst.*, 34u8);
+    let mut i: i64 = 0;
+    while i < ln {
+        let b: u8 = get(read pool, conv usize (start + i)).*;
+        if b == 34u8 {
+            out_lit(write dst.*, "\\\"");
+        } else if b == 92u8 {
+            out_lit(write dst.*, "\\\\");
+        } else if b == 8u8 {
+            out_lit(write dst.*, "\\b");
+        } else if b == 9u8 {
+            out_lit(write dst.*, "\\t");
+        } else if b == 10u8 {
+            out_lit(write dst.*, "\\n");
+        } else if b == 12u8 {
+            out_lit(write dst.*, "\\f");
+        } else if b == 13u8 {
+            out_lit(write dst.*, "\\r");
+        } else if b < 32u8 {
+            out_lit(write dst.*, "\\u00");
+            out_hex2(write dst.*, conv i64 b);
+        } else {
+            push(write dst.*, b);
+        }
+        i = i + 1;
+    }
+    push(write dst.*, 34u8);
+}
+
+// A container being printed: its arena node and the child currently rendered.
+copy struct WFrame {
+    node: i64,
+    child: i64,
+}
+
+// Print one value COMPACT (no whitespace), iteratively — an explicit
+// [MAX_DEPTH] frame stack, like the parser. (The 13_json original also carries
+// a pretty form; this service stores and serves canonical compact bytes only.)
+fn print_value(nodes: read Vec[Node], pool: read Vec[u8], root: i64, dst: write Vec[u8]) alloc -> unit {
+    let mut stk: [24]WFrame = [WFrame { node: 0 - 1, child: 0 - 1 }; 24];
+    let mut depth: i64 = 0;
+    let mut item: i64 = root;
+    loop {
+        // Render `item`: leaves (incl. empty containers) emit bytes; non-empty
+        // containers open a frame and descend to their first child.
+        let nd: Node = get(read nodes, conv usize item).*;
+        let mut opened: bool = false;
+        if nd.kind == K_NULL {
+            out_lit(write dst.*, "null");
+        } else if nd.kind == K_FALSE {
+            out_lit(write dst.*, "false");
+        } else if nd.kind == K_TRUE {
+            out_lit(write dst.*, "true");
+        } else if nd.kind == K_INT {
+            emit_int(write dst.*, nd.a);
+        } else if nd.kind == K_LEX {
+            emit_pool(write dst.*, pool, nd.a, nd.b);
+        } else if nd.kind == K_STR {
+            emit_jstring(write dst.*, pool, nd.a, nd.b);
+        } else if nd.b == 0 {
+            if nd.kind == K_ARR {
+                out_lit(write dst.*, "[]");
+            } else {
+                out_lit(write dst.*, "{}");
+            }
+        } else {
+            if nd.kind == K_ARR {
+                push(write dst.*, 91u8);
+            } else {
+                push(write dst.*, 123u8);
+            }
+            stk[conv usize depth] = WFrame { node: item, child: nd.a };
+            depth = depth + 1;
+            if nd.kind == K_OBJ {
+                let cn: Node = get(read nodes, conv usize nd.a).*;
+                emit_jstring(write dst.*, pool, cn.ka, cn.kb);
+                push(write dst.*, 58u8);
+            }
+            item = nd.a;
+            opened = true;
+        }
+        if !opened {
+            // `item` completed: move to a sibling, or close frames upward.
+            loop {
+                if depth == 0 {
+                    return;
+                }
+                let mut f: WFrame = stk[conv usize (depth - 1)];
+                let cn: Node = get(read nodes, conv usize f.child).*;
+                let nx: i64 = cn.next;
+                if nx >= 0 {
+                    f.child = nx;
+                    stk[conv usize (depth - 1)] = f;
+                    push(write dst.*, 44u8);
+                    let pn: Node = get(read nodes, conv usize f.node).*;
+                    if pn.kind == K_OBJ {
+                        let kn: Node = get(read nodes, conv usize nx).*;
+                        emit_jstring(write dst.*, pool, kn.ka, kn.kb);
+                        push(write dst.*, 58u8);
+                    }
+                    item = nx;
+                    break;
+                }
+                let pn: Node = get(read nodes, conv usize f.node).*;
+                if pn.kind == K_ARR {
+                    push(write dst.*, 93u8);
+                } else {
+                    push(write dst.*, 125u8);
+                }
+                depth = depth - 1;
+                // The closed container is itself a completed value; keep going.
+            }
+        }
+    }
+}
+
+// ---- byte utilities ---------------------------------------------------------
+
+fn bytes_is(v: [u8], s: str) -> bool {
+    let sb: [u8] = as_bytes(s);
+    let n: usize = len(sb);
+    if len(v) != n {
+        return false;
+    }
+    let mut i: usize = 0usize;
+    while i < n {
+        if v[i] != sb[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+fn bytes_starts(v: [u8], s: str) -> bool {
+    let sb: [u8] = as_bytes(s);
+    let n: usize = len(sb);
+    if len(v) < n {
+        return false;
+    }
+    let mut i: usize = 0usize;
+    while i < n {
+        if v[i] != sb[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+// Decimal digits in v[from, to) as a non-negative i64; -1 on empty, a
+// non-digit, or a value past 10^15 (ample for ids and Content-Length).
+fn parse_digits(v: [u8], from: usize, to: usize) -> i64 {
+    if from >= to {
+        return 0 - 1;
+    }
+    let mut acc: i64 = 0;
+    let mut i: usize = from;
+    while i < to {
+        let b: u8 = v[i];
+        if b < 48u8 || b > 57u8 {
+            return 0 - 1;
+        }
+        if acc > 1000000000000000 {
+            return 0 - 1;
+        }
+        acc = acc * 10 + conv i64 b - 48;
+        i = i + 1usize;
+    }
+    return acc;
+}
+
+fn index_byte(v: [u8], from: usize, b: u8) -> i64 {
+    let n: usize = len(v);
+    let mut i: usize = from;
+    while i < n {
+        if v[i] == b {
+            return conv i64 i;
+        }
+        i = i + 1usize;
+    }
+    return 0 - 1;
+}
+
+fn fold_lower(b: u8) -> u8 {
+    if b >= 65u8 && b <= 90u8 {
+        return b + 32u8;
+    }
+    return b;
+}
+
+// Append every byte of `src` to `dst` (the Vec-to-Vec copy this file uses to
+// move canonical bytes between the request and store arenas).
+fn emit_vec(dst: write Vec[u8], src: read Vec[u8]) alloc -> unit {
+    let m: usize = len(src);
+    let mut i: usize = 0usize;
+    while i < m {
+        push(write dst.*, get(src, i).*);
+        i = i + 1usize;
+    }
+}
+
+// Write a Vec[u8] to a descriptor through a fixed bridge buffer (there is no
+// Vec[u8] -> [u8] view builtin; example 13 bridges the same way).
+fn write_vec(fd: i32, v: read Vec[u8]) -> unit {
+    let m: usize = len(v);
+    let mut chunk: [1024]u8 = [0u8; 1024];
+    let mut i: usize = 0usize;
+    while i < m {
+        let mut k: usize = 0usize;
+        while k < 1024usize && i + k < m {
+            chunk[k] = get(v, i + k).*;
+            k = k + 1usize;
+        }
+        let w: IoResult = write_all(fd, subslice(slice_of(chunk), 0usize, k));
+        i = i + k;
+    }
+}
+
+// One static line + newline to stderr (no allocation, so usable anywhere).
+fn log_line(msg: str) -> unit {
+    let w1: IoResult = write_all(stderr(), as_bytes(msg));
+    let nl: [1]u8 = [10u8; 1];
+    let w2: IoResult = write_all(stderr(), slice_of(nl));
+}
+
+// The socket twin of write_vec: send(2)-based, and a disconnected peer aborts
+// the response with one log line instead of killing the process (see send_all).
+fn send_vec(cfd: i32, v: read Vec[u8]) -> unit {
+    let m: usize = len(v);
+    let mut chunk: [1024]u8 = [0u8; 1024];
+    let mut i: usize = 0usize;
+    while i < m {
+        let mut k: usize = 0usize;
+        while k < 1024usize && i + k < m {
+            chunk[k] = get(v, i + k).*;
+            k = k + 1usize;
+        }
+        let ok: bool = match send_all(cfd, subslice(slice_of(chunk), 0usize, k)) {
+            IoResult::Ok(c) => true,
+            IoResult::Err(e) => false,
+        };
+        if !ok {
+            log_line("restd: client closed early");
+            return;
+        }
+        i = i + k;
+    }
+}
+
+// ---- file reading (open -> read-to-string -> close, from example 12) --------
+
+// Loop `read_into` a fixed buffer into an owned growable String: `Ok(0)` is
+// EOF; `Ok(n)` appends the first n bytes; `Err` propagates via `?`. A multibyte
+// char may straddle a read boundary, so `str_from_unchecked` (not `str_from`):
+// the whole is valid UTF-8 iff the file is; append only ever copies.
+fn read_to_string(a: read Alloc, fd: i32) alloc -> StrIoResult {
+    let mut s: String = string_new(a);
+    let mut buf: [512]u8 = [0u8; 512];
+    loop {
+        let n: usize = read_into(fd, slice_of_mut(buf))?;
+        if n == 0usize {
+            break;
+        }
+        let bytes: [u8] = subslice(slice_of(buf), 0usize, n);
+        unsafe "file bytes appended raw: a multibyte char may straddle a read boundary, so per-chunk validation would wrongly reject a valid whole; the accumulated String is valid UTF-8 iff the source is" {
+            append(write s, str_from_unchecked(bytes));
+        }
+    }
+    return StrIoResult::Ok(s);
+}
+
+fn read_file(a: read Alloc, path: [u8]) alloc -> StrIoResult {
+    let fd: usize = open_read(path)?;
+    let s: String = read_to_string(a, conv i32 fd)?;
+    let cr: IoResult = close(conv i32 fd);
+    return StrIoResult::Ok(s);
+}
+
+// ---- the record store -------------------------------------------------------
+// Two parallel store-arena vectors: ids[i] is the record id (or -1, a free
+// slot) and bodies[i] its canonical compact JSON bytes. A delete tombstones
+// the slot and frees the bytes through the free-list handle; a create reuses
+// the first tombstone, so the store's footprint tracks the PEAK live count,
+// not the total ever created.
+
+fn find_slot(ids: read Vec[i64], id: i64) -> i64 {
+    let n: usize = len(ids);
+    let mut i: usize = 0usize;
+    while i < n {
+        if get(ids, i).* == id {
+            return conv i64 i;
+        }
+        i = i + 1usize;
+    }
+    return 0 - 1;
+}
+
+fn free_slot(ids: read Vec[i64]) -> i64 {
+    let n: usize = len(ids);
+    let mut i: usize = 0usize;
+    while i < n {
+        if get(ids, i).* < 0 {
+            return conv i64 i;
+        }
+        i = i + 1usize;
+    }
+    return 0 - 1;
+}
+
+fn live_count(ids: read Vec[i64]) -> i64 {
+    let n: usize = len(ids);
+    let mut c: i64 = 0;
+    let mut i: usize = 0usize;
+    while i < n {
+        if get(ids, i).* >= 0 {
+            c = c + 1;
+        }
+        i = i + 1usize;
+    }
+    return c;
+}
+
+// ---- persistence: whole-store snapshot --------------------------------------
+
+// The NUL-terminated snapshot path (cwd-relative, like example 12's file paths).
+fn snap_name(a: read Alloc) alloc -> String {
+    let mut p: String = string_new(a);
+    append(write p, "records.json");
+    push(write p, 0);
+    return p;
+}
+
+// Rewrite the snapshot: one `<id> <compact JSON>\n` line per live record. The
+// write is best-effort (a failure loses persistence, never the in-memory
+// store); the compact printer escapes control bytes, so a body cannot contain
+// a raw newline and the line format cannot break.
+fn save_snapshot(a: read Alloc, ids: read Vec[i64], bodies: read Vec[Vec[u8]]) alloc -> unit {
+    let mut d: Vec[u8] = vec_new(a);
+    let n: usize = len(ids);
+    let mut i: usize = 0usize;
+    while i < n {
+        let id: i64 = get(ids, i).*;
+        if id >= 0 {
+            emit_int(write d, id);
+            push(write d, 32u8);
+            emit_vec(write d, read get(bodies, i).*);
+            push(write d, 10u8);
+        }
+        i = i + 1usize;
+    }
+    let namez: String = snap_name(a);
+    let fd: i64 = match open_trunc(as_bytes(as_str(read namez))) {
+        IoResult::Ok(f) => conv i64 f,
+        IoResult::Err(e) => 0 - 1,
+    };
+    if fd < 0 {
+        return;
+    }
+    write_vec(conv i32 fd, read d);
+    let cc: IoResult = close(conv i32 fd);
+}
+
+// Reload the snapshot into the store: parse the id, VALIDATE the body through
+// the same `json_parse` that serves requests (scratch tree in the request
+// arena), then copy the already-canonical bytes into the store arena. A
+// malformed line (or a snapshot past the capacity budget) stops the load,
+// keeping every record before it — and says so on stderr, naming the line.
+fn load_snapshot(a: read Alloc, astore: read Alloc, ids: write Vec[i64], bodies: write Vec[Vec[u8]], next_id: write i64, store_bytes: write i64) alloc -> i64 {
+    let namez: String = snap_name(a);
+    let s: String = match read_file(a, as_bytes(as_str(read namez))) {
+        StrIoResult::Ok(v) => v,
+        StrIoResult::Err(e) => {
+            return 0;
+        },
+    };
+    let bytes: [u8] = as_bytes(as_str(read s));
+    let n: usize = len(bytes);
+    let mut count: i64 = 0;
+    let mut pos: usize = 0usize;
+    let mut bad_line: i64 = 0;
+    // One scratch tree for the whole load (a droppable `let` inside the loop
+    // would re-drop across iterations); json_parse appends per line.
+    let mut nodes: Vec[Node] = vec_new(a);
+    let mut pool: Vec[u8] = vec_new(a);
+    loop {
+        if pos >= n {
+            break;
+        }
+        let lineno: i64 = count + 1;
+        let sp: i64 = index_byte(bytes, pos, 32u8);
+        let nl: i64 = index_byte(bytes, pos, 10u8);
+        if sp < 0 || nl < 0 || sp > nl {
+            bad_line = lineno;
+            break;
+        }
+        let id: i64 = parse_digits(bytes, pos, conv usize sp);
+        if id < 0 {
+            bad_line = lineno;
+            break;
+        }
+        let body: [u8] = subslice(bytes, conv usize (sp + 1), conv usize nl);
+        let ok: bool = match json_parse(body, write nodes, write pool) {
+            PRes::Ok(r) => true,
+            PRes::Err(e) => false,
+        };
+        if !ok {
+            bad_line = lineno;
+            break;
+        }
+        let blen: i64 = nl - sp - 1;
+        if count >= MAX_RECORDS || store_bytes.* + blen > MAX_STORE_BYTES {
+            bad_line = lineno;
+            break;
+        }
+        let mut stored: Vec[u8] = vec_new(astore);
+        let mut j: usize = conv usize (sp + 1);
+        while j < conv usize nl {
+            push(write stored, bytes[j]);
+            j = j + 1usize;
+        }
+        push(write ids.*, id);
+        push(write bodies.*, stored);
+        store_bytes.* = store_bytes.* + blen;
+        count = count + 1;
+        if id >= next_id.* {
+            next_id.* = id + 1;
+        }
+        pos = conv usize nl + 1usize;
+    }
+    if bad_line > 0 {
+        print_kv(a, stderr(), "restd: snapshot truncated at line ", bad_line);
+    }
+    return count;
+}
+
+// ---- HTTP responses ---------------------------------------------------------
+
+fn crlf(d: write Vec[u8]) alloc -> unit {
+    push(write d.*, 13u8);
+    push(write d.*, 10u8);
+}
+
+// Compose the WHOLE response (status line, headers, body) into one buffer and
+// send it once: a single send path means a rude client costs at most one
+// aborted send, and the socket never sees a half-written header block.
+fn send_resp(a: read Alloc, cfd: i32, status: str, body: read Vec[u8]) alloc -> unit {
+    let mut h: Vec[u8] = vec_new(a);
+    out_lit(write h, "HTTP/1.0 ");
+    out_lit(write h, status);
+    crlf(write h);
+    out_lit(write h, "Content-Type: application/json");
+    crlf(write h);
+    out_lit(write h, "Content-Length: ");
+    emit_int(write h, conv i64 len(body));
+    crlf(write h);
+    out_lit(write h, "Connection: close");
+    crlf(write h);
+    crlf(write h);
+    emit_vec(write h, body);
+    send_vec(cfd, read h);
+}
+
+fn send_err(a: read Alloc, cfd: i32, status: str, tag: str) alloc -> unit {
+    let mut b: Vec[u8] = vec_new(a);
+    out_lit(write b, "{\"error\":\"");
+    out_lit(write b, tag);
+    out_lit(write b, "\"}");
+    send_resp(a, cfd, status, read b);
+}
+
+// The parser's error VALUE crossing the HTTP boundary: exact code + byte
+// position, as JSON, with a 400 status. Never a fault.
+fn send_bad_json(a: read Alloc, cfd: i32, e: PErr) alloc -> unit {
+    let mut b: Vec[u8] = vec_new(a);
+    out_lit(write b, "{\"error\":\"bad_json\",\"code\":");
+    emit_int(write b, e.code);
+    out_lit(write b, ",\"pos\":");
+    emit_int(write b, e.pos);
+    push(write b, 125u8);
+    send_resp(a, cfd, "400 Bad Request", read b);
+}
+
+fn send_id(a: read Alloc, cfd: i32, status: str, id: i64) alloc -> unit {
+    let mut b: Vec[u8] = vec_new(a);
+    out_lit(write b, "{\"id\":");
+    emit_int(write b, id);
+    push(write b, 125u8);
+    send_resp(a, cfd, status, read b);
+}
+
+// ---- route handlers ---------------------------------------------------------
+
+// The store's deliberate fixed capacity (see the header): budgets on live
+// records and live body bytes sized so every allocation lands well inside the
+// 8 MiB store window — the budget answers 507 long before the arena itself
+// could fail. Reads and deletes always work; a delete makes room again.
+static MAX_RECORDS: i64 = 8192;
+static MAX_STORE_BYTES: i64 = 4194304;
+
+// POST /records: parse -> canonical compact bytes -> capacity check -> store
+// (reusing a tombstone slot when one exists) -> snapshot -> 201 {"id":N}.
+fn create_record(a: read Alloc, astore: read Alloc, ids: write Vec[i64], bodies: write Vec[Vec[u8]], next_id: write i64, store_bytes: write i64, body: [u8], cfd: i32) alloc -> unit {
+    let mut nodes: Vec[Node] = vec_new(a);
+    let mut pool: Vec[u8] = vec_new(a);
+    let root: i64 = match json_parse(body, write nodes, write pool) {
+        PRes::Err(e) => {
+            send_bad_json(a, cfd, e);
+            return;
+        },
+        PRes::Ok(r) => r,
+    };
+    let mut canon: Vec[u8] = vec_new(a);
+    print_value(read nodes, read pool, root, write canon);
+    let newlen: i64 = conv i64 len(read canon);
+    if live_count(read ids.*) >= MAX_RECORDS || store_bytes.* + newlen > MAX_STORE_BYTES {
+        send_err(a, cfd, "507 Insufficient Storage", "storage_full");
+        return;
+    }
+    let mut stored: Vec[u8] = vec_new(astore);
+    emit_vec(write stored, read canon);
+    store_bytes.* = store_bytes.* + newlen;
+    let id: i64 = next_id.*;
+    next_id.* = id + 1;
+    let slot: i64 = free_slot(read ids.*);
+    if slot >= 0 {
+        set(write ids.*, conv usize slot, id);
+        set(write bodies.*, conv usize slot, stored);
+    } else {
+        push(write ids.*, id);
+        push(write bodies.*, stored);
+    }
+    save_snapshot(a, read ids.*, read bodies.*);
+    send_id(a, cfd, "201 Created", id);
+}
+
+// PUT /records/<id>: parse -> capacity check on the byte delta -> replace the
+// slot's bytes (the old Vec drops through the free-list handle, returning its
+// block) -> snapshot -> {"id":N}.
+fn update_record(a: read Alloc, astore: read Alloc, ids: write Vec[i64], bodies: write Vec[Vec[u8]], store_bytes: write i64, id: i64, body: [u8], cfd: i32) alloc -> unit {
+    let slot: i64 = find_slot(read ids.*, id);
+    if slot < 0 {
+        send_err(a, cfd, "404 Not Found", "not_found");
+        return;
+    }
+    let mut nodes: Vec[Node] = vec_new(a);
+    let mut pool: Vec[u8] = vec_new(a);
+    let root: i64 = match json_parse(body, write nodes, write pool) {
+        PRes::Err(e) => {
+            send_bad_json(a, cfd, e);
+            return;
+        },
+        PRes::Ok(r) => r,
+    };
+    let mut canon: Vec[u8] = vec_new(a);
+    print_value(read nodes, read pool, root, write canon);
+    let newlen: i64 = conv i64 len(read canon);
+    let oldlen: i64 = conv i64 len(read get(read bodies.*, conv usize slot).*);
+    if store_bytes.* - oldlen + newlen > MAX_STORE_BYTES {
+        send_err(a, cfd, "507 Insufficient Storage", "storage_full");
+        return;
+    }
+    let mut stored: Vec[u8] = vec_new(astore);
+    emit_vec(write stored, read canon);
+    store_bytes.* = store_bytes.* - oldlen + newlen;
+    set(write bodies.*, conv usize slot, stored);
+    save_snapshot(a, read ids.*, read bodies.*);
+    send_id(a, cfd, "200 OK", id);
+}
+
+// DELETE /records/<id>: tombstone the slot; the freed body returns to the
+// free list (and its bytes to the capacity budget), and the slot itself is
+// reused by the next create.
+fn delete_record(a: read Alloc, astore: read Alloc, ids: write Vec[i64], bodies: write Vec[Vec[u8]], store_bytes: write i64, id: i64, cfd: i32) alloc -> unit {
+    let slot: i64 = find_slot(read ids.*, id);
+    if slot < 0 {
+        send_err(a, cfd, "404 Not Found", "not_found");
+        return;
+    }
+    store_bytes.* = store_bytes.* - conv i64 len(read get(read bodies.*, conv usize slot).*);
+    set(write ids.*, conv usize slot, 0 - 1);
+    set(write bodies.*, conv usize slot, vec_new(astore));
+    save_snapshot(a, read ids.*, read bodies.*);
+    send_id(a, cfd, "200 OK", id);
+}
+
+// GET /records/<id>: the stored canonical bytes, verbatim.
+fn get_record(a: read Alloc, ids: read Vec[i64], bodies: read Vec[Vec[u8]], id: i64, cfd: i32) alloc -> unit {
+    let slot: i64 = find_slot(ids, id);
+    if slot < 0 {
+        send_err(a, cfd, "404 Not Found", "not_found");
+        return;
+    }
+    send_resp(a, cfd, "200 OK", read get(bodies, conv usize slot).*);
+}
+
+// GET /records: every live record as [{"id":N,"rec":<record>},...].
+fn list_records(a: read Alloc, ids: read Vec[i64], bodies: read Vec[Vec[u8]], cfd: i32) alloc -> unit {
+    let mut b: Vec[u8] = vec_new(a);
+    push(write b, 91u8);
+    let n: usize = len(ids);
+    let mut first: bool = true;
+    let mut i: usize = 0usize;
+    while i < n {
+        let id: i64 = get(ids, i).*;
+        if id >= 0 {
+            if !first {
+                push(write b, 44u8);
+            }
+            first = false;
+            out_lit(write b, "{\"id\":");
+            emit_int(write b, id);
+            out_lit(write b, ",\"rec\":");
+            emit_vec(write b, read get(bodies, i).*);
+            push(write b, 125u8);
+        }
+        i = i + 1usize;
+    }
+    push(write b, 93u8);
+    send_resp(a, cfd, "200 OK", read b);
+}
+
+// The memory probes a load test watches (see the header): all three must stay
+// flat under sustained load.
+copy struct Probe {
+    served: i64,
+    store_next: i64,
+    store_bytes: i64,
+    req_peak: i64,
+    stack_probe: i64,
+}
+
+fn send_stats(a: read Alloc, cfd: i32, p: Probe, records: i64) alloc -> unit {
+    let mut b: Vec[u8] = vec_new(a);
+    out_lit(write b, "{\"served\":");
+    emit_int(write b, p.served);
+    out_lit(write b, ",\"records\":");
+    emit_int(write b, records);
+    out_lit(write b, ",\"store_bytes\":");
+    emit_int(write b, p.store_bytes);
+    out_lit(write b, ",\"store_frontier\":");
+    emit_int(write b, p.store_next);
+    out_lit(write b, ",\"req_arena_peak\":");
+    emit_int(write b, p.req_peak);
+    out_lit(write b, ",\"stack_probe\":");
+    emit_int(write b, p.stack_probe);
+    push(write b, 125u8);
+    send_resp(a, cfd, "200 OK", read b);
+}
+
+// The model address of a frame local: constant across requests now that
+// native call frames roll back (the 2026-08 model-stack rollback).
+fn probe_addr() -> i64 {
+    let x: u8 = 0u8;
+    unsafe "diagnostic only: report the model address of a frame local through /stats so a load test can watch the native stack bump stay flat" {
+        return conv i64 ptr_to_addr(addr_of(x));
+    }
+}
+
+// ---- request framing --------------------------------------------------------
+
+fn find_hdr_end(v: [u8]) -> i64 {
+    let n: usize = len(v);
+    if n < 4usize {
+        return 0 - 1;
+    }
+    let mut i: usize = 0usize;
+    while i + 4usize <= n {
+        if v[i] == 13u8 && v[i + 1usize] == 10u8 && v[i + 2usize] == 13u8 && v[i + 3usize] == 10u8 {
+            return conv i64 (i + 4usize);
+        }
+        i = i + 1usize;
+    }
+    return 0 - 1;
+}
+
+fn line_is_content_length(v: [u8], at: usize) -> bool {
+    let lit: [u8] = as_bytes("content-length:");
+    let n: usize = len(lit);
+    if at + n > len(v) {
+        return false;
+    }
+    let mut i: usize = 0usize;
+    while i < n {
+        if fold_lower(v[at + i]) != lit[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+// The Content-Length value among the header lines; 0 when absent, -1 when
+// malformed (a non-digit or absurd value -> 400, never a giant read loop).
+fn content_length(v: [u8], he: usize) -> i64 {
+    let first: i64 = index_byte(v, 0usize, 10u8);
+    if first < 0 {
+        return 0 - 1;
+    }
+    let mut i: usize = conv usize (first + 1);
+    let mut clen: i64 = 0;
+    while i < he {
+        let e: i64 = index_byte(v, i, 13u8);
+        if e < 0 {
+            break;
+        }
+        if line_is_content_length(v, i) {
+            let mut j: usize = i + 15usize;
+            while j < conv usize e && (v[j] == 32u8 || v[j] == 9u8) {
+                j = j + 1usize;
+            }
+            clen = parse_digits(v, j, conv usize e);
+            if clen < 0 {
+                return 0 - 1;
+            }
+        }
+        i = conv usize e + 2usize;
+    }
+    return clen;
+}
+
+// Total bytes this request needs (headers + declared body), or -1 while the
+// header terminator has not arrived yet, or -2 for a malformed Content-Length.
+fn req_need(v: [u8]) -> i64 {
+    let he: i64 = find_hdr_end(v);
+    if he < 0 {
+        return 0 - 1;
+    }
+    let cl: i64 = content_length(v, conv usize he);
+    if cl < 0 {
+        return 0 - 2;
+    }
+    return he + cl;
+}
+
+// ---- serve one connection ---------------------------------------------------
+// Read until the request is complete, route it, respond. Returns 1 when the
+// request was POST /shutdown (main then exits its loop), else 0. Every
+// allocation below comes from the per-request bump arena `a` except the
+// canonical record bytes the mutating handlers copy into the store.
+fn handle(a: read Alloc, astore: read Alloc, ids: write Vec[i64], bodies: write Vec[Vec[u8]], next_id: write i64, store_bytes: write i64, probe: Probe, cfd: i32) alloc -> i64 {
+    let mut reqbuf: [8192]u8 = [0u8; 8192];
+    let mut chunk: [1024]u8 = [0u8; 1024];
+    let mut total: usize = 0usize;
+    let mut need: i64 = 0 - 1;
+    loop {
+        need = req_need(subslice(slice_of(reqbuf), 0usize, total));
+        if need == 0 - 2 {
+            send_err(a, cfd, "400 Bad Request", "bad_request");
+            return 0;
+        }
+        if need >= 0 && conv i64 total >= need {
+            break;
+        }
+        if need > 8192 || total >= 8192usize {
+            send_err(a, cfd, "413 Payload Too Large", "too_large");
+            return 0;
+        }
+        let n: usize = match read_into(cfd, slice_of_mut(chunk)) {
+            IoResult::Ok(c) => c,
+            IoResult::Err(e) => {
+                return 0;
+            },
+        };
+        if n == 0usize {
+            // The client closed before a full request arrived.
+            send_err(a, cfd, "400 Bad Request", "bad_request");
+            return 0;
+        }
+        if total + n > 8192usize {
+            send_err(a, cfd, "413 Payload Too Large", "too_large");
+            return 0;
+        }
+        let mut j: usize = 0usize;
+        while j < n {
+            reqbuf[total + j] = chunk[j];
+            j = j + 1usize;
+        }
+        total = total + n;
+    }
+
+    let req: [u8] = subslice(slice_of(reqbuf), 0usize, conv usize need);
+    let he: i64 = find_hdr_end(req);
+    let body: [u8] = subslice(req, conv usize he, conv usize need);
+    let sp1: i64 = index_byte(req, 0usize, 32u8);
+    if sp1 <= 0 {
+        send_err(a, cfd, "400 Bad Request", "bad_request");
+        return 0;
+    }
+    let sp2: i64 = index_byte(req, conv usize (sp1 + 1), 32u8);
+    if sp2 < 0 {
+        send_err(a, cfd, "400 Bad Request", "bad_request");
+        return 0;
+    }
+    let method: [u8] = subslice(req, 0usize, conv usize sp1);
+    let path: [u8] = subslice(req, conv usize (sp1 + 1), conv usize sp2);
+
+    if bytes_is(path, "/records") {
+        if bytes_is(method, "POST") {
+            create_record(a, astore, write ids.*, write bodies.*, write next_id.*, write store_bytes.*, body, cfd);
+        } else if bytes_is(method, "GET") {
+            list_records(a, read ids.*, read bodies.*, cfd);
+        } else {
+            send_err(a, cfd, "405 Method Not Allowed", "bad_method");
+        }
+        return 0;
+    }
+    if bytes_starts(path, "/records/") {
+        let id: i64 = parse_digits(path, 9usize, len(path));
+        if id < 0 {
+            send_err(a, cfd, "404 Not Found", "not_found");
+            return 0;
+        }
+        if bytes_is(method, "GET") {
+            get_record(a, read ids.*, read bodies.*, id, cfd);
+        } else if bytes_is(method, "PUT") {
+            update_record(a, astore, write ids.*, write bodies.*, write store_bytes.*, id, body, cfd);
+        } else if bytes_is(method, "DELETE") {
+            delete_record(a, astore, write ids.*, write bodies.*, write store_bytes.*, id, cfd);
+        } else {
+            send_err(a, cfd, "405 Method Not Allowed", "bad_method");
+        }
+        return 0;
+    }
+    if bytes_is(path, "/stats") {
+        if bytes_is(method, "GET") {
+            send_stats(a, cfd, probe, live_count(read ids.*));
+        } else {
+            send_err(a, cfd, "405 Method Not Allowed", "bad_method");
+        }
+        return 0;
+    }
+    if bytes_is(path, "/shutdown") {
+        if bytes_is(method, "POST") {
+            let mut b: Vec[u8] = vec_new(a);
+            out_lit(write b, "{\"shutdown\":true}");
+            send_resp(a, cfd, "200 OK", read b);
+            return 1;
+        }
+        send_err(a, cfd, "405 Method Not Allowed", "bad_method");
+        return 0;
+    }
+    send_err(a, cfd, "404 Not Found", "not_found");
+    return 0;
+}
+
+// One human-readable line — `prefix<n>\n` — to the given descriptor.
+fn print_kv(a: read Alloc, fd: i32, prefix: str, n: i64) alloc -> unit {
+    let mut v: Vec[u8] = vec_new(a);
+    out_lit(write v, prefix);
+    emit_int(write v, n);
+    push(write v, 10u8);
+    write_vec(fd, read v);
+}
+
+// Load the snapshot, listen on 127.0.0.1:8081, and serve until POST /shutdown.
+// The loop body IS the teaching point: capture the probes, handle one
+// connection from the request arena, then reset that arena's frontier — every
+// byte a request allocated is released in one store, and only the record
+// store (and the descriptor table) carries state to the next iteration.
+fn main() alloc -> i64 {
+    let mut st_store: FreeList = with_window(16777216usize, 8388608usize);
+    let a_store: Alloc = mk_alloc(write st_store);
+    // The request window is sized for the WORST single request at full store
+    // capacity: a ~4 MiB list response (or snapshot image) built by doubling
+    // pushes costs about 2x its final size in a no-reclaim bump, and response
+    // composition copies it once more — 64 MiB gives that a comfortable 4x
+    // margin. Model address space is 256 MiB; an oversized window costs nothing.
+    let mut st_req: Bump = bump_window(33554432usize, 67108864usize);
+    let a_req: Alloc = mk_bump(write st_req);
+
+    let mut ids: Vec[i64] = vec_new(read a_store);
+    let mut bodies: Vec[Vec[u8]] = vec_new(read a_store);
+    let mut next_id: i64 = 1;
+    let mut store_bytes: i64 = 0;
+
+    let loaded: i64 = load_snapshot(read a_req, read a_store, write ids, write bodies, write next_id, write store_bytes);
+    st_req.next = 33554432usize; // startup scratch released wholesale
+
+    let lfd: i32 = match tcp_listen(8081i32) {
+        TcpResult::Ok(f) => f,
+        TcpResult::Err(e) => 0i32 - 1i32,
+    };
+    if lfd < 0i32 {
+        return 0 - 1;
+    }
+    print_kv(read a_req, stdout(), "restd: serving on http://127.0.0.1:8081, records loaded: ", loaded);
+    st_req.next = 33554432usize;
+
+    let mut served: i64 = 0;
+    let mut req_peak: i64 = 0;
+    loop {
+        let cfd: i32 = match tcp_accept(lfd) {
+            TcpResult::Ok(f) => f,
+            TcpResult::Err(e) => 0i32 - 1i32,
+        };
+        if cfd < 0i32 {
+            break;
+        }
+        let probe: Probe = Probe { served: served, store_next: conv i64 st_store.next, store_bytes: store_bytes, req_peak: req_peak, stack_probe: probe_addr() };
+        let act: i64 = handle(read a_req, read a_store, write ids, write bodies, write next_id, write store_bytes, probe, cfd);
+        let cc: IoResult = close(cfd);
+        served = served + 1;
+        let hw: i64 = conv i64 st_req.next;
+        if hw > req_peak {
+            req_peak = hw;
+        }
+        st_req.next = 33554432usize; // the per-request arena reset
+        if act == 1 {
+            break;
+        }
+    }
+    let lc: IoResult = close(lfd);
+    print_kv(read a_req, stdout(), "restd: served requests: ", served);
+    return 0;
+}

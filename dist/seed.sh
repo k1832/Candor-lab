@@ -99,11 +99,16 @@ mkdir -p "$TARGET/.github/workflows"
 cp "$DIST_DIR/prod-ci.yml"      "$TARGET/.github/workflows/ci.yml"
 cp -R "$DIST_DIR/examples"      "$TARGET/examples"
 
-# --- 6. strip build caches -----------------------------------------------
+# --- 6. strip build caches and runtime artifacts --------------------------
 # The lab working tree may carry untracked .candor-cache/ dirs (incremental-
 # build caches from verification runs); cp -R copies the working tree, so
 # strip them from the seed — a distribution ships sources, never caches.
 find "$TARGET" -type d -name '.candor-cache' -exec rm -rf {} +
+# Likewise the example servers' runtime artifacts: compiled binaries and the
+# REST example's snapshot file, left behind by a lab run before the seed.
+rm -f "$TARGET/examples/12_http_server/httpd"
+rm -f "$TARGET/examples/14_rest_api/restd"
+rm -f "$TARGET/examples/14_rest_api/records.json"
 
 echo
 echo "Done. The standalone repo is assembled at:"

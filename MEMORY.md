@@ -1359,3 +1359,37 @@ once you add the literal node). Key design/impl facts worth reusing:
   Exhaustion regression tests: `*stack_exhaustion*` in stage_b/aot/llvm/
   freestanding — they SIGSEGV, not fail, on regression. (bump assessment,
   2026-08-03)
+
+- **14_rest_api ships the two-arena endurance pattern: a free-list store arena
+  for state, a bump request arena reset each iteration — 110,005 compiled
+  (--release) requests at ~15k req/s with byte-flat probes.** The flagship
+  composition example (dist/examples/14_rest_api/: 12's audited TCP/file
+  boundary + 13's JSON core + parallel `Vec[i64]`/`Vec[Vec[u8]]` store with
+  tombstone slot reuse + a `<id> <compact-json>\n` line snapshot rewritten per
+  mutation). Facts that bit: (1) `result` is a RESERVED WORD (`Kw(Result)`
+  parse error on `let mut result`); (2) a droppable `let` INSIDE a loop is
+  E0309 ("initialized on only some paths" across iterations) — hoist the
+  collection out and reuse it; (3) nested `Vec[Vec[u8]]`, `set`-overwrite drop
+  of nested elements, and `read get(read v, i).*` element borrows all work on
+  every engine; (4) the model-stack rollback holds under load — a frame-local
+  `addr_of` probe is constant across 110k native requests (Cranelift and LLVM);
+  (5) line-per-record beats a JSON-array snapshot because wrapping records adds
+  +2 nesting and would make reload stricter than POST (MAX_DEPTH 24). /stats
+  serves the probes (store frontier, request-bump running peak, stack address)
+  so load.py can assert flatness over HTTP. prod-ci.yml gained the
+  create/read/shutdown/reload sentinel; dist/README.md lists the showcase.
+  Adversarial review then forced three lessons: (6) SIGPIPE KILLS a compiled
+  server whose client closes before the response write — write(2) on a reset
+  socket is fatal (exit 141) in native binaries (interpreters survive only
+  because Rust ignores SIGPIPE). Fix = a `sys_send` extern (libc `send(2)` +
+  MSG_NOSIGNAL, EPIPE as an error value) with matching interpreter shims added
+  to foreign_io.rs (both registries), and each response composed into ONE
+  buffer; 1,000 slammed connections now shrug. (7) A no-reclaim BUMP arena
+  doubles the cost of Vec-doubling: building a ~4 MiB snapshot image leaked ~8
+  MiB of bump and blew the 8 MiB window — size a bump window ~4x the largest
+  single buffer built in it (now 64 MiB; model space is free). (8) Arena
+  exhaustion through Vec push is an UNCATCHABLE fault, so a bounded store must
+  refuse BEFORE allocating: explicit budgets (8,192 records / 4 MiB live
+  bytes) checked pre-copy answer 507 with reads/deletes still working and
+  delete->create cycling — verified full at both budgets, plus reload of a
+  full snapshot. (14_rest_api, 2026-08-19)

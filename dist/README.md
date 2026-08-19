@@ -71,7 +71,7 @@ candor compile --freestanding hello.cnr -o hello && ldd hello   # => "not a dyna
 
 ---
 
-## Showcase — three real programs, written in Candor
+## Showcase — four real programs, written in Candor
 
 Not snippets — substantial programs you can read, run, and point at:
 
@@ -113,6 +113,31 @@ candor run examples/13_json.cnr               # -> 42
 candor compile examples/13_json.cnr -o json && ./json   # exits 42
 ```
 
+**A JSON REST service** (`examples/14_rest_api/`, ~2,000 lines): the pieces
+above composed into real software — create/read/update/delete records over
+HTTP, bodies parsed and canonicalized by the 13_json core, the store
+snapshotted to disk on every mutation and reloaded on restart. Malformed JSON
+comes back as a 400 carrying the parser's exact error value; a full store
+(deliberate fixed capacity) answers 507 and deletes make room again; clients
+that disconnect mid-response are a handled EPIPE, never a crash. The memory
+story is the point: a long-lived free-list arena holds the store, a
+per-request bump arena is reset after every response, and `GET /stats`
+exposes live probes — a scripted load test (`load.py`, in the example
+directory) drives 110,000+ requests, rude disconnecting clients included,
+through a compiled server at ~16,000 req/s with byte-flat memory:
+
+```sh
+cd examples/14_rest_api
+candor compile main.cnr -o restd --release && ./restd
+# from another terminal:
+curl -d '{"title":"first note"}' http://127.0.0.1:8081/records  # -> {"id":1}
+curl http://127.0.0.1:8081/records/1
+curl -X POST http://127.0.0.1:8081/shutdown     # server exits cleanly
+# the endurance run drives a FRESH store (the driver's model starts empty):
+rm -f records.json && ./restd &
+python3 load.py 110000    # checks every response; shuts the server down itself
+```
+
 And the parts too big to ship as examples, on the public record in the
 [lab repository](https://github.com/k1832/Candor-lab): the **self-hosted
 compiler** (~19,300 lines of Candor that check, interpret, lower, and compile
@@ -142,6 +167,7 @@ this toolchain:
 | `11_wasm_interp.cnr` | `candor run` / `candor compile` | ⭐ a from-scratch WebAssembly interpreter (see Showcase) |
 | `12_http_server/` | `candor run` (from its dir) | ⭐ an HTTP/1.0 static-file server over the audited TCP boundary (see Showcase) |
 | `13_json.cnr` | `candor run` / `candor compile` | ⭐ a full RFC 8259 JSON parser + pretty-printer, errors as values (see Showcase) |
+| `14_rest_api/` | `candor compile --release` (from its dir) | ⭐ a persistent JSON REST service — HTTP + JSON + arenas composed; flat memory over 110k requests (see Showcase) |
 
 ---
 
