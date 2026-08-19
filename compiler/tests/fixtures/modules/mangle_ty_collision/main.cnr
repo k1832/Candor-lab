@@ -1,0 +1,11 @@
+// Type arguments `a::b::C` and `a::b_C` must instantiate DISTINCT `Wrap`
+// instances: the old `::` -> `_` flattening mangled both to `Wrap$a_b_C`, so
+// the second instantiation silently reused the first's layout.
+use a::{b_C, mk_bc};
+use a::b::{C, mk_c};
+struct Wrap[T] { v: T }
+fn main() -> i64 {
+    let p: Wrap[C] = Wrap { v: mk_c(7) };
+    let q: Wrap[b_C] = Wrap { v: mk_bc(30, 12) };
+    return p.v.x + q.v.x + q.v.y;
+}

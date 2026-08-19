@@ -707,7 +707,10 @@ fn unify2(
         | (Type::Slice(a), Type::Slice(b))
         | (Type::SliceMut(a), Type::SliceMut(b))
         | (Type::Borrow(a), Type::Borrow(b))
-        | (Type::BorrowMut(a), Type::BorrowMut(b))
+        // Deliberately length-blind: for impl-overlap coherence, `[2]T` and
+        // `[3]T` count as overlapping (conservative rejection), even though
+        // `mangle_ty` keys them as distinct instances for monomorphization.
+        // Recorded as a choice, not an oversight.
         | (Type::Array(a, _), Type::Array(b, _)) => unify2(a, b, aset, bset, amap, bmap),
         _ => false,
     }
@@ -731,21 +734,46 @@ pub fn impl_method_fn_name(iface: &str, iface_args: &[Type], target: &str, metho
     format!("<impl {key} for {target}>::{method}")
 }
 
+/// A mangled fragment for a possibly module-qualified name, injective where the
+/// old `::` -> `_` flattening was not (`a::b::N` and `a::b_N` both flattened to
+/// `a_b_N`, collapsing distinct names onto one instance). A name containing
+/// neither `_` nor `::` is emitted verbatim; any other name is emitted as
+/// digit-led length-prefixed `::`-segments (`a::b::N` -> `1a1b1N`, `a::b_N` ->
+/// `1a3b_N`). Injectivity: identifiers never start with a digit, so verbatim and
+/// encoded forms cannot coincide, and within an encoded form a maximal digit run
+/// is exactly the next segment's byte length — decoding is unique. Verbatim
+/// forms contain no `_` at all and encoded underscores sit inside counted
+/// segments, so `_` stays usable as the composite separator in instance names
+/// (`arr_<len>_<elem>`, `Head_<arg>`) without a name underscore forging a
+/// component boundary.
+fn mangle_name(n: &str) -> String {
+    if !n.contains('_') && !n.contains("::") {
+        return n.to_string();
+    }
+    n.split("::").map(|s| format!("{}{}", s.len(), s)).collect()
+}
+
 /// A mangled fragment for a concrete type, used in instance names.
 pub fn mangle_ty(t: &Type) -> String {
     match t {
         Type::Scalar(s) => scalar_name(*s).to_string(),
         Type::IntLit => "int".to_string(),
-        Type::Named(n) => n.replace("::", "_"),
+        Type::Named(n) => mangle_name(n),
         Type::App(n, args) => {
-            let mut s = n.replace("::", "_");
+            let mut s = mangle_name(n);
             for a in args {
                 s.push('_');
                 s.push_str(&mangle_ty(a));
             }
             s
         }
-        Type::Array(e, _) => format!("arr_{}", mangle_ty(e)),
+        // The length is part of the type, so it is part of the instance key:
+        // `[2]i64` and `[3]i64` must monomorphize separately.
+        Type::Array(e, l) => match l {
+            ArrayLen::Lit(n) => format!("arr{n}_{}", mangle_ty(e)),
+            ArrayLen::Named(n) => format!("arr_{}_{}", mangle_name(n), mangle_ty(e)),
+            ArrayLen::Unknown => format!("arr_{}", mangle_ty(e)),
+        },
         Type::Slice(e) => format!("slice_{}", mangle_ty(e)),
         Type::Str => "str".to_string(),
         Type::SliceMut(e) => format!("slicemut_{}", mangle_ty(e)),
@@ -756,7 +784,7 @@ pub fn mangle_ty(t: &Type) -> String {
         Type::BorrowMut(e) => format!("refmut_{}", mangle_ty(e)),
         Type::FnPtr(_) => "fnptr".to_string(),
         Type::Param(n) => n.clone(),
-        Type::Proj(b, a) => format!("{b}_{a}"),
+        Type::Proj(b, a) => format!("{}_{}", mangle_name(b), mangle_name(a)),
         Type::Never => "never".to_string(),
         Type::Error => "err".to_string(),
     }
@@ -1246,7 +1274,10 @@ impl<'a> Monomorphizer<'a> {
                 self.enqueue(name, sargs.clone());
                 Type::App(name.clone(), sargs)
             }
-            TyKind::Array { elem, .. } => Type::Array(Box::new(self.ast_to_type(elem, map)), ArrayLen::Unknown),
+            TyKind::Array { size, elem } => Type::Array(
+                Box::new(self.ast_to_type(elem, map)),
+                crate::types::array_len_from_size(size),
+            ),
             TyKind::Slice(e) => Type::Slice(Box::new(self.ast_to_type(e, map))),
             TyKind::SliceMut(e) => Type::SliceMut(Box::new(self.ast_to_type(e, map))),
             TyKind::RawPtr(e) => Type::RawPtr(Box::new(self.ast_to_type(e, map))),
@@ -1434,10 +1465,31 @@ impl<'a> Monomorphizer<'a> {
                 self.enqueue(n, args.clone());
                 TyKind::Named(inst_type_name(n, args))
             }
-            Type::Array(e, _) => TyKind::Array {
-                size: Box::new(Expr { kind: ExprKind::IntLit { value: 0, suffix: None }, span: Span::point(0) }),
-                elem: Box::new(self.type_to_ast(e)),
-            },
+            Type::Array(e, l) => {
+                // Carry the concrete length through: the rendered annotation is
+                // what MIR/native layout sizes the array by (a literal renders
+                // as itself, a named constant by its spelling, exactly as a
+                // source annotation would).
+                let size_kind = match l {
+                    ArrayLen::Lit(n) => ExprKind::IntLit { value: *n, suffix: None },
+                    ArrayLen::Named(n) => ExprKind::Ident(n.clone()),
+                    ArrayLen::Unknown => {
+                        // Unreachable for a checked program (annotation sizes
+                        // parse only as literal/name; runtime repeat lengths are
+                        // E0717) — refuse rather than miscompile if it ever is.
+                        self.diags.push(Diag::error(
+                            "E1027",
+                            "array type argument has an unresolved length".to_string(),
+                            Span::point(0),
+                        ));
+                        ExprKind::IntLit { value: 0, suffix: None }
+                    }
+                };
+                TyKind::Array {
+                    size: Box::new(Expr { kind: size_kind, span: Span::point(0) }),
+                    elem: Box::new(self.type_to_ast(e)),
+                }
+            }
             Type::Slice(e) => TyKind::Slice(Box::new(self.type_to_ast(e))),
             Type::SliceMut(e) => TyKind::SliceMut(Box::new(self.type_to_ast(e))),
             Type::RawPtr(e) => TyKind::RawPtr(Box::new(self.type_to_ast(e))),

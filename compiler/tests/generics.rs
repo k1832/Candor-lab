@@ -6,7 +6,8 @@
 use candor::diag::Severity;
 use candor::{
     check_dir, check_source_real, run_dir, run_dir_mir, run_dir_native, run_dir_native_opt,
-    run_source_real, run_source_real_mir, MirRunResult, RunResult,
+    run_source_real, run_source_real_mir, run_source_real_native, run_source_real_native_opt,
+    MirRunResult, RunResult,
 };
 use std::path::PathBuf;
 
@@ -663,4 +664,210 @@ fn divergent_instantiation_chain_hits_depth_limit() {
         ),
         other => panic!("expected E1099, got ok={}", matches!(other, RunResult::Ok(_))),
     }
+}
+
+// ===========================================================================
+// Array type arguments carry their length through monomorphization (review
+// finding P1, 2026-08-03): `type_to_ast_kind` used to render every substituted
+// `Type::Array` with a hardcoded length of 0, so the MIR/native engines laid
+// out zero-length arrays (wrong results in safe code) while the tree-walk
+// oracle, whose values carry their own length, computed correctly. The mangler
+// also omitted the length, collapsing `[2]i64` and `[3]i64` onto one instance.
+// Each test runs on every engine and must agree with the oracle.
+// ===========================================================================
+
+/// Run `src` on the oracle, MIR, native, and native `-O2`; assert every return
+/// agrees with the oracle's and return it.
+fn all_engines_ret(src: &str) -> i64 {
+    let o_ret = match run_source_real(src) {
+        RunResult::Ok(r) => r.ret,
+        RunResult::Fault(f) => panic!("oracle faulted: {}\n{src}", f.to_json()),
+        RunResult::CheckErrors(d) => {
+            panic!("oracle check errors: {:?}\n{src}", d.iter().map(|x| &x.code).collect::<Vec<_>>())
+        }
+        RunResult::ParseError(d) => panic!("oracle parse error: {}\n{src}", d.to_json()),
+    };
+    for (label, res) in [
+        ("mir", run_source_real_mir(src)),
+        ("native-noopt", run_source_real_native(src)),
+        ("native-opt", run_source_real_native_opt(src)),
+    ] {
+        match res {
+            MirRunResult::Ok(r) => {
+                assert_eq!(r.ret, o_ret, "{label} ret diverged from oracle for:\n{src}")
+            }
+            MirRunResult::Fault(f) => panic!("{label} faulted: {}\n{src}", f.to_json()),
+            MirRunResult::Unsupported(e) => panic!("{label} unsupported: {e}\n{src}"),
+            MirRunResult::CheckErrors(d) => {
+                panic!("{label} check errors: {:?}\n{src}", d.iter().map(|x| &x.code).collect::<Vec<_>>())
+            }
+            MirRunResult::ParseError(d) => panic!("{label} parse error: {}\n{src}", d.to_json()),
+        }
+    }
+    o_ret
+}
+
+/// The P1 repro shape: a generic identity handed a `[3]i64` (also the RETURN
+/// position — the instance's return type is the same rendered array).
+#[test]
+fn array_type_argument_round_trips_all_engines() {
+    let src = "fn idf[T: copy](x: T) -> T { return x; }\n\
+               fn main() -> i64 {\n\
+                   let a: [3]i64 = [7, 8, 9];\n\
+                   let b: [3]i64 = idf(a);\n\
+                   return b[0] + b[1] + b[2];\n\
+               }\n";
+    assert_eq!(all_engines_ret(src), 24);
+}
+
+/// The array survives a two-deep generic call chain (`outer` instantiates
+/// `inner` with the same substituted array argument).
+#[test]
+fn array_through_two_deep_generic_chain_all_engines() {
+    let src = "fn inner[T: copy](x: T) -> T { return x; }\n\
+               fn outer[T: copy](x: T) -> T { return inner(x); }\n\
+               fn main() -> i64 {\n\
+                   let a: [3]i64 = [1, 2, 3];\n\
+                   let b: [3]i64 = outer(a);\n\
+                   return b[0] * 100 + b[1] * 10 + b[2];\n\
+               }\n";
+    assert_eq!(all_engines_ret(src), 123);
+}
+
+/// An array-typed field inside a generic struct: the instance's field type must
+/// be laid out at the real length. The first element is suffixed because an
+/// all-unsuffixed array literal in a generic struct literal still hits the open
+/// `{integer}`-grounding finding P5 (2026-08-03 review) — a separate defect.
+#[test]
+fn array_field_inside_generic_struct_all_engines() {
+    let src = "struct Wrap[T] { v: T }\n\
+               fn first[T: copy](w: Wrap[T]) -> T { return w.v; }\n\
+               fn main() -> i64 {\n\
+                   let w: Wrap[[3]i64] = Wrap { v: [4i64, 5, 6] };\n\
+                   let c: [3]i64 = first(w);\n\
+                   return c[0] * 100 + c[1] * 10 + c[2];\n\
+               }\n";
+    assert_eq!(all_engines_ret(src), 456);
+}
+
+/// A generic returning its array argument through a recursive call: the RETURN
+/// type is rendered per instance and must keep the length at every depth.
+#[test]
+fn generic_returning_its_array_argument_all_engines() {
+    let src = "fn make[T: copy](x: T, again: bool) -> T {\n\
+                   if again { return make(x, false); }\n\
+                   return x;\n\
+               }\n\
+               fn main() -> i64 {\n\
+                   let a: [3]i64 = [9, 8, 7];\n\
+                   let b: [3]i64 = make(a, true);\n\
+                   return b[0] * 100 + b[1] * 10 + b[2];\n\
+               }\n";
+    assert_eq!(all_engines_ret(src), 987);
+}
+
+/// A nested array type argument (`[2][3]i64`): both dimensions must survive.
+#[test]
+fn nested_array_type_argument_all_engines() {
+    let src = "fn idf[T: copy](x: T) -> T { return x; }\n\
+               fn main() -> i64 {\n\
+                   let m: [2][3]i64 = [[7, 8, 9], [10, 11, 12]];\n\
+                   let n: [2][3]i64 = idf(m);\n\
+                   return n[0][0] + n[0][1] + n[0][2] + n[1][0] + n[1][1] + n[1][2];\n\
+               }\n";
+    assert_eq!(all_engines_ret(src), 57);
+}
+
+/// Two lengths of the same element type are DISTINCT instantiations: the length
+/// is part of the instance key (`arr2_i64` vs `arr3_i64`), so `[2]i64` and
+/// `[3]i64` must not collapse onto one monomorphized instance. Before the
+/// mangler carried the length, the second call reused the first instance.
+#[test]
+fn distinct_array_lengths_monomorphize_separately_all_engines() {
+    let src = "fn idf[T: copy](x: T) -> T { return x; }\n\
+               fn main() -> i64 {\n\
+                   let a: [3]i64 = [1, 2, 3];\n\
+                   let b: [3]i64 = idf(a);\n\
+                   let s: [2]i64 = [100, 200];\n\
+                   let t: [2]i64 = idf(s);\n\
+                   return b[2] + t[1];\n\
+               }\n";
+    assert_eq!(all_engines_ret(src), 203);
+}
+
+/// A named-constant length (`[N]i64`) renders by its spelling and resolves
+/// through each engine's const table, exactly as a source annotation would.
+#[test]
+fn named_constant_array_length_type_argument_all_engines() {
+    let src = "static N: usize = 2;\n\
+               fn idf[T: copy](x: T) -> T { return x; }\n\
+               fn main() -> i64 {\n\
+                   let u: [N]i64 = [1000i64; N];\n\
+                   let v: [N]i64 = idf(u);\n\
+                   return v[0] + v[1];\n\
+               }\n";
+    assert_eq!(all_engines_ret(src), 2000);
+}
+
+/// Run a module-tree fixture on the oracle, MIR, native, and native `-O2`;
+/// assert every return agrees with the oracle's and return it.
+fn all_engines_ret_dir(name: &str) -> i64 {
+    let dir = moddir(name);
+    let o_ret = match run_dir(&dir) {
+        RunResult::Ok(r) => r.ret,
+        RunResult::Fault(f) => panic!("{name} oracle faulted: {}", f.to_json()),
+        RunResult::CheckErrors(d) => {
+            panic!("{name} oracle check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>())
+        }
+        RunResult::ParseError(d) => panic!("{name} oracle parse error: {}", d.to_json()),
+    };
+    for (label, res) in [
+        ("mir", run_dir_mir(&dir)),
+        ("native-noopt", run_dir_native(&dir)),
+        ("native-opt", run_dir_native_opt(&dir)),
+    ] {
+        match res {
+            MirRunResult::Ok(r) => assert_eq!(r.ret, o_ret, "{name}: {label} ret diverged from oracle"),
+            MirRunResult::Fault(f) => panic!("{name}: {label} faulted: {}", f.to_json()),
+            MirRunResult::Unsupported(e) => panic!("{name}: {label} unsupported: {e}"),
+            MirRunResult::CheckErrors(d) => {
+                panic!("{name}: {label} check errors: {:?}", d.iter().map(|x| &x.code).collect::<Vec<_>>())
+            }
+            MirRunResult::ParseError(d) => panic!("{name}: {label} parse error: {}", d.to_json()),
+        }
+    }
+    o_ret
+}
+
+/// Instance-name mangling is injective across `_`-bearing identifiers and `::`
+/// qualification (B1): named array lengths `a::b::N` (= 2) and `a::b_N` (= 3)
+/// both flattened to `arr_a_b_N_i64` under the old `::` -> `_` scheme and
+/// collapsed onto one instance (oracle fault / wrong MIR results); they must
+/// monomorphize separately and agree everywhere.
+#[test]
+fn qualified_and_underscore_array_length_names_do_not_collide() {
+    assert_eq!(all_engines_ret_dir("mangle_len_collision"), 80);
+}
+
+/// The nominal-name half of the same class (B1): struct type arguments
+/// `a::b::C` and `a::b_C` both flattened to `Wrap$a_b_C`, so the second
+/// instantiation reused the first's layout (wrong field reads). They must key
+/// distinct `Wrap` instances and agree everywhere.
+#[test]
+fn qualified_and_underscore_type_names_do_not_collide() {
+    assert_eq!(all_engines_ret_dir("mangle_ty_collision"), 49);
+}
+
+/// An array inside a generic ENUM payload keeps its length as well.
+#[test]
+fn array_in_generic_enum_payload_all_engines() {
+    let src = "enum Opt[T] { Some(T), None, }\n\
+               fn main() -> i64 {\n\
+                   let o: Opt[[3]i64] = Opt::Some([1i64, 2, 3]);\n\
+                   match o {\n\
+                       Opt::Some(a) => { return a[0] * 100 + a[1] * 10 + a[2]; },\n\
+                       Opt::None => { return -1; },\n\
+                   }\n\
+               }\n";
+    assert_eq!(all_engines_ret(src), 123);
 }

@@ -334,6 +334,23 @@ fn pool_mangle_ty(m: write M, pp: read P, src: [u8], tn: u32) -> unit {
     if w != 0 { pool_scalar(m, w); return; }
     let nd: Node = pp.nodes[conv usize tn];
     if nd.tag == T_APP && nd.b != 0u32 { pool_inst_name(m, pp, src, nd.b); return; }
+    // T_ARRAY: `arr<len>_<elem>` / `arr_<name>_<elem>` (mirror mangle_ty — the
+    // LENGTH is part of the instance key, and a synthesized T_ARRAY node has no
+    // source span to fall back on).
+    if nd.tag == T_ARRAY {
+        pool_lit(m, b"arr");
+        let sz: Node = pp.nodes[conv usize nd.a];
+        if sz.tag == T_INT {
+            pool_num(m, sz.ival);
+        } else {
+            pool_byte(m, 95);
+            let mut j: usize = sz.p0;
+            while j < sz.p1 { pool_byte(m, conv i32 src[j]); j = j + 1usize; }
+        }
+        pool_byte(m, 95);
+        pool_mangle_ty(m, pp, src, nd.b);
+        return;
+    }
     let mut i: usize = nd.p0;
     while i < nd.p1 { pool_byte(m, conv i32 src[i]); i = i + 1usize; }
     return;
@@ -4006,6 +4023,22 @@ fn emit_mangle_ty(pp: read P, src: [u8], tn: u32) -> unit {
     if w != 0 { emit_scalar(w); return; }
     let nd: Node = pp.nodes[conv usize tn];
     if nd.tag == T_APP && nd.b != 0u32 { emit_inst_name(pp, src, nd.b); return; }
+    // T_ARRAY: `arr<len>_<elem>` / `arr_<name>_<elem>` (mirror pool_mangle_ty —
+    // the LENGTH is part of the instance key, and a synthesized T_ARRAY node has
+    // no source span to fall back on).
+    if nd.tag == T_ARRAY {
+        emit_lit(b"arr");
+        let sz: Node = pp.nodes[conv usize nd.a];
+        if sz.tag == T_INT {
+            emit_num(sz.ival);
+        } else {
+            emit_byte(95);
+            emit_bytes(src, sz.p0, sz.p1);
+        }
+        emit_byte(95);
+        emit_mangle_ty(pp, src, nd.b);
+        return;
+    }
     emit_bytes(src, nd.p0, nd.p1);
     return;
 }

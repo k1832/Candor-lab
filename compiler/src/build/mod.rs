@@ -48,7 +48,9 @@ use crate::modules::{self, ModuleParts, TreeParts};
 /// The MIR-schema version. Bumping it invalidates every cached codegen artifact
 /// by construction (design 0008 §2 F3 salt; 0010 §3). The gate exercises this
 /// via [`build_dir_with_salt`].
-pub const SCHEMA_VERSION: &str = "candor-mir-schema-c2";
+// c2.1: instance-name mangling made injective for `_`/`::` names (arrays keyed
+// by length) — old caches carry collided instance sets and must not be reused.
+pub const SCHEMA_VERSION: &str = "candor-mir-schema-c2.1";
 
 /// The blessed-toolchain identity that co-salts the codegen cache (0010 §3): the
 /// compiler version and the pinned backend. Same source + **same toolchain** is

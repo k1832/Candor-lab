@@ -549,6 +549,7 @@ const GENERIC_FIXTURES: &[&str] = &[
     "gbound.cnr",
     "fromq.cnr",
     "gfromq.cnr",
+    "arrlen2.cnr",
 ];
 
 #[test]

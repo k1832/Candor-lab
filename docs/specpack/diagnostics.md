@@ -166,4 +166,5 @@ should make.** Grouped by family. (This doubles as the P4 diagnostic taxonomy.)
 | E1024 | impl method parameter type mismatch | match the declared type |
 | E1025 | impl method return-type mismatch | match the declared return |
 | E1026 | impl method effect-marker mismatch | match the interface's `alloc`/absence exactly |
+| E1027 | array type argument has an unresolved length | defensive monomorphization refusal; unreachable from checked source (sizes parse as literal/name, runtime repeat lengths are E0717) — report if seen |
 | E1099 | monomorphization exceeded the depth limit | break unbounded instantiation (resource limit, not a type error) |
