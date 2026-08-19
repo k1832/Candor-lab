@@ -129,8 +129,9 @@ value-first, checked arithmetic by default, errors as values, contracts,
 structured concurrency without async coloring, an audited FFI boundary you can
 enumerate with one command, explicit allocators, freestanding no-libc binaries,
 and a small real std. It builds in about half a minute and the examples include
-a from-scratch WebAssembly interpreter and a working HTTP server, both written
-in Candor. Compile times are a pre-registered, CI-gated claim, not a vibe: a
+a from-scratch WebAssembly interpreter, a full JSON parser, and a REST API
+service with disk persistence that survived a 110,000-request load test at
+~16,000 requests/second — all written in Candor. Compile times are a pre-registered, CI-gated claim, not a vibe: a
 50,000-line reference project type-checks in about 1.4 seconds, incremental
 rebuilds are ~36ms, and optimized native output currently lands at ~1.35× the
 compile time of `cc -O2` on comparable code.

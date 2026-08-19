@@ -59,7 +59,10 @@ toolchain.
 
 Ninety-second version: clone, `cargo build --release` (~30s), then
 `candor run examples/11_wasm_interp.cnr` runs a from-scratch WASM interpreter
-written in Candor, and `examples/12_http_server` is a web server you can curl.
+written in Candor; `examples/13_json.cnr` is a full JSON parser; and
+`examples/14_rest_api` is a JSON REST service with disk persistence that
+survived a 110,000-request load test (including rude disconnects) with
+byte-identical memory probes from warmup to the end.
 
 The full design record — seventeen adversarially reviewed design docs, the
 frozen criteria, the KILL, the soundness bugs the differential suite caught in

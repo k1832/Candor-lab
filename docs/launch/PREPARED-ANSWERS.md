@@ -16,8 +16,13 @@ an external WASM runtime), the compiler self-checks against a Rust reference,
 and the bugs that apparatus caught in our own compiler are documented — an
 associated-type miscompile (garbage / panic / segfault, different per engine),
 a dispatch bug where every engine unanimously ran the *wrong* interface's
-method, a formatter that rewrote a reborrow into a move. Each is now a spec
-clause plus a standing CI gate. Invite the attack: the differential suite is
+method, a formatter that rewrote a reborrow into a move, compiled engines
+that skipped running cleanup when a value was overwritten (leaking every
+overwritten Box), a generics bug that rendered every array type argument
+with length zero, and arrays of borrows escaping the borrow checker
+entirely. Each is now a spec clause or checker rule plus a standing CI
+gate — and several were found by adversarial review sessions attacking our
+own fixes. Invite the attack: the differential suite is
 public; break it.
 
 ### 2. "Why not just use Rust?"
