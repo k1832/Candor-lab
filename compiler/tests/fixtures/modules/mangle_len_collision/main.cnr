@@ -1,0 +1,13 @@
+// Named array lengths `a::b::N` (= 2) and `a::b_N` (= 3) must monomorphize
+// `idf` to DISTINCT instances: the old `::` -> `_` flattening mangled both to
+// `arr_a_b_N_i64`, collapsing them onto whichever instance was emitted first.
+use a::{b_N};
+use a::b::{N};
+fn idf[T: copy](x: T) -> T { return x; }
+fn main() -> i64 {
+    let u: [N]i64 = [10i64; N];
+    let v: [b_N]i64 = [20i64; b_N];
+    let x: [N]i64 = idf(u);
+    let y: [b_N]i64 = idf(v);
+    return x[0] + x[1] + y[0] + y[1] + y[2];
+}

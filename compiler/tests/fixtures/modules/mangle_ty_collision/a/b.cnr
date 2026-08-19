@@ -1,0 +1,4 @@
+// Module `a::b`: qualifies to `a::b::C`. One field, so a layout collision with
+// the two-field `a::b_C` is observable, not silent.
+pub struct C { x: i64 }
+pub fn mk_c(x: i64) -> C { return C { x: x }; }

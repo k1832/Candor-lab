@@ -1,0 +1,4 @@
+// Module `a`: a struct whose NAME contains an underscore — qualifies to
+// `a::b_C`, which the old mangler flattened to the same `a_b_C` as `a::b::C`.
+pub struct b_C { x: i64, y: i64 }
+pub fn mk_bc(x: i64, y: i64) -> b_C { return b_C { x: x, y: y }; }

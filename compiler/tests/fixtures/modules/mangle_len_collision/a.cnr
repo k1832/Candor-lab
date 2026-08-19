@@ -1,0 +1,4 @@
+// Module `a`: a const whose NAME contains an underscore. After `::`
+// qualification it is `a::b_N` — the spelling the old mangler collapsed onto
+// `a::b::N` (both flattened to `a_b_N`).
+pub static b_N: usize = 3;

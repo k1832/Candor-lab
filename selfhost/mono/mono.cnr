@@ -138,6 +138,19 @@ fn tparam_count(p: write P, tphead: u32) -> i32 {
     return n;
 }
 
+// The array LENGTH is part of the type identity, mirroring the reference
+// mangler (`mangle_ty`: `arr2_i64` vs `arr3_i64`): literal sizes compare by
+// value, named sizes by spelling, mixed kinds are distinct.
+fn same_len(p: write P, src: [u8], a: u32, b: u32) -> bool {
+    if a == b { return true; }
+    if a == 0u32 || b == 0u32 { return false; }
+    let na: Node = p.nodes[conv usize a];
+    let nb: Node = p.nodes[conv usize b];
+    if na.tag == T_INT && nb.tag == T_INT { return na.ival == nb.ival; }
+    if na.tag == T_ID && nb.tag == T_ID { return name_eq_m(src, na.p0, na.p1, nb.p0, nb.p1); }
+    return false;
+}
+
 // ---- structural type identity (== mangled-name equality over our type forms) ----
 fn same_type(p: write P, src: [u8], a: u32, b: u32) -> bool {
     if a == b { return true; }
@@ -163,7 +176,10 @@ fn same_type(p: write P, src: [u8], a: u32, b: u32) -> bool {
         }
         return ca == 0u32 && cb == 0u32;
     }
-    if ta == T_ARRAY && tb == T_ARRAY { return same_type(p, src, na.b, nb.b); }
+    if ta == T_ARRAY && tb == T_ARRAY {
+        if !same_len(p, src, na.a, nb.a) { return false; }
+        return same_type(p, src, na.b, nb.b);
+    }
     if ta == T_RAWPTR && tb == T_RAWPTR { return same_type(p, src, na.a, nb.a); }
     return false;
 }

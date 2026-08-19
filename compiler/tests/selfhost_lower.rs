@@ -264,6 +264,7 @@ corpus! {
     generics_arena: "generics/arena.cnr" => Ret,
     generics_gdrop_groundfloor: "generics/gdrop_groundfloor.cnr" => Ret,
     generics_gdrop: "generics/gdrop.cnr" => Ret,
+    generics_arrlen2: "generics/arrlen2.cnr" => Ret,
     // T3: interface/impl method dispatch lowered to direct MIR Calls.
     generics_iface: "generics/iface.cnr" => Ret,
     generics_gimpl: "generics/gimpl.cnr" => Ret,

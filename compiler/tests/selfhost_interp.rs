@@ -236,6 +236,7 @@ corpus! {
     generics_gdrop_groundfloor: "generics/gdrop_groundfloor.cnr" => Ret,
     generics_mixed: "generics/mixed.cnr" => Ret,
     generics_nameval: "generics/nameval.cnr" => Ret,
+    generics_arrlen2: "generics/arrlen2.cnr" => Ret,
     // ---- TRAIT interfaces + impls + static method dispatch (T2) ----
     generics_iface: "generics/iface.cnr" => Ret,
     generics_gimpl: "generics/gimpl.cnr" => Ret,
