@@ -41,12 +41,19 @@ by admitting `read`-borrow repeat elements. The loan checker needs to track
 borrows stored into array elements (it tracks struct fields; arrays fell
 through).
 
-## P5 — Untyped-literal array narrows silently through inference (LOW)
+## P5 — Untyped-literal array narrows silently through inference (RE-OPENED, MEDIUM)
 
 `let t = [1, 2]; S { a: t, b: 42 }` with `a: [2]u8` stores `a[1] == 0` on
-all engines. Same `{integer}`-never-grounded root cause as the F2 int-
-unification fix in the checker workstream; re-test after that lands and
-close or re-scope.
+all engines. Root cause: an array of unsuffixed integer literals is never
+grounded to a concrete element type. The array-literal unification fix
+narrowed this but did NOT close it: the P1 workstream found a live shape —
+a generic struct literal whose array field is all-unsuffixed
+(`let w: Wrap[[3]i64] = Wrap { v: [4, 5, 6] };`) instantiates the generic
+at an ungrounded element type while the annotation instantiates it at the
+concrete one, producing two divergent instances of one type (oracle faults;
+MIR/native refuse). Four-line repro in the P1 workstream report. Needs the
+checker to ground literal element types against the expected type before
+the monomorphization shape is recorded.
 
 ## Disposition
 
