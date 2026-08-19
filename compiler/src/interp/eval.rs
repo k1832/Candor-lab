@@ -3764,8 +3764,22 @@ impl<'a> Interp<'a> {
                 // unconditionally, which double-freed the moved-out value.
                 let rv = self.eval_value(value, Some(&tty))?;
                 if self.place_is_local_direct(&pl) && self.place_owned(&pl) {
+                    // Rebase the local's root-relative move mask onto the
+                    // assigned place — keep only marks below the target's
+                    // field path, stripped of it — so the drop walk (whose
+                    // path starts empty at the place) prunes moved sub-paths
+                    // below a PROJECTED target: `sink(h.d.x); h.d = ...;`
+                    // must skip the moved-out `.x`, not double-drop it (M2,
+                    // review 2026-08-19). Identity for a whole-local target.
                     let mask = self.local_mask(&pl.root);
-                    self.drop_value(addr, &tty, &mask, &mut Vec::new())?;
+                    let path = pl.field_path();
+                    let mut rebased = MoveMask::default();
+                    for m in &mask.moved {
+                        if prefix(&path, m) {
+                            rebased.mark(m[path.len()..].to_vec());
+                        }
+                    }
+                    self.drop_value(addr, &tty, &rebased, &mut Vec::new())?;
                 }
                 self.move_to(addr, rv)?;
                 if self.place_is_local_direct(&pl) {

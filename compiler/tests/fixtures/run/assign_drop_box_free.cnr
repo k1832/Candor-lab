@@ -1,0 +1,34 @@
+// GATE (overwrite frees, spec 03 §6.8): reassigning a Box-typed local must
+// free the OLD box through its allocator. `live` counts outstanding blocks:
+// it returns to 0 only if the overwritten box is freed exactly once (a missed
+// overwrite drop leaks it; a double drop double-frees and drives live negative).
+struct AllocVtable { alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8, free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit, realloc: fn(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) alloc -> rawptr u8 }
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize, live: i64 }
+fn with_window(base: usize, size: usize) -> Bump { return Bump { next: base, end: base + size, live: 0 }; }
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 { unsafe "reserved window" { let b: Bump = ptr_read(cast_ptr[Bump](ctx)); let a: usize = (b.next + align - 1) / align * align; if a + size > b.end { return ptr_null[u8](); } ptr_write(cast_ptr[Bump](ctx), Bump { next: a + size, end: b.end, live: b.live + 1 }); return addr_to_ptr[u8](a); } }
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit { unsafe "reserved window" { let b: Bump = ptr_read(cast_ptr[Bump](ctx)); ptr_write(cast_ptr[Bump](ctx), Bump { next: b.next, end: b.end, live: b.live - 1 }); } }
+fn bump_realloc(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) -> rawptr u8 { unsafe "bump cannot grow in place: carve a fresh block and release the old one" { let newp: rawptr u8 = bump_alloc(ctx, new_size, align); if is_null(newp) { return newp; } let a: usize = ptr_to_addr(ptr); let base: usize = ptr_to_addr(newp); let mut i: usize = 0usize; while i < old_size { let s: rawptr u8 = addr_to_ptr[u8](a + i); let d: rawptr u8 = addr_to_ptr[u8](base + i); let v: u8 = ptr_read(s); ptr_write(d, v); i = i + 1usize; } bump_free(ctx, ptr, old_size, align); return newp; } }
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free, realloc: bump_realloc };
+fn mk_alloc(state: write Bump) -> Alloc { unsafe "outlives every alloc" { return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) }; } }
+fn use_box(al: Alloc) alloc -> i64 {
+    match box(read al, 10) {
+        BoxResult::boxed(b) => {
+            let mut p: Box i64 = b;
+            match box(read al, 20) {
+                BoxResult::boxed(b2) => { p = b2; }  // must FREE the 10-box
+                BoxResult::oom => { return 0 - 1; }
+            }
+            trace(unbox(p));  // 20; consumes p, freeing the 20-box
+            return 0;
+        }
+        BoxResult::oom => { return 0 - 1; }
+    }
+}
+fn main() alloc -> i64 {
+    let mut bs: Bump = with_window(16777216, 1048576);
+    let al: Alloc = mk_alloc(write bs);
+    let r: i64 = use_box(al);
+    if r != 0 { return r; }
+    return bs.live;  // 0 iff the overwritten box was freed exactly once
+}

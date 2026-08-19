@@ -139,6 +139,7 @@ pub(crate) fn check_call_reclamation(f: &MirFn, items: &Items) {
             }
             StatementKind::Spawn { .. }
             | StatementKind::Drop { .. }
+            | StatementKind::DropPlace { .. }
             | StatementKind::BoxOp { .. }
             | StatementKind::UnboxOp { .. }
             | StatementKind::CollectionOp { .. } => true,
@@ -299,6 +300,13 @@ struct Loop {
     continue_bb: BlockId,
     break_bb: BlockId,
     scope_depth: usize,
+    /// The move state carried by each `break` edge into the loop's exit block
+    /// (captured at the break point, B1/B2 of the 2026-08-19 review). The exit
+    /// state is their union — plus, for `while`, the loop-head state. A
+    /// `continue` edge needs no capture: it rejoins the loop head/body entry,
+    /// a CFG join where E0302/E0309 force agreement wherever the state is
+    /// later consulted.
+    break_states: Vec<MoveState>,
 }
 
 struct Lowerer<'a> {
@@ -306,10 +314,18 @@ struct Lowerer<'a> {
     consts: &'a HashMap<String, u64>,
     fn_ptr_id: &'a HashMap<String, usize>,
     impls: &'a ImplTables,
-    /// Static move state (the compile-time analog of the oracle's `MoveMask`):
-    /// per-local, the field-name paths already moved out. Consulted when emitting
-    /// a `Drop` so the drop skips moved sub-paths — the static mask baked into the
-    /// MIR (design 0010 §2 INV-DROP), NO runtime flag.
+    /// Static move state (the compile-time analog of the oracle's `MoveMask`,
+    /// whose doc reads "moved-out or never initialized"): per-local, the
+    /// field-name paths already moved out — plus the whole-value mark `[]` for
+    /// an uninitialized `let`, the oracle's `MoveMask::whole()` (defect P2,
+    /// 2026-08-03). Consulted when emitting a `Drop`/`DropPlace` so the drop
+    /// skips moved/uninitialized sub-paths — the static mask baked into the
+    /// MIR (design 0010 §2 INV-DROP), NO runtime flag. E0302 (move-state
+    /// join agreement) and E0309 (path-independent init at every needs-drop
+    /// drop point) are what make this per-program-point state a sound static
+    /// schedule; `if`/`match` arms save and re-merge it (see `lower_if` /
+    /// `merge_move_states`) so an arm never reads a sibling arm's mutations,
+    /// and loops carry break-edge states to their exit (see `Loop`).
     moves: HashMap<LocalId, Vec<Vec<String>>>,
     locals: Vec<LocalDecl>,
     blocks: Vec<BasicBlock>,
@@ -792,6 +808,13 @@ impl<'a> Lowerer<'a> {
                     None => {
                         let lty = decl.ok_or_else(|| LowerError("untyped uninit let".into()))?;
                         let id = self.new_local(lty.clone(), Some(name.clone()));
+                        // An uninitialized `let` starts NOT owned — the oracle's
+                        // `MoveMask::whole()` — so its scope-exit drop is skipped
+                        // and its first assignment is not an overwrite drop point
+                        // (defect P2, 2026-08-03: MIR/native ran drop hooks over
+                        // never-constructed storage). The first assignment clears
+                        // the mark via `set_owned`.
+                        self.moves.entry(id).or_default().push(Vec::new());
                         self.bind(name, id, lty);
                     }
                 }
@@ -799,11 +822,68 @@ impl<'a> Lowerer<'a> {
             }
             StmtKind::Assign { target, value } => {
                 let (place, tty) = self.lower_place(target)?;
-                self.lower_into(value, &place, &tty)?;
-                // A reassignment reinitializes the target place (design 0001 §1.5):
-                // clear its moved paths so a later drop of it is not pruned.
-                if let Some((id, path)) = self.ast_place_path(target) {
-                    self.set_owned(id, &path);
+                let tracked = self.ast_place_path(target);
+                match tracked {
+                    // Overwrite drop (spec 03 §6.8/§7.5): reassigning a place first
+                    // destroys the value it currently holds, then stores the new
+                    // one. Mirror the oracle (`interp/eval.rs` `StmtKind::Assign`):
+                    // evaluate the RHS first (§1.5 order) into a fresh temp —
+                    // lowering straight into the target would clobber the old value
+                    // before its drop and break an RHS that reads/moves it — then
+                    // drop the old value gated on the move state the RHS lowering
+                    // just updated (`lst = cons(take lst, ..)` moved it out: no
+                    // drop, §6.7 — the oracle's double-free guard), then byte-copy
+                    // temp -> place. Drop-inert targets and opaque (deref/index/
+                    // static) places lower exactly as before, at zero cost — the
+                    // oracle, too, drops only direct local places.
+                    // B3 (2026-08-19 review): gate on the LOWERED place — every
+                    // projection must be a `Field`, mirroring the oracle's
+                    // `place_is_local_direct` exactly. Auto-deref (`bx.d = ...`
+                    // through a Box/borrow) inserts a `Deref`, and the oracle
+                    // emits no drop for such a target.
+                    Some((id, path))
+                        if needs_drop(&tty, self.items)
+                            && place.proj.iter().all(|pr| matches!(pr, Proj::Field { .. })) =>
+                    {
+                        let tmp = self.new_local(tty.clone(), None);
+                        self.lower_into(value, &Place::local(tmp), &tty)?;
+                        let mask = self.moves.get(&id).cloned().unwrap_or_default();
+                        if !mask.iter().any(|m| prefix(m, &path)) {
+                            // M2: rebase the root-relative mask onto the assigned
+                            // place — keep only marks below the target path,
+                            // stripped of it — so the drop walk (whose path starts
+                            // empty at the place) prunes the right sub-paths:
+                            // `sink(h.d.x); h.d = ...;` must skip the moved-out
+                            // `.x`, not double-drop it. Identity for a whole-local
+                            // target. The oracle's assignment drop rebases the
+                            // same way (`interp/eval.rs`).
+                            let moved: Vec<Vec<String>> = mask
+                                .iter()
+                                .filter(|m| prefix(&path, m))
+                                .map(|m| m[path.len()..].to_vec())
+                                .collect();
+                            self.emit(
+                                StatementKind::DropPlace { place: place.clone(), ty: tty.clone(), moved },
+                                s.span,
+                                false,
+                            );
+                        }
+                        self.emit(
+                            StatementKind::CopyVal { dst: place, src: Place::local(tmp), ty: tty },
+                            s.span,
+                            false,
+                        );
+                        self.set_owned(id, &path);
+                    }
+                    tracked => {
+                        self.lower_into(value, &place, &tty)?;
+                        // A reassignment reinitializes the target place (design 0001
+                        // §1.5): clear its moved paths so a later drop of it is not
+                        // pruned.
+                        if let Some((id, path)) = tracked {
+                            self.set_owned(id, &path);
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -916,6 +996,14 @@ impl<'a> Lowerer<'a> {
                     .map(|l| (l.break_bb, l.scope_depth))
                     .ok_or_else(|| LowerError("break outside loop".into()))?;
                 self.emit_loop_exit_drops(depth);
+                // The break edge carries this program point's move state into
+                // the loop exit; the loop lowering unions all break-edge
+                // states there (B1/B2 of the 2026-08-19 review: a moved-then-
+                // broken value must stay moved after the loop).
+                if self.reachable {
+                    let st = self.moves.clone();
+                    self.loops.last_mut().unwrap().break_states.push(st);
+                }
                 self.terminate(Terminator::Goto(bb));
                 Ok(self.unit())
             }
@@ -1270,6 +1358,49 @@ impl<'a> Lowerer<'a> {
     /// their payload out. Scope is limited to drop-inert enums with copy payload
     /// binds (no scrutinee move/drop to reconcile) — anything else is out of
     /// subset (never a silent divergence).
+    /// Lower one match arm's body `f` from the current arm-chain move state
+    /// (mirroring `lower_if`'s arm handling — sibling arms are alternatives):
+    /// snapshot the chain state, run the arm, terminate its fall-through edge
+    /// into `join`, record the arm's exit state (when it reaches the join) in
+    /// `exits`, and restore the chain state for the next arm's test. For a
+    /// GUARDED arm the restored chain is union-merged with the arm's state,
+    /// because the guard-false edge re-enters the chain after the arm's
+    /// binding moves already ran (conservative: a mark that holds on either
+    /// in-edge skips the drop — a leak at worst, never a double-drop).
+    fn lower_arm_stated(
+        &mut self,
+        guarded: bool,
+        join: BlockId,
+        exits: &mut Vec<MoveState>,
+        f: impl FnOnce(&mut Self) -> LR<()>,
+    ) -> LR<()> {
+        let chain = self.moves.clone();
+        f(self)?;
+        let reach = self.reachable;
+        if reach {
+            self.terminate(Terminator::Goto(join));
+        }
+        let arm_state = std::mem::replace(&mut self.moves, chain);
+        if guarded {
+            let restored = std::mem::take(&mut self.moves);
+            self.moves = merge_move_states(restored, &arm_state);
+        }
+        if reach {
+            exits.push(arm_state);
+        }
+        Ok(())
+    }
+
+    /// Continue after an arm chain (match) or edge set (loop breaks): the
+    /// join's move state is the union of the states of every edge that
+    /// actually reaches it. With no incoming edge the state is left alone —
+    /// the caller marks the join dead (M1).
+    fn join_arm_states(&mut self, mut exits: Vec<MoveState>) {
+        if let Some(seed) = exits.pop() {
+            self.moves = exits.drain(..).fold(seed, |acc, st| merge_move_states(acc, &st));
+        }
+    }
+
     fn lower_match(
         &mut self,
         scrutinee: &Expr,
@@ -1310,29 +1441,29 @@ impl<'a> Lowerer<'a> {
         );
         let join = self.new_block();
         let mut test_open = true;
+        let mut exit_states: Vec<MoveState> = Vec::new();
         for arm in arms {
             if !test_open {
                 break;
             }
+            let guarded = arm.guard.is_some();
             match &arm.pattern.kind {
                 PatKind::Wildcard | PatKind::Binding(_) => {
-                    if arm.guard.is_some() {
+                    if guarded {
                         // A guarded catch-all is NOT a terminal default: on a false
                         // guard control falls through to a later arm, so the match
                         // stays open (an unguarded catch-all follows — required by
                         // exhaustiveness).
                         let next_bb = self.new_block();
-                        self.lower_match_arm(arm, &splace, &einfo, None, dst, hold, scrut_path.as_ref(), Some(next_bb))?;
-                        if self.reachable {
-                            self.terminate(Terminator::Goto(join));
-                        }
+                        self.lower_arm_stated(true, join, &mut exit_states, |s| {
+                            s.lower_match_arm(arm, &splace, &einfo, None, dst, hold, scrut_path.as_ref(), Some(next_bb))
+                        })?;
                         self.switch_to(next_bb);
                     } else {
                         // Default arm (exhaustive tail): unconditional.
-                        self.lower_match_arm(arm, &splace, &einfo, None, dst, hold, scrut_path.as_ref(), None)?;
-                        if self.reachable {
-                            self.terminate(Terminator::Goto(join));
-                        }
+                        self.lower_arm_stated(false, join, &mut exit_states, |s| {
+                            s.lower_match_arm(arm, &splace, &einfo, None, dst, hold, scrut_path.as_ref(), None)
+                        })?;
                         test_open = false;
                     }
                 }
@@ -1356,10 +1487,9 @@ impl<'a> Lowerer<'a> {
                     let next_bb = self.new_block();
                     self.terminate(Terminator::Branch { cond: Operand::Local(cmp), then_bb: arm_bb, else_bb: next_bb });
                     self.switch_to(arm_bb);
-                    self.lower_match_arm(arm, &splace, &einfo, Some(idx), dst, hold, scrut_path.as_ref(), Some(next_bb))?;
-                    if self.reachable {
-                        self.terminate(Terminator::Goto(join));
-                    }
+                    self.lower_arm_stated(guarded, join, &mut exit_states, |s| {
+                        s.lower_match_arm(arm, &splace, &einfo, Some(idx), dst, hold, scrut_path.as_ref(), Some(next_bb))
+                    })?;
                     self.switch_to(next_bb);
                 }
             }
@@ -1369,7 +1499,13 @@ impl<'a> Lowerer<'a> {
             // mirror the oracle's "no matching arm" panic if it is ever reached.
             self.terminate(Terminator::Fault(FaultEdge { kind: FaultKind::Panic, span: self.cur_span }));
         }
+        let dead = exit_states.is_empty();
+        self.join_arm_states(exit_states);
         self.switch_to(join);
+        // M1: with no arm reaching the join, it and everything after is dead.
+        if dead {
+            self.reachable = false;
+        }
         Ok(())
     }
 
@@ -1393,10 +1529,12 @@ impl<'a> Lowerer<'a> {
         );
         let join = self.new_block();
         let mut test_open = true;
+        let mut exit_states: Vec<MoveState> = Vec::new();
         for arm in arms {
             if !test_open {
                 break;
             }
+            let guarded = arm.guard.is_some();
             match &arm.pattern.kind {
                 PatKind::IntLit { value, negative, .. } => {
                     let konst = crate::ast::int_pat_value(*value, *negative);
@@ -1413,10 +1551,9 @@ impl<'a> Lowerer<'a> {
                     let next_bb = self.new_block();
                     self.terminate(Terminator::Branch { cond: Operand::Local(cmp), then_bb: arm_bb, else_bb: next_bb });
                     self.switch_to(arm_bb);
-                    self.lower_int_arm(arm, None, val, &scalar, dst, Some(next_bb))?;
-                    if self.reachable {
-                        self.terminate(Terminator::Goto(join));
-                    }
+                    self.lower_arm_stated(guarded, join, &mut exit_states, |s| {
+                        s.lower_int_arm(arm, None, val, &scalar, dst, Some(next_bb))
+                    })?;
                     self.switch_to(next_bb);
                 }
                 PatKind::IntRange { lo_value, lo_negative, hi_value, hi_negative, inclusive, .. } => {
@@ -1447,41 +1584,36 @@ impl<'a> Lowerer<'a> {
                     );
                     self.terminate(Terminator::Branch { cond: Operand::Local(le_hi), then_bb: arm_bb, else_bb: next_bb });
                     self.switch_to(arm_bb);
-                    self.lower_int_arm(arm, None, val, &scalar, dst, Some(next_bb))?;
-                    if self.reachable {
-                        self.terminate(Terminator::Goto(join));
-                    }
+                    self.lower_arm_stated(guarded, join, &mut exit_states, |s| {
+                        s.lower_int_arm(arm, None, val, &scalar, dst, Some(next_bb))
+                    })?;
                     self.switch_to(next_bb);
                 }
                 PatKind::Wildcard => {
-                    if arm.guard.is_some() {
+                    if guarded {
                         let next_bb = self.new_block();
-                        self.lower_int_arm(arm, None, val, &scalar, dst, Some(next_bb))?;
-                        if self.reachable {
-                            self.terminate(Terminator::Goto(join));
-                        }
+                        self.lower_arm_stated(true, join, &mut exit_states, |s| {
+                            s.lower_int_arm(arm, None, val, &scalar, dst, Some(next_bb))
+                        })?;
                         self.switch_to(next_bb);
                     } else {
-                        self.lower_int_arm(arm, None, val, &scalar, dst, None)?;
-                        if self.reachable {
-                            self.terminate(Terminator::Goto(join));
-                        }
+                        self.lower_arm_stated(false, join, &mut exit_states, |s| {
+                            s.lower_int_arm(arm, None, val, &scalar, dst, None)
+                        })?;
                         test_open = false;
                     }
                 }
                 PatKind::Binding(name) => {
-                    if arm.guard.is_some() {
+                    if guarded {
                         let next_bb = self.new_block();
-                        self.lower_int_arm(arm, Some(name.clone()), val, &scalar, dst, Some(next_bb))?;
-                        if self.reachable {
-                            self.terminate(Terminator::Goto(join));
-                        }
+                        self.lower_arm_stated(true, join, &mut exit_states, |s| {
+                            s.lower_int_arm(arm, Some(name.clone()), val, &scalar, dst, Some(next_bb))
+                        })?;
                         self.switch_to(next_bb);
                     } else {
-                        self.lower_int_arm(arm, Some(name.clone()), val, &scalar, dst, None)?;
-                        if self.reachable {
-                            self.terminate(Terminator::Goto(join));
-                        }
+                        self.lower_arm_stated(false, join, &mut exit_states, |s| {
+                            s.lower_int_arm(arm, Some(name.clone()), val, &scalar, dst, None)
+                        })?;
                         test_open = false;
                     }
                 }
@@ -1493,7 +1625,13 @@ impl<'a> Lowerer<'a> {
             // checker requires a catch-all), but mirror the "no matching arm" panic.
             self.terminate(Terminator::Fault(FaultEdge { kind: FaultKind::Panic, span: self.cur_span }));
         }
+        let dead = exit_states.is_empty();
+        self.join_arm_states(exit_states);
         self.switch_to(join);
+        // M1: with no arm reaching the join, it and everything after is dead.
+        if dead {
+            self.reachable = false;
+        }
         Ok(())
     }
 
@@ -2483,19 +2621,42 @@ impl<'a> Lowerer<'a> {
         let else_bb = self.new_block();
         let join = self.new_block();
         self.terminate(Terminator::Branch { cond: c, then_bb, else_bb });
+        // The arms are ALTERNATIVES: each lowers from the branch-point move
+        // state (a sibling arm's moves/assignments are not on this arm's
+        // paths — a linear thread would, e.g., see the then-arm's first
+        // assignment of an uninitialized needs-drop local and wrongly emit an
+        // overwrite drop in the else arm), and the join continues with the
+        // reachable arm exits merged (`merge_move_states`).
+        let branch_state = self.moves.clone();
         self.switch_to(then_bb);
         self.lower_block(then_blk)?;
+        let then_reach = self.reachable;
         if self.reachable {
             self.terminate(Terminator::Goto(join));
         }
+        let then_state = std::mem::replace(&mut self.moves, branch_state);
         self.switch_to(else_bb);
         if let Some(e) = else_blk {
             self.lower_value(e, None)?;
         }
+        let else_reach = self.reachable;
         if self.reachable {
             self.terminate(Terminator::Goto(join));
         }
+        let else_state = std::mem::take(&mut self.moves);
+        self.moves = match (then_reach, else_reach) {
+            (true, false) => then_state,
+            (false, true) => else_state,
+            _ => merge_move_states(then_state, &else_state),
+        };
         self.switch_to(join);
+        // M1 (2026-08-19 review): a join no arm actually reaches is dead code
+        // — everything after it must contribute no state (and no statements)
+        // to any enclosing merge, so unreachability propagates outward instead
+        // of `switch_to` faking a live fall-through edge.
+        if !then_reach && !else_reach {
+            self.reachable = false;
+        }
         Ok(())
     }
 
@@ -2506,16 +2667,25 @@ impl<'a> Lowerer<'a> {
         self.terminate(Terminator::Goto(head));
         self.switch_to(head);
         let (c, _) = self.lower_value(cond, Some(&Type::bool()))?;
+        // The head->exit edge's move state (the zero-iteration path, plus the
+        // cond's own effects). Body-fallthrough and continue edges rejoin the
+        // head, where E0302/E0309 force agreement with this state wherever it
+        // is later consulted, so they need no separate capture.
+        let head_state = self.moves.clone();
         self.terminate(Terminator::Branch { cond: c, then_bb: body_bb, else_bb: exit });
         self.switch_to(body_bb);
         let scope_depth = self.scopes.len();
-        self.loops.push(Loop { continue_bb: head, break_bb: exit, scope_depth });
+        self.loops.push(Loop { continue_bb: head, break_bb: exit, scope_depth, break_states: Vec::new() });
         self.lower_block(body)?;
-        self.loops.pop();
+        let lp = self.loops.pop().unwrap();
         if self.reachable {
             self.terminate(Terminator::Goto(head));
         }
+        // Exit state = head-exit edge state ∪ every break-edge state (B2).
+        let mut states = lp.break_states;
+        states.push(head_state);
         self.switch_to(exit);
+        self.join_arm_states(states);
         Ok(())
     }
 
@@ -2525,13 +2695,21 @@ impl<'a> Lowerer<'a> {
         self.terminate(Terminator::Goto(body_bb));
         self.switch_to(body_bb);
         let scope_depth = self.scopes.len();
-        self.loops.push(Loop { continue_bb: body_bb, break_bb: exit, scope_depth });
+        self.loops.push(Loop { continue_bb: body_bb, break_bb: exit, scope_depth, break_states: Vec::new() });
         self.lower_block(body)?;
-        self.loops.pop();
+        let lp = self.loops.pop().unwrap();
         if self.reachable {
             self.terminate(Terminator::Goto(body_bb));
         }
+        // A `loop`'s exit is reachable ONLY through break edges: its state is
+        // their union (B1: the linear body-exit state is NOT on any exit
+        // path). With no break the exit — and everything after — is dead code.
+        let dead = lp.break_states.is_empty();
         self.switch_to(exit);
+        self.join_arm_states(lp.break_states);
+        if dead {
+            self.reachable = false;
+        }
         Ok(())
     }
 
@@ -3401,6 +3579,37 @@ fn is_builtin(name: &str) -> bool {
 
 fn prefix(a: &[String], b: &[String]) -> bool {
     a.len() <= b.len() && a[..] == b[..a.len()]
+}
+
+/// The per-local move-mask state at one program point of the linear lowering
+/// walk (`Lowerer::moves`), saved/restored around branch arms.
+type MoveState = HashMap<LocalId, Vec<Vec<String>>>;
+
+/// Merge two edge states at a control-flow join: the union of the marks (a
+/// path counts moved/uninitialized after the join iff EITHER joining edge left
+/// it so). Callers union over exactly the edges that reach the join — `if`/
+/// `match` arm fall-throughs, a `loop`'s break edges, a `while`'s head edge
+/// plus its break edges — never an edge that diverged before the join (M1) and
+/// never a state that only flows to a back edge (B1). At any DROP DECISION
+/// that later consults the merged state, the checker guarantees the joined
+/// edges agree — E0302 rejects moved-on-one/live-on-another at the join, and
+/// E0309 rejects path-dependent initialization at every needs-drop drop point
+/// (scope exit and whole-binding reassignment) — so there the union equals
+/// each edge's state. Edges CAN disagree where no such guarantee applies
+/// (drop-inert locals, init-only differences, a guarded arm's fall-through
+/// chain); there the union errs toward keeping a mark, i.e. SKIPPING a drop (a
+/// leak at worst), never toward dropping — a mark is only ever cleared by a
+/// reassignment's `set_owned` on the path that reinitializes.
+fn merge_move_states(mut a: MoveState, b: &MoveState) -> MoveState {
+    for (id, marks) in b {
+        let e = a.entry(*id).or_default();
+        for m in marks {
+            if !e.contains(m) {
+                e.push(m.clone());
+            }
+        }
+    }
+    a
 }
 
 fn find_field<'f>(fields: &'f [FieldInit], name: &str) -> Option<&'f FieldInit> {

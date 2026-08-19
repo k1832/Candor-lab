@@ -1,0 +1,12 @@
+// GATE (RHS moves the old value out, spec 03 §6.7): in `p = wrap(p)` the RHS
+// consumes the old value, so the reassignment must NOT drop it — the exact
+// double-drop the oracle's assignment gating prevents (`eval.rs` comment). The
+// single live value is dropped once, at scope exit (trace 3).
+struct D { id: i64 }
+drop(write self) { trace(self.id); }
+fn wrap(d: D) -> D { return d; }  // moves d through: no drop inside wrap
+fn main() -> i64 {
+    let mut p: D = D { id: 3 };
+    p = wrap(p);  // old value moved out by the RHS: NO drop here
+    return 0;
+}                 // scope exit: trace 3 (exactly once)

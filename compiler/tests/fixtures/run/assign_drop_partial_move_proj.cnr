@@ -1,0 +1,17 @@
+// GATE (depth-adjusted mask under a projected overwrite, review 2026-08-19
+// M2): `h.d.x` was moved into `sink`, so reassigning `h.d` must NOT re-drop
+// the moved-out `.x` — the move mask is rebased onto the assigned place in
+// both the oracle and the builder. Scope exit drops the replacement (9).
+// Pinned from reviewer repro R5_partial_move_double_drop.
+struct D { id: i64 }
+drop(write self) { trace(self.id); }
+struct In { x: D }
+struct H { d: In, n: i64 }
+fn sink(d: D) -> i64 { trace(100 + d.id); return 0; }
+fn main() -> i64 {
+    let mut h: H = H { d: In { x: D { id: 1 } }, n: 0 };
+    sink(h.d.x);
+    h.d = In { x: D { id: 9 } };
+    trace(90);
+    return 0;
+}

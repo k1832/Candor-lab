@@ -1,0 +1,11 @@
+// GATE (first assignment after an uninitialized declaration, spec 03 §7.4):
+// `let mut p: D;` holds no value, so the first assignment is NOT an overwrite
+// drop point — no hook runs over never-constructed storage (defect P2 /
+// correction D1 of the 2026-08-03 review). Only the scope exit drops (trace 5).
+struct D { id: i64 }
+drop(write self) { trace(self.id); }
+fn main() -> i64 {
+    let mut p: D;
+    p = D { id: 5 };  // first initialization: NO drop
+    return 0;
+}                     // scope exit: trace 5

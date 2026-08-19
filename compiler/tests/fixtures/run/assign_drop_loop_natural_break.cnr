@@ -1,0 +1,20 @@
+// GATE (natural break after an unconditional move, review 2026-08-19 B1): on
+// the breaking iteration `p` was moved into `sink` BEFORE the break, so the
+// post-loop reassignment must not drop; earlier iterations restored ownership
+// via the in-loop reassignment. Pinned from reviewer repro R2c_natural_break.
+struct D { id: i64 }
+drop(write self) { trace(self.id); }
+fn sink(d: D) -> i64 { trace(100 + d.id); return 0; }
+fn go() -> i64 {
+    let mut p: D = D { id: 1 };
+    let mut i: i64 = 0;
+    loop {
+        sink(p);
+        if i > 0 { break; }
+        p = D { id: 2 };
+        i = i + 1;
+    }
+    p = D { id: 3 };
+    return 0;
+}
+fn main() -> i64 { go(); trace(90); return 0; }

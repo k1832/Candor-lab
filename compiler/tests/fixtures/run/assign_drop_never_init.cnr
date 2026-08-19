@@ -1,0 +1,11 @@
+// GATE (never-initialized scope exit, spec 03 §7.5): a needs-drop local that is
+// never assigned holds no value at scope exit, so NO hook runs — before the
+// 2026-08-03 fix, MIR/native ran the hook over zeroed storage at the fn-exit
+// drop (traced [7, 0]). The only observable is the explicit trace(7).
+struct D { id: i64 }
+drop(write self) { trace(self.id); }
+fn main() -> i64 {
+    let mut p: D;
+    trace(7);
+    return 0;
+}         // scope exit: p was never initialized — no hook

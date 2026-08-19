@@ -1,0 +1,36 @@
+// GATE (loop break-edge move state with a Box, review 2026-08-19 B1): the box
+// is consumed by `eat` on the breaking arm; a post-loop drop would DOUBLE-FREE
+// it and drive the bump allocator's live count negative. Pinned from
+// reviewer repro R1b_double_free.
+struct AllocVtable { alloc: fn(ctx: rawptr u8, size: usize, align: usize) alloc -> rawptr u8, free: fn(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) alloc -> unit, realloc: fn(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) alloc -> rawptr u8 }
+copy struct Alloc { ctx: rawptr u8, vt: rawptr AllocVtable }
+struct Bump { next: usize, end: usize, live: i64 }
+fn with_window(base: usize, size: usize) -> Bump { return Bump { next: base, end: base + size, live: 0 }; }
+fn bump_alloc(ctx: rawptr u8, size: usize, align: usize) -> rawptr u8 { unsafe "reserved window" { let b: Bump = ptr_read(cast_ptr[Bump](ctx)); let a: usize = (b.next + align - 1) / align * align; if a + size > b.end { return ptr_null[u8](); } ptr_write(cast_ptr[Bump](ctx), Bump { next: a + size, end: b.end, live: b.live + 1 }); return addr_to_ptr[u8](a); } }
+fn bump_free(ctx: rawptr u8, ptr: rawptr u8, size: usize, align: usize) -> unit { unsafe "reserved window" { let b: Bump = ptr_read(cast_ptr[Bump](ctx)); ptr_write(cast_ptr[Bump](ctx), Bump { next: b.next, end: b.end, live: b.live - 1 }); } }
+fn bump_realloc(ctx: rawptr u8, ptr: rawptr u8, old_size: usize, new_size: usize, align: usize) -> rawptr u8 { unsafe "no grow" { return ptr_null[u8](); } }
+static BUMP_VT: AllocVtable = AllocVtable { alloc: bump_alloc, free: bump_free, realloc: bump_realloc };
+fn mk_alloc(state: write Bump) -> Alloc { unsafe "outlives every alloc" { return Alloc { ctx: cast_ptr[u8](addr_of_mut(state.*)), vt: addr_of(BUMP_VT) }; } }
+fn eat(b: Box i64) alloc -> i64 { return unbox(b); }
+fn go(al: Alloc) alloc -> i64 {
+    match box(read al, 7) {
+        BoxResult::boxed(b0) => {
+            let p: Box i64 = b0;
+            let mut i: i64 = 0;
+            loop {
+                if i > 0 { trace(eat(p)); break; }
+                i = i + 1;
+            }
+            return 0;
+        }
+        BoxResult::oom => { return 0 - 1; }
+    }
+}
+fn main() alloc -> i64 {
+    let mut bs: Bump = with_window(16777216, 1048576);
+    let al: Alloc = mk_alloc(write bs);
+    let r: i64 = go(al);
+    if r != 0 { return r; }
+    trace(bs.live);
+    return bs.live;
+}

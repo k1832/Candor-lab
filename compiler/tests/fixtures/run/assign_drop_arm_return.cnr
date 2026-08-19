@@ -1,0 +1,21 @@
+// GATE (move inside a returning arm): `go(true)` moves `p` into `sink` (whose
+// exit drops it: trace 5) and returns from inside the arm; `go(false)` never
+// enters the arm, so `p` is still owned at the tail return, which must drop it
+// (trace 5 again). A linear-threaded move state leaked the sibling arm's move
+// mark into the tail return and skipped that drop on MIR/native.
+struct D { id: i64 }
+drop(write self) { trace(self.id); }
+fn sink(d: D) -> i64 { return d.id; }  // owns d: drops it at exit
+fn go(c: bool) -> i64 {
+    let p: D = D { id: 5 };
+    if c {
+        sink(p);   // moves p; sink's exit traces 5
+        return 1;  // p moved: no drop here
+    }
+    return 2;      // p still owned on this path: trace 5
+}
+fn main() -> i64 {
+    trace(go(true));   // 5 (inside sink), then 1
+    trace(go(false));  // 5 (tail return drop), then 2
+    return 0;
+}

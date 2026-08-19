@@ -741,6 +741,9 @@ fn stmtkind_to(k: &StatementKind) -> Sexp {
             l(vec![a("copyval"), place_to(dst), place_to(src), ty_to(ty)])
         }
         StatementKind::Drop { local, moved } => l(vec![a("drop"), n(*local), moved_to(moved)]),
+        StatementKind::DropPlace { place, ty, moved } => {
+            l(vec![a("dropplace"), place_to(place), ty_to(ty), moved_to(moved)])
+        }
         StatementKind::BoxOp { dst, inner_ty, result_ty, alloc, value } => l(vec![
             a("boxop"),
             place_to(dst),
@@ -880,6 +883,11 @@ fn stmtkind_from(sx: &Sexp) -> Result<StatementKind, String> {
             ty: ty_from(arg(args, 2)?)?,
         },
         "drop" => StatementKind::Drop { local: arg(args, 0)?.num()?, moved: moved_from(arg(args, 1)?)? },
+        "dropplace" => StatementKind::DropPlace {
+            place: place_from(arg(args, 0)?)?,
+            ty: ty_from(arg(args, 1)?)?,
+            moved: moved_from(arg(args, 2)?)?,
+        },
         "boxop" => StatementKind::BoxOp {
             dst: place_from(arg(args, 0)?)?,
             inner_ty: ty_from(arg(args, 1)?)?,

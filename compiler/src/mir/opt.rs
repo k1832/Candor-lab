@@ -279,6 +279,8 @@ fn stmt_uses(kind: &StatementKind, live: &mut HashSet<LocalId>) {
         StatementKind::Drop { local, .. } => {
             live.insert(*local);
         }
+        // An overwrite drop reads (and runs drop work over) its place.
+        StatementKind::DropPlace { place, .. } => place_use(place, live),
         StatementKind::BoxOp { dst, alloc, value, .. } => {
             place_use(dst, live);
             op_use(alloc, live);

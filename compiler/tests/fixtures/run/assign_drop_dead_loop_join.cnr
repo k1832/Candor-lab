@@ -1,0 +1,21 @@
+// GATE (break-less loop is a dead exit, review 2026-08-19 M1): the else arm
+// ends in a `loop` with no break (it returns from inside), so the else arm
+// never reaches the if-join — the post-if state is the then-arm's alone, and
+// the reassignment drops (2). Pinned from reviewer repro R4b_loop_in_else.
+struct D { id: i64 }
+drop(write self) { trace(self.id); }
+fn sink(d: D) -> i64 { trace(100 + d.id); return 0; }
+fn go(a: bool) -> i64 {
+    let mut p: D = D { id: 1 };
+    if a {
+        p = D { id: 2 };
+    } else {
+        loop {
+            sink(p);
+            return 0;
+        }
+    }
+    p = D { id: 3 };
+    return 0;
+}
+fn main() -> i64 { go(true); trace(90); go(false); trace(91); return 0; }

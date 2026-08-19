@@ -1,0 +1,11 @@
+// GATE (overwrite drop through a projection, spec 03 §6.8): `h.d = ...` must
+// destroy only the FIELD's old value (trace 1) — not the whole struct — then
+// scope exit drops `h`, recursing into the replacement field (trace 9).
+struct D { id: i64 }
+drop(write self) { trace(self.id); }
+struct H { d: D, n: i64 }
+fn main() -> i64 {
+    let mut h: H = H { d: D { id: 1 }, n: 40 };
+    h.d = D { id: 9 };  // destroys the old field value: trace 1
+    return 0;
+}                       // scope exit drops h -> h.d: trace 9

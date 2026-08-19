@@ -399,6 +399,9 @@ fn classify_tiers(mf: &MirFn) -> Vec<bool> {
             match &st.kind {
                 StatementKind::Assign(_, Rvalue::Ref(p))
                 | StatementKind::Store(_, Rvalue::Ref(p)) => mark(p, &mut tf),
+                // An overwrite drop resolves its place ADDRESS (`place_addr`),
+                // so the dropped root must live flat.
+                StatementKind::DropPlace { place, .. } => mark(place, &mut tf),
                 StatementKind::CopyVal { dst, src, .. } => {
                     mark(dst, &mut tf);
                     mark(src, &mut tf);
@@ -2933,6 +2936,18 @@ impl<'a> FnEmit<'a> {
                     let addr = format!("%off{local}");
                     self.emit_drop(&addr, &ty, moved, &mut Vec::new())?;
                 }
+            }
+            // The overwrite drop (03 §6.8): destroy the old value of the
+            // reassigned place before its CopyVal stores the new one, pruned by
+            // the place-rebased static move mask (mirror of `mir::interp`). The
+            // builder emits it only for needs-drop targets, and `emit_drop`
+            // itself gates on `needs_drop(ty)` — the per-local
+            // `drop_obligation` flag gates only whole-local `Drop`s;
+            // `classify_tiers` keeps this place's root in flat (Tier-F)
+            // storage so `place_addr` is well-defined here.
+            StatementKind::DropPlace { place, ty, moved } => {
+                let (addr, _) = self.place_addr(place)?;
+                self.emit_drop(&addr, ty, moved, &mut Vec::new())?;
             }
             StatementKind::BoxOp { dst, inner_ty, result_ty, alloc, value } => {
                 self.box_op(dst, inner_ty, result_ty, alloc, value)?;

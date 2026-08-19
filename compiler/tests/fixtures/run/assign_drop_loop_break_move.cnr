@@ -1,0 +1,20 @@
+// GATE (loop break-edge move state, review 2026-08-19 B1): the value is moved
+// into `sink` on the breaking arm, so NOTHING may drop it after the loop —
+// the exit state is the union of the break-edge states, not the linear
+// body-exit state. Pinned from reviewer repro R1_minimal_double_drop.
+struct D { id: i64 }
+drop(write self) { trace(self.id); }
+fn sink(d: D) -> i64 { trace(100 + d.id); return 0; }
+fn go() -> i64 {
+    let mut p: D = D { id: 0 };
+    let mut i: i64 = 0;
+    loop {
+        
+        if i > 0 { sink(p); break; }
+        
+        i = i + 1;
+    }
+    
+    return 0;
+}
+fn main() -> i64 { go(); trace(999); return 0; }
