@@ -89,8 +89,6 @@ struct FnState {
     /// Loans carried by the just-evaluated expression's value (borrow exprs,
     /// call-return extension). Read by the binding site to anchor them.
     carried: Vec<usize>,
-    /// Provenance root of the just-evaluated borrow value (for return checks).
-    carried_prov: Option<String>,
     /// Signature facts the return-provenance check needs (name, is_borrow_param,
     /// region tag) and the return's region/borrow-ness.
     sig_params: Vec<(String, bool, Option<String>)>,
@@ -130,7 +128,6 @@ impl FnState {
             loans: Vec::new(),
             call_groups: Vec::new(),
             carried: Vec::new(),
-            carried_prov: None,
             sig_params: Vec::new(),
             ret_region: None,
             ret_is_borrow: false,
@@ -567,6 +564,12 @@ impl<'a> Checker<'a> {
     /// Create a loan on `place`'s conflict-granularity anchor (design §2.2/§2.3)
     /// and mark it as carried by the expression's value. Anchoring to a binding
     /// (or extension across a call) happens later, at the value's landing site.
+    ///
+    /// Borrowing or slicing an AGGREGATE that stores borrows (`read a`,
+    /// `read a[i]`, `slice_of(a)` over `[N]borrow T`) views the borrows inside
+    /// it, so the aggregate's own loans are re-carried alongside the fresh loan
+    /// (P4 review B2/B3) — otherwise the derived value sheds the element loans
+    /// and the borrowed places reopen while the view is live.
     pub(super) fn record_borrow(&mut self, place: &Option<Place>, kind: LoanKind, span: Span) {
         match place {
             Some(p) => {
@@ -579,12 +582,33 @@ impl<'a> Checker<'a> {
                     span,
                     anchor: Anchor::Temp,
                 });
-                self.f.carried = vec![id];
-                self.f.carried_prov = Some(root);
+                let mut ids = vec![id];
+                let root_holds_element_loans = self
+                    .lookup_local(&root)
+                    .map(|l| aggregate_stores_borrows(&l.ty))
+                    .unwrap_or(false);
+                if root_holds_element_loans {
+                    let sources: Vec<LoanInfo> = self
+                        .f
+                        .loans
+                        .iter()
+                        .filter(|l| matches!(&l.anchor, Anchor::Binding(n) if *n == root))
+                        .cloned()
+                        .collect();
+                    for li in sources {
+                        ids.push(self.f.loans.len());
+                        self.f.loans.push(LoanInfo {
+                            place: li.place,
+                            kind: li.kind,
+                            span: li.span,
+                            anchor: Anchor::Temp,
+                        });
+                    }
+                }
+                self.f.carried = ids;
             }
             None => {
                 self.f.carried = Vec::new();
-                self.f.carried_prov = None;
             }
         }
     }
@@ -599,21 +623,13 @@ impl<'a> Checker<'a> {
     /// of the borrowed backing is a use-after-free the checker misses. Fresh
     /// transient loans (same place, kind, span) are recorded and marked carried, so
     /// the landing binding anchors them to its own live range exactly as a fresh
-    /// borrow would.
+    /// borrow would. `field_stores_borrow` is the value-type predicate: the five
+    /// borrow kinds plus arrays of them — copying an array of borrows (or one of
+    /// its elements) aliases the same borrowed memory (P4, whole-array
+    /// granularity).
     pub(super) fn propagate_place_loans(&mut self, place: &Option<Place>, ty: &Type) {
         let root = match place {
-            Some(p)
-                if matches!(
-                    ty,
-                    Type::Borrow(_)
-                        | Type::BorrowMut(_)
-                        | Type::Slice(_)
-                        | Type::SliceMut(_)
-                        | Type::Str
-                ) =>
-            {
-                p.root.clone()
-            }
+            Some(p) if field_stores_borrow(ty) => p.root.clone(),
             _ => return,
         };
         let sources: Vec<LoanInfo> = self
@@ -638,7 +654,6 @@ impl<'a> Checker<'a> {
             ids.push(id);
         }
         self.f.carried = ids;
-        self.f.carried_prov = Some(root);
     }
 
     /// Anchor the currently-carried loans to a landing binding `name` (a `let` or
@@ -648,19 +663,16 @@ impl<'a> Checker<'a> {
         for id in ids {
             self.f.loans[id].anchor = Anchor::Binding(name.to_string());
         }
-        self.f.carried_prov = None;
     }
 
     pub(super) fn take_carried(&mut self) -> Vec<usize> {
         std::mem::take(&mut self.f.carried)
     }
-    pub(super) fn set_carried(&mut self, ids: Vec<usize>, prov: Option<String>) {
+    pub(super) fn set_carried(&mut self, ids: Vec<usize>) {
         self.f.carried = ids;
-        self.f.carried_prov = prov;
     }
     pub(super) fn clear_carried(&mut self) {
         self.f.carried = Vec::new();
-        self.f.carried_prov = None;
     }
     /// Create a loan directly anchored to a binding (a borrowed-scrutinee
     /// pattern binding, §8.2.1): in scope over that binding's live range.
@@ -760,7 +772,9 @@ impl<'a> Checker<'a> {
     fn check_fn_with_sig(&mut self, f: &FnDecl, sig: &FnSig) {
         self.f = FnState::empty();
         self.f.ret_ty = sig.ret.clone();
-        self.f.ret_is_borrow = sig.ret.is_borrow_kind();
+        // Arrays of borrows escape a frame exactly as a bare borrow does (P4):
+        // the provenance walk runs for them too.
+        self.f.ret_is_borrow = field_stores_borrow(&sig.ret);
         self.f.ret_region = sig.ret_region.clone();
         self.f.sig_params = sig
             .params
@@ -1052,7 +1066,9 @@ impl<'a> Checker<'a> {
     /// two-plus borrow params returning a borrow OR view require a region variable;
     /// an explicit return region must be declared and tag some borrow param.
     fn check_signature_regions(&mut self, sig: &crate::resolve::FnSig) {
-        if !sig.ret.is_borrow_kind() {
+        // An array-of-borrows return carries borrows out exactly as a bare
+        // borrow return does (P4), so the same region rules apply.
+        if !field_stores_borrow(&sig.ret) {
             return;
         }
         let borrow_params: Vec<&crate::resolve::ParamInfo> =
@@ -1154,7 +1170,20 @@ impl<'a> Checker<'a> {
 }
 
 /// A parameter that is itself a borrow (design §3.3): a `read`/`write` mode
-/// parameter, or a by-value borrow-kind (slice/borrow) parameter.
+/// parameter, or a by-value borrow-kind (slice/borrow) parameter — including an
+/// array of borrows (P4), whose elements point into caller frames just as a
+/// bare borrow parameter does.
 fn is_borrow_param(p: &crate::resolve::ParamInfo) -> bool {
-    matches!(p.mode, ParamMode::Read | ParamMode::Write) || p.decl_ty.is_borrow_kind()
+    matches!(p.mode, ParamMode::Read | ParamMode::Write) || field_stores_borrow(&p.decl_ty)
+}
+
+/// An aggregate (array or slice) whose ELEMENTS store borrows (P4): borrowing
+/// or slicing such a binding views the borrows inside it, so the binding's
+/// loans follow the derived value. Scalar borrow bindings are excluded — a
+/// reborrow's obligation chain is a separate (pre-existing) mechanism.
+fn aggregate_stores_borrows(ty: &Type) -> bool {
+    match ty {
+        Type::Array(e, _) | Type::Slice(e) | Type::SliceMut(e) => field_stores_borrow(e),
+        _ => false,
+    }
 }

@@ -75,3 +75,88 @@ and could lower a live bump via `rt_stack_restore` — unreachable today because
 the null-`CURRENT` abort always wins first, but it becomes reachable if the
 orphan crash is ever "fixed" by making `rt()` null-tolerant. Fix the orphan
 lifecycle (join-or-detach on the fault path), not the symptom.
+
+# Ledger additions from the P4-fix adversarial review (2026-08-18)
+
+Pre-existing holes found while attacking the P4 (arrays-of-borrows) fix. All
+four reproduce on the pre-P4-fix binary, so none are regressions of that
+work; each is logged here to be fixed in its own workstream, not in the P4
+one. Source: the 2026-08-18 adversarial review of the P4 fix.
+
+## P7 — Out-mode borrow escape (HIGH, pre-existing)
+
+A borrow written into an `out`-mode parameter slot leaves the callee without
+any provenance or region check: the return-provenance walk only covers
+`return` expressions, so a callee can store a borrow of its own local into
+the caller's slot and the caller then reads a dead frame. Applies to plain
+borrows and to arrays of borrows alike (the review has runnable repros for
+both). The fix belongs with the out-slot machinery, next to the E0806 walk.
+
+## P8 — Match-arm borrow shedding (HIGH, pre-existing)
+
+A borrow value produced as a `match` arm's result sheds its loan on the way
+out: the carried-loan protocol anchors at `let`/assignment landing sites and
+extends through calls, but the arm-result path does not re-carry, so the
+landing binding holds an unguarded borrow and the borrowed place reopens.
+Plain borrows and arrays of borrows both take this path. (The return-side
+walk already recurses into `match` arms; the value-side carry does not.)
+
+## P9 — E1006 annotation-position gap (LATENT, pre-existing)
+
+E1006 ("a borrow type is not a legal type argument", now also arrays of
+borrows) fires at explicit type-argument positions. A type argument that is
+only ever *inferred* through an annotation position is not routed through
+`check_arg_conformance`, so a borrow-storing argument could be laundered in
+by inference. Today the gap is unreachable in practice only because the
+generic-monomorphization array bug (P1 above: array type arguments render
+with length 0) breaks the carrier shapes first — the in-flight generics
+workstream that fixes P1 may unblock this path, so re-test E1006 coverage
+when P1 lands.
+
+## P10 — Block-scope dangle for plain borrows (MEDIUM-HIGH, pre-existing, now confirmed)
+
+Confirmed by repro during the P4 work: `let mut b = read x; { let y = 3;
+b = read y; } return deref b;` checks clean and returns the dead slot's
+value. A scope exit is neither a use nor a def in the loan liveness scan,
+and no rule ties a loan's life to its referent's scope, so a borrow of a
+block-local outliving the block escapes. Arrays of borrows now inherit
+exactly this (and no worse) behavior by parity; fixing it means tying loan
+places to the scope depth of their roots, a separate workstream.
+
+## P11 — Interface methods via associated types shed their return borrow (HIGH)
+
+`method_returns_borrow` reads the method's declared return type before
+substitution, so a method whose signature returns `Self::Item` never
+registers as borrow-returning even when `Item` is bound to a borrow (scalar
+`read i64` and array `[2]read i64` alike). The landing binding discards the
+receiver's loan and a later write through the "live" borrow checks clean and
+is observed at runtime. Distinct from the (closed) B1 predicate split: this
+is a substitution-ordering hole and it predates the borrow-array work
+(reproduced on both binaries). Fix direction: consult the substituted return
+type where the call is checked.
+
+## P12 — Instance-name structural prefixes forgeable by user type names (MEDIUM)
+
+The mangling scheme's verbatim fast path leaves plain identifiers unencoded,
+so a user type literally named `arr3` (or `arr`, `slice`, `ptr`, `Box`, ...)
+can collide with the structural array form in single-file programs
+(module-qualified names encode and cannot collide). Pre-existing class,
+net-improved by the injective-mangling work (the plain `arr[T]` collision is
+now fixed); eliminating the class means encoding every name and accepting
+instance-name churn for plain names — a recorded trade-off, not an
+oversight.
+
+## P13 — Selfhost mangling does not mirror the qualified-name encoding (LOW)
+
+The selfhost lowering emits type and length names as raw source spans where
+the reference now emits the length-prefixed encoding; a selfhost fixture
+using a qualified or underscored name in a generic instance would fail
+loudly (name mismatch against the reference-built tables), not miscompile.
+No fixture hits it today.
+
+## P14 — Pairwise array-literal loan scan double-counts one exclusive loan (COSMETIC)
+
+`[b, b]` where `b` is an exclusive borrow emits a spurious extra E0801
+beside the pre-existing E0301; the two propagated copies of one loan are
+counted as a conflicting pair. Can only co-occur with E0301, so no legal
+program is rejected.

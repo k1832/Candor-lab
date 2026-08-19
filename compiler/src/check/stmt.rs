@@ -3,7 +3,7 @@
 //! — recorded as an `Assign` action for Stage 4).
 
 use crate::ast::*;
-use crate::types::{bears_box, box_subpaths, needs_drop, Type};
+use crate::types::{bears_box, box_subpaths, field_stores_borrow, needs_drop, Type};
 
 use super::dataflow::{Access, Place};
 use crate::ast::{ExprKind, PrefixOp};
@@ -95,10 +95,18 @@ impl<'a> Checker<'a> {
                 }
                 match &place {
                     // A borrow value assigned to a whole binding anchors the loan(s)
-                    // it carries to that binding (§2.3); a store through a projection
-                    // targets no borrow binding (§3.4 bans borrow fields), so any
-                    // carried loan is dropped.
-                    Some(p) if self.carries_borrow(value) && p.proj.is_empty() => {
+                    // it carries to that binding (§2.3). A store through a projection
+                    // usually targets no borrow slot (§3.4 bans borrow fields) and
+                    // drops the carried loan; the exception is a projected slot whose
+                    // TYPE is a borrow — in practice an array element (P4) — where the
+                    // loan anchors on the place's root binding, the whole-array
+                    // granularity choice. (For a deref store the root is the
+                    // written-through binding, a conservative approximation: its live
+                    // range may end before the slot's.)
+                    Some(p)
+                        if self.carries_borrow(value)
+                            && (p.proj.is_empty() || field_stores_borrow(&tt)) =>
+                    {
                         let name = p.root.clone();
                         self.anchor_carried(&name);
                     }
@@ -185,12 +193,24 @@ impl<'a> Checker<'a> {
                 op: PrefixOp::Read | PrefixOp::Write,
                 ..
             } => true,
-            ExprKind::Ident(name) => matches!(
-                self.lookup_local(name).map(|li| &li.ty),
-                Some(
-                    Type::Borrow(_) | Type::BorrowMut(_) | Type::Slice(_) | Type::SliceMut(_) | Type::Str
-                )
-            ),
+            // `field_stores_borrow` is the borrow-value type predicate: the five
+            // borrow kinds plus arrays of them (P4, whole-array granularity).
+            ExprKind::Ident(name) => self
+                .lookup_local(name)
+                .map(|li| field_stores_borrow(&li.ty))
+                .unwrap_or(false),
+            // An array element read (`a[0]`) copies a borrow out of the array,
+            // aliasing the same borrowed place; a whole-array or nested-array
+            // read likewise. Probe the place's type without emitting.
+            ExprKind::Index { .. } => {
+                let (t, _) = self.write_path_probe(e);
+                field_stores_borrow(&t)
+            }
+            // An array of borrows carries every element's loan (P4).
+            ExprKind::ArrayLit(elems) => {
+                elems.iter().any(|el| self.carries_borrow(el))
+            }
+            ExprKind::ArrayRepeat { value, .. } => self.carries_borrow(value),
             ExprKind::Call { callee, .. } => {
                 if let ExprKind::Ident(name) = &callee.kind {
                     if matches!(
@@ -209,8 +229,9 @@ impl<'a> Checker<'a> {
                         // A user fn returning a borrow OR a view (`[T]`/`str`) carries
                         // its return-extended argument loan, exactly as a borrow return
                         // does; without this a view laundered out of a call sheds the
-                        // source loan (the function-return view UAF).
-                        return sig.ret.is_borrow_kind();
+                        // source loan (the function-return view UAF). An array of
+                        // borrows aliases its sources the same way (P4).
+                        return field_stores_borrow(&sig.ret);
                     }
                     return false;
                 }
@@ -236,10 +257,8 @@ impl<'a> Checker<'a> {
     /// which it saves/restores around).
     fn method_returns_borrow(&mut self, base: &crate::ast::Expr, field: &str) -> bool {
         let saved = std::mem::take(&mut self.f.carried);
-        let saved_prov = self.f.carried_prov.take();
         let recv_ty = self.synth_arg_type(base);
         self.f.carried = saved;
-        self.f.carried_prov = saved_prov;
         if field == "get_ref" {
             if let Type::App(n, _) = &recv_ty {
                 if n == "Vec" {
@@ -264,7 +283,9 @@ impl<'a> Checker<'a> {
                 .map(|m| m.ret),
             _ => None,
         };
-        matches!(ret, Some(t) if t.is_borrow_kind())
+        // Arrays of borrows returned from a method alias their sources exactly
+        // as a bare borrow return does (P4).
+        matches!(ret, Some(t) if field_stores_borrow(&t))
     }
 }
 

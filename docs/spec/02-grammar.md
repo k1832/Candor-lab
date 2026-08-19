@@ -421,6 +421,16 @@ grouping, `"lit"` terminal, UPPER a token class from chapter 01.
      region bracket immediately follows the borrow keyword and the slice type
      follows, with one-token lookahead after each bracket (§3.2).
 
+10.7a **Array-of-view regions** *(ratified 2026-08)*: the same keyword-led
+     region form extends to a fixed-length array whose element type is a view
+     or borrow (`read[r] [2]str`, `write[r] [4][u8]`) -- the region rides the
+     array exactly as it rides a slice, and the type denoted is the array of
+     views itself (not a borrow of it). Arrays of views follow the same
+     region/provenance rules as their scalar element views (04 §6); a
+     borrow-headed return whose array element type is owned is unchanged
+     (`read [2]i64` remains a borrow of `[2]i64`). Literal array sizes only,
+     matching the region-bracket lookahead.
+
 10.8 *(note)* **`>>`** stays unambiguously a shift because no `<…>` generic
      bracketing exists (OBL-GENERIC-BRACKET forbids `<>`); **`-` + literal** is
      the §6.6 fold decided on the next token's lexical class; **`?`** is pure

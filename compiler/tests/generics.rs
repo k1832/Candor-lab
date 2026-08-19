@@ -181,6 +181,76 @@ fn borrow_type_argument_is_rejected() {
 }
 
 #[test]
+fn iface_method_array_of_borrows_return_keeps_receiver_loan() {
+    // P4 review B1: an interface method returning `[N]read T` reborrows its
+    // receiver exactly as a `read T`-returning method does — the landing
+    // binding must keep the receiver's loan, so a write to the receiver while
+    // the array is live is E0803 (previously the loan was shed at the let).
+    assert_code(
+        "interface Viewer { fn view(read self) -> [2]read i64; }\n\
+         struct Pr { a: i64, b: i64 }\n\
+         impl Viewer for Pr { fn view(read self) -> [2]read i64 \
+         { return [read self.a, read self.b]; } }\n\
+         fn main() -> i64 { let mut p: Pr = Pr { a: 1, b: 2 }; \
+         let v: [2]read i64 = p.view(); p.a = 9; return v[0].*; }\n",
+        "E0803",
+    );
+}
+
+#[test]
+fn iface_method_assoc_type_array_of_borrows_return_keeps_receiver_loan() {
+    // Same shape through an associated-type return (`[2]read Self::Item`).
+    assert_code(
+        "interface RefPair { type Item; fn pair(read self) -> [2]read Self::Item; }\n\
+         struct Qr { a: i64, b: i64 }\n\
+         impl RefPair for Qr { type Item = i64; fn pair(read self) -> [2]read i64 \
+         { return [read self.a, read self.b]; } }\n\
+         fn main() -> i64 { let mut q: Qr = Qr { a: 3, b: 4 }; \
+         let v: [2]read i64 = q.pair(); q.a = 9; return v[0].*; }\n",
+        "E0803",
+    );
+}
+
+#[test]
+fn iface_method_array_of_borrows_return_within_window_accepted() {
+    let src = "interface Viewer { fn view(read self) -> [2]read i64; }\n\
+         struct Pr { a: i64, b: i64 }\n\
+         impl Viewer for Pr { fn view(read self) -> [2]read i64 \
+         { return [read self.a, read self.b]; } }\n\
+         fn main() -> i64 { let mut p: Pr = Pr { a: 1, b: 2 }; \
+         let v: [2]read i64 = p.view(); let s: i64 = v[0].* + v[1].*; \
+         p.a = 9; return s + p.a; }\n";
+    assert!(codes(src).is_empty(), "expected clean, got {:?}", codes(src));
+}
+
+#[test]
+fn method_receiver_probe_does_not_duplicate_same_call_overlap() {
+    // P4 review M1: `synth_arg_type` probes the receiver expression; the call
+    // groups the probe pushed re-raised the receiver call's same-call overlap,
+    // tripling E0805. Exactly one diagnostic must remain.
+    let src = "interface M { fn m(read self) -> i64; }\n\
+         struct Sm { v: i64 }\n\
+         impl M for Sm { fn m(read self) -> i64 { return self.v; } }\n\
+         fn mk(a: write i64, b: write i64) -> Sm { return Sm { v: a.* + b.* }; }\n\
+         fn main() -> i64 { let mut x: i64 = 1; \
+         let r: i64 = mk(write x, write x).m(); return r; }\n";
+    let cs = codes(src);
+    let n = cs.iter().filter(|c| *c == "E0805").count();
+    assert_eq!(n, 1, "expected exactly one E0805, got {cs:?}");
+}
+
+#[test]
+fn array_of_borrows_type_argument_is_rejected() {
+    // An array of borrows stores them just the same (P4): no laundering a
+    // borrow into abstraction through an array element type.
+    assert_code(
+        "fn id[T](x: T) -> T { return x; }\n\
+         fn main() -> i64 { let f: fn([2]read i64) -> [2]read i64 = id::[[2]read i64]; return 0; }\n",
+        "E1006",
+    );
+}
+
+#[test]
 fn polymorphic_recursion_is_def_site_error() {
     assert_code(
         "struct Wrap[T] { v: T }\n\
