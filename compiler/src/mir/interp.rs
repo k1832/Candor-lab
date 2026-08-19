@@ -389,6 +389,14 @@ impl<'a> Engine<'a> {
                         let ty = mf.locals[*local].ty.clone();
                         self.drop_value(addr, &ty, moved, &mut Vec::new())?;
                     }
+                    // The overwrite drop (03 §6.8): destroy the old value of the
+                    // reassigned place, pruned by the place-rebased static move
+                    // mask — mirrors the oracle's assignment drop (`eval.rs`
+                    // Assign).
+                    StatementKind::DropPlace { place, ty, moved } => {
+                        let (addr, _) = self.place_addr(place, mf, frame)?;
+                        self.drop_value(addr, ty, moved, &mut Vec::new())?;
+                    }
                     StatementKind::BoxOp { dst, inner_ty, result_ty, alloc, value } => {
                         self.box_op(dst, inner_ty, result_ty, alloc, value, mf, frame)?;
                     }

@@ -1359,3 +1359,39 @@ once you add the literal node). Key design/impl facts worth reusing:
   Exhaustion regression tests: `*stack_exhaustion*` in stage_b/aot/llvm/
   freestanding — they SIGSEGV, not fail, on regression. (bump assessment,
   2026-08-03)
+
+- **The MIR builder's move mask must ALSO carry initialization, and its state
+  must follow EDGES, not the linear AST walk — arms, loop breaks, and dead
+  joins each bite separately.** The overwrite-drop fix (2026-08-03 dossier +
+  2026-08-19 adversarial review) landed as: (1) an uninitialized `let` pushes
+  the whole-value mark `[]` into `Lowerer::moves` (the oracle's
+  `MoveMask::whole()`), init-gating every scope-exit/return/break `Drop` and
+  making the first assignment a non-drop; (2) `StmtKind::Assign` on a
+  needs-drop target whose LOWERED place is all-`Field` (the oracle's
+  `place_is_local_direct` — gating on the AST path alone wrongly fired through
+  a Box auto-deref, review B3) lowers the RHS into a fresh temp, emits
+  `StatementKind::DropPlace` when the target is owned-per-mask AFTER the RHS
+  lowering (so `p = wrap(p)` never double-drops), then `CopyVal`s temp→place;
+  the mask on the drop is REBASED onto the assigned place (marks below the
+  target path, stripped of it) in BOTH builder and oracle, or
+  `sink(h.d.x); h.d = ...` re-drops the moved `.x` (review M2); (3) `if`/match
+  arms snapshot `self.moves`, lower from the branch-point state, and
+  union-merge the arm exits that ACTUALLY reach the join — and a join no arm
+  reaches marks `reachable = false` so dead code contributes no state outward
+  (review M1: an inner if whose arms all return, or a break-less loop); (4)
+  loops collect the move state at every `break` on the `Loop` frame and union
+  them at the exit (`while` also unions its head state) — the FIRST version
+  merged only if/match arms, so a returning/breaking arm's move vanished from
+  the loop-exit state and previously-correct programs DOUBLE-DROPPED
+  (double-FREED for Box) on every MIR engine (review B1/B2: arm-restore
+  without break-edge collection is worse than the linear thread it replaced).
+  The union is exact at every consulted drop decision because E0302 forces
+  moved-vs-live agreement at joins and E0309 forces path-independent init at
+  needs-drop drop points; where edges may genuinely disagree (guard-false
+  chains, drop-inert locals) the union keeps the mark, i.e. skips the drop.
+  Continue edges need no capture: they rejoin the head, where the same rules
+  apply. A new StatementKind touches SEVEN sites: mir/mod.rs, build.rs (incl.
+  check_call_reclamation's may_allocate), interp.rs, opt.rs stmt_uses,
+  serial.rs ser+deser, backend/lower.rs, backend/llvm.rs (+ classify_tiers must
+  Tier-F any place the statement resolves via place_addr). (assignment-drop
+  fix + review, 2026-08-19)

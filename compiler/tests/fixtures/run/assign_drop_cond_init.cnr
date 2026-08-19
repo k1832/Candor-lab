@@ -1,0 +1,23 @@
+// GATE (conditional initialization, both arms, spec 03 §7.5): each `if` arm is
+// the FIRST initialization of `p` (no drop — the sibling arm's assignment is
+// not on this path; a linear-threaded move state wrongly dropped uninitialized
+// storage in the else arm), then the post-join reassignment drops the arm's
+// value (E0309 guarantees path-independent initialization there), and the
+// return drops the final value. pick(true) traces [1, 3]; pick(false) [2, 3].
+struct D { id: i64 }
+drop(write self) { trace(self.id); }
+fn pick(c: bool) -> i64 {
+    let mut p: D;
+    if c {
+        p = D { id: 1 };   // first init on the then path: NO drop
+    } else {
+        p = D { id: 2 };   // first init on the else path: NO drop
+    }
+    p = D { id: 3 };       // initialized on every path: drops the old value
+    return 0;
+}                          // return: trace 3
+fn main() -> i64 {
+    pick(true);
+    pick(false);
+    return 0;
+}

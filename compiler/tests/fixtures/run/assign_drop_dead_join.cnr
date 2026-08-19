@@ -1,0 +1,28 @@
+// GATE (dead join contributes no state, review 2026-08-19 M1): the inner
+// else-if's arms BOTH return, so its join is dead — the outer merge must take
+// only the then-arm state (owned), and the post-if reassignment drops (2).
+// Pinned from reviewer repro R4_deadjoin_missing_drop.
+struct D { id: i64 }
+drop(write self) { trace(self.id); }
+fn sink(d: D) -> i64 { trace(100 + d.id); return 0; }
+fn go(a: bool, b: bool) -> i64 {
+    let mut p: D = D { id: 1 };
+    if a {
+        p = D { id: 2 };
+    } else if b {
+        sink(p);
+        return 0;
+    } else {
+        sink(p);
+        return 0;
+    }
+    p = D { id: 3 };
+    return 0;
+}
+fn main() -> i64 {
+    go(true, true);
+    trace(90);
+    go(false, true);
+    trace(91);
+    return 0;
+}

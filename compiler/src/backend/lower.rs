@@ -1378,6 +1378,13 @@ impl<M: Module> Cg<'_, '_, M> {
                 let ty = mf.locals[*local].ty.clone();
                 self.emit_drop(a, &ty, moved, &mut Vec::new());
             }
+            // The overwrite drop (03 §6.8): destroy the old value of the
+            // reassigned place before its CopyVal stores the new one, pruned by
+            // the place-rebased static move mask (mirror of `mir::interp`).
+            StatementKind::DropPlace { place, ty, moved } => {
+                let (a, _) = self.place_addr(place, mf);
+                self.emit_drop(a, ty, moved, &mut Vec::new());
+            }
             StatementKind::BoxOp { dst, inner_ty, result_ty, alloc, value } => {
                 self.box_op(dst, inner_ty, result_ty, alloc, value, mf);
             }

@@ -1,0 +1,14 @@
+// GATE (overwrite drop, spec 03 §6.8/§7.5): reassigning a drop-hooked place
+// runs the OLD value's hook first (trace 1), before the new value is stored;
+// the scalar field store involves no drop; scope exit drops the final value
+// (trace 2). The 2026-08-03 divergence dossier's minimal reproduction: the
+// oracle traced [1, 2] while MIR/native traced [2].
+struct D { id: i64 }
+drop(write self) { trace(self.id); }
+fn mk(n: i64) -> D { return D { id: n }; }
+fn main() -> i64 {
+    let mut p: D = mk(1);
+    p = mk(9);      // destroys the old value: trace 1
+    p.id = 2;       // scalar field store: no drop involved
+    return 0;
+}                   // scope exit: trace 2

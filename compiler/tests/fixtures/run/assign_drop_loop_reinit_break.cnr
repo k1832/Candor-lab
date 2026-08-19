@@ -1,0 +1,23 @@
+// GATE (post-loop overwrite after a moving break, review 2026-08-19 B2): the
+// breaking arm moves `p` into `sink`, so the post-loop reassignment must NOT
+// drop — the loop-exit state is the union of the break-edge states, and the
+// in-loop reassignment's own overwrite drop (trace 1) still fires. Pinned
+// from reviewer repro R2_dropplace_double_drop.
+struct D { id: i64 }
+drop(write self) { trace(self.id); }
+fn sink(d: D) -> i64 { trace(100 + d.id); return 0; }
+fn go() -> i64 {
+    let mut p: D = D { id: 1 };
+    let mut i: i64 = 0;
+    loop {
+        if i > 0 {
+            sink(p);
+            break;
+        }
+        p = D { id: 2 };
+        i = i + 1;
+    }
+    p = D { id: 3 };
+    return 0;
+}
+fn main() -> i64 { go(); trace(90); return 0; }

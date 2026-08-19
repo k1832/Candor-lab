@@ -253,6 +253,18 @@ pub enum StatementKind {
     /// runtime flag) — the drop skips those sub-paths, running hooks/frees only on
     /// the still-owned remainder (field-granular pruning, design 0010 §2 INV-DROP).
     Drop { local: LocalId, moved: Vec<Vec<String>> },
+    /// The overwrite drop (spec 03 §6.8/§7.5): destroy the OLD value of a
+    /// (possibly projected) place right before a reassignment stores the new
+    /// one. Emitted only for a DIRECT place (every projection a `Field` — the
+    /// oracle's `place_is_local_direct`) whose type needs drop and which is
+    /// statically initialized-and-unmoved at the assignment — E0309 makes that
+    /// a path-independent fact, so no runtime flag is needed (INV-DROP). `ty`
+    /// is the place's type; `moved` is the static move mask REBASED onto the
+    /// place (marks below the target's field path, stripped of it), consulted
+    /// while walking from the place with an empty starting path — matching the
+    /// tree-walking oracle's assignment drop (`interp/eval.rs`
+    /// `StmtKind::Assign`), which rebases the local's live mask identically.
+    DropPlace { place: Place, ty: Type, moved: Vec<Vec<String>> },
     /// `box(alloc, value)` (design 0001 §6.2): allocate through the handle's
     /// vtable, move `value` into the block, and build the `BoxResult` at `dst`.
     BoxOp { dst: Place, inner_ty: Type, result_ty: Type, alloc: Operand, value: Place },

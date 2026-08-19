@@ -1,0 +1,15 @@
+// GATE (overwrite drops inside a loop, spec 03 §6.8): each iteration's
+// reassignment destroys the previous value — the pre-loop value on the first
+// pass (trace 0), then each prior iteration's (1, 2) — and scope exit drops
+// the last (3).
+struct D { id: i64 }
+drop(write self) { trace(self.id); }
+fn main() -> i64 {
+    let mut p: D = D { id: 0 };
+    let mut i: i64 = 1;
+    while i < 4 {
+        p = D { id: i };  // drops the previous value: traces 0, 1, 2
+        i = i + 1;
+    }
+    return 0;
+}                         // scope exit: trace 3

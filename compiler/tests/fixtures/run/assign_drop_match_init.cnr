@@ -1,0 +1,22 @@
+// GATE (conditional initialization through match arms): each arm is the FIRST
+// initialization of `p` — no drop in either arm (the sibling arm's assignment
+// is not on this arm's paths) — then the post-match reassignment drops the
+// arm's value and the return drops the final one. Mirrors the `if` fixture
+// (assign_drop_cond_init) on the match-arm chain.
+struct D { id: i64 }
+drop(write self) { trace(self.id); }
+enum Tag { A, B }
+fn pick(t: Tag) -> i64 {
+    let mut p: D;
+    match t {
+        Tag::A => { p = D { id: 1 }; }
+        Tag::B => { p = D { id: 2 }; }
+    }
+    p = D { id: 3 };       // initialized on every path: drops the old value
+    return 0;
+}                          // return: trace 3
+fn main() -> i64 {
+    pick(Tag::A);
+    pick(Tag::B);
+    return 0;
+}
