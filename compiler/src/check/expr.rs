@@ -8,7 +8,7 @@ use crate::span::Span;
 use crate::token::ScalarTy;
 use crate::types::*;
 
-use super::dataflow::{Access, LoanKind, Place, Proj, Term};
+use super::dataflow::{overlaps, Access, LoanKind, Place, Proj, Term};
 use super::patterns::{self, BindMode, HoldMode};
 use super::{Checker, Use};
 
@@ -113,7 +113,11 @@ impl<'a> Checker<'a> {
             ExprKind::ArrayLit(elems) => self.check_array_lit(elems),
             ExprKind::ArrayRepeat { value, size } => {
                 let t = self.check_expr(value, Use::Value);
+                // A `read x` element's loan is carried by the whole array value
+                // (P4, whole-array granularity): keep it across the size check.
+                let carried = self.take_carried();
                 let _ = self.check_expr(size, Use::Value);
+                self.set_carried(carried);
                 // Repeating IS copying: the one element value is duplicated into
                 // every slot, so a non-`copy` (drop-hooked or owning) element
                 // would be dropped N times for one construction (§1.3/§1.5).
@@ -426,7 +430,7 @@ impl<'a> Checker<'a> {
     /// place `e` holds and whether any `deref` on the path to it peels a SHARED
     /// borrow. Autoderef steps into a field/index of a borrow count as derefs on
     /// the path; peeling an exclusive borrow or a `Box` does not set the flag.
-    fn write_path_probe(&self, e: &Expr) -> (Type, bool) {
+    pub(super) fn write_path_probe(&self, e: &Expr) -> (Type, bool) {
         match &e.kind {
             ExprKind::Paren(i) => self.write_path_probe(i),
             ExprKind::Ident(name) => {
@@ -927,15 +931,61 @@ impl<'a> Checker<'a> {
 
     fn check_array_lit(&mut self, elems: &[Expr]) -> Type {
         let mut ty = Type::Error;
+        // Borrow elements: every element's loan(s) accumulate onto the whole
+        // array value (P4, conservative whole-array granularity), so the
+        // landing binding anchors them all — `record_borrow` alone would keep
+        // only the last element's loan.
+        let mut carried: Vec<usize> = Vec::new();
         for (i, el) in elems.iter().enumerate() {
+            self.clear_carried();
             let t = self.check_expr(el, Use::Value);
+            let new_ids = self.take_carried();
+            self.check_array_elem_overlaps(&carried, &new_ids);
+            carried.extend(new_ids);
             if i == 0 {
                 ty = t;
             } else {
                 ty = self.unify_array_elem(ty, t, el.span);
             }
         }
+        self.set_carried(carried);
         Type::Array(Box::new(ty), ArrayLen::Lit(elems.len() as u64))
+    }
+
+    /// Elements of one array literal are live together for the array's whole
+    /// live range (P4 whole-array granularity), so overlapping element loans
+    /// must all be shared — `[write x, write x]` is the in-array twin of two
+    /// live exclusive borrows (E0801), exactly as the same-call scan (E0805)
+    /// treats co-argument loans. The liveness conflict scan cannot see this
+    /// pair: neither loan is anchored (thus live) until the literal lands.
+    fn check_array_elem_overlaps(&mut self, prev: &[usize], new_ids: &[usize]) {
+        let mut conflicts: Vec<(String, Span, String, Span)> = Vec::new();
+        for &nid in new_ids {
+            for &pid in prev {
+                let (a, b) = (&self.f.loans[pid], &self.f.loans[nid]);
+                if !overlaps(&a.place, &b.place) {
+                    continue;
+                }
+                if matches!((a.kind, b.kind), (LoanKind::Shared, LoanKind::Shared)) {
+                    continue;
+                }
+                conflicts.push((b.place.display(), b.span, a.place.display(), a.span));
+            }
+        }
+        for (bp, bspan, ap, aspan) in conflicts {
+            self.diags.push(
+                Diag::error(
+                    "E0801",
+                    format!("conflicting borrow of `{bp}` (an exclusive borrow excludes all other borrows) (§2.2)"),
+                    bspan,
+                )
+                .with_note(format!("...conflicts with the borrow of `{ap}` in this same array"), Some(aspan))
+                .with_note(
+                    "array elements live exactly as long as the array: overlapping element borrows must all be shared (§2.2)",
+                    None,
+                ),
+            );
+        }
     }
 
     /// Unify one array-literal element type into the running element type,
@@ -1019,6 +1069,14 @@ impl<'a> Checker<'a> {
                 }
             }
             ExprKind::Block(b) => self.check_return_block_tail(b),
+            // An array of borrows escapes each element's borrow (P4): every
+            // element must independently derive from a legal input region.
+            ExprKind::ArrayLit(elems) => {
+                for el in elems {
+                    self.check_return_provenance(el);
+                }
+            }
+            ExprKind::ArrayRepeat { value, .. } => self.check_return_provenance(value),
             // Diverging shapes yield no borrow value to escape the body.
             ExprKind::Return(_) | ExprKind::Break | ExprKind::Continue | ExprKind::Panic(_) => {}
             _ => self.check_return_root(e),
@@ -1102,12 +1160,29 @@ impl<'a> Checker<'a> {
                 expr,
             } => expr_place_root(expr),
             ExprKind::Ident(n) => {
-                if self.lookup_local(n).map(|l| l.ty.is_borrow_kind()).unwrap_or(false) {
+                // Arrays of borrows count (P4): the array binding is the
+                // provenance root, at whole-array granularity.
+                if self
+                    .lookup_local(n)
+                    .map(|l| field_stores_borrow(&l.ty))
+                    .unwrap_or(false)
+                {
                     Some(n.clone())
                 } else {
                     None
                 }
             }
+            // A borrow value read out of a projection roots at the place's
+            // binding (P4 forwarding shapes): an element of an array of borrows
+            // (`a[i]`) or the array behind a `read`-mode array param (`deref p`)
+            // derives from that root, at whole-array granularity. Only reached
+            // when the value's type is borrow-kind, so an owned element read
+            // never lands here.
+            ExprKind::Index { base, .. } => expr_place_root(base),
+            ExprKind::Prefix {
+                op: PrefixOp::Deref,
+                expr,
+            } => expr_place_root(expr),
             ExprKind::Call { callee, args } => {
                 if let ExprKind::Ident(name) = &callee.kind {
                     match name.as_str() {
@@ -1115,7 +1190,8 @@ impl<'a> Checker<'a> {
                         "subslice" | "substr" | "as_bytes" | "as_str" => args.first().and_then(|a| self.borrow_provenance(a)),
                         _ => {
                             if let Some(sig) = self.items.fns.get(name) {
-                                if sig.ret.is_borrow_kind() {
+                                // Arrays of borrows forward like bare borrows (P4).
+                                if field_stores_borrow(&sig.ret) {
                                     let src = region_source_indices(sig);
                                     return src
                                         .first()
@@ -1570,11 +1646,9 @@ impl<'a> Checker<'a> {
         }
         // Evaluate each argument, capturing the loan(s) it contributes (§3.1).
         let mut per_arg: Vec<Vec<usize>> = Vec::new();
-        let mut per_prov: Vec<Option<String>> = Vec::new();
         for (p, a) in sig.params.iter().zip(args) {
             self.clear_carried();
             self.check_arg_mode(p.mode, &p.decl_ty, a);
-            per_prov.push(self.f.carried_prov.clone());
             per_arg.push(self.take_carried());
         }
         let group: Vec<usize> = per_arg.iter().flatten().copied().collect();
@@ -1599,17 +1673,14 @@ impl<'a> Checker<'a> {
         // the loan(s) on the argument(s) tagged with the return's region alive
         // (§3.1/§3.3) — a view aliases its source's backing exactly as a borrow
         // does, so a view laundered out of a call must carry the source loan.
-        if sig.ret.is_borrow_kind() {
+        // An array of borrows aliases its sources the same way (P4).
+        if field_stores_borrow(&sig.ret) {
             let src = region_source_indices(sig);
             let mut ids = Vec::new();
-            let mut prov = None;
             for i in src {
                 ids.extend(per_arg[i].iter().copied());
-                if prov.is_none() {
-                    prov = per_prov[i].clone();
-                }
             }
-            self.set_carried(ids, prov);
+            self.set_carried(ids);
         } else {
             self.clear_carried();
         }
@@ -1748,7 +1819,7 @@ impl<'a> Checker<'a> {
                 );
                 // `out place` is an exclusive loan on the slot for the call (§3.1).
                 let id = self.new_temp_loan(p.canonical(), LoanKind::Excl, arg.span);
-                self.set_carried(vec![id], Some(p.canonical().root));
+                self.set_carried(vec![id]);
             }
             None => self.diags.push(
                 Diag::error("E0705", "an `out` argument must be a place", arg.span)
@@ -2977,7 +3048,9 @@ fn region_source_indices(sig: &crate::resolve::FnSig) -> Vec<usize> {
         .params
         .iter()
         .enumerate()
-        .filter(|(_, p)| matches!(p.mode, ParamMode::Read | ParamMode::Write) || p.decl_ty.is_borrow_kind())
+        .filter(|(_, p)| {
+            matches!(p.mode, ParamMode::Read | ParamMode::Write) || field_stores_borrow(&p.decl_ty)
+        })
         .map(|(i, _)| i)
         .collect();
     match &sig.ret_region {

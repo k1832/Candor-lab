@@ -701,8 +701,12 @@ fn bears_box_rec(ty: &Type, env: &dyn ItemEnv, stack: &mut Vec<String>) -> bool 
 // Well-formedness helpers
 // ---------------------------------------------------------------------------
 
-/// Does this *field* type store a borrow (design 0001 §3.4 — banned)? Slices are
-/// borrows too. `Box`/`rawptr` indirection is fine (they are not borrows).
+/// Does this type store a borrow (design 0001 §3.4)? Slices are borrows too;
+/// arrays store whatever their element stores. `Box`/`rawptr` indirection is
+/// fine (they are not borrows). Used both to ban borrow-typed struct fields /
+/// enum payloads / generic type arguments, and by the loan machinery as the
+/// "this value carries loans" predicate (P4: arrays of borrows carry their
+/// elements' loans at whole-array granularity).
 pub fn field_stores_borrow(ty: &Type) -> bool {
     match ty {
         Type::Slice(_) | Type::SliceMut(_) | Type::Str | Type::Borrow(_) | Type::BorrowMut(_) => true,

@@ -98,6 +98,13 @@ fn slice_typed_struct_field() {
 }
 
 #[test]
+fn array_of_borrows_struct_field() {
+    // §3.4 recurses into arrays: a field of `[N]borrow T` stores borrows too
+    // (P4: struct-of-array-of-borrow stays unconstructible).
+    assert_has("struct Bad { a: [2]borrow i64 }", "E0201");
+}
+
+#[test]
 fn rawptr_op_outside_unsafe() {
     assert_has("fn f(p: rawptr i64) -> i64 { return ptr_read(p); }", "E0501");
 }

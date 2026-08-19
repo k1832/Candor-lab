@@ -698,3 +698,461 @@ fn implicit_reborrow_composes_with_return_extension_s1() {
     );
     assert_has(&explicit, "E0803");
 }
+
+// ---- P4 (review 2026-08-03): borrows stored into array elements -----------
+//
+// Conservative whole-array granularity: borrowing into ANY element places the
+// loan on the whole array binding, and the array's live range covers every
+// element's loan. Struct fields cannot store borrows (E0201), so arrays are
+// the only aggregate that carries element loans.
+
+#[test]
+fn p4_repeat_write_during_live_loan() {
+    // The P4 repro: `[read x; 3]` then a write to `x` under the live loan.
+    assert_has(
+        "fn f() -> i64 { let mut x: i64 = 1; let a: [3]borrow i64 = [read x; 3]; \
+         x = 9; return deref a[0]; }",
+        "E0803",
+    );
+}
+
+#[test]
+fn p4_literal_write_during_live_loan() {
+    // The array-literal form, conflicting through the FIRST element's loan —
+    // every element's loan must accumulate onto the array, not just the last.
+    assert_has(
+        "fn f() -> i64 { let mut x: i64 = 1; let y: i64 = 2; \
+         let a: [2]borrow i64 = [read x, read y]; x = 9; return deref a[0]; }",
+        "E0803",
+    );
+}
+
+#[test]
+fn p4_move_while_array_borrowed() {
+    assert_has(
+        "fn f() -> i64 { let x: S = mk(); let a: [2]borrow S = [read x; 2]; \
+         let y: S = x; return (deref a[0]).n; }",
+        "E0802",
+    );
+}
+
+#[test]
+fn p4_exclusive_borrow_while_array_loan_live() {
+    assert_has(
+        "fn f() -> i64 { let mut x: i64 = 1; let a: [2]borrow i64 = [read x; 2]; \
+         let w = write x; deref w = 3; return deref a[0]; }",
+        "E0801",
+    );
+}
+
+#[test]
+fn p4_read_while_write_borrow_array_live() {
+    // Arrays of write borrows are constructible through the literal form
+    // (`write x` is a fresh borrow, not a copy); the exclusive loan lands on
+    // the array and excludes direct reads of `x`.
+    assert_has(
+        "fn f() -> i64 { let mut x: i64 = 1; let a: [1]borrow_mut i64 = [write x]; \
+         let v: i64 = x; deref a[0] = 2; return v; }",
+        "E0804",
+    );
+}
+
+#[test]
+fn write_borrow_array_repeat_noncopy_pin() {
+    // PIN of pre-existing behavior (not part of the P4 fix): the repeat form
+    // duplicates its element, and an exclusive borrow is not `copy` (E0716) —
+    // so arrays of write borrows exist only via the literal form. The P4
+    // matrix relies on this staying true.
+    assert_has(
+        "fn f() -> i64 { let mut x: i64 = 1; let a: [2]borrow_mut i64 = [write x; 2]; \
+         deref a[0] = 2; return x; }",
+        "E0716",
+    );
+}
+
+#[test]
+fn p4_element_store_write_during_live_loan() {
+    // A borrow stored into an element AFTER construction anchors on the whole
+    // array too.
+    assert_has(
+        "fn f() -> i64 { let x: i64 = 1; let mut y: i64 = 2; \
+         let mut a: [2]borrow i64 = [read x; 2]; a[0] = read y; \
+         y = 5; return deref a[0]; }",
+        "E0803",
+    );
+}
+
+#[test]
+fn p4_array_copy_keeps_loans() {
+    // Copying the array aliases the same borrowed memory: the copy must not
+    // shed the source loans (the array analogue of the loan-copy UAF).
+    assert_has(
+        "fn f() -> i64 { let mut x: i64 = 1; let a: [2]borrow i64 = [read x; 2]; \
+         let b = a; x = 9; return deref b[0]; }",
+        "E0803",
+    );
+}
+
+#[test]
+fn p4_element_copy_keeps_loans() {
+    // Copying ONE element out likewise carries the loan to the new binding.
+    assert_has(
+        "fn f() -> i64 { let mut x: i64 = 1; let a: [2]borrow i64 = [read x; 2]; \
+         let e = a[0]; x = 9; return deref e; }",
+        "E0803",
+    );
+}
+
+#[test]
+fn p4_nested_array_write_during_live_loan() {
+    assert_has(
+        "fn f() -> i64 { let mut x: i64 = 1; \
+         let a: [1][1]borrow i64 = [[read x]]; x = 9; return deref a[0][0]; }",
+        "E0803",
+    );
+}
+
+#[test]
+fn p4_dangling_return_repeat_rejected() {
+    // The dangling-frame variant: an array of borrows of a local escaping the
+    // body is the same escape a bare borrow return is (E0806).
+    assert_has(
+        "fn mk3() -> [3]borrow i64 { let x: i64 = 7; return [read x; 3]; }",
+        "E0806",
+    );
+}
+
+#[test]
+fn p4_dangling_return_literal_rejected() {
+    assert_has(
+        "fn mk2() -> [2]borrow i64 { let x: i64 = 7; return [read x, read x]; }",
+        "E0806",
+    );
+}
+
+#[test]
+fn p4_dangling_return_binding_rejected() {
+    // Returning an array-of-borrows BINDING roots provenance at the (local)
+    // binding, at whole-array granularity.
+    assert_has(
+        "fn mk2() -> [2]borrow i64 { let x: i64 = 7; \
+         let a: [2]borrow i64 = [read x; 2]; return a; }",
+        "E0806",
+    );
+}
+
+#[test]
+fn p4_array_return_from_borrow_param_extends_caller_loan() {
+    // The legal escape: elements derive from a borrow parameter (§3.3). The
+    // caller-side return extension must then keep the argument's loan alive
+    // under the landed array.
+    assert_has(
+        "fn view(p: read i64) -> [2]borrow i64 { return [read (deref p); 2]; } \
+         fn f() -> i64 { let mut x: i64 = 5; let a: [2]borrow i64 = view(read x); \
+         x = 9; return deref a[0]; }",
+        "E0803",
+    );
+}
+
+#[test]
+fn p4_repeat_use_within_window_accepted() {
+    // NLL window: the loan dies with the array's last use; writing after is fine.
+    assert_clean(
+        "fn f() -> i64 { let mut x: i64 = 1; let a: [3]borrow i64 = [read x; 3]; \
+         let v: i64 = deref a[0] + deref a[2]; x = 9; return v + x; }",
+    );
+}
+
+#[test]
+fn p4_literal_use_within_window_accepted() {
+    assert_clean(
+        "fn f() -> i64 { let mut x: i64 = 1; let mut y: i64 = 2; \
+         let a: [2]borrow i64 = [read x, read y]; let v: i64 = deref a[0] + deref a[1]; \
+         x = 9; y = 8; return v; }",
+    );
+}
+
+#[test]
+fn p4_element_store_then_use_accepted() {
+    assert_clean(
+        "fn f() -> i64 { let x: i64 = 1; let y: i64 = 2; \
+         let mut a: [2]borrow i64 = [read x; 2]; a[1] = read y; \
+         return deref a[0] + deref a[1]; }",
+    );
+}
+
+#[test]
+fn p4_write_borrow_array_write_through_accepted() {
+    // Writing THROUGH the stored exclusive borrow is the legal use; the direct
+    // read of `x` afterwards is past the loan's window.
+    assert_clean(
+        "fn f() -> i64 { let mut x: i64 = 1; let a: [1]borrow_mut i64 = [write x]; \
+         deref a[0] = 5; return x; }",
+    );
+}
+
+#[test]
+fn p4_array_return_from_borrow_param_accepted() {
+    assert_clean(
+        "fn view(p: read i64) -> [2]borrow i64 { return [read (deref p); 2]; } \
+         fn f() -> i64 { let x: i64 = 5; let a: [2]borrow i64 = view(read x); \
+         return deref a[0] + deref a[1]; }",
+    );
+}
+
+// The legal shapes must also RUN identically on all three engines (the
+// differential half of the P4 matrix; rejected shapes never reach a runtime).
+
+fn assert_runs_all_engines(src: &str, want: i64) {
+    match candor::run_source(src) {
+        candor::RunResult::Ok(r) => assert_eq!(r.ret, want, "tree-walker"),
+        other => panic!("tree-walker did not run (ok={})", matches!(other, candor::RunResult::Ok(_))),
+    }
+    match candor::run_source_mir(src) {
+        candor::MirRunResult::Ok(r) => assert_eq!(r.ret, want, "MIR"),
+        candor::MirRunResult::Unsupported(w) => panic!("MIR unsupported: {w}"),
+        _ => panic!("MIR did not run"),
+    }
+    match candor::run_source_native(src) {
+        candor::MirRunResult::Ok(r) => assert_eq!(r.ret, want, "native"),
+        candor::MirRunResult::Unsupported(w) => panic!("native unsupported: {w}"),
+        _ => panic!("native did not run"),
+    }
+}
+
+#[test]
+fn p4_differential_repeat_within_window() {
+    assert_runs_all_engines(
+        "fn main() -> i64 { let mut x: i64 = 1; let a: [3]borrow i64 = [read x; 3]; \
+         let v: i64 = deref a[0] + deref a[2]; x = 9; return v + x; }",
+        11,
+    );
+}
+
+#[test]
+fn p4_differential_literal_and_element_store() {
+    assert_runs_all_engines(
+        "fn main() -> i64 { let x: i64 = 1; let y: i64 = 2; \
+         let mut a: [2]borrow i64 = [read x; 2]; a[1] = read y; \
+         return deref a[0] * 10 + deref a[1]; }",
+        12,
+    );
+}
+
+#[test]
+fn p4_differential_write_borrow_array() {
+    assert_runs_all_engines(
+        "fn main() -> i64 { let mut x: i64 = 1; let a: [1]borrow_mut i64 = [write x]; \
+         deref a[0] = 5; return x; }",
+        5,
+    );
+}
+
+#[test]
+fn p4_differential_array_from_borrow_param() {
+    assert_runs_all_engines(
+        "fn view(p: read i64) -> [2]borrow i64 { return [read (deref p); 2]; } \
+         fn main() -> i64 { let x: i64 = 5; let a: [2]borrow i64 = view(read x); \
+         return deref a[0] + deref a[1]; }",
+        10,
+    );
+}
+
+// ---- P4 review (2026-08-18) B2/B3: derived views of a borrow array ---------
+//
+// Borrowing or slicing an array of borrows views the borrows inside it: the
+// array's element loans must follow the derived value (`read a`, `write a`,
+// an element reborrow, `slice_of`/`slice_of_mut`/`subslice`), or the borrowed
+// places reopen while the view is live.
+
+#[test]
+fn p4_borrow_of_array_keeps_element_loans() {
+    assert_has(
+        "fn f() -> i64 { let mut x: i64 = 1; let a: [2]borrow i64 = [read x; 2]; \
+         let r: borrow [2]borrow i64 = read a; x = 9; return deref (deref r)[0]; }",
+        "E0803",
+    );
+}
+
+#[test]
+fn p4_write_borrow_of_array_keeps_element_loans() {
+    assert_has(
+        "fn f() -> i64 { let mut x: i64 = 1; let mut a: [2]borrow i64 = [read x; 2]; \
+         let w: borrow_mut [2]borrow i64 = write a; x = 9; return deref (deref w)[0]; }",
+        "E0803",
+    );
+}
+
+#[test]
+fn p4_element_reborrow_keeps_element_loans() {
+    // `a[0]` passed to a `read`-mode param is an implicit element reborrow; the
+    // borrow-returning callee extends BOTH the fresh loan on `a` and the
+    // re-carried element loan on `x` to the landing binding.
+    assert_has(
+        "fn g(p: read i64) -> borrow i64 { return read (deref p); } \
+         fn f() -> i64 { let mut x: i64 = 1; let a: [1]borrow i64 = [read x]; \
+         let r: borrow i64 = g(a[0]); x = 9; return deref r; }",
+        "E0803",
+    );
+}
+
+#[test]
+fn p4_slice_of_borrow_array_keeps_element_loans() {
+    assert_has(
+        "fn f() -> i64 { let mut x: i64 = 1; let a: [2]borrow i64 = [read x; 2]; \
+         let s: slice borrow i64 = slice_of(a); x = 9; return deref s[0]; }",
+        "E0803",
+    );
+}
+
+#[test]
+fn p4_slice_of_mut_borrow_array_keeps_element_loans() {
+    assert_has(
+        "fn f() -> i64 { let mut x: i64 = 1; let mut a: [2]borrow i64 = [read x; 2]; \
+         let s: slice_mut borrow i64 = slice_of_mut(a); x = 9; return deref s[0]; }",
+        "E0803",
+    );
+}
+
+#[test]
+fn p4_subslice_of_borrow_slice_keeps_element_loans() {
+    assert_has(
+        "fn f() -> i64 { let mut x: i64 = 1; let a: [2]borrow i64 = [read x; 2]; \
+         let s: slice borrow i64 = slice_of(a); \
+         let s2: slice borrow i64 = subslice(s, 0, 1); x = 9; return deref s2[0]; }",
+        "E0803",
+    );
+}
+
+#[test]
+fn p4_borrow_of_array_within_window_accepted() {
+    // NLL positive: the derived view dies before the write.
+    assert_clean(
+        "fn f() -> i64 { let mut x: i64 = 1; let a: [2]borrow i64 = [read x; 2]; \
+         let s: slice borrow i64 = slice_of(a); let v: i64 = deref s[0]; \
+         x = 9; return v + x; }",
+    );
+}
+
+// ---- P4 review (2026-08-18) O1: forwarding arrays of borrows ---------------
+//
+// Forwarding an array of borrows out of a function works exactly like
+// forwarding a scalar borrow: provenance is tracked (not rejected), and the
+// caller-side return extension keeps the source loans alive.
+
+#[test]
+fn p4_forward_array_through_call_accepted() {
+    assert_clean(
+        "fn view(p: read i64) -> [2]borrow i64 { return [read (deref p); 2]; } \
+         fn fwd(q: read i64) -> [2]borrow i64 { return view(q); }",
+    );
+}
+
+#[test]
+fn p4_return_array_param_by_value_accepted() {
+    // A by-value array-of-borrows parameter is a borrow parameter (its
+    // elements point into caller frames): returning it is region-legal.
+    assert_clean("fn fwd2(a: [2]borrow i64) -> [2]borrow i64 { return a; }");
+}
+
+#[test]
+fn p4_return_array_param_by_deref_accepted() {
+    // (`read [2]...` would parse the bracket as a region tag, so the borrowed
+    // array param is spelled as a by-value `borrow` type here.)
+    assert_clean("fn fwd3(p: borrow [2]borrow i64) -> [2]borrow i64 { return deref p; }");
+}
+
+#[test]
+fn p4_return_element_of_array_param_accepted() {
+    assert_clean("fn first(a: [2]borrow i64) -> borrow i64 { return a[0]; }");
+}
+
+#[test]
+fn p4_forwarded_array_param_extends_caller_loan() {
+    // The forwarded array is safe end to end: the caller's element loans
+    // extend through the call and still guard the borrowed place.
+    assert_has(
+        "fn fwd2(a: [2]borrow i64) -> [2]borrow i64 { return a; } \
+         fn f() -> i64 { let mut x: i64 = 1; let arr: [2]borrow i64 = [read x; 2]; \
+         let r: [2]borrow i64 = fwd2(arr); x = 9; return deref r[0]; }",
+        "E0803",
+    );
+}
+
+#[test]
+fn p4_return_element_of_local_array_still_rejected() {
+    // The element-forwarding arm roots at the array BINDING: a local array of
+    // local borrows stays rejected.
+    assert_has(
+        "fn bad() -> borrow i64 { let x: i64 = 1; \
+         let a: [2]borrow i64 = [read x; 2]; return a[0]; }",
+        "E0806",
+    );
+}
+
+// ---- P4 review (2026-08-18) P2: conflicting borrows inside one literal -----
+//
+// Elements of one array literal are live together for the array's whole live
+// range, so overlapping element loans must all be shared — the in-array twin
+// of two live exclusive borrows.
+
+#[test]
+fn p4_two_exclusive_elements_of_one_place_rejected() {
+    assert_has(
+        "fn f() -> i64 { let mut x: i64 = 1; \
+         let a: [2]borrow_mut i64 = [write x, write x]; deref a[0] = 2; return x; }",
+        "E0801",
+    );
+}
+
+#[test]
+fn p4_moved_and_fresh_exclusive_elements_rejected() {
+    // A moved-in exclusive borrow (its loan re-carried by the move) conflicts
+    // with a fresh exclusive borrow of the same place in the same literal.
+    assert_has(
+        "fn f() -> i64 { let mut x: i64 = 1; let wb: borrow_mut i64 = write x; \
+         let a: [2]borrow_mut i64 = [wb, write x]; deref a[0] = 2; return x; }",
+        "E0801",
+    );
+}
+
+#[test]
+fn p4_disjoint_exclusive_elements_accepted() {
+    assert_clean(
+        "fn f() -> i64 { let mut x: i64 = 1; let mut y: i64 = 2; \
+         let a: [2]borrow_mut i64 = [write x, write y]; \
+         deref a[0] = 5; deref a[1] = 6; return x + y; }",
+    );
+}
+
+#[test]
+fn p4_shared_elements_of_one_place_accepted() {
+    assert_clean(
+        "fn f() -> i64 { let x: i64 = 1; \
+         let a: [2]borrow i64 = [read x, read x]; return deref a[0] + deref a[1]; }",
+    );
+}
+
+// ---- P4 review (2026-08-18) O2: arrays of views follow scalar view rules ---
+
+#[test]
+fn view_array_return_two_borrow_params_needs_region() {
+    // The tightening: a `[2]str` return from two borrow params is exactly as
+    // ambiguous as a `str` return from two borrow params (E0807).
+    assert_str_has(
+        "fn pick(a: read String, b: read String) -> [2]str \
+         { return [as_str(read a), as_str(read a)]; }",
+        "E0807",
+    );
+}
+
+#[test]
+fn view_array_return_with_region_accepted() {
+    // The region-annotated string lookup table: tagging the source parameter
+    // and riding the region on the return (`read[r] [2]str`, exactly as a
+    // slice return rides its region) makes the array-of-views return legal.
+    assert_str_clean(
+        "fn pick[region r](a: read[r] String, b: read String) -> read[r] [2]str \
+         { return [as_str(read a), as_str(read a)]; }",
+    );
+}

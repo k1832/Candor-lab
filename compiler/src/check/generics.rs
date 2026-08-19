@@ -106,8 +106,9 @@ impl<'a> Checker<'a> {
 
     /// Verify one concrete type argument against one parameter's bound set.
     pub(super) fn check_arg_conformance(&mut self, arg: &Type, bounds: &[String], span: Span) {
-        // A type parameter never ranges over a borrow type (design 0007 §3.5).
-        if arg.is_borrow_kind() {
+        // A type parameter never ranges over a borrow type (design 0007 §3.5) —
+        // nor over an array of borrows, which stores them just the same (P4).
+        if field_stores_borrow(arg) {
             self.diags.push(
                 Diag::error(
                     "E1006",
@@ -894,11 +895,15 @@ impl<'a> Checker<'a> {
     /// Reuses the full checker in a diagnostics-suppressed probe.
     pub(super) fn synth_arg_type(&mut self, e: &Expr) -> Type {
         let mark = self.diags.len();
+        let groups_mark = self.f.call_groups.len();
         let saved_cur = self.f.cur;
         self.f.cur = None; // suppress CFG action emission during the probe
         let t = self.check_expr(e, Use::Value);
         self.f.cur = saved_cur;
         self.diags.truncate(mark);
+        // The probe is not part of the program: call groups it pushed would
+        // re-raise the real call's same-call overlaps as duplicates (E0805).
+        self.f.call_groups.truncate(groups_mark);
         // Strip a borrow to get the underlying value type for inference.
         match t {
             Type::Borrow(inner) | Type::BorrowMut(inner) => *inner,
@@ -1104,7 +1109,6 @@ impl<'a> Checker<'a> {
         // parent's obligation). The landing binding then anchors it, so an escaped
         // yield keeps the collection frozen — the `get_ref` hinge §5 rests on.
         let recv_carried = self.take_carried();
-        let recv_prov = self.f.carried_prov.clone();
         let self_is_borrow_in = matches!(m.self_mode, ParamMode::Read | ParamMode::Write);
         if args.len() != m.params.len() {
             self.diags.push(Diag::error(
@@ -1114,16 +1118,14 @@ impl<'a> Checker<'a> {
             ));
         }
         let mut per_arg: Vec<Vec<usize>> = Vec::new();
-        let mut per_prov: Vec<Option<String>> = Vec::new();
         let mut param_is_borrow_in: Vec<bool> = Vec::new();
         for ((mode, pty), a) in m.params.iter().zip(args) {
             self.clear_carried();
             let pty = subst(pty, smap);
             self.check_arg_mode(*mode, &pty, a);
-            per_prov.push(self.f.carried_prov.clone());
             per_arg.push(self.take_carried());
             param_is_borrow_in
-                .push(matches!(mode, ParamMode::Read | ParamMode::Write) || pty.is_borrow_kind());
+                .push(matches!(mode, ParamMode::Read | ParamMode::Write) || field_stores_borrow(&pty));
         }
         if m.alloc {
             self.note_alloc(span, format!("call to `alloc` interface method `{}` (§4.1)", m.name));
@@ -1135,15 +1137,16 @@ impl<'a> Checker<'a> {
         // loan(s); the landing binding then anchors them (`carries_borrow` admits the
         // method call). With more than one borrow-in and no region tag the source is
         // ambiguous — carry nothing, matching the free-fn `region_source_indices` rule.
-        if ret.is_borrow_kind() {
+        // An array-of-borrows return aliases its sources the same way (P4).
+        if field_stores_borrow(&ret) {
             let borrow_in_count =
                 usize::from(self_is_borrow_in) + param_is_borrow_in.iter().filter(|b| **b).count();
             if borrow_in_count == 1 {
                 if self_is_borrow_in {
-                    self.set_carried(recv_carried, recv_prov);
+                    self.set_carried(recv_carried);
                 } else {
                     let idx = param_is_borrow_in.iter().position(|b| *b).unwrap();
-                    self.set_carried(per_arg[idx].clone(), per_prov[idx].clone());
+                    self.set_carried(per_arg[idx].clone());
                 }
             } else {
                 self.clear_carried();

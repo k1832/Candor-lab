@@ -714,6 +714,16 @@ impl RParser {
                 // A returned slice is already a borrow value: no extra borrow
                 // wrapper, the region rides on the return.
                 TyKind::Slice(_) | TyKind::SliceMut(_) => (None, region, ty),
+                // Same for an array OF views/borrows (P4): `read[r] [2]str`
+                // returns a `[2]str` whose region rides on the return — the
+                // array is already a borrow value. An array of OWNED elements
+                // keeps the borrow wrapper below.
+                TyKind::Borrow(ref inner) | TyKind::BorrowMut(ref inner)
+                    if matches!(inner.kind, TyKind::Array { .. }) && ty_stores_borrow(&inner.kind) =>
+                {
+                    let t = (**inner).clone();
+                    (None, region, t)
+                }
                 TyKind::Borrow(inner) => (Some(BorrowKind::Shared), region, *inner),
                 TyKind::BorrowMut(inner) => (Some(BorrowKind::Exclusive), region, *inner),
                 _ => (
@@ -857,10 +867,27 @@ impl RParser {
             if let RTok::Ident(id) = self.peek().clone() {
                 if matches!(self.peek_at(1), RTok::RBracket) {
                     if matches!(self.peek_at(2), RTok::LBracket) {
-                        // region + slice: `read[r] [T]`
+                        // region + slice `read[r] [T]`, or region + literal-sized
+                        // array `read[r] [N]T` (P4: an array of views/borrows
+                        // returns with a region exactly as a slice does).
                         self.bump(); // ident (region)
                         self.expect(&RTok::RBracket, "`]`")?;
                         self.expect(&RTok::LBracket, "`[`")?;
+                        if let RTok::Int { value, suffix } = self.peek().clone() {
+                            let slo = self.cur_start();
+                            self.bump();
+                            let size = Expr {
+                                kind: ExprKind::IntLit { value, suffix },
+                                span: self.span_from(slo),
+                            };
+                            self.expect(&RTok::RBracket, "`]`")?;
+                            let elem = self.parse_type()?;
+                            let inner = Ty {
+                                kind: TyKind::Array { size: Box::new(size), elem: Box::new(elem) },
+                                span: self.span_from(lo),
+                            };
+                            return Ok((Some(id), self.wrap_borrow(excl, inner, lo)));
+                        }
                         let elem = self.parse_type()?;
                         self.expect(&RTok::RBracket, "`]`")?;
                         let sl = Ty {
@@ -1938,6 +1965,19 @@ enum IntrinsicKind {
     CastPtr,
     AddrToPtr,
     PtrNull,
+}
+
+/// AST-level twin of the resolved-type `field_stores_borrow` (P4): does this
+/// type store a borrow/view (str, slice, read/write borrow), directly or
+/// through array nesting? Decides whether a borrow-headed return type is
+/// already a borrow value (region rides, no wrapper).
+fn ty_stores_borrow(k: &TyKind) -> bool {
+    match k {
+        TyKind::Slice(_) | TyKind::SliceMut(_) | TyKind::Borrow(_) | TyKind::BorrowMut(_) => true,
+        TyKind::Named(n) => n == "str",
+        TyKind::Array { elem, .. } => ty_stores_borrow(&elem.kind),
+        _ => false,
+    }
 }
 
 /// Does this token begin a `Type` (spec 02 §3)? Used to disambiguate a named
