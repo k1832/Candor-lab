@@ -71,7 +71,7 @@ candor compile --freestanding hello.cnr -o hello && ldd hello   # => "not a dyna
 
 ---
 
-## Showcase — four real programs, written in Candor
+## Showcase — five real programs, written in Candor
 
 Not snippets — substantial programs you can read, run, and point at:
 
@@ -138,6 +138,26 @@ rm -f records.json && ./restd &
 python3 load.py 110000    # checks every response; shuts the server down itself
 ```
 
+![Ray-traced scene rendered by examples/15_raytracer.cnr — byte-identical on all five engines](assets/raytracer.png)
+
+**A ray tracer** (`examples/15_raytracer.cnr`, ~400 lines): four spheres — one
+a mirror — on a checkerboard plane under a directional sun, with hard shadows,
+reflection bounces, a sky gradient, 2x2 supersampling, and sqrt-gamma output,
+written to `render.ppm` (binary P6, 640x480) through the same audited file
+boundary as the servers. It demonstrates that Candor's `f64` support does real
+numeric work — ray-sphere quadratics, normalization, shading — over IEEE-754
+operations and the correctly-rounded `sqrt` intrinsic that are bit-deterministic
+across every engine: the lab pins a 64x48 twin of this exact render across all
+five (tree-walker, MIR, Cranelift no-opt/-O2, LLVM -O2), and CI re-renders the
+full image and checks its SHA-256, byte for byte, on every push:
+
+```sh
+cd examples
+candor compile 15_raytracer.cnr -o rt --release && ./rt   # ~3 s -> render.ppm, exits 42
+candor run 15_raytracer.cnr        # same bytes, interpreted (takes minutes)
+# view render.ppm in GIMP/feh/Preview, or: magick render.ppm render.png
+```
+
 And the parts too big to ship as examples, on the public record in the
 [lab repository](https://github.com/k1832/Candor-lab): the **self-hosted
 compiler** (~19,300 lines of Candor that check, interpret, lower, and compile
@@ -168,6 +188,7 @@ this toolchain:
 | `12_http_server/` | `candor run` (from its dir) | ⭐ an HTTP/1.0 static-file server over the audited TCP boundary (see Showcase) |
 | `13_json.cnr` | `candor run` / `candor compile` | ⭐ a full RFC 8259 JSON parser + pretty-printer, errors as values (see Showcase) |
 | `14_rest_api/` | `candor compile --release` (from its dir) | ⭐ a persistent JSON REST service — HTTP + JSON + arenas composed; flat memory over 110k requests (see Showcase) |
+| `15_raytracer.cnr` | `candor compile --release` (from examples/) | ⭐ a ray tracer writing a real image (P6 PPM) — bit-deterministic f64 + `sqrt` across all five engines (see Showcase) |
 
 ---
 

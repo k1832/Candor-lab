@@ -1,0 +1,260 @@
+// A whole ray tracer as an f64 corpus fixture (design 0016) — the corpus twin
+// of examples/15_raytracer.cnr (which writes the same scene as a 640x480 P6
+// PPM through the audited file boundary; this twin is pure compute). Four
+// spheres (one mirror at 0.85 reflectivity) on a checkerboard ground plane,
+// a directional sun with hard shadows, a sky gradient, 2x2 supersampling,
+// iterative reflection bounces (a while loop with a depth cap of 4 — no
+// recursion), and sqrt-gamma output. Everything is f64 `+ - * /`, ordered
+// comparison, int<->f64 `conv`, and the correctly-rounded IEEE `sqrt`
+// intrinsic — all bit-deterministic on the shared x86-64 target — so every
+// engine (tree-walker, MIR, Cranelift no-opt/opt, LLVM -O2) must produce the
+// SAME 64x48 image, byte for byte. main renders 64x48, traces the RGB bytes
+// of three probe pixels (sky at (5,5); the mirror sphere at (32,20), whose pinned value is the sky it reflects -- it exercises reflection even though the bytes read as sky-blue; shadowed floor at (53,33)) and a checksum
+// folded over all 9,216 pixel bytes, and returns 42; tests/raytracer.rs pins
+// the exact values across all five engines. NOTE deliberately absent: a
+// float->u8 `conv` (f64 to a sub-32-bit integer) panics the Cranelift x64
+// emitter, so pixel bytes are narrowed f64 -> i64 -> clamp -> u8 instead —
+// see to_byte and the compiler-bug note in tests/raytracer.rs.
+
+copy struct V3 {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+fn v3(x: f64, y: f64, z: f64) -> V3 {
+    return V3 { x: x, y: y, z: z };
+}
+
+fn vadd(a: V3, b: V3) -> V3 {
+    return V3 { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z };
+}
+
+fn vsub(a: V3, b: V3) -> V3 {
+    return V3 { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
+}
+
+fn vscale(a: V3, s: f64) -> V3 {
+    return V3 { x: a.x * s, y: a.y * s, z: a.z * s };
+}
+
+fn vdot(a: V3, b: V3) -> f64 {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+fn vnorm(a: V3) -> V3 {
+    let inv: f64 = 1.0 / sqrt(vdot(a, a));
+    return vscale(a, inv);
+}
+
+fn vreflect(d: V3, n: V3) -> V3 {
+    return vsub(d, vscale(n, 2.0 * vdot(d, n)));
+}
+
+copy struct Sphere {
+    c: V3,
+    r: f64,
+    col: V3,
+    refl: f64,
+}
+
+copy struct Hit {
+    t: f64,
+    obj: i64,
+}
+
+fn scene() -> [4]Sphere {
+    let mirror: Sphere = Sphere { c: v3(0.0, 1.0, 3.4), r: 1.0, col: v3(0.95, 0.95, 0.95), refl: 0.85 };
+    let red: Sphere = Sphere { c: v3(-1.9, 0.62, 2.4), r: 0.62, col: v3(0.85, 0.22, 0.18), refl: 0.05 };
+    let gold: Sphere = Sphere { c: v3(1.75, 0.55, 2.2), r: 0.55, col: v3(0.88, 0.58, 0.16), refl: 0.3 };
+    let blue: Sphere = Sphere { c: v3(-0.55, 0.3, 1.5), r: 0.3, col: v3(0.25, 0.4, 0.9), refl: 0.15 };
+    let s: [4]Sphere = [mirror, red, gold, blue];
+    return s;
+}
+
+fn sphere_hit(o: V3, d: V3, s: Sphere) -> f64 {
+    let oc: V3 = vsub(o, s.c);
+    let b: f64 = vdot(oc, d);
+    let cq: f64 = vdot(oc, oc) - s.r * s.r;
+    let disc: f64 = b * b - cq;
+    if disc < 0.0 {
+        return -1.0;
+    }
+    let sq: f64 = sqrt(disc);
+    let mut t: f64 = -b - sq;
+    if t < 0.001 {
+        t = -b + sq;
+    }
+    if t < 0.001 {
+        return -1.0;
+    }
+    return t;
+}
+
+fn hit_scene(o: V3, d: V3, s: read [4]Sphere) -> Hit {
+    let mut best: f64 = 1.0e30;
+    let mut obj: i64 = 0 - 1;
+    let mut i: usize = 0usize;
+    while i < 4usize {
+        let t: f64 = sphere_hit(o, d, s[i]);
+        if t > 0.0 && t < best {
+            best = t;
+            obj = conv i64 i;
+        }
+        i = i + 1usize;
+    }
+    if d.y < -0.0001 {
+        let tp: f64 = -o.y / d.y;
+        if tp > 0.001 && tp < best {
+            best = tp;
+            obj = 4;
+        }
+    }
+    return Hit { t: best, obj: obj };
+}
+
+fn floor_i(x: f64) -> i64 {
+    let mut f: i64 = conv i64 x;
+    if conv f64 f > x {
+        f = f - 1;
+    }
+    return f;
+}
+
+fn sky(d: V3) -> V3 {
+    let t: f64 = 0.5 * (d.y + 1.0);
+    let white: V3 = v3(1.0, 1.0, 1.0);
+    let blue: V3 = v3(0.45, 0.62, 0.95);
+    return vadd(vscale(white, 1.0 - t), vscale(blue, t));
+}
+
+// Directional sun: the unit vector TOWARD the light (up, left, slightly front).
+fn light_dir() -> V3 {
+    return vnorm(v3(-1.1, 1.0, -0.4));
+}
+
+fn trace_ray(o0: V3, d0: V3, s: read [4]Sphere) -> V3 {
+    let mut o: V3 = o0;
+    let mut d: V3 = d0;
+    let mut acc: V3 = v3(0.0, 0.0, 0.0);
+    let mut att: f64 = 1.0;
+    let mut depth: i64 = 0;
+    while depth < 4 {
+        let h: Hit = hit_scene(o, d, s);
+        if h.obj < 0 {
+            acc = vadd(acc, vscale(sky(d), att));
+            return acc;
+        }
+        let p: V3 = vadd(o, vscale(d, h.t));
+        let mut n: V3 = v3(0.0, 1.0, 0.0);
+        let mut albedo: V3 = v3(0.0, 0.0, 0.0);
+        let mut refl: f64 = 0.0;
+        if h.obj < 4 {
+            let sp: Sphere = s[conv usize h.obj];
+            n = vscale(vsub(p, sp.c), 1.0 / sp.r);
+            albedo = sp.col;
+            refl = sp.refl;
+        } else {
+            let par: i64 = floor_i(p.x) + floor_i(p.z);
+            if par - par / 2 * 2 == 0 {
+                albedo = v3(0.85, 0.85, 0.85);
+            } else {
+                albedo = v3(0.22, 0.26, 0.32);
+            }
+            refl = 0.07;
+        }
+        let ldir: V3 = light_dir();
+        let mut diff: f64 = vdot(n, ldir);
+        if diff < 0.0 {
+            diff = 0.0;
+        }
+        let so: V3 = vadd(p, vscale(n, 0.001));
+        let sh: Hit = hit_scene(so, ldir, s);
+        if sh.obj >= 0 {
+            diff = 0.0;
+        }
+        let lum: f64 = 0.09 + 1.0 * diff;
+        let local: V3 = vscale(albedo, lum);
+        acc = vadd(acc, vscale(local, att * (1.0 - refl)));
+        if refl <= 0.0 {
+            return acc;
+        }
+        att = att * refl;
+        d = vnorm(vreflect(d, n));
+        o = vadd(p, vscale(n, 0.001));
+        depth = depth + 1;
+    }
+    return acc;
+}
+
+fn to_byte(c: f64) -> i64 {
+    let mut g: f64 = c;
+    if g < 0.0 {
+        g = 0.0;
+    }
+    if g > 1.0 {
+        g = 1.0;
+    }
+    g = sqrt(g);
+    let mut b: i64 = conv i64 (g * 255.0 + 0.5);
+    if b < 0 {
+        b = 0;
+    }
+    if b > 255 {
+        b = 255;
+    }
+    return b;
+}
+
+fn render_pixel(px: i64, py: i64, w: i64, h: i64, s: read [4]Sphere) -> V3 {
+    let cam: V3 = v3(0.0, 1.1, -2.4);
+    let aspect: f64 = conv f64 w / conv f64 h;
+    let fov: f64 = 0.62;
+    let mut col: V3 = v3(0.0, 0.0, 0.0);
+    let mut sy: i64 = 0;
+    while sy < 2 {
+        let mut sx: i64 = 0;
+        while sx < 2 {
+            let ox: f64 = 0.25 + 0.5 * conv f64 sx;
+            let oy: f64 = 0.25 + 0.5 * conv f64 sy;
+            let u: f64 = (2.0 * (conv f64 px + ox) / conv f64 w - 1.0) * aspect * fov;
+            let v: f64 = (1.0 - 2.0 * (conv f64 py + oy) / conv f64 h) * fov;
+            let d: V3 = vnorm(v3(u, v, 1.0));
+            col = vadd(col, trace_ray(cam, d, s));
+            sx = sx + 1;
+        }
+        sy = sy + 1;
+    }
+    return vscale(col, 0.25);
+}
+
+fn main() -> i64 {
+    let s: [4]Sphere = scene();
+    let w: i64 = 64;
+    let h: i64 = 48;
+    let mut sum: i64 = 17;
+    let mut py: i64 = 0;
+    while py < h {
+        let mut px: i64 = 0;
+        while px < w {
+            let c: V3 = render_pixel(px, py, w, h, read s);
+            let r: i64 = to_byte(c.x);
+            let g: i64 = to_byte(c.y);
+            let b: i64 = to_byte(c.z);
+            wrapping {
+                sum = (sum * 31 + r) * 31;
+                sum = (sum + g) * 31 + b;
+            }
+            let probe: bool = px == 32 && py == 20 || px == 53 && py == 33 || px == 5 && py == 5;
+            if probe {
+                trace(r);
+                trace(g);
+                trace(b);
+            }
+            px = px + 1;
+        }
+        py = py + 1;
+    }
+    trace(sum);
+    return 42;
+}

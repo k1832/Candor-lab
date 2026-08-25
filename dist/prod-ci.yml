@@ -87,6 +87,18 @@ jobs:
           curl -s --max-time 5 -X POST http://127.0.0.1:8081/shutdown >/dev/null
           wait "$PID" || true
           echo "rest OK"
+      - name: Ray tracer renders (compiled, deterministic bytes)
+        working-directory: examples
+        run: |
+          set -eu
+          ../toolchain/target/release/candor compile 15_raytracer.cnr -o rt --release
+          code=0; ./rt || code=$?
+          [ "$code" = "42" ]
+          [ -f render.ppm ]
+          # IEEE-754 f64 + the correctly-rounded sqrt intrinsic are bit-exact
+          # on x86-64, so the 921,615-byte image is the SAME on every run.
+          echo "55b56d894388f60f148eef10f3d78094f0cf611132b9f80936c60a04c76aedc3  render.ppm" | sha256sum -c -
+          echo "raytracer OK"
       - name: Compile an example to native
         working-directory: toolchain
         run: |

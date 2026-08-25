@@ -83,6 +83,7 @@ sed -e 's#`../../compiler`#`../../toolchain`#g' \
 # --- 5. dist/ contents become the repo root ----------------------------------
 echo "-> (root)      README.md, INSTALL.md, LANGUAGE-TOUR.md, MANIFEST.md, VERSIONING.md, examples/"
 cp "$DIST_DIR/README.md"        "$TARGET/README.md"
+cp -R "$DIST_DIR/assets"        "$TARGET/assets"
 cp "$DIST_DIR/INSTALL.md"       "$TARGET/INSTALL.md"
 cp "$DIST_DIR/LANGUAGE-TOUR.md" "$TARGET/LANGUAGE-TOUR.md"
 cp "$DIST_DIR/MANIFEST.md"      "$TARGET/MANIFEST.md"
@@ -109,6 +110,8 @@ find "$TARGET" -type d -name '.candor-cache' -exec rm -rf {} +
 rm -f "$TARGET/examples/12_http_server/httpd"
 rm -f "$TARGET/examples/14_rest_api/restd"
 rm -f "$TARGET/examples/14_rest_api/records.json"
+rm -f "$TARGET/examples/rt"
+rm -f "$TARGET/examples/render.ppm"
 
 echo
 echo "Done. The standalone repo is assembled at:"
