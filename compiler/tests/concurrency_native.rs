@@ -363,3 +363,94 @@ fn native_spawn_inside_allocating_callee() {
         ITERS,
     );
 }
+
+// ===========================================================================
+// ORPHAN LIFECYCLE on the fault path (ledger P6). A thread that faults with
+// open scopes joins every already-spawned task BEFORE its `_longjmp` unwinds
+// past the scope joins (`quiesce_open_scopes`), so no orphan thread outlives
+// the run to touch the cleared runtime pointer. Fault identity follows §7.4(b)
+// program order, matching the sequential oracle: a spawned task runs AT its
+// spawn point there, so a task's fault supersedes the parent's later one, and
+// an outer scope's task fault supersedes an inner scope's.
+// ===========================================================================
+
+/// The P6 reproducer: the parent faults between `spawn` and the join while the
+/// task still runs. Pre-fix this aborted the process on most runs (orphan task
+/// dereferencing the cleared `CURRENT`); now every run delivers the parent's
+/// fault identity, equal to the oracle's.
+#[test]
+fn native_parent_fault_with_live_task() {
+    gate(
+        "fn work(o: write i64) -> unit { \
+            let mut i: i64 = 0; while i < 200000 { i = i + 1; } o.* = i; } \
+         fn main() -> i64 { let mut r: i64 = 0; \
+            scope { spawn work(write r); let z: i64 = 0; let q: i64 = 1 / z; } \
+            return r; }",
+        ITERS,
+    );
+}
+
+/// Racing faults: the parent faults (div0) while the still-running task also
+/// faults (assert). The task's spawn point is program-order earlier, so its
+/// fault wins — deterministically, on every schedule, as on the oracle.
+#[test]
+fn native_parent_and_task_both_fault_task_wins() {
+    let src = "fn boom(o: write i64) -> unit { \
+            let mut i: i64 = 0; while i < 200000 { i = i + 1; } o.* = i; assert(false); } \
+         fn main() -> i64 { let mut r: i64 = 0; \
+            scope { spawn boom(write r); let z: i64 = 0; let q: i64 = 1 / z; } \
+            return r; }";
+    gate(src, ITERS);
+    match native(src) {
+        Out::Fault(s) => assert!(s.starts_with("Assert@"), "task fault (po-earlier spawn) wins, got {s}"),
+        o => panic!("expected fault, got {o:?}"),
+    }
+}
+
+/// Nested scopes, both levels faulting: the OUTER scope's task was spawned
+/// before the inner scope opened, so its fault (assert) supersedes the inner
+/// task's (div0) when the inner join's delivery unwinds past the outer join.
+#[test]
+fn native_outer_task_fault_supersedes_inner() {
+    let src = "fn slow_boom() -> unit { \
+            let mut i: i64 = 0; while i < 200000 { i = i + 1; } assert(false); } \
+         fn fast_boom() -> unit { let z: i64 = 0; let q: i64 = 1 / z; } \
+         fn main() -> i64 { \
+            scope { spawn slow_boom(); scope { spawn fast_boom(); } } return 0; }";
+    gate(src, ITERS);
+    match native(src) {
+        Out::Fault(s) => assert!(s.starts_with("Assert@"), "outer task fault (po-earlier spawn) wins, got {s}"),
+        o => panic!("expected fault, got {o:?}"),
+    }
+}
+
+/// The parent faults inside an INNER scope with live tasks in BOTH open frames:
+/// both are quiesced (outermost first) and the parent's own fault is delivered.
+#[test]
+fn native_parent_fault_with_live_tasks_in_nested_frames() {
+    gate(
+        "fn work(o: write i64, n: i64) -> unit { \
+            let mut i: i64 = 0; while i < n { i = i + 1; } o.* = i; } \
+         fn main() -> i64 { let mut a: i64 = 0; let mut b: i64 = 0; \
+            scope { spawn work(write a, 200000); \
+              scope { spawn work(write b, 150000); let z: i64 = 0; let q: i64 = 1 / z; } } \
+            return a + b; }",
+        ITERS,
+    );
+}
+
+/// A TASK thread faults with its own open scope and a live child: the child is
+/// quiesced on the task thread before `run_task` catches the fault, and the
+/// task's fault is re-delivered at the parent's join as usual.
+#[test]
+fn native_task_fault_with_own_open_scope() {
+    gate(
+        "fn grand(o: write i64) -> unit { \
+            let mut i: i64 = 0; while i < 200000 { i = i + 1; } o.* = i; } \
+         fn child(o: write i64) -> unit { \
+            scope { spawn grand(write o); let z: i64 = 0; let q: i64 = 1 / z; } } \
+         fn main() -> i64 { let mut r: i64 = 0; \
+            scope { spawn child(write r); } return r; }",
+        ITERS,
+    );
+}
