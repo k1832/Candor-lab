@@ -160,3 +160,43 @@ No fixture hits it today.
 beside the pre-existing E0301; the two propagated copies of one loan are
 counted as a conflicting pair. Can only co-occur with E0301, so no legal
 program is rejected.
+
+## P15 — Float-to-small-integer conversion panics both Cranelift engines (HIGH, compile-time)
+
+`conv u8` / `conv u16` / `conv i8` of an f64 crashes the Cranelift JIT (both
+tiers) and AOT at COMPILE time (cranelift-codegen 0.132.3's x64 emitter hits
+unreachable code lowering a sub-32-bit saturating float convert), while the
+tree-walk oracle and MIR interpreter execute the same program correctly. An
+engine-parity hole outside the float gates' coverage (they only test conv
+i32/i64). Minimal repro in the raytracer test header and MEMORY.md. Fix
+direction: widen the convert to i32 in the lowering and narrow after. Found
+by the ray tracer workstream, 2026-08-26.
+
+## P16 — Generic functions do no return-borrow loan extension (HIGH)
+
+`fn idr[T](p: read T) -> read T` lets the caller shed the argument loan
+entirely: the returned borrow carries nothing, so writing the borrowed-from
+owner while the result lives checks clean. Same laundering family as P9/P1;
+found on the baseline binary during the P7/P8/P11 workstream (its fixes
+cover interface methods and out-slots, not plain generic returns).
+
+## P17 — Native trace order around joins diverges from the oracle (MEDIUM)
+
+Native engines merge a task's trace at the JOIN; the oracle emits it at the
+SPAWN point. Any parent trace between spawn and join reorders theta
+deterministically (oracle [1,99] vs native [99,1]). No existing gated test
+has a tracing task plus a tracing parent, so the differential suite never
+sees it — a live hole in the per-task projection equivalence claim (design
+0012 §6). Pre-existing; surfaced by the orphan-lifecycle review, 2026-08-26.
+
+## P18 — Call-free infinite loops: oracle faults, native spins (MEDIUM)
+
+A call-free spin loop (while f.* == 0 {}) exhausts the oracle's model stack
+(it allocates a temp per iteration) and faults bad_pointer, while native
+binaries — whose per-statement state stays flat — spin forever. Both
+directions of the asymmetry are pre-existing; it also bounds what the
+orphan-fix's unconditional fault-path joins can promise (a non-terminating
+task hangs the join, matching the already-shipped normal-path join). Fix
+directions to weigh: an iteration budget in the oracle mirroring MAX_ADDR
+semantics deliberately, or documenting the asymmetry as a model limit.
+Surfaced by the orphan-lifecycle review, 2026-08-26.
