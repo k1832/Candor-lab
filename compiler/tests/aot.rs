@@ -303,6 +303,29 @@ const CONC: &[(&str, bool)] = &[
             scope { spawn work(write a, 10, 0); } return a; }",
         true,
     ),
+    // Orphan lifecycle (ledger P6): the PARENT faults between `spawn` and the
+    // join while the task still runs — the fault path joins the task before
+    // unwinding, and the parent's fault identity is delivered (exit 2, never a
+    // crash or a hung orphan thread).
+    (
+        "fn work(o: write i64) -> unit { \
+            let mut i: i64 = 0; while i < 200000 { i = i + 1; } o.* = i; } \
+         fn main() -> i64 { let mut r: i64 = 0; \
+            scope { spawn work(write r); let z: i64 = 0; let q: i64 = 1 / z; } \
+            return r; }",
+        true,
+    ),
+    // Racing faults: parent (div0) and still-running task (assert) both fault;
+    // the task's spawn point is program-order earlier, so its assert wins,
+    // deterministically, matching the sequential oracle.
+    (
+        "fn boom(o: write i64) -> unit { \
+            let mut i: i64 = 0; while i < 200000 { i = i + 1; } o.* = i; assert(false); } \
+         fn main() -> i64 { let mut r: i64 = 0; \
+            scope { spawn boom(write r); let z: i64 = 0; let q: i64 = 1 / z; } \
+            return r; }",
+        true,
+    ),
 ];
 
 #[test]
@@ -310,6 +333,18 @@ fn gate_aot_concurrency() {
     assert!(cc_available(), "cc/linker unavailable: cannot build runnable executables");
     for (i, (src, real)) in CONC.iter().enumerate() {
         assert_aot_eq_oracle_src(src, *real, &format!("conc{i}"));
+    }
+    // The two orphan-lifecycle shapes (last entries) race the parent's fault
+    // against live tasks, and the C quiesce path is a separate implementation
+    // from the Rust one -- one run per shape would let a 1-in-N regression
+    // through, so shake them (review F5). The binary is rebuilt per run; the
+    // schedule varies with load.
+    let shaken = CONC.len() - 2..CONC.len();
+    for round in 0..24 {
+        for i in shaken.clone() {
+            let (src, real) = &CONC[i];
+            assert_aot_eq_oracle_src(src, *real, &format!("conc{i}_r{round}"));
+        }
     }
 }
 

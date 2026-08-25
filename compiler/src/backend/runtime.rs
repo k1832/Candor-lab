@@ -55,7 +55,8 @@ pub struct Runtime {
     pub base: *mut u8,
     pub stack_bump: AtomicU64,
     /// Spawned-but-not-yet-joined task count (`rt_spawn` increments BEFORE the
-    /// thread exists; `rt_scope_end` decrements AFTER its join returns). When it
+    /// thread exists; the joins — `rt_scope_end`, or `quiesce_open_scopes` on a
+    /// fault path — decrement AFTER their join returns). When it
     /// reads 0 exactly one thread is running, which gates every stack-bump
     /// rollback (`rt_stack_restore`): restoring while tasks share the atomic
     /// bump could reclaim a concurrent task's live frame.
@@ -289,15 +290,63 @@ pub extern "C" fn rt_mmio_store(addr: u64, val: i64, size: u64) {
 
 /// The fault-exit hook: record `(k, s)` in THIS thread's fault slot and `_longjmp`
 /// to THIS thread's landing pad (never a cross-thread jump). Never returns.
+///
+/// ## Orphan lifecycle on the fault path (ledger P6)
+/// The `_longjmp` unwinds past every open `scope` on this thread, skipping their
+/// `rt_scope_end` joins — so BEFORE jumping, every already-spawned task of every
+/// open scope is joined (`quiesce_open_scopes`). Without this the orphaned task
+/// threads outlive the run and dereference the cleared `CURRENT` pointer (an
+/// abort), and the leaked `live_tasks` counts would disable stack-bump rollback.
+/// Fault identity stays oracle-deterministic: in the sequential oracle a spawned
+/// task runs to completion AT its spawn point, which is program-order-earlier
+/// than this fault, so a quiesced task's fault (spawn-order-first) supersedes
+/// this thread's own — the oracle's program-order-earliest fault: spec 06 §7.4(b) pins the single-threaded oracle's answer, and native is gated to match the oracle.
 pub extern "C" fn rt_fault(kind: u32, span_start: u32, span_end: u32) {
+    let own = (kind, span_start as usize, span_end as usize);
+    let delivered = quiesce_open_scopes().unwrap_or(own);
     let land = TLS.with(|t| {
         let mut t = t.borrow_mut();
-        t.fault = Some((kind, span_start as usize, span_end as usize));
+        t.fault = Some(delivered);
         t.land
     });
     unsafe {
         _longjmp(land, 1);
     }
+}
+
+/// Join every task of every still-open scope on THIS thread — the fault path's
+/// half of the task lifecycle (a normal path joins at each `rt_scope_end`).
+/// Returns the spawn-order-first fault among the joined tasks, if any faulted.
+///
+/// Open frames are strictly nested and spawns always land in the innermost open
+/// frame, so iterating frames outermost-first visits tasks in spawn (= program)
+/// order. Each task's trace is merged into this thread's buffer in that same
+/// order (on a faulting run only fault identity is gated; trace extent is
+/// declared-nondeterministic, design 0012 §3.2). The joins are unconditional:
+/// The joins are unconditional. A non-terminating task hangs here; it also hangs the already-shipped rt_scope_end join, so this adds no new hang class. A blocking foreign call blocks the sequential oracle at its spawn point too. (A call-free spin loop is the known engine asymmetry: the oracle exhausts its model stack and faults where native spins -- pre-existing, ledgered.) No stack-bump
+/// restore happens on this path ("a fault path never restores"): a main-thread
+/// fault terminates the run, and a task-thread fault leaves the reclaim to its
+/// parent's scope join.
+fn quiesce_open_scopes() -> Option<(u32, usize, usize)> {
+    let frames = TLS.with(|t| std::mem::take(&mut t.borrow_mut().scopes));
+    if frames.iter().all(|f| f.tasks.is_empty()) {
+        return None;
+    }
+    let r = rt();
+    let mut first_fault = None;
+    for frame in frames {
+        for h in frame.tasks {
+            let outcome = h.join().expect("task thread panicked");
+            // The task's thread is gone; only now may its liveness count drop
+            // (the rollback gate in `rt_stack_restore` relies on this ordering).
+            r.live_tasks.fetch_sub(1, Ordering::SeqCst);
+            TLS.with(|t| t.borrow_mut().trace.extend_from_slice(&outcome.trace));
+            if first_fault.is_none() {
+                first_fault = outcome.fault;
+            }
+        }
+    }
+    first_fault
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +486,12 @@ pub extern "C" fn rt_scope_end() {
     // leaks nothing.
     drop(outcomes);
     if let Some(f) = first_fault {
+        // The `_longjmp` below unwinds past ENCLOSING open scopes too, so their
+        // tasks must be quiesced first (ledger P6). An outer frame's tasks were
+        // spawned before this scope opened — program-order earlier — so an outer
+        // task's fault supersedes this scope's (§7.4(b), matching the oracle,
+        // which faults at the outer spawn point before this scope even begins).
+        let f = quiesce_open_scopes().unwrap_or(f);
         let land = TLS.with(|t| {
             let mut t = t.borrow_mut();
             t.fault = Some(f);

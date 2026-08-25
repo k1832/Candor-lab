@@ -355,14 +355,70 @@ void rt_mmio_store(uint64_t addr, int64_t val, uint64_t size) {
     memcpy(g_base + addr, &val, (size_t)n);
 }
 
+/* Join every task of every still-open scope on THIS thread — the fault path's
+ * half of the task lifecycle (a normal path joins at each rt_scope_end); the
+ * longjmp below unwinds past those joins, so they must happen first (ledger P6,
+ * mirrors runtime.rs `quiesce_open_scopes`). Open frames are strictly nested
+ * and spawns land in the innermost open frame, so iterating frames
+ * outermost-first visits tasks in spawn (= program) order; returns the
+ * spawn-order-first fault among them, if any faulted. Traces merge in frame
+ * order (on the rt_scope_end delivery path the already-merged inner frame
+ * precedes outer tasks; native trace ORDER around joins differs from the
+ * oracle's spawn-point emission generally -- pre-existing, ledgered; on a
+ * faulting run only fault identity is gated). The joins are unconditional:
+ * a non-terminating task hangs here exactly as it
+ * already hangs the shipped rt_scope_end join -- no new hang class -- and a
+ * blocking foreign call blocks the sequential oracle at its spawn point too. */
+/* No
+ * stack-bump restore happens here (a fault path never restores). */
+static RtFault quiesce_open_scopes(Tls *t) {
+    RtFault first;
+    first.has = 0;
+    for (size_t f = 0; f < t->slen; f++) {
+        ScopeFrame *fr = &t->scopes[f];
+        for (size_t i = 0; i < fr->len; i++) {
+            Task *tk = fr->tasks[i];
+            void *ret = NULL;
+            pthread_join(tk->thread, &ret);
+            /* The task's thread is gone; only now may its liveness count drop
+             * (the rollback gate in rt_stack_restore relies on this ordering). */
+            atomic_fetch_sub_explicit(&g_live_tasks, 1, memory_order_seq_cst);
+            TaskOutcome *o = (TaskOutcome *)ret;
+            for (size_t j = 0; j < o->trace.len; j++) {
+                trace_push(&t->trace, o->trace.data[j]);
+            }
+            if (!first.has && o->fault.has) {
+                first = o->fault;
+            }
+            free(o->trace.data);
+            free(o);
+            free(tk);
+        }
+        free(fr->tasks);
+    }
+    t->slen = 0;
+    return first;
+}
+
 /* The fault-exit hook: record (kind, span) in THIS thread's fault slot and
- * longjmp to THIS thread's landing pad (never a cross-thread jump). */
+ * longjmp to THIS thread's landing pad (never a cross-thread jump).
+ *
+ * Orphan lifecycle on the fault path (ledger P6): the longjmp unwinds past
+ * every open scope on this thread, skipping their rt_scope_end joins — so every
+ * already-spawned task is joined first (quiesce_open_scopes). Fault identity
+ * stays oracle-deterministic: in the sequential oracle a spawned task runs to
+ * completion AT its spawn point, program-order-earlier than this fault, so a
+ * quiesced task's fault (spawn-order-first) supersedes this thread's own
+ * (spec 06 §7.4(b), mirrors runtime.rs rt_fault). */
 void rt_fault(uint32_t kind, uint32_t s, uint32_t e) {
     Tls *t = tls();
-    t->fault.kind = kind;
-    t->fault.s = s;
-    t->fault.e = e;
-    t->fault.has = 1;
+    RtFault own;
+    own.kind = kind;
+    own.s = s;
+    own.e = e;
+    own.has = 1;
+    RtFault task_first = quiesce_open_scopes(t);
+    t->fault = task_first.has ? task_first : own;
     longjmp(*t->land, 1);
 }
 
@@ -499,7 +555,14 @@ void rt_scope_end(void) {
         atomic_store_explicit(&g_stack_bump, fr.mark, memory_order_seq_cst);
     }
     if (first.has) {
-        t->fault = first;
+        /* The longjmp below unwinds past ENCLOSING open scopes too, so their
+         * tasks must be quiesced first (ledger P6). An outer frame's tasks were
+         * spawned before this scope opened — program-order earlier — so an
+         * outer task's fault supersedes this scope's (spec 06 §7.4(b), matching
+         * the oracle, which faults at the outer spawn point before this scope
+         * even begins). */
+        RtFault outer = quiesce_open_scopes(t);
+        t->fault = outer.has ? outer : first;
         longjmp(*t->land, 1);
     }
 }

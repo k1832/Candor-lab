@@ -382,6 +382,34 @@ it. A nested `scope`'s join is *also* an implicit cancellation point. The idiom 
 
 #### 3.4 Scope-body faults — cancel-then-join, and the unbounded-but-legal delay
 
+**Addendum (2026-08-26, recorded after the orphan-lifecycle fix and its
+adversarial review).** Two cases this section left unstated are now implemented
+and gated, and are recorded here so the rule has written backing:
+
+1. **A faulting scope *body* joins its live tasks before unwinding.** If the
+   parent itself faults between `spawn` and the brace (or an inner scope's
+   fault-delivery longjmp would unwind past outer joins), every already-spawned
+   task of every open scope is joined on the fault path, outermost frame first
+   — which is spawn order, since `spawn` always pushes into the innermost open
+   frame. No task can outlive its scope even when the scope's body faults;
+   previously an orphaned task crashed the process (JIT) or corrupted fault
+   identity (AOT).
+
+2. **A task's fault supersedes the body's own.** The spawn-order-first fault
+   among the joined tasks, then the body's, is delivered — the program-order-
+   earliest fault of the sequential schedule this document's §3.2 defines (the
+   single-threaded oracle runs each task to completion at its spawn point, so
+   any live task's fault is program-order-earlier than the body's). Spec 06
+   §7.4 governs the single-threaded oracle; native engines match the oracle by
+   differential gate, not by direct appeal to §7.4.
+
+   Honest caveat, unchanged by the fix: the fault-path joins are unconditional,
+   so a non-terminating task hangs the fault path exactly as it already hangs
+   the normal `rt_scope_end` join — no new hang class, and a call-free spin
+   loop remains the known engine asymmetry (the oracle exhausts its model stack
+   and faults where native spins).
+
+
 Because *no task outlives the scope* (§1.1), the parent cannot pass the brace until every
 sibling is terminal. On a task fault the scope performs **cancel-then-join**: (1) record
 the fault; (2) request cancellation of all siblings; (3) join all siblings — each
