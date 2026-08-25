@@ -1429,3 +1429,19 @@ once you add the literal node). Key design/impl facts worth reusing:
   bytes) checked pre-copy answer 507 with reads/deletes still working and
   delete->create cycling — verified full at both budgets, plus reload of a
   full snapshot. (14_rest_api, 2026-08-19)
+
+- **Float->int `conv` to a sub-32-bit target panics BOTH Cranelift engines
+  (JIT tiers and AOT) — narrow through i64 instead.** `conv u8`/`conv u16`/
+  `conv i8` of an f64 dies at compile time in cranelift-codegen 0.132.3's x64
+  emitter ("internal error: entered unreachable code", isa/x64/inst/emit.rs:1247):
+  `eval_float_conv` (src/backend/lower.rs) requests `fcvt_to_{s,u}int_sat` with
+  an I8/I16 result type, which the x64 lowering cannot emit. The tree-walker
+  and MIR interpreter execute it fine (saturating narrow), so this is an
+  engine-parity hole — found the day floats did real work (the 15_raytracer
+  pixel bytes; the least-soaked corner delivered as predicted). Minimal repro:
+  `fn main() -> i64 { let a: f64 = 6.4; let b: u8 = conv u8 (a); return conv i64 (b); }`.
+  Until fixed: float->int `conv` targets i32/i64 only, then clamps and narrows
+  in the integer domain (`to_byte` in tests/fixtures/run/raytracer.cnr is the
+  shape); the fix itself is one backend change — fcvt to I32, then ireduce —
+  plus a widths-matrix float-conv gate in tests/floats.rs. (15_raytracer,
+  2026-08-26)
