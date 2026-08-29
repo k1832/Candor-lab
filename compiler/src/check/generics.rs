@@ -875,6 +875,14 @@ impl<'a> Checker<'a> {
             per_arg.push(self.take_carried());
             subst_params.push((p.mode, decl));
         }
+        // §3.1 same-call overlap (ledger P26): the loans this call's arguments
+        // contribute form one group for the no-two-phase rule (E0805), pushed
+        // right after the argument loans are captured — the exact mirror of
+        // `check_user_call` and the fn-pointer path. Without it,
+        // `g[T](a: write T, b: read T)` called `g(write x, read x)` checked
+        // clean while its concrete twin rejected.
+        let group: Vec<usize> = per_arg.iter().flatten().copied().collect();
+        self.push_call_group(group);
         // P7: a borrow-storing `out` slot extends the sole borrow-in argument's
         // loan over the slot's landing binding, exactly as the non-generic call
         // path does (the substituted parameter types decide borrow-ness).
@@ -912,7 +920,7 @@ impl<'a> Checker<'a> {
         // predicate (`carries_borrow`) cannot see the substitution, so the
         // borrow-valued answer is recorded per call span (the P11 pattern).
         let ret = subst(&sig.ret, &subst_map);
-        if field_stores_borrow(&ret) {
+        if may_store_borrow(&ret) {
             let src = generic_region_source_indices(&sig, &subst_params);
             let mut ids: Vec<usize> = Vec::new();
             for i in src {
@@ -1191,12 +1199,12 @@ impl<'a> Checker<'a> {
             // caller-side loan extension below.
             if *mode == ParamMode::Out {
                 param_is_borrow_in.push(false);
-                if field_stores_borrow(&pty) {
+                if may_store_borrow(&pty) {
                     out_borrow_slots.push(idx);
                 }
             } else {
                 param_is_borrow_in
-                    .push(matches!(mode, ParamMode::Read | ParamMode::Write) || field_stores_borrow(&pty));
+                    .push(matches!(mode, ParamMode::Read | ParamMode::Write) || may_store_borrow(&pty));
             }
         }
         if m.alloc {
@@ -1231,8 +1239,11 @@ impl<'a> Checker<'a> {
         // The landing-site predicate (`carries_borrow`) cannot re-derive
         // borrow-ness from the DECLARED return type when it is an associated
         // projection (`Self::Item`, P11): record the substituted answer for
-        // this call site instead.
-        if field_stores_borrow(&ret) {
+        // this call site instead. At a generic def site the projection stays
+        // OPAQUE and is treated as potentially borrow-storing (P22(a), spec
+        // 04 §7.6): the receiver loan must survive over the landing binding,
+        // since an impl may bind `Item` to a borrow of the receiver's innards.
+        if may_store_borrow(&ret) {
             self.f.borrow_valued.insert((span.start, span.end));
         }
         // Reborrow-through-call-return: a returned borrow derives, by the compact
@@ -1242,7 +1253,7 @@ impl<'a> Checker<'a> {
         // method call). With more than one borrow-in and no region tag the source is
         // ambiguous — carry nothing, matching the free-fn `region_source_indices` rule.
         // An array-of-borrows return aliases its sources the same way (P4).
-        if field_stores_borrow(&ret) {
+        if may_store_borrow(&ret) {
             let borrow_in_count =
                 usize::from(self_is_borrow_in) + param_is_borrow_in.iter().filter(|b| **b).count();
             if borrow_in_count == 1 {
@@ -1279,7 +1290,7 @@ fn generic_region_source_indices(
         .enumerate()
         .filter(|(_, (m, t))| {
             matches!(m, ParamMode::Read | ParamMode::Write)
-                || (*m != ParamMode::Out && field_stores_borrow(t))
+                || (*m != ParamMode::Out && may_store_borrow(t))
         })
         .map(|(i, _)| i)
         .collect();

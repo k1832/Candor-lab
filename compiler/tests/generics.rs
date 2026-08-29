@@ -557,31 +557,236 @@ fn p22_generic_match_to_proj_return_keeps_argument_loan() {
     );
 }
 
+// ---- P22(a): the def-site Proj-only rule (ratified 2026-08-30, spec 04 §7.6).
+// Inside generic code an opaque associated-type projection (`I::Item`, and
+// arrays of it) is treated as potentially borrow-storing by the loan machinery
+// and the §7 signature rules: an impl may legally bind `type Item = read T`
+// (P11), and the body is checked once, before any impl is known. Concrete code
+// is unaffected; the escape hatch is binding a concrete type.
+
 #[test]
-fn p22_open_hole_two_borrow_inputs_proj_return_still_accepted() {
-    // OPEN HOLE lock-in (ledger P22(a), reviewer repro leak2): with TWO
-    // post-substitution borrow inputs and a declared `-> I::Item` return, the
-    // call-site compact default is ambiguous (carries nothing, matching the
-    // concrete rule) and the def-site E0807 backstop does not fire because the
-    // declared Proj is opaque (`field_stores_borrow(Proj) == false`). No
-    // region tag is spellable on a Proj return, so the ambiguous branch is the
-    // only reachable one. This test DOCUMENTS the current acceptance; flip it
-    // to an expected rejection when the option-(a) def-site ruling lands (the
-    // Proj-only conservative rule gives this def an E0807 exactly like its
-    // concrete twin).
-    let src = "interface Get { type Item; fn get(read self) -> Self::Item; }\n\
+fn p22_two_borrow_inputs_proj_return_rejected_at_def_site() {
+    // The rejection twin of the former open-hole lock-in (reviewer repro
+    // leak2): with a `-> I::Item` return, `it: read I` and `extra: I::Item`
+    // are TWO borrow inputs at the definition site under the Proj-only rule,
+    // and no region variable is spellable on a projection return — E0807 at
+    // the declaration, exactly like the concrete twin (§7.4). This is the
+    // def-site backstop that makes the call-site ambiguous branch (which
+    // deliberately carries nothing) unreachable for generic code.
+    assert_code(
+        "interface Get { type Item; fn get(read self) -> Self::Item; }\n\
          struct Q { a: i64 }\n\
          impl Get for Q { type Item = read i64; fn get(read self) -> read i64 \
          { return read self.a; } }\n\
          fn leak2[I: Get](it: read I, extra: I::Item) alloc -> I::Item { return it.get(); }\n\
          fn main() alloc -> i64 { let mut q: Q = Q { a: 5 }; let x: i64 = 1; \
-         let b: read i64 = leak2(read q, read x); q.a = 9; return b.*; }\n";
+         let b: read i64 = leak2(read q, read x); q.a = 9; return b.*; }\n",
+        "E0807",
+    );
+}
+
+#[test]
+fn p22_def_site_out_proj_from_owned_receiver_rejected() {
+    // The def-site half of reviewer repro l2: `o = it.get()` fills an `out
+    // I::Item` slot with a value deriving from `it`, an OWNED (take-mode)
+    // parameter whose frame dies at return — before the ruling this checked
+    // clean and RAN to a dead-frame read. The Proj-only rule puts the out
+    // assignment under the E0806 provenance regime; the assoc-method
+    // provenance extension roots `it.get()` at the receiver, and the owned
+    // root is rejected.
+    assert_code(
+        "interface Get { type Item; fn get(read self) -> Self::Item; }\n\
+         struct Q { a: i64 }\n\
+         impl Get for Q { type Item = read i64; fn get(read self) -> read i64 \
+         { return read self.a; } }\n\
+         fn fill[I: Get](o: out I::Item, it: I) alloc -> unit { o = it.get(); }\n\
+         fn main() alloc -> i64 { let q: Q = Q { a: 5 }; let mut s: read i64; \
+         fill(out s, q); return s.*; }\n",
+        "E0806",
+    );
+}
+
+#[test]
+fn p22_def_site_write_while_proj_result_lives_rejected() {
+    // The def-site half of reviewer repro k3: a Proj-typed method result may
+    // be a borrow of the receiver's innards at some instantiation, so the
+    // receiver loan carries over the landing binding — an exclusive re-borrow
+    // of `it` while `r` lives is E0801, exactly as the concrete twin.
+    assert_code(
+        "interface Get { type Item; fn get(read self) -> Self::Item; \
+         fn bump(write self) -> unit; }\n\
+         struct Q { a: i64 }\n\
+         impl Get for Q { type Item = read i64; fn get(read self) -> read i64 \
+         { return read self.a; } fn bump(write self) -> unit { } }\n\
+         fn inner[I: Get](it: write I) alloc -> i64 { let r: I::Item = it.get(); \
+         it.bump(); let s: I::Item = r; return 0; }\n\
+         fn main() -> i64 { return 0; }\n",
+        "E0801",
+    );
+}
+
+#[test]
+fn p22_def_site_proj_accessor_from_borrow_receiver_accepted() {
+    // The legal accessor idiom the rule must keep legal (memo §2(i)): a sole
+    // borrow-in receiver, a `-> I::Item` return. The compact default (§7.3)
+    // covers the signature, and the assoc-method provenance extension roots
+    // the returned value at the `read`-mode receiver — clean, at the def site
+    // and at a concrete call site alike.
+    let src = "interface Get { type Item; fn get(read self) -> Self::Item; }\n\
+         struct Q { a: i64 }\n\
+         impl Get for Q { type Item = read i64; fn get(read self) -> read i64 \
+         { return read self.a; } }\n\
+         fn first[I: Get](it: read I) -> I::Item { return it.get(); }\n\
+         fn main() -> i64 { let q: Q = Q { a: 5 }; \
+         let b: read i64 = first(read q); return b.*; }\n";
+    assert!(codes(src).is_empty(), "expected clean, got {:?}", codes(src));
+}
+
+#[test]
+fn p22_def_site_owned_item_shared_gets_accepted() {
+    // Non-borrow associated-type code still checks clean: two shared `get()`
+    // results coexist (shared loans never conflict), so the conservative
+    // receiver freeze costs nothing for the get-style owned-Item idiom.
+    let src = "interface Get { type Item; fn get(read self) -> Self::Item; }\n\
+         struct P { a: i64 }\n\
+         impl Get for P { type Item = i64; fn get(read self) -> i64 \
+         { return self.a; } }\n\
+         fn sum2[I: Get](it: read I) alloc -> i64 { let a: I::Item = it.get(); \
+         let b: I::Item = it.get(); return 0; }\n\
+         fn main() -> i64 { let p: P = P { a: 3 }; let r: i64 = p.get(); return r; }\n";
+    assert!(codes(src).is_empty(), "expected clean, got {:?}", codes(src));
+}
+
+#[test]
+fn p22_def_site_next_style_owned_item_through_enum_accepted() {
+    // The corelib iterator-stack shape (0009 Iter yields owned Items through
+    // `IterStep[Item, Self]`): a wrapped projection (`Opt[I::Item]`) is NOT a
+    // bare Proj, so the ratified rule does not flag it and repeated `next()`
+    // calls through an exclusive receiver stay clean. NOTE this acceptance is
+    // ALSO an open-hole lock-in: the rule's scope deliberately excludes App-of-
+    // Proj, and — contrary to the design memo's original completeness claim —
+    // E1006 does NOT bar a borrow-bound Item from instantiating a generic enum
+    // through a constructor or annotation (E1006 runs only on generic-fn call
+    // and impl-conformance type arguments; ledger P9, reopened 2026-08-30).
+    // The acceptance here is CORRECT (Item = i64, owned) and must survive any
+    // App-of-Proj closure; the two `p22_open_hole_app_of_proj_*` lock-ins
+    // below document the unsound side of the same scope line.
+    let src = "enum Opt[T] { Some(T), None, }\n\
+         interface It { type Item; fn next(write self) -> Opt[Self::Item]; }\n\
+         struct C { n: i64 }\n\
+         impl It for C { type Item = i64; fn next(write self) -> Opt[i64] \
+         { return Opt::Some(self.n); } }\n\
+         fn drain[I: It](it: write I) alloc -> i64 { \
+         let a: Opt[I::Item] = it.next(); let b: Opt[I::Item] = it.next(); return 0; }\n\
+         fn main() -> i64 { return 0; }\n";
+    assert!(codes(src).is_empty(), "expected clean, got {:?}", codes(src));
+}
+
+#[test]
+fn p22_open_hole_app_of_proj_enum_return_still_accepted() {
+    // OPEN HOLE lock-in (ledger P22 partial closure / P9, adversarial review
+    // 2026-08-30): a borrow-bound Item laundered through a generic ENUM
+    // defeats the Proj-only rule — `Opt[I::Item]` is an App, not a bare Proj,
+    // and E1006 never runs on enum-constructor or annotation type arguments,
+    // so `Opt[read i64]` instantiates unchallenged. This program checks clean
+    // and RUNS today: the caller writes the owner while the wrapped borrow is
+    // live and observes 9. Flip this to a rejection twin when the App-of-Proj
+    // gap is closed (the measured candidate extension and its corelib cost are
+    // in the design memo's "App extension, measured" section).
+    let src = "enum Opt[T] { Some(T), None, }\n\
+         interface Get { type Item; fn get(read self) -> Self::Item; }\n\
+         struct Q { a: i64 }\n\
+         impl Get for Q { type Item = read i64; fn get(read self) -> read i64 \
+         { return read self.a; } }\n\
+         fn wrap[I: Get](it: read I) alloc -> Opt[I::Item] { \
+         return Opt::Some(it.get()); }\n\
+         fn main() alloc -> i64 { let mut q: Q = Q { a: 5 }; \
+         let o: Opt[read i64] = wrap(read q); q.a = 9; \
+         match o { Opt::Some(b) => { return b.*; } Opt::None => { return 0 - 1; } } }\n";
     assert!(
         codes(src).is_empty(),
-        "leak2 unexpectedly rejected — the P22(a) def-site ruling may have landed; \
-         flip this lock-in to its rejection twin. got {:?}",
+        "App-of-Proj enum escape unexpectedly rejected — the App-of-Proj gap \
+         may have been closed; flip this lock-in to its rejection twin. got {:?}",
         codes(src)
     );
+}
+
+#[test]
+fn p22_open_hole_app_of_proj_struct_write_still_accepted() {
+    // OPEN HOLE lock-in, exclusive twin (same P22-partial/P9 gap): a WRITE
+    // borrow smuggled through a generic STRUCT (`W[I::Item]`) — both aliases
+    // are live at once; the program checks clean and RUNS to 42 through
+    // `w.v.*` after writing `q.a` directly. Flip to a rejection twin when the
+    // App-of-Proj gap is closed.
+    let src = "struct W[T] { v: T }\n\
+         interface Get { type Item; fn get(write self) -> Self::Item; }\n\
+         struct Q { a: i64 }\n\
+         impl Get for Q { type Item = write i64; fn get(write self) -> write i64 \
+         { return write self.a; } }\n\
+         fn wrap[I: Get](it: write I) -> W[I::Item] { return W { v: it.get() }; }\n\
+         fn main() -> i64 { let mut q: Q = Q { a: 5 }; \
+         let w: W[write i64] = wrap(write q); q.a = 7; w.v.* = 42; return q.a; }\n";
+    assert!(
+        codes(src).is_empty(),
+        "App-of-Proj struct write escape unexpectedly rejected — the App-of-Proj \
+         gap may have been closed; flip this lock-in to its rejection twin. got {:?}",
+        codes(src)
+    );
+}
+
+#[test]
+fn p22_def_site_match_join_to_proj_write_rejected() {
+    // The def-site-internal half of reviewer repro s1 (adversarial review
+    // regression lock): a match joining to a Proj result carries the union of
+    // its arms' receiver loans (the flipped `finish_match_value`), so an
+    // exclusive re-borrow of `it` while the joined result lives is E0801.
+    // Checked clean on the pre-rule binary.
+    assert_code(
+        "interface Get { type Item; fn get(read self) -> Self::Item; \
+         fn bump(write self) -> unit; }\n\
+         struct Q { a: i64 }\n\
+         impl Get for Q { type Item = read i64; fn get(read self) -> read i64 \
+         { return read self.a; } fn bump(write self) -> unit { } }\n\
+         fn s1[I: Get](it: write I, c: i64) alloc -> i64 { \
+         let r: I::Item = match c { 0 => it.get(), _ => it.get(), }; \
+         it.bump(); let s: I::Item = r; return 0; }\n\
+         fn main() -> i64 { return 0; }\n",
+        "E0801",
+    );
+}
+
+#[test]
+fn p22_def_site_array_of_proj_borrow_recarries_element_loans() {
+    // The `aggregate_stores_borrows` flip: `[2]I::Item` is an aggregate whose
+    // elements may store borrows, so `read arr` re-carries the element loans
+    // alongside the fresh array loan (P4 re-carry) — the receiver stays frozen
+    // while the derived view lives, and the exclusive `bump` is E0801. Checked
+    // clean on the pre-rule binary.
+    assert_code(
+        "interface Get { type Item; fn get(read self) -> Self::Item; \
+         fn bump(write self) -> unit; }\n\
+         struct Q { a: i64 }\n\
+         impl Get for Q { type Item = read i64; fn get(read self) -> read i64 \
+         { return read self.a; } fn bump(write self) -> unit { } }\n\
+         fn hold[I: Get](it: write I) alloc -> i64 { \
+         let arr: [2]I::Item = [it.get(), it.get()]; \
+         let v: read [2]I::Item = read arr; it.bump(); \
+         let k: read [2]I::Item = v; return 0; }\n\
+         fn main() -> i64 { return 0; }\n",
+        "E0801",
+    );
+}
+
+#[test]
+fn p22_def_site_concrete_item_binding_unaffected() {
+    // The escape hatch: binding a CONCRETE type resolves the projection away,
+    // so concrete twins of the rejected shapes stay exactly as before — a
+    // two-borrow-input fn returning a concrete borrow still wears its region
+    // variable and checks clean.
+    let src = "fn pick[region r](a: read[r] i64, b: read i64) -> read[r] i64 { return a; }\n\
+         fn main() -> i64 { let x: i64 = 1; let y: i64 = 2; \
+         let v: read i64 = pick(read x, read y); return v.*; }\n";
+    assert!(codes(src).is_empty(), "expected clean, got {:?}", codes(src));
 }
 
 #[test]
@@ -598,6 +803,42 @@ fn method_receiver_probe_does_not_duplicate_same_call_overlap() {
     let cs = codes(src);
     let n = cs.iter().filter(|c| *c == "E0805").count();
     assert_eq!(n, 1, "expected exactly one E0805, got {cs:?}");
+}
+
+// ---- P26: generic calls push a call group, so the §3.1 same-call overlap
+// rule (E0805, no two-phase borrows) runs for them exactly as for concrete
+// calls. Mirrors loans.rs `no_two_phase_write_read` / `out_and_read_overlap`.
+
+#[test]
+fn p26_generic_same_call_overlap_rejected() {
+    // The ledger repro: the concrete twin is E0805; the generic call must be
+    // too (the group is pushed right after the argument loans are captured,
+    // the exact `check_user_call` placement).
+    assert_code(
+        "fn g[T](a: write T, b: read T) -> unit { }\n\
+         fn main() -> i64 { let mut x: i64 = 5; g(write x, read x); return 0; }\n",
+        "E0805",
+    );
+}
+
+#[test]
+fn p26_generic_same_call_distinct_owners_accepted() {
+    // Non-overlapping twin: two different owners never trip the rule.
+    let src = "fn g[T](a: write T, b: read T) -> unit { }\n\
+         fn main() -> i64 { let mut x: i64 = 5; let mut y: i64 = 6; \
+         g(write x, read y); return 0; }\n";
+    assert!(codes(src).is_empty(), "expected clean, got {:?}", codes(src));
+}
+
+#[test]
+fn p26_generic_out_and_read_overlap_rejected() {
+    // The `out` twin (loans.rs `out_and_read_overlap`): an `out` slot and a
+    // `read` borrow of the same owner in one generic call.
+    assert_code(
+        "fn h[T: copy](a: out T, b: read T) -> unit { a = b.*; }\n\
+         fn main() -> i64 { let mut x: i64 = 5; h(out x, read x); return 0; }\n",
+        "E0805",
+    );
 }
 
 #[test]

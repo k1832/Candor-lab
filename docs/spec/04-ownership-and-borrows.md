@@ -208,6 +208,34 @@ live ranges by any means (the prototype uses body-local non-lexical liveness,
     parameter) SHALL be rejected: a borrow SHALL NOT outlive the body it was born
     in. This is checked body-locally.
 
+7.6 **Opaque projections are conservatively borrow-like in generic code**
+    *(ratified 2026-08-30)*: inside a generic body or signature, an
+    associated-type projection whose base is still opaque (`I::Item`, and
+    arrays of it) SHALL be treated as if it **may store a borrow** — an impl
+    may legally bind the associated type to a borrow, and a generic body is
+    checked exactly once, before any impl is known (design 0007 §5.2). The
+    treatment applies to the loan rules (chapter 04 §2–§5) and to §7's
+    signature rules: a Proj-typed parameter counts as a borrow input, a Proj
+    return or Proj-typed `out` slot comes under §7.2–§7.5, and — since no
+    region variable is spellable on a projection return today — a `-> I::Item`
+    return with two or more borrow inputs SHALL be rejected at the declaration
+    (§7.4), exactly as its concrete twin. Under the compact default (§7.3) a
+    borrow-valued associated-method call derives from the method's sole borrow
+    input, so the single-borrow-in accessor idiom (`fn first[I: Get](it: read
+    I) -> I::Item { return it.get(); }`) stays legal. **Concrete code that
+    checks today is unaffected**: a projection whose base is known normalizes
+    away before these rules run, and the escape hatch is binding a concrete
+    type. (The one concrete shape that still carries a raw projection — a
+    `Self::Item` written in an impl METHOD signature, which does not resolve
+    against the impl's own binding — is already ill-formed E0703 with or
+    without this rule; under the rule it additionally reports the provenance
+    walk's E0806, so no program that checks changes behavior.) This is
+    a deliberate def-site conservatism (some programs every concrete
+    instantiation would accept are ill-formed at the definition), in the
+    tradition of §3.4 alloc-on-drop and E1020 polymorphic recursion; it does
+    NOT widen the §8 storage ban or the type-argument ban (E1006), whose
+    "is a borrow type" meaning is unchanged.
+
 ---
 
 ## 8. Storage restriction on borrows

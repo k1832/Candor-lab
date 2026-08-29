@@ -7,9 +7,23 @@ this workstream's own change. All measurements in this memo were re-run in this
 workstream; repro sources are inlined below so they survive the scratchpad.
 
 **Ruling (2026-08-30): the deciding authority ratified option (i), the
-Proj-only conservative rule, as recommended below. Implementation follows in
-its own reviewed workstream; the lock-in tests for the open shapes flip to
-rejection twins when it lands.**
+Proj-only conservative rule, as recommended below. IMPLEMENTED (same day, its
+own reviewed workstream) FOR THE RATIFIED SCOPE — bare `I::Item` and arrays
+of it: the named predicate `may_store_borrow` covers the loan machinery and
+`check_signature_regions` (E1006/E0201 keep the unwidened
+`field_stores_borrow`), with the assoc-method provenance extension; spec 04
+§7.6 records the rule. The bare-Proj shapes closed as §2(i) predicted — l2
+E0806, k3-internal E0801, leak2 def-site E0807 — and the leak2 lock-in test
+flipped to its rejection twin. Re-measured over-rejection on the full corpus:
+zero diffs. P26 (the same-call-overlap mirror gap logged in §4) was closed
+for free generic calls in the same workstream (the interface-method path is
+ledger P28). HOWEVER, the implementation's adversarial review REFUTED this
+memo's completeness argument for (i): a WRAPPED projection (`Opt[I::Item]`)
+still launders a borrow-bound Item, because E1006 does not run at
+constructor/annotation positions (ledger P9, reopened) — see the corrected
+§2(i) paragraph and the new "App extension, measured" section. P22 is
+therefore PARTIALLY closed: bare-Proj def-site shapes closed, App-of-Proj
+residual open under P9.**
 
 Summary of verdicts:
 
@@ -88,10 +102,11 @@ What this workstream measured, shape by shape, against the post-(b) binary:
 | q1 (`-> read T`) | **CLOSED by (b)** — E0803 | n/a (no Proj; `read T` is borrow-kind syntactically) |
 | leak2 (`-> I::Item`, TWO borrow inputs) | **OPEN** — the compact default is ambiguous with two post-substitution borrow inputs, so (b) deliberately carries nothing, matching the concrete rule | **OPEN** — this is where the backstop belongs: the concrete twin cannot even be declared (E0807 without a region), but `field_stores_borrow(Proj) == false` skips the signature rule, and no region tag is parseable on a `-> I::Item` return, so the ambiguous branch is the only reachable one |
 
-The leak2 residual, found by the (b) adversarial review — checks clean and
-runs to 9 through a "live" borrow today (verified; locked in as a
-currently-accepted test, `p22_open_hole_two_borrow_inputs_proj_return_still_
-accepted`):
+The leak2 residual, found by the (b) adversarial review — checked clean and
+ran to 9 through a "live" borrow when this memo was written (verified; it was
+locked in as a currently-accepted test, `p22_open_hole_two_borrow_inputs_
+proj_return_still_accepted`, now flipped by the (i) implementation to its
+rejection twin `p22_two_borrow_inputs_proj_return_rejected_at_def_site`):
 
     fn leak2[I: Get](it: read I, extra: I::Item) alloc -> I::Item {
         return it.get();
@@ -175,11 +190,24 @@ appears, it needs region tags to become spellable on projection returns (a
 small grammar addition, decidable then). This finding materially STRENGTHENS
 the (i) recommendation — it closes the one caller-side shape (b) cannot.
 
-Why Proj-only coverage is complete: an Item bound to a borrow can only flow
-through BARE Proj positions. A nested position such as `Opt[I::Item]` would,
-at Item = borrow, instantiate a generic enum at a borrow-kind argument — the
-same E1006 rule forbids that (modulo ledger P9, the annotation-position E1006
-gap, which needs closing on its own regardless of this decision).
+Why Proj-only coverage was ARGUED complete — CORRECTED 2026-08-30 by the
+implementation's adversarial review: this memo originally claimed a nested
+position such as `Opt[I::Item]` would, at Item = borrow, instantiate a
+generic enum at a borrow-kind argument and be caught by E1006. That is
+WRONG about where E1006 runs: `check_arg_conformance` fires only on generic
+FN call type arguments (check/generics.rs check_bounds callers, :75/:890)
+and generic-impl conformance (:1110) — never on struct-literal or
+enum-constructor type arguments, and never on type annotations (`let o:
+Opt[read i64] = Opt::None;` checks clean today — verified). So App-of-Proj
+IS a live laundering route: `fn wrap[I: Get](it: read I) alloc ->
+Opt[I::Item] { return Opt::Some(it.get()); }` checks clean under the
+shipped (i) rule and runs (repros inlined in the reopened ledger P9 entry;
+locked in as `p22_open_hole_app_of_proj_*`). The parenthetical about P9
+was carrying the whole claim: P9 is not a modulo, it is the hole. Closing
+it (running the E1006 borrow-argument rule at constructor and annotation
+positions) is the (iii-b)-flavored path; extending the predicate through
+App instead was prototyped and measured — see "App extension, measured"
+below.
 
 Costs and residual work for a shipped (i):
 
@@ -398,3 +426,55 @@ brought the P15 float-conv fix and its gates):
 * `cargo clippy --all-targets`: green — the only output is the pre-existing
   "unknown lint `clippy::chunks_exact_to_as_chunks`" warning from
   src/build/sha256.rs's allow for a newer clippy than this environment runs.
+
+## 5. App extension, measured (2026-08-30, post-ruling; prototype reverted)
+
+The (i)-implementation adversarial review refuted §2(i)'s completeness
+argument (see the corrected paragraph above): App-of-Proj launders a
+borrow-bound Item past the shipped rule. The obvious candidate closure —
+extend the conservative predicate through App — was prototyped and measured
+in the implementation workstream, behind a local env toggle
+(`CANDOR_P22_APP_PROTO`, `OnceLock`-cached; fully reverted after
+measurement, re-verified inert): `may_store_borrow(App(_, args))` is true
+when any (transitively) instantiated argument contains a Proj.
+
+Measured over-rejection, toggle off vs on, same release binary, the full
+370-subject corpus (fixtures + selfhost + ports as files, plus the corelib,
+selfhost, and p20-reference module trees):
+
+* **3 subjects diff; 1 previously-clean subject newly rejects — the corelib
+  TREE itself** (0 -> 24 E0806 error lines). The two other diffs are the
+  same errors seen through the standalone module files (core/iter_adapters.cnr
+  +17 E0806 lines, std/list.cnr +2; both already non-clean checked standalone,
+  as bare modules). Total +43 E0806 lines corpus-wide.
+* The rejected shapes are exactly the shipped iterator stack: every generic
+  adapter `next` returning `IterStep[Item, Self]` CONSTRUCTORS
+  (`return IterStep::Done;`, `return IterStep::More(x, TakeN { inner: rest,
+  n: self.n - 1usize });`, Zip's `More(Pair {...}, Zip {...})` — spans mapped
+  to iter_adapters.cnr:39/43/46/192 and 13 more) plus list.cnr's fold-style
+  `acc` returns. Mechanism: the App-flagged return makes `ret_is_borrow`
+  true at the def site, and the provenance walk has no rule for constructor
+  expressions — `None` => E0806. Fixtures (non-corelib), selfhost, ports,
+  and the 50 kL reference: zero diffs.
+* **The P20 bench cannot even run with the toggle on**: its corelib
+  continuity tree fails the cold build (`cold build had errors`,
+  benches/p20.rs:118) — the headline cost is correctness of shipped code,
+  not time. Timing was measured on the basis available: release CLI `check`
+  of the 50 kL reference tree (which stays clean under the toggle), five
+  runs each — toggle off 1.49–1.61 s (median 1.55), toggle on 1.48–1.51 s
+  (median 1.50). The predicate itself costs nothing measurable.
+
+Recommendation: do NOT ship the naive App extension. It rejects the exact
+corpus the ratified zero-measurement protected, and making it shippable
+means constructor-aware provenance (per-payload provenance through
+enum/struct literals, plus landing-site loan plumbing for wrapped borrows) —
+a real design workstream, not a predicate tweak. The cheaper and cleaner
+closure for the App-of-Proj residual is the P9/E1006 route (the (iii-b)
+flavor): run the borrow-type-argument rule at constructor and annotation
+positions, so a borrow-bound Item cannot be NAMED at the laundering
+positions at all. Expected corpus cost is zero (no shipped code names a
+borrow-kind constructor/annotation type argument), to be confirmed by that
+workstream's own sweep; it needs its own ruling since P11 implicitly
+legalized the binding it constrains. Until then the residual is locked in
+as accepted-today tests (`p22_open_hole_app_of_proj_*`) and tracked as the
+reopened ledger P9 / P22-partial.
