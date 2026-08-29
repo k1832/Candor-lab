@@ -344,7 +344,7 @@ caller-side extension also refuses to guess with two-plus inputs. A latent
 asymmetry to close if fn-pointer signatures ever get their own
 well-formedness pass.
 
-# Ledger addition from the P21/P19/P23-fix verification (2026-08-30)
+# Ledger additions from the 2026-08-30 fix round (P21/P19/P23 verification and P22(b) review)
 
 ## P25 — Scalar `{integer}` flexibility through a binding still truncates (MEDIUM)
 
@@ -360,6 +360,20 @@ means either grounding bare scalar `{integer}` to i64 at the binding
 let y: u8 = x;`) or tracking constant values through bindings — a language
 ruling, not a mechanical fix. Surfaced by the P21 closure's verifier,
 2026-08-30.
+
+## P26 — Generic calls never push a call group, so same-call overlap is unchecked (MEDIUM)
+
+Found by the P22(b) adversarial review (2026-08-30): `check_generic_call`
+captures per-argument loans (and the P22(b) fix now extends the return
+loan from them) but, unlike `check_user_call` and the fn-pointer path, it
+never calls `push_call_group`, so the §3.1 no-two-phase rule does not run
+for generic calls. `fn g[T](a: write T, b: read T)` called as
+`g(write x, read x)` is E0805 on the concrete twin and checks CLEAN on
+the generic one (repro verified on the post-P22(b) binary; pre-existing —
+the P22(b) fix neither created nor touched this path). A mirror gap of
+the same family as P22(b), likely a one-call fix at the same site, but
+logged as its own item so it gets its own tests and sweep rather than
+riding the P22 change. Cross-reference: P22.
 
 ## P27 — `spawn` arguments bypass the argument type check entirely (HIGH, pending triage)
 

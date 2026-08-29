@@ -902,8 +902,28 @@ impl<'a> Checker<'a> {
         if !targs.iter().any(|t| matches!(t, Type::Error)) {
             self.shapes.insert((self.cur_item, span.start), crate::generics::Shape::Fn(name.to_string(), targs.clone()));
         }
-        self.clear_carried();
-        subst(&sig.ret, &subst_map)
+        // Return-borrow extension (P16/P22b): borrow-ness is judged on the
+        // SUBSTITUTED return type — `fn idr[T](p: read T) -> read T` returns a
+        // borrow at every instantiation, so the loan(s) on the region-source
+        // argument(s) extend over the call's result exactly as a concrete
+        // borrow/view-returning call's do (§3.1/§3.3, `check_user_call`). The
+        // substituted parameter types decide borrow-in-ness, the same choice
+        // the P7 out-slot extension above already makes. The landing-site
+        // predicate (`carries_borrow`) cannot see the substitution, so the
+        // borrow-valued answer is recorded per call span (the P11 pattern).
+        let ret = subst(&sig.ret, &subst_map);
+        if field_stores_borrow(&ret) {
+            let src = generic_region_source_indices(&sig, &subst_params);
+            let mut ids: Vec<usize> = Vec::new();
+            for i in src {
+                ids.extend(per_arg[i].iter().copied());
+            }
+            self.set_carried(ids);
+            self.f.borrow_valued.insert((span.start, span.end));
+        } else {
+            self.clear_carried();
+        }
+        ret
     }
 
     /// Best-effort synthesis of an argument's type for inference (not emitting).
@@ -1239,6 +1259,42 @@ impl<'a> Checker<'a> {
             self.clear_carried();
         }
         ret
+    }
+}
+
+/// Which argument indices of a generic call are the return-region source
+/// (design §3.3): the mirror of `expr::region_source_indices`, judged on the
+/// SUBSTITUTED parameter types (`subst_params`, index-aligned with
+/// `sig.params`) — a `take`-mode `p: T` instantiated at a view type is a
+/// borrow input even though the declared type is opaque. Region tags come
+/// from the declaration; under the compact default the sole borrow input is
+/// the source, and with two-plus untagged borrow inputs the source is
+/// ambiguous — carry nothing.
+fn generic_region_source_indices(
+    sig: &GenericFnSig,
+    subst_params: &[(ParamMode, Type)],
+) -> Vec<usize> {
+    let bidx: Vec<usize> = subst_params
+        .iter()
+        .enumerate()
+        .filter(|(_, (m, t))| {
+            matches!(m, ParamMode::Read | ParamMode::Write)
+                || (*m != ParamMode::Out && field_stores_borrow(t))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    match &sig.ret_region {
+        Some(r) => bidx
+            .into_iter()
+            .filter(|&i| sig.params[i].region.as_deref() == Some(r.as_str()))
+            .collect(),
+        None => {
+            if bidx.len() == 1 {
+                vec![bidx[0]]
+            } else {
+                Vec::new()
+            }
+        }
     }
 }
 
