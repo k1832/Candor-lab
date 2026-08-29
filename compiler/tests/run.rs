@@ -117,6 +117,15 @@ fn array_index_out_of_bounds_faults() {
 }
 
 #[test]
+fn array_literal_index_base_reads_at_grounded_i64_stride() {
+    // P19: the rvalue base grounds to [2][2]i64 (the checker's temporary
+    // landing default), so the copied row reads whole i64 elements — the
+    // narrowing shape ([2]u8 slot) is E0703 and never reaches the runtime.
+    let r = run("fn main() -> i64 { let s: [2]i64 = [[1, 2], [3, 4]][0]; return s[0] + s[1]; }");
+    assert_eq!(r.ret, 3);
+}
+
+#[test]
 fn assert_fault() {
     let f = fault("fn main() -> i64 { let x: i64 = 1; assert(x == 2); return 0; }");
     assert_eq!(f.kind, FaultKind::Assert);

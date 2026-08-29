@@ -11,15 +11,27 @@ use super::{Checker, Use};
 
 impl<'a> Checker<'a> {
     pub(super) fn check_block_stmts(&mut self, b: &Block) {
+        // A block's STATEMENTS are their own typing contexts: the surrounding
+        // slot's expected type describes the block's value (an arm or branch
+        // expression), never a statement inside it, so the expectation clears
+        // at this boundary (B1) — a `let y = <literal>;` in an arm body must
+        // ground and range-check against its own annotation or the i64
+        // default, not the outer slot's scalar.
+        let saved = self.expected_ty.take();
         self.push_scope();
         for s in &b.stmts {
             self.check_stmt(s);
         }
         self.emit_scope_exits(self.f.env.len() - 1, b.span);
         self.pop_scope();
+        self.expected_ty = saved;
     }
 
     pub(super) fn check_block_value(&mut self, b: &Block) -> Type {
+        // Same statement-boundary clearing as `check_block_stmts` (B1): the
+        // block yields unit/Never, so the outer expectation never describes
+        // anything inside it.
+        let saved = self.expected_ty.take();
         self.push_scope();
         for s in &b.stmts {
             self.check_stmt(s);
@@ -27,6 +39,7 @@ impl<'a> Checker<'a> {
         self.emit_scope_exits(self.f.env.len() - 1, b.span);
         let diverged = self.cur_get().is_none();
         self.pop_scope();
+        self.expected_ty = saved;
         if diverged {
             Type::Never
         } else {

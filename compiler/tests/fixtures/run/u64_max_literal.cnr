@@ -1,0 +1,40 @@
+// P21 direction 2 (spec 01 §3.3): an unsuffixed literal above i64::MAX is
+// legal wherever its REQUIRED type is u64/usize, and must store bit-exactly on
+// every engine. Exercised through a let, a call argument, a static, a match
+// arm, an array element, and top-of-range arithmetic; each observation traces
+// an i64-safe value (the halves are 0xffffffff).
+
+static TOP: u64 = 18446744073709551615;
+
+fn take_max(x: u64) -> u64 {
+    return x;
+}
+
+fn main() -> i64 {
+    let x: u64 = 18446744073709551615;
+    trace(conv i64 (x >> 32u64));
+    trace(conv i64 (x & 4294967295u64));
+    if take_max(x) == TOP {
+        trace(1);
+    } else {
+        trace(0);
+    }
+    let c: i64 = 0;
+    let y: u64 = match c {
+        0 => 18446744073709551615,
+        _ => 0,
+    };
+    let z: u64 = y - 1u64 + 1u64;
+    if z == x {
+        trace(1);
+    } else {
+        trace(0);
+    }
+    let a: [2]u64 = [18446744073709551615, 1];
+    if a[0] == z {
+        trace(1);
+    } else {
+        trace(0);
+    }
+    return conv i64 (a[1]);
+}

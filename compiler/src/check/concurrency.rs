@@ -27,10 +27,14 @@ impl<'a> Checker<'a> {
             self.reject_in_contract(span, "a `scope` concurrency region");
         }
         self.scope_enter();
+        // Statement-boundary expectation clearing, as `check_block_stmts` (B1):
+        // the region yields unit, so no outer slot describes its statements.
+        let saved_expect = self.expected_ty.take();
         self.push_scope();
         for s in &b.stmts {
             self.check_stmt(s);
         }
+        self.expected_ty = saved_expect;
         // The whole-scope loan range (§1.2): a synthetic use of each spawn-crossing
         // borrow's scope-length binding AT the closing brace keeps its loan live to
         // the brace, so any parent access to a borrowed place during the scope, and

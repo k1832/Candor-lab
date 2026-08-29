@@ -122,8 +122,14 @@ impl<'a> Checker<'a> {
                 let saved_expect = std::mem::replace(&mut self.expected_ty, elem_expect.clone());
                 let t = self.check_expr(value, Use::Value);
                 self.expected_ty = saved_expect;
+                // Mirror `check_array_lit`: a direct literal already checked
+                // on sight against a scalar expectation (P21) is not re-checked.
+                let sight_checked =
+                    matches!(&elem_expect, Some(Type::Scalar(s)) if s.is_integer());
                 let bare: Vec<(i128, Span)> = match (&t, const_int(value)) {
-                    (Type::IntLit, Some(v)) => vec![(v, value.span)],
+                    (Type::IntLit, Some(v)) if !(sight_checked && direct_int_lit(value)) => {
+                        vec![(v, value.span)]
+                    }
                     _ => Vec::new(),
                 };
                 let t = self.ground_array_elem(t, &elem_expect, &bare);
@@ -419,7 +425,14 @@ impl<'a> Checker<'a> {
                 (elem, place)
             }
             _ => {
-                let t = self.check_expr(e, Use::Value);
+                // An rvalue used as a place base (an array literal indexed in
+                // place, P19) lands in a TEMPORARY — a non-propagating landing,
+                // so a composite's `{integer}` grounds to the `i64` default
+                // here exactly as at an unannotated `let` (P5): the temporary's
+                // layout is fixed before any outer slot is consulted, making a
+                // narrower slot a compile-time mismatch (E0703), never a
+                // silently narrowing copy.
+                let t = ground_nested_int_lit(&self.check_expr(e, Use::Value));
                 (t, None)
             }
         }
@@ -990,10 +1003,15 @@ impl<'a> Checker<'a> {
         // Bare `{integer}` elements that fold to constants: range-checked below
         // against whatever element type the literal finally grounds to.
         let mut bare: Vec<(i128, Span)> = Vec::new();
+        // A direct literal element checks ON SIGHT against the scalar
+        // expectation (P21, `check_int_lit_range`), so re-checking it below
+        // would double-report; only folded compounds (`-(5)`) — whose operands
+        // check expectation-free (F1) — still need the grounded-type check.
+        let sight_checked = matches!(&elem_expect, Some(Type::Scalar(s)) if s.is_integer());
         for (i, el) in elems.iter().enumerate() {
             self.clear_carried();
             let t = self.check_expr(el, Use::Value);
-            if matches!(t, Type::IntLit) {
+            if matches!(t, Type::IntLit) && !(sight_checked && direct_int_lit(el)) {
                 if let Some(v) = const_int(el) {
                     bare.push((v, el.span));
                 }
@@ -1337,7 +1355,17 @@ impl<'a> Checker<'a> {
 
     /// Range-check an integer literal (real front-end only; spec 01 §3.3). A
     /// positive literal must fit its type's maximum; a negative-literal fold must
-    /// fit its type's minimum. Unsuffixed literals default to `i64`.
+    /// fit its type's minimum. An unsuffixed literal checks against the type it
+    /// is REQUIRED to take (P21): the expected type when it sits in a
+    /// propagating integer-scalar slot — the type the engines lower it at, so
+    /// `let x: u8 = 300` rejects and `let x: u64 = 18446744073709551615` (in
+    /// range for its slot) is legal — and the `i64` default (design 0002 §0.1)
+    /// otherwise. Two disciplines keep the expectation honest here: F1 clears
+    /// it at operand/index/builtin positions (`check_operand`, `check_place`,
+    /// `check_builtin`), and block-statement boundaries clear it on entry
+    /// (`check_block_stmts`/`check_block_value`/`check_scope`, B1) — so a
+    /// statement inside an arm or branch block never sees the outer slot's
+    /// scalar, while a plain-expression arm body still propagates it.
     pub(super) fn check_int_lit_range(
         &mut self,
         value: u64,
@@ -1345,7 +1373,10 @@ impl<'a> Checker<'a> {
         neg: bool,
         span: Span,
     ) {
-        let sty = suffix.unwrap_or(ScalarTy::I64);
+        let sty = suffix.unwrap_or(match &self.expected_ty {
+            Some(Type::Scalar(s)) if s.is_integer() => *s,
+            _ => ScalarTy::I64,
+        });
         let (min, max) = scalar_range(sty);
         let v: i128 = if neg { -(value as i128) } else { value as i128 };
         if v < min || v > max {
@@ -1805,7 +1836,12 @@ impl<'a> Checker<'a> {
             let src = region_source_indices(sig);
             let mut ids = Vec::new();
             for i in src {
-                ids.extend(per_arg[i].iter().copied());
+                // `src` indexes by PARAMETER position while `per_arg` is
+                // zip-truncated to the argument count: an arity-error call
+                // (E0706 already queued above) must not panic here (P23).
+                if let Some(a) = per_arg.get(i) {
+                    ids.extend(a.iter().copied());
+                }
             }
             self.set_carried(ids);
         } else {
@@ -3344,6 +3380,18 @@ fn scalar_range(s: ScalarTy) -> (i128, i128) {
 fn scalar_fits(v: i128, s: ScalarTy) -> bool {
     let (min, max) = scalar_range(s);
     v >= min && v <= max
+}
+
+/// Is `e` an integer-literal token (possibly parenthesized) — the shapes
+/// `check_int_lit_range` checks ON SIGHT against the expected type (P21)? A
+/// folded compound (`-(5)`) is NOT direct: its operand checks
+/// expectation-free (F1), so only the grounded-type re-check covers its value.
+fn direct_int_lit(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::IntLit { .. } | ExprKind::NegIntLit { .. } => true,
+        ExprKind::Paren(i) => direct_int_lit(i),
+        _ => false,
+    }
 }
 
 /// Fold an expression to a compile-time integer constant, if it is one.

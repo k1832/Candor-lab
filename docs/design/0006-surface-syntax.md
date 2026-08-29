@@ -330,8 +330,12 @@ parenthesized primary (the magnitude over-ranges first, so it errors as an
 ordinary expression), and `- x` for a variable stays ordinary faulting negation.
 So `-9223372036854775808` (or `-9223372036854775808i64`) is a valid `i64`. **A
 bare over-range literal with no sign — e.g. `9223372036854775808` on its own — is
-a compile error** (it fits no target type), as is any signed literal outside its
-target's range; never a runtime fault. Walked in §3. For the programmatic bound,
+a compile error** (with no required type it takes the `i64` default and fits no
+target), as is any signed literal outside its target's range; never a runtime
+fault. The range an unsuffixed literal checks against is the type it is
+*required* to take: written directly in a `u64` slot, `9223372036854775808` is in
+range and legal — the `i64` default governs only where no required type exists
+(spec 01 §3.3, amended 2026-08-30, ratification pending). Walked in §3. For the programmatic bound,
 add compile-time intrinsics **`min_of(T)` / `max_of(T)`** to the `sizeof`/`alignof`
 family (greppable, NN#13-clean). An `i64::MIN` associated-constant spelling is
 rejected: `::` is reserved exclusively for enum variants (NN#13), and reopening it

@@ -77,9 +77,12 @@ fn golden_programs_parse() {
 
 #[test]
 fn neg_bare_over_range_literal_is_compile_error() {
-    // spec 01 §3.3: a bare unsigned over-range literal is rejected at compile
-    // time (never a runtime fault).
-    let codes = real_error_codes("fn main() -> i64 { let x: u64 = 9223372036854775808; return 0; }");
+    // spec 01 §3.3: a bare unsigned over-range literal WRITTEN ON ITS OWN is
+    // rejected at compile time (never a runtime fault). In a `u64` slot the
+    // required type is `u64` and the same literal is in range and legal (P21).
+    let codes = real_error_codes("fn main() -> i64 { let x = 9223372036854775808; return 0; }");
+    assert!(codes.contains(&"E0709".to_string()), "expected E0709, got {codes:?}");
+    let codes = real_error_codes("fn main() -> i64 { let x: i64 = 9223372036854775808; return 0; }");
     assert!(codes.contains(&"E0709".to_string()), "expected E0709, got {codes:?}");
 }
 
