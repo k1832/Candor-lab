@@ -715,6 +715,60 @@ pub fn field_stores_borrow(ty: &Type) -> bool {
     }
 }
 
+/// Ground any `{integer}` sitting INSIDE a composite type to `i64` — the
+/// unconstrained-literal default (design 0002 §0.1), applied structurally. A
+/// bare top-level `{integer}` is returned unchanged (scalar literals stay
+/// flexible; `unify`'s own IntLit arm and the engines' lowering default handle
+/// them), but a composite must never carry one into a binding or a
+/// monomorphization type argument: a composite's layout (an array's stride)
+/// and its instance identity are functions of the element type, so a flexible
+/// element type silently narrows or forks instances downstream (P5).
+pub fn ground_nested_int_lit(t: &Type) -> Type {
+    fn inner(t: &Type) -> Type {
+        if matches!(t, Type::IntLit) {
+            return Type::Scalar(crate::token::ScalarTy::I64);
+        }
+        rebuild(t)
+    }
+    fn rebuild(t: &Type) -> Type {
+        match t {
+            Type::Array(e, l) => Type::Array(Box::new(inner(e)), l.clone()),
+            Type::Slice(e) => Type::Slice(Box::new(inner(e))),
+            Type::SliceMut(e) => Type::SliceMut(Box::new(inner(e))),
+            Type::Box(e) => Type::Box(Box::new(inner(e))),
+            Type::BoxResult(e) => Type::BoxResult(Box::new(inner(e))),
+            Type::RawPtr(e) => Type::RawPtr(Box::new(inner(e))),
+            Type::Borrow(e) => Type::Borrow(Box::new(inner(e))),
+            Type::BorrowMut(e) => Type::BorrowMut(Box::new(inner(e))),
+            Type::App(n, args) => Type::App(n.clone(), args.iter().map(inner).collect()),
+            _ => t.clone(),
+        }
+    }
+    rebuild(t)
+}
+
+/// Does `t` contain `{integer}` anywhere — itself included? Debug-assert
+/// support for the P5 invariant: no monomorphization type argument may carry
+/// a still-flexible literal type.
+pub fn contains_int_lit(t: &Type) -> bool {
+    match t {
+        Type::IntLit => true,
+        Type::Array(e, _)
+        | Type::Slice(e)
+        | Type::SliceMut(e)
+        | Type::Box(e)
+        | Type::BoxResult(e)
+        | Type::RawPtr(e)
+        | Type::Borrow(e)
+        | Type::BorrowMut(e) => contains_int_lit(e),
+        Type::App(_, args) => args.iter().any(contains_int_lit),
+        Type::FnPtr(fp) => {
+            fp.params.iter().any(|(_, t)| contains_int_lit(t)) || contains_int_lit(&fp.ret)
+        }
+        _ => false,
+    }
+}
+
 /// Assignability of `from` (a value's type) into a slot expecting `to`.
 /// Handles integer-literal flexibility and fn-pointer effect subtyping
 /// (design 0001 §6.1: a non-`alloc` fn is assignable to an `alloc` slot, never

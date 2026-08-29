@@ -842,7 +842,7 @@ impl<'a> Interp<'a> {
             ExprKind::StructLit { name, fields } => self.eval_struct_lit(name, fields),
             ExprKind::EnumCtor { enum_name, variant, args } => self.eval_enum_ctor(enum_name, variant, args, expected),
             ExprKind::ArrayLit(elems) => self.eval_array_lit(elems, expected),
-            ExprKind::ArrayRepeat { value, size } => self.eval_array_repeat(value, size),
+            ExprKind::ArrayRepeat { value, size } => self.eval_array_repeat(value, size, expected),
             ExprKind::CastPtr { ty, arg } => {
                 let p = self.eval_value(arg, None)?;
                 let addr = self.read_u64(p.addr)?;
@@ -3351,10 +3351,28 @@ impl<'a> Interp<'a> {
         Ok(RVal { ty: aty, addr, origin: Origin::Temp(id) })
     }
 
-    fn eval_array_repeat(&mut self, value: &Expr, size: &Expr) -> R<RVal> {
+    fn eval_array_repeat(&mut self, value: &Expr, size: &Expr, expected: Option<&Type>) -> R<RVal> {
+        // The repeated element materializes at the expected ELEMENT type,
+        // exactly as `eval_array_lit`'s elements do (P5): without this an
+        // unsuffixed `[9; 3]` under a `[3]u8` annotation laid out i64 slots
+        // while the checker (and MIR/native) agreed on u8.
+        //
+        // Resolution-rule difference from `eval_array_lit` (F7): the literal
+        // path picks `expected_elem` FIRST and falls back to the first
+        // element's type (expectation wins); this path takes the evaluated
+        // value's type (value wins), the expectation only threading into the
+        // value's own evaluation. Currently unobservable: the checker rejects
+        // any program where the two would disagree (a concrete element type
+        // mismatching the expected element type is E0703), so both rules pick
+        // the same type — do not assume they are interchangeable if either
+        // side's flexibility ever widens.
+        let expected_elem = match expected {
+            Some(Type::Array(e, _)) => Some((**e).clone()),
+            _ => None,
+        };
         let nv = self.eval_value(size, Some(&Type::usize()))?;
         let n = self.read_u64(nv.addr)?;
-        let ev = self.eval_value(value, None)?;
+        let ev = self.eval_value(value, expected_elem.as_ref())?;
         let elem_ty = ev.ty.clone();
         let aty = Type::Array(Box::new(elem_ty.clone()), ArrayLen::Lit(n));
         let (addr, id) = self.alloc_temp(aty.clone());

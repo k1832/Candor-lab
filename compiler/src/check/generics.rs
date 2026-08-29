@@ -31,6 +31,13 @@ impl<'a> Checker<'a> {
         if args.iter().any(|t| matches!(t, Type::Param(_) | Type::Error)) {
             return;
         }
+        // The P5 invariant, self-checking under the test profile: a type
+        // argument still carrying `{integer}` (bare or inside a composite)
+        // would fork one source type into divergent instances downstream.
+        debug_assert!(
+            !args.iter().any(contains_int_lit),
+            "monomorphization type argument for `{name}` still carries `{{integer}}` (P5): {args:?}"
+        );
         if !self.insts.iter().any(|(n, a)| n == name && a == &args) {
             self.insts.push((name.to_string(), args));
         }
@@ -897,9 +904,18 @@ impl<'a> Checker<'a> {
         let mark = self.diags.len();
         let groups_mark = self.f.call_groups.len();
         let saved_cur = self.f.cur;
+        // An argument is its own typing context (F1/F3): the caller's landing
+        // slot must not leak into the probe, or an unsuffixed array argument
+        // would adopt the slot's element type instead of the grounded `i64`
+        // default — the expected-type hint enters inference only through the
+        // explicit return-type unification (design 0007 §6.2), exactly as a
+        // bare scalar argument never adopts the slot type (`let a: u8 =
+        // idf(1)` is E0703).
+        let saved_expect = self.expected_ty.take();
         self.f.cur = None; // suppress CFG action emission during the probe
         let t = self.check_expr(e, Use::Value);
         self.f.cur = saved_cur;
+        self.expected_ty = saved_expect;
         self.diags.truncate(mark);
         // The probe is not part of the program: call groups it pushed would
         // re-raise the real call's same-call overlaps as duplicates (E0805).
@@ -1164,7 +1180,13 @@ fn unify(decl: &Type, arg: &Type, params: &HashSet<String>, out: &mut HashMap<St
     match (decl, arg) {
         (Type::Param(n), a) if params.contains(n) => {
             if !matches!(a, Type::Error | Type::IntLit) {
-                out.entry(n.clone()).or_insert_with(|| a.clone());
+                // A composite still carrying a bare `{integer}` (an
+                // all-unsuffixed array literal) binds at the grounded `i64`
+                // default, exactly as the bare scalar literal below does — a
+                // flexible element type must never become a monomorphization
+                // type argument, or the same source type forks into divergent
+                // instances (P5).
+                out.entry(n.clone()).or_insert_with(|| ground_nested_int_lit(a));
             } else if matches!(a, Type::IntLit) {
                 out.entry(n.clone()).or_insert(Type::Scalar(ScalarTy::I64));
             }
