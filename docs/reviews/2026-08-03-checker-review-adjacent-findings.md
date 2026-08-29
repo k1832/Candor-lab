@@ -171,7 +171,7 @@ beside the pre-existing E0301; the two propagated copies of one loan are
 counted as a conflicting pair. Can only co-occur with E0301, so no legal
 program is rejected.
 
-## P15 — Float-to-small-integer conversion panics both Cranelift engines (HIGH, compile-time)
+## P15 — Float-to-small-integer conversion panics both Cranelift engines (CLOSED 2026-08-30, HIGH, compile-time)
 
 `conv u8` / `conv u16` / `conv i8` of an f64 crashes the Cranelift JIT (both
 tiers) and AOT at COMPILE time (cranelift-codegen 0.132.3's x64 emitter hits
@@ -181,6 +181,17 @@ engine-parity hole outside the float gates' coverage (they only test conv
 i32/i64). Minimal repro in the raytracer test header and MEMORY.md. Fix
 direction: widen the convert to i32 in the lowering and narrow after. Found
 by the ray tracer workstream, 2026-08-26.
+
+CLOSED by the P15 workstream (adversarially reviewed): `eval_float_conv`
+(src/backend/lower.rs) now saturates sub-32-bit targets via
+`fcvt_to_{s,u}int_sat` at I32, extends to the i64 register, then clamps to
+the TARGET type's bounds with icmp+select — matching the interpreters'
+Rust-`as` rule (out-of-range clamps, negatives into unsigned -> 0, NaN -> 0).
+The entry's original "widen to i32 and narrow after" hint was wrong on the
+second half: a plain narrow would WRAP past-bounds values (300.7 -> u8 would
+give 44, not 255); the clamp is load-bearing. LLVM was already correct
+(`llvm.fpto*i.sat.iN` at exact width). Gated five-engine in tests/floats.rs,
+tests/floats_f32.rs, and the AOT slice.
 
 ## P16 — Generic functions do no return-borrow loan extension (HIGH)
 

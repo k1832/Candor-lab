@@ -252,6 +252,29 @@ fn f32_to_int_saturates() {
 }
 
 #[test]
+fn f32_to_small_int_saturates() {
+    // Sub-32-bit targets from f32 (checker-review ledger P15): clamp at the
+    // TARGET type's bounds, negatives into unsigned -> 0, NaN -> 0, ±inf and
+    // large magnitudes clamp. Used to panic both Cranelift engines at
+    // compile time (fcvt_to_*int_sat at I8/I16 has no x64 lowering).
+    let src = "fn main() -> i64 { \
+        let z: f32 = 0.0f32; let o: f32 = 1.0f32; \
+        let nan: f32 = z / z; let pinf: f32 = o / z; let ninf: f32 = (-o) / z; \
+        let a: f32 = 300.7f32; trace(conv i64 (conv u8 (a))); \
+        let b: f32 = -5.9f32; trace(conv i64 (conv u8 (b))); \
+        trace(conv i64 (conv u8 (nan))); \
+        trace(conv i64 (conv u8 (pinf))); \
+        trace(conv i64 (conv u8 (ninf))); \
+        let c: f32 = 128.0f32; trace(conv i64 (conv i8 (c))); \
+        let d: f32 = -129.0f32; trace(conv i64 (conv i8 (d))); \
+        let e: f32 = 1.0e18f32; trace(conv i64 (conv u16 (e))); \
+        let f: f32 = -32769.0f32; trace(conv i64 (conv i16 (f))); \
+        return 0; }";
+    let (_, trace) = all_engines(src, "smallsat");
+    assert_eq!(trace, vec![255, 0, 0, 255, 0, 127, -128, 65535, -32768]);
+}
+
+#[test]
 fn int_f32_round_trip() {
     let src = "fn main() -> i64 { \
         let i: i64 = 1234; let f: f32 = conv f32 (i); let back: i64 = conv i64 (f); \

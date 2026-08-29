@@ -1174,9 +1174,35 @@ impl<M: Module> Cg<'_, '_, M> {
             };
             return self.float_bits(to, f);
         }
-        // float -> int: saturate to the exact target width, then canonicalize to i64.
-        let (_, _, bits, signed) = ty_range(to);
+        // float -> int: saturate at the target type's bounds, then canonicalize to
+        // i64 — directly at the target width for 32/64-bit targets, via an I32
+        // saturate plus an explicit clamp for sub-32-bit ones.
+        let (min, max, bits, signed) = ty_range(to);
         let f = self.as_float(from, x);
+        if bits < 32 {
+            // Cranelift's x64 backend cannot lower `fcvt_to_{s,u}int_sat` at
+            // I8/I16 (unreachable in the emitter — checker-review ledger P15).
+            // Saturate at I32 — that already truncates toward zero and maps
+            // NaN to 0 — then clamp to the target's bounds with i64 selects,
+            // matching the interpreters' Rust-`as` rule. A plain `ireduce`
+            // here would WRAP values beyond the small type's range, not clamp.
+            let narrow = if signed {
+                self.b.ins().fcvt_to_sint_sat(types::I32, f)
+            } else {
+                self.b.ins().fcvt_to_uint_sat(types::I32, f)
+            };
+            let w = if signed {
+                self.b.ins().sextend(types::I64, narrow)
+            } else {
+                self.b.ins().uextend(types::I64, narrow)
+            };
+            let minc = self.iconst(min as i64);
+            let maxc = self.iconst(max as i64);
+            let lt = self.b.ins().icmp(IntCC::SignedLessThan, w, minc);
+            let gt = self.b.ins().icmp(IntCC::SignedGreaterThan, w, maxc);
+            let lo = self.b.ins().select(lt, minc, w);
+            return self.b.ins().select(gt, maxc, lo);
+        }
         let it = int_ty(crate::interp::layout::Layout::scalar_size(to));
         let narrow = if signed {
             self.b.ins().fcvt_to_sint_sat(it, f)

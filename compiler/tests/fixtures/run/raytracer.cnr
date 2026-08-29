@@ -11,10 +11,12 @@
 // SAME 64x48 image, byte for byte. main renders 64x48, traces the RGB bytes
 // of three probe pixels (sky at (5,5); the mirror sphere at (32,20), whose pinned value is the sky it reflects -- it exercises reflection even though the bytes read as sky-blue; shadowed floor at (53,33)) and a checksum
 // folded over all 9,216 pixel bytes, and returns 42; tests/raytracer.rs pins
-// the exact values across all five engines. NOTE deliberately absent: a
-// float->u8 `conv` (f64 to a sub-32-bit integer) panics the Cranelift x64
-// emitter, so pixel bytes are narrowed f64 -> i64 -> clamp -> u8 instead —
-// see to_byte and the compiler-bug note in tests/raytracer.rs.
+// the exact values across all five engines. NOTE: when this fixture was
+// written, a float->u8 `conv` (f64 to a sub-32-bit integer) panicked the
+// Cranelift x64 emitter, so pixel bytes narrow f64 -> i64 -> clamp -> u8
+// instead (to_byte). That bug is fixed as of 2026-08-30 (ledger P15); the
+// manual clamp stays — it is semantically identical to `conv u8` — see the
+// note in tests/raytracer.rs.
 
 copy struct V3 {
     x: f64,

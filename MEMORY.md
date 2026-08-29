@@ -940,9 +940,11 @@ once you add the literal node). Key design/impl facts worth reusing:
   For INV-CHECK uniformity, a checked f64→int conv keeps an INERT ConvLoss edge (saturating
   never takes it) rather than fault=None (which the invariant, lacking the source type,
   can't distinguish from a missing edge on an int→int conv).
-- **f64→int must saturate to the EXACT target width** (`fcvt_to_*int_sat(I8/I16/I32/I64)` /
-  `llvm.fpto*i.sat.iN`), then sign/zero-extend to the i64 register — saturating to i64 first
-  then narrowing would wrap (300.0→u8 must be 255, not 44). Matches Rust `as`.
+- **f64→int must saturate at the EXACT target type's bounds** (`llvm.fpto*i.sat.iN`;
+  Cranelift `fcvt_to_*int_sat` at I32/I64 — the x64 backend cannot lower it at I8/I16,
+  so sub-32-bit targets saturate at I32 then clamp with i64 selects, ledger P15), then
+  sign/zero-extend to the i64 register — saturating wide then narrowing without a clamp
+  would wrap (300.0→u8 must be 255, not 44). Matches Rust `as`.
 - Newton's-method sqrt(n) converges to ONE ULP short of the correctly-rounded library `sqrt`
   — assert loop results against the reproduced loop in host Rust, not against `f64::sqrt`.
 
@@ -1430,18 +1432,22 @@ once you add the literal node). Key design/impl facts worth reusing:
   delete->create cycling — verified full at both budgets, plus reload of a
   full snapshot. (14_rest_api, 2026-08-19)
 
-- **Float->int `conv` to a sub-32-bit target panics BOTH Cranelift engines
-  (JIT tiers and AOT) — narrow through i64 instead.** `conv u8`/`conv u16`/
-  `conv i8` of an f64 dies at compile time in cranelift-codegen 0.132.3's x64
+- **Float->int `conv` to a sub-32-bit target panicked BOTH Cranelift engines
+  (JIT tiers and AOT) — FIXED 2026-08-30 (ledger P15).** `conv u8`/`conv u16`/
+  `conv i8` of an f64 died at compile time in cranelift-codegen 0.132.3's x64
   emitter ("internal error: entered unreachable code", isa/x64/inst/emit.rs:1247):
-  `eval_float_conv` (src/backend/lower.rs) requests `fcvt_to_{s,u}int_sat` with
+  `eval_float_conv` (src/backend/lower.rs) requested `fcvt_to_{s,u}int_sat` with
   an I8/I16 result type, which the x64 lowering cannot emit. The tree-walker
-  and MIR interpreter execute it fine (saturating narrow), so this is an
+  and MIR interpreter executed it fine (saturating narrow), so this was an
   engine-parity hole — found the day floats did real work (the 15_raytracer
   pixel bytes; the least-soaked corner delivered as predicted). Minimal repro:
   `fn main() -> i64 { let a: f64 = 6.4; let b: u8 = conv u8 (a); return conv i64 (b); }`.
-  Until fixed: float->int `conv` targets i32/i64 only, then clamps and narrows
-  in the integer domain (`to_byte` in tests/fixtures/run/raytracer.cnr is the
-  shape); the fix itself is one backend change — fcvt to I32, then ireduce —
-  plus a widths-matrix float-conv gate in tests/floats.rs. (15_raytracer,
-  2026-08-26)
+  The fix widens the saturate to I32 then clamps to the target's bounds with
+  i64 selects — NOT the once-guessed "fcvt to I32, then ireduce": a plain
+  ireduce would WRAP values beyond the small type's range (300.7 -> u8 must be
+  255, not 44). LLVM (`llvm.fpto*i.sat.iN` at exact width) was already correct.
+  Gated in tests/floats.rs (u8/i8/u16/i16 boundary/NaN/±inf/negative-into-
+  unsigned probes, all five engines) and tests/floats_f32.rs. `to_byte` in
+  tests/fixtures/run/raytracer.cnr still carries the old manual clamp — shipped
+  and pinned, harmless, simplifiable in a future example refresh. (15_raytracer,
+  2026-08-26; fixed 2026-08-30)

@@ -246,6 +246,82 @@ fn f64_to_int_saturates() {
 }
 
 #[test]
+fn f64_to_small_int_minimal_repro() {
+    // The checker-review ledger P15 repro: `conv u8` of an f64 used to panic
+    // both Cranelift engines at COMPILE time (fcvt_to_uint_sat at I8 has no
+    // x64 lowering). Must now compile and run on every engine.
+    let src = "fn main() -> i64 { let a: f64 = 6.4; let b: u8 = conv u8 (a); return conv i64 (b); }";
+    let (ret, _) = all_engines(src, "smallrepro");
+    assert_eq!(ret, 6);
+}
+
+#[test]
+fn f64_to_u8_saturates() {
+    // Rust-`as` rule at the TARGET width: in-range truncates toward zero,
+    // out-of-range clamps to [0, 255], negatives -> 0, NaN -> 0, ±inf clamp.
+    // The Cranelift lowering saturates at I32 then clamps (ledger P15), so
+    // the probes straddle both the u8 bounds and the I32 saturation points.
+    let src = "fn main() -> i64 { \
+        let z: f64 = 0.0; let o: f64 = 1.0; \
+        let nan: f64 = z / z; let pinf: f64 = o / z; let ninf: f64 = (-o) / z; \
+        let a: f64 = 300.7; trace(conv i64 (conv u8 (a))); \
+        let b: f64 = -5.9; trace(conv i64 (conv u8 (b))); \
+        let c: f64 = 255.0; trace(conv i64 (conv u8 (c))); \
+        let d: f64 = 255.9; trace(conv i64 (conv u8 (d))); \
+        let e: f64 = 256.0; trace(conv i64 (conv u8 (e))); \
+        let f: f64 = -0.9; trace(conv i64 (conv u8 (f))); \
+        trace(conv i64 (conv u8 (nan))); \
+        trace(conv i64 (conv u8 (pinf))); \
+        trace(conv i64 (conv u8 (ninf))); \
+        let g: f64 = 1.0e18; trace(conv i64 (conv u8 (g))); \
+        return 0; }";
+    let (_, trace) = all_engines(src, "u8sat");
+    assert_eq!(trace, vec![255, 0, 255, 255, 255, 0, 0, 255, 0, 255]);
+}
+
+#[test]
+fn f64_to_i8_saturates() {
+    // Signed sub-32-bit target: clamp to [-128, 127], NaN -> 0, ±inf and
+    // large magnitudes clamp (ledger P15).
+    let src = "fn main() -> i64 { \
+        let z: f64 = 0.0; let o: f64 = 1.0; \
+        let nan: f64 = z / z; let pinf: f64 = o / z; let ninf: f64 = (-o) / z; \
+        let a: f64 = 127.9; trace(conv i64 (conv i8 (a))); \
+        let b: f64 = 128.0; trace(conv i64 (conv i8 (b))); \
+        let c: f64 = -128.9; trace(conv i64 (conv i8 (c))); \
+        let d: f64 = -129.0; trace(conv i64 (conv i8 (d))); \
+        trace(conv i64 (conv i8 (nan))); \
+        trace(conv i64 (conv i8 (pinf))); \
+        trace(conv i64 (conv i8 (ninf))); \
+        let e: f64 = -1.0e18; trace(conv i64 (conv i8 (e))); \
+        return 0; }";
+    let (_, trace) = all_engines(src, "i8sat");
+    assert_eq!(trace, vec![127, 127, -128, -128, 0, 127, -128, -128]);
+}
+
+#[test]
+fn f64_to_u16_i16_saturate() {
+    // 16-bit targets, boundary values both sides plus a negative into
+    // unsigned, NaN, and ±inf (ledger P15).
+    let src = "fn main() -> i64 { \
+        let z: f64 = 0.0; let o: f64 = 1.0; \
+        let nan: f64 = z / z; let pinf: f64 = o / z; let ninf: f64 = (-o) / z; \
+        let a: f64 = 65535.9; trace(conv i64 (conv u16 (a))); \
+        let b: f64 = 65536.0; trace(conv i64 (conv u16 (b))); \
+        let c: f64 = -3.5; trace(conv i64 (conv u16 (c))); \
+        trace(conv i64 (conv u16 (nan))); \
+        let d: f64 = 32767.9; trace(conv i64 (conv i16 (d))); \
+        let e: f64 = 32768.0; trace(conv i64 (conv i16 (e))); \
+        let f: f64 = -32768.9; trace(conv i64 (conv i16 (f))); \
+        let g: f64 = -32769.0; trace(conv i64 (conv i16 (g))); \
+        trace(conv i64 (conv i16 (pinf))); \
+        trace(conv i64 (conv i16 (ninf))); \
+        return 0; }";
+    let (_, trace) = all_engines(src, "u16i16sat");
+    assert_eq!(trace, vec![65535, 65535, 0, 0, 32767, 32767, -32768, -32768, 32767, -32768]);
+}
+
+#[test]
 fn int_f64_round_trip() {
     // 1234 -> f64 -> i64 recovers 1234 exactly.
     let src = "fn main() -> i64 { \

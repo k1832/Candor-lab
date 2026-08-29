@@ -35,10 +35,12 @@ boundary
 //   - No allocator: one fixed 1,920-byte row buffer, written row by row —
 //     the whole render needs no heap at all.
 //   - Pixel bytes narrow f64 -> i64 -> clamp -> u8. A direct float->u8
-//     `conv` is avoided deliberately: f64 to a sub-32-bit integer currently
-//     panics the Cranelift x64 emitter (a known toolchain bug found while
-//     building this example); the i64 detour is also what the checked-
-//     narrowing style wants — clamp first, then narrow.
+//     `conv` was avoided when this example was written: f64 to a sub-32-bit
+//     integer panicked the Cranelift x64 emitter (a toolchain bug found
+//     while building this example, fixed 2026-08-30 — ledger P15). The
+//     manual clamp stays — it is semantically identical to `conv u8`, and
+//     the i64 detour is also what the checked-narrowing style wants:
+//     clamp first, then narrow.
 
 // ---- the audited file boundary (the examples/12,/14 externs, file slice) ----
 
