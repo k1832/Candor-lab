@@ -223,6 +223,126 @@ fn iface_method_array_of_borrows_return_within_window_accepted() {
     assert!(codes(src).is_empty(), "expected clean, got {:?}", codes(src));
 }
 
+// ---- P11 (review 2026-08-18): borrow returns hidden behind `Self::Item` ----
+//
+// A method whose DECLARED return type is the associated projection
+// (`-> Self::Item`, not `-> [N]read T`) is borrow-returning only after
+// substitution. The landing-site decision must consult the substituted
+// return type recorded where the call was checked; before the fix the raw
+// signature said "no borrow", the landing `let` discarded the receiver's
+// loan, and a later write through the live borrow checked clean.
+
+#[test]
+fn p11_assoc_scalar_item_return_keeps_receiver_loan() {
+    // `Item = read i64`, method declared `-> Self::Item`.
+    assert_code(
+        "interface Get { type Item; fn item(read self) -> Self::Item; }\n\
+         struct Q { a: i64 }\n\
+         impl Get for Q { type Item = read i64; fn item(read self) -> read i64 \
+         { return read self.a; } }\n\
+         fn main() -> i64 { let mut q: Q = Q { a: 1 }; \
+         let b: read i64 = q.item(); q.a = 9; return b.*; }\n",
+        "E0803",
+    );
+}
+
+#[test]
+fn p11_assoc_array_item_return_keeps_receiver_loan() {
+    // `Item = [2]read i64`: the whole array of borrows hides behind the
+    // projection.
+    assert_code(
+        "interface Get { type Item; fn item(read self) -> Self::Item; }\n\
+         struct Q { a: i64, b: i64 }\n\
+         impl Get for Q { type Item = [2]read i64; fn item(read self) -> [2]read i64 \
+         { return [read self.a, read self.b]; } }\n\
+         fn main() -> i64 { let mut q: Q = Q { a: 1, b: 2 }; \
+         let v: [2]read i64 = q.item(); q.a = 9; return v[0].*; }\n",
+        "E0803",
+    );
+}
+
+#[test]
+fn p11_assoc_item_nested_in_array_keeps_receiver_loan() {
+    // The projection nested inside an array (`-> [2]Self::Item`,
+    // `Item = read i64`).
+    assert_code(
+        "interface Get { type Item; fn item(read self) -> [2]Self::Item; }\n\
+         struct Q { a: i64, b: i64 }\n\
+         impl Get for Q { type Item = read i64; fn item(read self) -> [2]read i64 \
+         { return [read self.a, read self.b]; } }\n\
+         fn main() -> i64 { let mut q: Q = Q { a: 1, b: 2 }; \
+         let v: [2]read i64 = q.item(); q.a = 9; return v[0].*; }\n",
+        "E0803",
+    );
+}
+
+#[test]
+fn p11_assoc_chained_calls_keep_receiver_loan() {
+    // Two assoc-typed hops: `w.view()` yields `Self::Inner = read Q`, and
+    // `.item()` on it yields `Self::Item = read i64` — the outer landing must
+    // still hold the root receiver's loan.
+    assert_code(
+        "interface Hold { type Inner; fn view(read self) -> Self::Inner; }\n\
+         interface Get { type Item; fn item(read self) -> Self::Item; }\n\
+         struct Q { a: i64 }\n\
+         struct W { q: Q }\n\
+         impl Get for Q { type Item = read i64; fn item(read self) -> read i64 \
+         { return read self.a; } }\n\
+         impl Hold for W { type Inner = read Q; fn view(read self) -> read Q \
+         { return read self.q; } }\n\
+         fn main() -> i64 { let mut w: W = W { q: Q { a: 1 } }; \
+         let b: read i64 = w.view().item(); w.q.a = 9; return b.*; }\n",
+        "E0803",
+    );
+}
+
+#[test]
+fn p11_assoc_scalar_item_within_window_accepted() {
+    let src = "interface Get { type Item; fn item(read self) -> Self::Item; }\n\
+         struct Q { a: i64 }\n\
+         impl Get for Q { type Item = read i64; fn item(read self) -> read i64 \
+         { return read self.a; } }\n\
+         fn main() -> i64 { let mut q: Q = Q { a: 1 }; \
+         let b: read i64 = q.item(); let v: i64 = b.*; \
+         q.a = 9; return v + q.a; }\n";
+    assert!(codes(src).is_empty(), "expected clean, got {:?}", codes(src));
+}
+
+// ---- P7 via generics: out-mode borrow slots in generic signatures ----------
+// The generic call path substitutes parameter types before mode-checking, so
+// a borrow-storing `out` slot must extend the sole borrow-in argument's loan
+// exactly as the non-generic call does; the def-site body walk and signature
+// rule cover the callee side.
+
+#[test]
+fn p7_generic_out_slot_extends_caller_loan() {
+    assert_code(
+        "fn fill[T](o: out read T, p: read T) -> unit { o = read p.*; }\n\
+         fn main() -> i64 { let mut x: i64 = 5; let mut s: read i64; \
+         fill(out s, read x); x = 9; return s.*; }\n",
+        "E0803",
+    );
+}
+
+#[test]
+fn p7_generic_out_slot_of_local_rejected() {
+    // Def-site body walk: storing a borrow of a callee local into the slot is
+    // the same dead-frame escape a returned borrow of a local is.
+    assert_code(
+        "fn fill[T](o: out read i64, v: T) -> unit { let x: i64 = 7; o = read x; }\n\
+         fn main() -> i64 { let mut s: read i64; fill(out s, 1); return s.*; }\n",
+        "E0806",
+    );
+}
+
+#[test]
+fn p7_generic_out_slot_within_window_accepted() {
+    let src = "fn fill[T](o: out read T, p: read T) -> unit { o = read p.*; }\n\
+         fn main() -> i64 { let mut x: i64 = 5; let mut s: read i64; \
+         fill(out s, read x); let v: i64 = s.*; x = 9; return v + x; }\n";
+    assert!(codes(src).is_empty(), "expected clean, got {:?}", codes(src));
+}
+
 #[test]
 fn method_receiver_probe_does_not_duplicate_same_call_overlap() {
     // P4 review M1: `synth_arg_type` probes the receiver expression; the call

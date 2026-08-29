@@ -1156,7 +1156,7 @@ impl<'a> Checker<'a> {
     /// `if` branch), or — if unrecognized — REJECTED (`None` ⇒ E0806), never
     /// skipped. Skipping let a borrow of a local laundered through a `match`
     /// escape the region check and dangle.
-    fn check_return_provenance(&mut self, e: &Expr) {
+    pub(super) fn check_return_provenance(&mut self, e: &Expr) {
         match &e.kind {
             ExprKind::Paren(i) => self.check_return_provenance(i),
             ExprKind::Match { arms, .. } => {
@@ -1204,18 +1204,24 @@ impl<'a> Checker<'a> {
 
     /// The base case of the total provenance walk: an atomic borrow-producing
     /// expression. Its provenance root must be a region-legal input parameter;
-    /// an unrecognized shape (`None`) is rejected E0806, never skipped.
+    /// an unrecognized shape (`None`) is rejected E0806, never skipped. The
+    /// walk is shared between a `return` and a P7 out-slot assignment
+    /// (`f.out_prov` names the slot); the diagnostics say which one happened.
     fn check_return_root(&mut self, e: &Expr) {
+        let out_slot = self.f.out_prov.clone();
         let root = match self.borrow_provenance(e) {
             None => {
-                self.diags.push(
-                    Diag::error(
-                        "E0806",
-                        "returned borrow does not provably derive from an input; it may borrow a local that does not outlive the body",
-                        e.span,
-                    )
-                    .with_note("return an owned value, or a borrow whose provenance is a `read`/`write`/slice parameter (§3.3)", None),
-                );
+                let (msg, note) = match &out_slot {
+                    Some(o) => (
+                        format!("borrow assigned to `out` parameter `{o}` does not provably derive from an input; it may borrow a local that does not outlive the body"),
+                        "assign an owned value, or a borrow whose provenance is a `read`/`write`/slice parameter (§3.3)",
+                    ),
+                    None => (
+                        "returned borrow does not provably derive from an input; it may borrow a local that does not outlive the body".to_string(),
+                        "return an owned value, or a borrow whose provenance is a `read`/`write`/slice parameter (§3.3)",
+                    ),
+                };
+                self.diags.push(Diag::error("E0806", msg, e.span).with_note(note, None));
                 return;
             }
             Some(r) => r,
@@ -1227,24 +1233,32 @@ impl<'a> Checker<'a> {
             .find(|(n, _, _)| *n == root)
             .cloned();
         match found {
-            None => self.diags.push(
-                Diag::error(
-                    "E0806",
-                    format!("returned borrow of local `{root}` does not live long enough"),
-                    e.span,
-                )
-                .with_note("a borrow may not outlive the body it was born in; return an owned value or borrow an input (§3.3)", None),
-            ),
+            None => {
+                let (msg, note) = match &out_slot {
+                    Some(o) => (
+                        format!("borrow of local `{root}` assigned to `out` parameter `{o}` does not live long enough"),
+                        "a borrow may not outlive the body it was born in; assign an owned value or a borrow of an input (§3.3)",
+                    ),
+                    None => (
+                        format!("returned borrow of local `{root}` does not live long enough"),
+                        "a borrow may not outlive the body it was born in; return an owned value or borrow an input (§3.3)",
+                    ),
+                };
+                self.diags.push(Diag::error("E0806", msg, e.span).with_note(note, None));
+            }
             Some((_, is_bp, region)) => {
                 if !is_bp {
-                    self.diags.push(
-                        Diag::error(
-                            "E0806",
+                    let (msg, note) = match &out_slot {
+                        Some(o) => (
+                            format!("borrow assigned to `out` parameter `{o}` derives from owned parameter `{root}`, which does not outlive the body"),
+                            "the assigned borrow's provenance must be a `read`/`write`/slice parameter (§3.3)",
+                        ),
+                        None => (
                             format!("returned borrow derives from owned parameter `{root}`, which does not outlive the body"),
-                            e.span,
-                        )
-                        .with_note("borrow-return provenance must be a `read`/`write`/slice parameter (§3.3)", None),
-                    );
+                            "borrow-return provenance must be a `read`/`write`/slice parameter (§3.3)",
+                        ),
+                    };
+                    self.diags.push(Diag::error("E0806", msg, e.span).with_note(note, None));
                 } else if let Some(r) = self.f.ret_region.clone() {
                     if region.as_deref() != Some(r.as_str()) {
                         self.diags.push(
@@ -1682,16 +1696,17 @@ impl<'a> Checker<'a> {
         match ct {
             Type::FnPtr(fp) => {
                 let n = fp.params.len().min(args.len());
-                let mut group: Vec<usize> = Vec::new();
+                let mut per_arg: Vec<Vec<usize>> = Vec::new();
                 for ((mode, pty), a) in fp.params.iter().zip(args) {
                     self.clear_carried();
                     self.check_arg_mode(*mode, pty, a);
-                    group.extend(self.take_carried());
+                    per_arg.push(self.take_carried());
                 }
                 for a in args.iter().skip(n) {
                     self.check_expr(a, Use::Value);
                 }
-                self.push_call_group(group);
+                self.push_call_group(per_arg.iter().flatten().copied().collect());
+                self.extend_out_slot_loans(fp.params.iter().map(|(m, t)| (*m, t)), args, &per_arg);
                 self.reject_consuming_call(fp.params.iter().map(|(m, t)| (*m, t)), span);
                 if fp.alloc {
                     self.note_alloc(span, "indirect call through an `alloc` fn-pointer (§6.1)");
@@ -1764,6 +1779,7 @@ impl<'a> Checker<'a> {
         }
         let group: Vec<usize> = per_arg.iter().flatten().copied().collect();
         self.push_call_group(group);
+        self.extend_out_slot_loans(sig.params.iter().map(|p| (p.mode, &p.decl_ty)), args, &per_arg);
         // A contract clause is read-only: a call that takes any argument by
         // `take` (non-copy), `write`, or `out` consumes or mutates it and is
         // rejected (review #3, 2026-07-07). `read`-mode and copy-`take` are fine.
@@ -1796,6 +1812,51 @@ impl<'a> Checker<'a> {
             self.clear_carried();
         }
         sig.ret.clone()
+    }
+
+    /// P7: caller-side loan extension for borrow-storing `out` slots. Inside
+    /// the callee the slot is filled with a borrow deriving from the sole
+    /// borrow input (the compact default; the two-plus case is rejected at the
+    /// callee's signature, E0807), so that argument's loan(s) must extend over
+    /// the slot's landing binding — exactly as a returned borrow's loans
+    /// extend over its landing `let` (§3.3).
+    pub(super) fn extend_out_slot_loans<'t>(
+        &mut self,
+        params: impl Iterator<Item = (ParamMode, &'t Type)>,
+        args: &[Expr],
+        per_arg: &[Vec<usize>],
+    ) {
+        let ps: Vec<(ParamMode, &Type)> = params.collect();
+        let out_slots: Vec<usize> = ps
+            .iter()
+            .enumerate()
+            .filter(|(_, (m, t))| *m == ParamMode::Out && field_stores_borrow(t))
+            .map(|(i, _)| i)
+            .collect();
+        if out_slots.is_empty() {
+            return;
+        }
+        let ins: Vec<usize> = ps
+            .iter()
+            .enumerate()
+            .filter(|(_, (m, t))| {
+                matches!(m, ParamMode::Read | ParamMode::Write)
+                    || (*m != ParamMode::Out && field_stores_borrow(t))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if ins.len() != 1 {
+            return;
+        }
+        let src: Vec<usize> = per_arg.get(ins[0]).cloned().unwrap_or_default();
+        for &oi in &out_slots {
+            if let Some(root) = args.get(oi).and_then(out_arg_root) {
+                for &lid in &src {
+                    let li = self.f.loans[lid].clone();
+                    self.record_binding_loan(&li.place, li.kind, li.span, &root);
+                }
+            }
+        }
     }
 
     /// Design 0005 implicit call-site reborrow. If `inner` is a place that
@@ -2628,6 +2689,7 @@ impl<'a> Checker<'a> {
             Some(b) => b,
             None => {
                 let mut ty = Type::Never;
+                let mut arm_carried: Vec<usize> = Vec::new();
                 for arm in arms {
                     let mut binds = Vec::new();
                     patterns::analyze_pattern(
@@ -2644,9 +2706,15 @@ impl<'a> Checker<'a> {
                         self.add_local(&b.name, b.ty.clone(), b.movable);
                     }
                     self.check_arm_guard(arm);
-                    ty = join_types(ty, self.check_expr(&arm.body, Use::Value));
+                    self.clear_carried();
+                    let bt = self.check_expr(&arm.body, Use::Value);
+                    if field_stores_borrow(&bt) {
+                        arm_carried.extend(self.take_carried());
+                    }
+                    ty = join_types(ty, bt);
                     self.pop_scope();
                 }
+                self.finish_match_value(&ty, arm_carried, span);
                 return ty;
             }
         };
@@ -2655,6 +2723,7 @@ impl<'a> Checker<'a> {
         self.set_join_span(join_bb, span);
         let mut arm_bbs = Vec::new();
         let mut result = Type::Never;
+        let mut arm_carried: Vec<usize> = Vec::new();
         for arm in arms {
             let mut binds = Vec::new();
             patterns::analyze_pattern(
@@ -2754,7 +2823,11 @@ impl<'a> Checker<'a> {
                 }
             }
             self.check_arm_guard(arm);
+            self.clear_carried();
             let bt = self.check_expr(&arm.body, Use::Value);
+            if field_stores_borrow(&bt) {
+                arm_carried.extend(self.take_carried());
+            }
             self.pop_scope();
             if let Some(cur) = self.cur_get() {
                 self.set_term(cur, Term::Goto(join_bb));
@@ -2763,7 +2836,24 @@ impl<'a> Checker<'a> {
         }
         self.set_term(c0, Term::Switch(arm_bbs));
         self.cur_set(Some(join_bb));
+        self.finish_match_value(&result, arm_carried, span);
         result
+    }
+
+    /// A `match` used as a value materializes its result OUTSIDE the arms'
+    /// exec-block scoping (P8): each borrow-valued arm's loans must re-carry
+    /// into the match's value (the union of the arms — every borrowed owner
+    /// stays frozen while the landing binding lives), and the checked result
+    /// type is recorded for the landing-site predicate (`carries_borrow`),
+    /// which cannot re-derive borrow-ness from arm syntax (a rebind of a
+    /// pattern-bound borrow is out of scope by then).
+    fn finish_match_value(&mut self, result: &Type, arm_carried: Vec<usize>, span: Span) {
+        if field_stores_borrow(result) {
+            self.f.borrow_valued.insert((span.start, span.end));
+            self.set_carried(arm_carried);
+        } else {
+            self.clear_carried();
+        }
     }
 
     /// Type-check a match arm's optional `if EXPR` guard: the guard must type as
@@ -2876,15 +2966,22 @@ impl<'a> Checker<'a> {
             Some(b) => b,
             None => {
                 let mut ty = Type::Never;
+                let mut arm_carried: Vec<usize> = Vec::new();
                 for arm in arms {
                     self.push_scope();
                     if let PatKind::Binding(name) = &arm.pattern.kind {
                         self.add_local(name, sc_ty.clone(), true);
                     }
                     self.check_arm_guard(arm);
-                    ty = join_types(ty, self.check_expr(&arm.body, Use::Value));
+                    self.clear_carried();
+                    let bt = self.check_expr(&arm.body, Use::Value);
+                    if field_stores_borrow(&bt) {
+                        arm_carried.extend(self.take_carried());
+                    }
+                    ty = join_types(ty, bt);
                     self.pop_scope();
                 }
+                self.finish_match_value(&ty, arm_carried, span);
                 return ty;
             }
         };
@@ -2893,6 +2990,7 @@ impl<'a> Checker<'a> {
         self.set_join_span(join_bb, span);
         let mut arm_bbs = Vec::new();
         let mut result = Type::Never;
+        let mut arm_carried: Vec<usize> = Vec::new();
         for arm in arms {
             let b = self.new_block();
             arm_bbs.push(b);
@@ -2910,7 +3008,11 @@ impl<'a> Checker<'a> {
                 );
             }
             self.check_arm_guard(arm);
+            self.clear_carried();
             let bt = self.check_expr(&arm.body, Use::Value);
+            if field_stores_borrow(&bt) {
+                arm_carried.extend(self.take_carried());
+            }
             self.pop_scope();
             if let Some(cur) = self.cur_get() {
                 self.set_term(cur, Term::Goto(join_bb));
@@ -2919,6 +3021,7 @@ impl<'a> Checker<'a> {
         }
         self.set_term(c0, Term::Switch(arm_bbs));
         self.cur_set(Some(join_bb));
+        self.finish_match_value(&result, arm_carried, span);
         result
     }
 
@@ -3149,6 +3252,16 @@ fn join_types(a: Type, b: Type) -> Type {
     }
 }
 
+/// The root binding of an `out` argument's slot (unwrapping the `out` marker):
+/// the caller-side landing binding a borrow-storing out slot's loans extend
+/// over (P7).
+pub(super) fn out_arg_root(a: &Expr) -> Option<String> {
+    match &a.kind {
+        ExprKind::OutArg(i) => expr_place_root(i),
+        _ => expr_place_root(a),
+    }
+}
+
 /// The canonical root binding of the place an expression denotes.
 pub(super) fn expr_place_root(e: &Expr) -> Option<String> {
     match &e.kind {
@@ -3165,14 +3278,16 @@ pub(super) fn expr_place_root(e: &Expr) -> Option<String> {
 
 /// Which argument indices are the return-region source for a borrow-returning
 /// call (design §3.3): the params tagged with the return region, or — under the
-/// compact default — the sole borrow parameter.
+/// compact default — the sole borrow parameter. An `out`-mode slot is a borrow
+/// OUTPUT, not an input (P7), so it is never a source.
 fn region_source_indices(sig: &crate::resolve::FnSig) -> Vec<usize> {
     let bidx: Vec<usize> = sig
         .params
         .iter()
         .enumerate()
         .filter(|(_, p)| {
-            matches!(p.mode, ParamMode::Read | ParamMode::Write) || field_stores_borrow(&p.decl_ty)
+            matches!(p.mode, ParamMode::Read | ParamMode::Write)
+                || (p.mode != ParamMode::Out && field_stores_borrow(&p.decl_ty))
         })
         .map(|(i, _)| i)
         .collect();

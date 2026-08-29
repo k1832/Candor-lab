@@ -866,11 +866,19 @@ impl<'a> Checker<'a> {
             &mut subst_map,
         );
         // Emit argument accesses (moves/borrows/effects) against substituted modes.
+        let mut per_arg: Vec<Vec<usize>> = Vec::new();
+        let mut subst_params: Vec<(ParamMode, Type)> = Vec::new();
         for (p, a) in sig.params.iter().zip(args) {
             self.clear_carried();
             let decl = subst(&p.decl_ty, &subst_map);
             self.check_arg_mode(p.mode, &decl, a);
+            per_arg.push(self.take_carried());
+            subst_params.push((p.mode, decl));
         }
+        // P7: a borrow-storing `out` slot extends the sole borrow-in argument's
+        // loan over the slot's landing binding, exactly as the non-generic call
+        // path does (the substituted parameter types decide borrow-ness).
+        self.extend_out_slot_loans(subst_params.iter().map(|(m, t)| (*m, t)), args, &per_arg);
         self.check_bounds(&sig, &subst_map, span);
         // Polymorphic recursion: a self-call whose inferred type argument nests a
         // type parameter under a constructor has no fixed point (design 0007
@@ -954,6 +962,9 @@ impl<'a> Checker<'a> {
                 } else {
                     self.diags.push(Diag::error("E0706", "method `at` expects 1 argument(s)".to_string(), span));
                 }
+                // `at` yields an OWNED Opt: whatever the receiver/argument
+                // checks left carried must not leak to the landing site (F1).
+                self.clear_carried();
                 return Some(crate::types::Type::Named("Opt".to_string()));
             }
             // A `Vec[T]` receiver answers the same ground-floor `Indexed` method
@@ -967,6 +978,8 @@ impl<'a> Checker<'a> {
                     } else {
                         self.diags.push(Diag::error("E0706", "method `at` expects 1 argument(s)".to_string(), span));
                     }
+                    // Owned Opt yield: shed any carried loans (F1).
+                    self.clear_carried();
                     return Some(crate::types::Type::Named("Opt".to_string()));
                 }
             }
@@ -984,6 +997,11 @@ impl<'a> Checker<'a> {
                     if !args.is_empty() {
                         self.diags.push(Diag::error("E0706", "method `count` expects 0 argument(s)".to_string(), span));
                     }
+                    // `count` yields an owned usize: loans carried by checking
+                    // the receiver (e.g. a chained borrow-returning method,
+                    // `w.v().count()`) must not anchor at the landing `let`
+                    // (F1 — the false E0803 on a later legal write).
+                    self.clear_carried();
                     return Some(crate::types::Type::usize());
                 }
             }
@@ -993,12 +1011,18 @@ impl<'a> Checker<'a> {
                 if n == "Vec" {
                     let elem = targs.first().cloned().unwrap_or(crate::types::Type::Error);
                     self.check_expr(base, Use::BorrowShared);
+                    // The yielded `read T` reborrows the RECEIVER (design 0015
+                    // §5): carry exactly the receiver's loans out of the call —
+                    // captured before the index argument can disturb the
+                    // carried state (F1 normalization).
+                    let recv_carried = self.take_carried();
                     if args.len() == 1 {
                         let it = self.check_expr(&args[0], Use::Value);
                         self.expect_integer(&it, args[0].span);
                     } else {
                         self.diags.push(Diag::error("E0706", "method `get_ref` expects 1 argument(s)".to_string(), span));
                     }
+                    self.set_carried(recv_carried);
                     return Some(crate::types::Type::Borrow(Box::new(elem)));
                 }
             }
@@ -1135,18 +1159,62 @@ impl<'a> Checker<'a> {
         }
         let mut per_arg: Vec<Vec<usize>> = Vec::new();
         let mut param_is_borrow_in: Vec<bool> = Vec::new();
-        for ((mode, pty), a) in m.params.iter().zip(args) {
+        let mut out_borrow_slots: Vec<usize> = Vec::new();
+        for (idx, ((mode, pty), a)) in m.params.iter().zip(args).enumerate() {
             self.clear_carried();
             let pty = subst(pty, smap);
             self.check_arg_mode(*mode, &pty, a);
             per_arg.push(self.take_carried());
-            param_is_borrow_in
-                .push(matches!(mode, ParamMode::Read | ParamMode::Write) || field_stores_borrow(&pty));
+            // An `out`-mode slot is a borrow OUTPUT, never an input (P7): it is
+            // excluded from the borrow-in count and, when its (substituted)
+            // type stores borrows, its landing binding is recorded for the
+            // caller-side loan extension below.
+            if *mode == ParamMode::Out {
+                param_is_borrow_in.push(false);
+                if field_stores_borrow(&pty) {
+                    out_borrow_slots.push(idx);
+                }
+            } else {
+                param_is_borrow_in
+                    .push(matches!(mode, ParamMode::Read | ParamMode::Write) || field_stores_borrow(&pty));
+            }
         }
         if m.alloc {
             self.note_alloc(span, format!("call to `alloc` interface method `{}` (§4.1)", m.name));
         }
         let ret = subst(&m.ret, smap);
+        // P7: a borrow-storing `out` slot receives, inside the callee, a borrow
+        // deriving from the sole borrow input (the compact default; the
+        // two-plus case is rejected at the callee's signature, E0807). Extend
+        // that input's loan(s) over the slot's landing binding, exactly as a
+        // returned borrow's loans extend over its landing `let` (§3.3).
+        if !out_borrow_slots.is_empty() {
+            let borrow_in_count =
+                usize::from(self_is_borrow_in) + param_is_borrow_in.iter().filter(|b| **b).count();
+            if borrow_in_count == 1 {
+                let src: Vec<usize> = if self_is_borrow_in {
+                    recv_carried.clone()
+                } else {
+                    let idx = param_is_borrow_in.iter().position(|b| *b).unwrap();
+                    per_arg[idx].clone()
+                };
+                for &oi in &out_borrow_slots {
+                    if let Some(root) = args.get(oi).and_then(super::expr::out_arg_root) {
+                        for &lid in &src {
+                            let li = self.f.loans[lid].clone();
+                            self.record_binding_loan(&li.place, li.kind, li.span, &root);
+                        }
+                    }
+                }
+            }
+        }
+        // The landing-site predicate (`carries_borrow`) cannot re-derive
+        // borrow-ness from the DECLARED return type when it is an associated
+        // projection (`Self::Item`, P11): record the substituted answer for
+        // this call site instead.
+        if field_stores_borrow(&ret) {
+            self.f.borrow_valued.insert((span.start, span.end));
+        }
         // Reborrow-through-call-return: a returned borrow derives, by the compact
         // default (0001 §3.3), from the method's sole borrow-in. When that is the
         // receiver (`get_ref`'s `read self`), the return carries the receiver's

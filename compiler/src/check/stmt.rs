@@ -97,6 +97,24 @@ impl<'a> Checker<'a> {
                 let (tt, place) = self.check_place(target);
                 self.clear_carried();
                 self.check_against(value, &tt);
+                // An assignment into an `out`-mode slot whose type stores
+                // borrows is semantically a RETURN of a borrow (P7, spec 04
+                // §6.5/§7): the value escapes into the caller's frame, so it
+                // must obey the same provenance rules as a returned borrow
+                // (E0806 family). Covers the whole slot and element stores
+                // into an out array-of-borrows alike. The return's own region
+                // tag does not govern the out slot, so it is masked here.
+                if field_stores_borrow(&tt)
+                    && place
+                        .as_ref()
+                        .is_some_and(|p| self.f.out_params.contains(&p.root))
+                {
+                    let saved_region = self.f.ret_region.take();
+                    self.f.out_prov = place.as_ref().map(|p| p.root.clone());
+                    self.check_return_provenance(value);
+                    self.f.out_prov = None;
+                    self.f.ret_region = saved_region;
+                }
                 if place.is_some() {
                     self.emit(
                         &place,
@@ -256,10 +274,23 @@ impl<'a> Checker<'a> {
                 // and any borrow-returning interface method, sheds its source loan and
                 // the escape UAF §5 case (2) forbids slips through.
                 if let ExprKind::Field { base, field, .. } = &callee.kind {
+                    // The substituted-return answer recorded when the call was
+                    // checked (P11) overrides the raw-signature probe: a method
+                    // declared `-> Self::Item` is borrow-returning whenever the
+                    // impl's binding of `Item` is, which the unsubstituted
+                    // signature cannot show.
+                    if self.f.borrow_valued.contains(&(e.span.start, e.span.end)) {
+                        return true;
+                    }
                     return self.method_returns_borrow(base, field);
                 }
                 false
             }
+            // A `match` whose checked result type stores a borrow carries the
+            // union of its arms' loans (P8); recorded when the match was
+            // checked — arm syntax (e.g. a rebind of a pattern-bound borrow)
+            // is not re-derivable at the landing site.
+            ExprKind::Match { .. } => self.f.borrow_valued.contains(&(e.span.start, e.span.end)),
             _ => false,
         }
     }

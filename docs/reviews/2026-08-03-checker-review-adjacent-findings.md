@@ -234,3 +234,48 @@ because `check_int_lit_range` runs against the `i64` default at literal
 sight, before the expectation is known — the same root defect pointing the
 other way. Fix belongs where the expectation is applied (`check_against`),
 mirroring what the array elements now get.
+
+# Ledger additions from the P7/P8/P11-fix adversarial review (2026-08-26)
+
+Pre-existing holes found while attacking the P7/P8/P11 fixes. All reproduce
+on the pre-fix binary, so none are regressions of that work; each is logged
+to be fixed in its own workstream.
+
+## P22 — Generic bodies are Proj-opaque and generic calls shed all loans (HIGH)
+
+Two halves of one family. (a) Generic function bodies are checked ONCE at
+the definition site with opaque type parameters, so `Type::Proj`
+(`I::Item`) defeats all three of the P7/P8/P11 fixes inside a generic body:
+an assoc-typed method return sheds the receiver loan (`fn leak[I: Get](it:
+write I) -> I::Item` — reviewer repro k3), an `out I::Item` slot escapes
+provenance (repro l2), and a match joining to a Proj result sheds its arm
+loans (repro s1). (b) Independently, `check_generic_call` ends with an
+unconditional `clear_carried`, so EVERY generic free function returning a
+borrow or view sheds its argument loan at the call site — `fn idr[T](p:
+read T) -> read T` lets the caller write the borrowed owner and observe it
+(repro q1 runs to 9 through a "live" shared borrow). All pre-existing; the
+CONCRETE halves of these shapes are closed by the P7/P8/P11 workstream. The
+generic halves need per-instantiation borrow information or def-site Proj
+bounds — the next major checker workstream.
+
+## P23 — Checker panic on a borrow-returning call with too few arguments (MEDIUM)
+
+`fn g(p: read i64) -> borrow i64` called as `g()` panics the checker
+(index out of bounds in `check_user_call`'s return-extension, currently
+`check/expr.rs:1697`: `per_arg` is zip-truncated to the argument count but
+`region_source_indices` indexes by parameter position) AFTER the correct
+E0706 arity diagnostic is queued. Reviewer repro i2. One-line `.get` fix in
+its own change; a panic, not an unsoundness.
+
+## P24 — extern/fn-pointer signatures skip the out-slot E0807 rule (LOW)
+
+The P7 signature rule (a borrow-storing `out` parameter with two-plus
+borrow inputs is E0807) runs where function bodies are checked, so a bare
+fn-pointer TYPE or an extern declaration with that shape is not itself
+rejected. Not exploitable from safe code: externs cannot declare borrow
+types (the foreign mappability check rejects them: "a Candor borrow/mode is
+not a C type") and any Candor callable matching
+the shape is rejected at its own declaration, so no callee can exist; the
+caller-side extension also refuses to guess with two-plus inputs. A latent
+asymmetry to close if fn-pointer signatures ever get their own
+well-formedness pass.

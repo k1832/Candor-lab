@@ -194,6 +194,16 @@ live ranges by any means (the prototype uses body-local non-lexical liveness,
     unannotated borrow return SHALL be rejected. Ambiguity SHALL NOT be silently
     resolved.
 
+7.4a **Out-parameters carry borrows out like returns** *(ratified 2026-08)*: a
+    borrow assigned into an `out` parameter escapes to the caller exactly as a
+    returned borrow, and SHALL obey §7.2–§7.5 identically (provenance, the
+    compact default, the local-escape ban). Because `out` has no region
+    spelling, the §7.4 ambiguous case has no annotated form for out slots: a
+    signature with a borrow-storing `out` parameter and two or more borrow
+    inputs SHALL be rejected at the declaration — deliberately STRICTER than
+    §7.4, which offers the region-annotation escape hatch. Lifting this
+    requires an `out`-region grammar amendment (02 §4).
+
 7.5 A returned borrow whose provenance is a **local** (or an owned `take`
     parameter) SHALL be rejected: a borrow SHALL NOT outlive the body it was born
     in. This is checked body-locally.

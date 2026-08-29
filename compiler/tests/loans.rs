@@ -1156,3 +1156,179 @@ fn view_array_return_with_region_accepted() {
          { return [as_str(read a), as_str(read a)]; }",
     );
 }
+
+// ---- P8 (review 2026-08-18): match-arm borrow shedding ---------------------
+//
+// A borrow produced as a `match` arm's result is materialized outside the
+// arms' scoping; each arm's loans must re-carry into the match's value (the
+// union of the arms) so the landing binding anchors them all. Before the fix
+// the landing binding held an unguarded borrow and the borrowed place
+// reopened.
+
+#[test]
+fn p8_match_arm_borrow_write_owner_rejected() {
+    // The P8 repro: the taken arm's owner is written while the landed borrow
+    // is live.
+    assert_has(
+        "enum C { a, b } \
+         fn f() -> i64 { let mut x: i64 = 1; let mut y: i64 = 2; let c: C = C::a; \
+         let b: borrow i64 = match c { case C::a => read x, case C::b => read y }; \
+         x = 9; return deref b; }",
+        "E0803",
+    );
+}
+
+#[test]
+fn p8_match_arm_other_owner_rejected() {
+    // The union rule: EVERY arm's owner is loaned, not just the last checked
+    // arm's — writing the other arm's owner is equally rejected.
+    assert_has(
+        "enum C { a, b } \
+         fn f() -> i64 { let mut x: i64 = 1; let mut y: i64 = 2; let c: C = C::a; \
+         let b: borrow i64 = match c { case C::a => read x, case C::b => read y }; \
+         y = 8; return deref b; }",
+        "E0803",
+    );
+}
+
+#[test]
+fn p8_match_mixed_arm_rebind_rejected() {
+    // Mixed arms: one arm a fresh borrow, the other a rebind of an existing
+    // borrow-typed local. The rebind arm's source loan must carry too.
+    assert_has(
+        "enum C { a, b } \
+         fn f() -> i64 { let mut x: i64 = 1; let mut y: i64 = 2; let c: C = C::a; \
+         let b0: borrow i64 = read y; \
+         let b: borrow i64 = match c { case C::a => read x, case C::b => b0 }; \
+         y = 8; return deref b; }",
+        "E0803",
+    );
+}
+
+#[test]
+fn p8_match_array_arm_rejected() {
+    // Arrays of borrows take the same arm-result path (whole-array rule).
+    assert_has(
+        "enum C { a, b } \
+         fn f() -> i64 { let mut x: i64 = 1; let mut y: i64 = 2; let c: C = C::a; \
+         let b: [2]borrow i64 = match c { case C::a => [read x; 2], case C::b => [read y; 2] }; \
+         x = 9; return deref b[0]; }",
+        "E0803",
+    );
+}
+
+#[test]
+fn p8_int_match_arm_borrow_rejected() {
+    // Integer-scrutinee matches materialize arm values through their own path;
+    // it must re-carry identically. (Integer patterns are real-surface syntax.)
+    let src = "fn main() -> i64 { let mut x: i64 = 1; let mut y: i64 = 2; let n: i64 = 0; \
+         let b: read i64 = match n { 0 => read x, _ => read y }; \
+         x = 9; return b.*; }";
+    let cs: Vec<String> = candor::check_source_real(src)
+        .expect("parse ok")
+        .into_iter()
+        .map(|d| d.code)
+        .collect();
+    assert!(cs.iter().any(|c| c == "E0803"), "expected `E0803`, got {cs:?}");
+}
+
+#[test]
+fn p8_match_within_window_accepted() {
+    // NLL window: the union loan dies with the landed borrow's last use.
+    assert_clean(
+        "enum C { a, b } \
+         fn f() -> i64 { let mut x: i64 = 1; let mut y: i64 = 2; let c: C = C::a; \
+         let b: borrow i64 = match c { case C::a => read x, case C::b => read y }; \
+         let v: i64 = deref b; x = 9; y = 8; return v; }",
+    );
+}
+
+#[test]
+fn p8_differential_match_within_window() {
+    assert_runs_all_engines(
+        "enum C { a, b } \
+         fn main() -> i64 { let mut x: i64 = 1; let mut y: i64 = 2; let c: C = C::a; \
+         let b: borrow i64 = match c { case C::a => read x, case C::b => read y }; \
+         let v: i64 = deref b; x = 9; return v + x; }",
+        10,
+    );
+}
+
+// ---- P7 (review 2026-08-18): out-mode borrow escape ------------------------
+//
+// An assignment into an `out`-mode slot whose type stores borrows is
+// semantically a RETURN of a borrow (spec 04 §6.5/§7): it escapes into the
+// caller's frame, so it obeys the same provenance rules (E0806 family), the
+// same signature-ambiguity rule (E0807 — `out` has no region spelling, so
+// only the compact default can name the source), and the caller extends the
+// sole borrow-in argument's loan over the slot's landing binding.
+
+#[test]
+fn p7_out_borrow_of_local_rejected() {
+    // The P7 repro: the callee hands the caller a borrow of its own frame.
+    assert_has(
+        "fn fill(o: out borrow i64) -> unit { let x: i64 = 7; o = read x; }",
+        "E0806",
+    );
+}
+
+#[test]
+fn p7_out_write_borrow_of_local_rejected() {
+    // The write-through variant: an exclusive borrow of a callee local in the
+    // slot lets the caller WRITE a dead frame.
+    assert_has(
+        "fn fill(o: out borrow_mut i64) -> unit { let mut x: i64 = 7; o = write x; }",
+        "E0806",
+    );
+}
+
+#[test]
+fn p7_out_array_of_borrows_of_local_rejected() {
+    assert_has(
+        "fn fill(o: out [2]borrow i64) -> unit { let x: i64 = 7; o = [read x; 2]; }",
+        "E0806",
+    );
+}
+
+#[test]
+fn p7_out_borrow_of_owned_param_rejected() {
+    // An owned (`take`) parameter dies with the callee frame exactly as a
+    // local does (§3.3).
+    assert_has(
+        "fn fill(o: out borrow i64, v: i64) -> unit { o = read v; }",
+        "E0806",
+    );
+}
+
+#[test]
+fn p7_out_two_borrow_ins_sig_rejected() {
+    // Two-plus borrow inputs: the slot's source is ambiguous and `out` has no
+    // region spelling — rejected at the signature, exactly as the unannotated
+    // two-borrow-param borrow return is.
+    assert_has(
+        "fn fill(o: out borrow i64, p: read i64, q: read i64) -> unit \
+         { o = read (deref p); }",
+        "E0807",
+    );
+}
+
+#[test]
+fn p7_out_slot_extends_caller_loan() {
+    // The legal escape (compact default: sole borrow-in): the caller-side
+    // extension keeps the argument's loan alive under the landed slot.
+    assert_has(
+        "fn fill(o: out borrow i64, p: read i64) -> unit { o = read (deref p); } \
+         fn f() -> i64 { let mut x: i64 = 5; let mut s: borrow i64; \
+         fill(out s, read x); x = 9; return deref s; }",
+        "E0803",
+    );
+}
+
+#[test]
+fn p7_out_slot_within_window_accepted() {
+    assert_clean(
+        "fn fill(o: out borrow i64, p: read i64) -> unit { o = read (deref p); } \
+         fn f() -> i64 { let mut x: i64 = 5; let mut s: borrow i64; \
+         fill(out s, read x); let v: i64 = deref s; x = 9; return v + x; }",
+    );
+}
