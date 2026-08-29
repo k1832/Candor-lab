@@ -1437,3 +1437,173 @@ fn guard_real_bitcast_of_array_rejected() {
     let cs = real_codes("fn f() -> f64 { return bitcast f64 ([0i64; 1]); }");
     assert!(cs.iter().any(|c| c == "E0714"), "expected E0714: {cs:?}");
 }
+
+// ----- P5: unsuffixed-literal arrays ground against the expected type ------
+// (2026-08-03 ledger, re-opened.) An all-unsuffixed array literal takes its
+// element type from the EXPECTED type when one exists — exactly as a scalar
+// literal takes its slot type (`let x: u8 = 1`) — and each bare constant
+// element is range-checked against the grounded type (E0709, spec 01 §3.3):
+// grounding is never a narrowing conversion (spec 03 §9.1). With no
+// expectation the element type falls back to `i64` (design 0002 §0.1) at the
+// escape points — an unannotated `let` and a generic type-argument binding —
+// so a flexible `{integer}` element type can never silently narrow through a
+// later use or fork a generic into divergent instances.
+
+fn assert_real_has(src: &str, code: &str) {
+    let cs = real_codes(src);
+    assert!(cs.iter().any(|c| c == code), "expected `{code}` for:\n{src}\ngot {cs:?}");
+}
+
+fn assert_real_clean(src: &str) {
+    let cs = real_codes(src);
+    assert!(cs.is_empty(), "expected clean for:\n{src}\ngot {cs:?}");
+}
+
+#[test]
+fn real_array_lit_grounds_to_annotated_elem_type() {
+    assert_real_clean("fn f() -> unit { let a: [2]u8 = [1, 2]; }");
+}
+
+#[test]
+fn real_array_lit_overrange_in_let_rejected() {
+    assert_real_has("fn f() -> unit { let a: [2]u8 = [300, 1]; }", "E0709");
+}
+
+#[test]
+fn real_array_lit_negative_into_unsigned_rejected() {
+    assert_real_has("fn f() -> unit { let a: [2]u8 = [-1, 1]; }", "E0709");
+    assert_real_has("fn f() -> unit { let a: [1]u64 = [-1]; }", "E0709");
+}
+
+#[test]
+fn real_array_lit_overrange_in_struct_field_rejected() {
+    assert_real_has(
+        "struct S { a: [2]u8 } fn f() -> unit { let s: S = S { a: [300, 1] }; }",
+        "E0709",
+    );
+}
+
+#[test]
+fn real_array_lit_overrange_in_call_arg_rejected() {
+    assert_real_has(
+        "fn g(x: [2]u8) -> unit { } fn f() -> unit { g([300, 1]); }",
+        "E0709",
+    );
+}
+
+#[test]
+fn real_array_lit_overrange_in_return_rejected() {
+    assert_real_has("fn f() -> [2]u8 { return [1, 300]; }", "E0709");
+}
+
+#[test]
+fn real_array_lit_overrange_in_nested_array_rejected() {
+    assert_real_has(
+        "fn f() -> unit { let m: [2][2]u8 = [[1, 300], [3, 4]]; }",
+        "E0709",
+    );
+}
+
+#[test]
+fn real_nested_array_lit_grounds_per_element() {
+    assert_real_clean("fn f() -> unit { let m: [2][2]u8 = [[1, 2], [3, 4]]; }");
+}
+
+#[test]
+fn real_array_repeat_overrange_rejected() {
+    assert_real_has("fn f() -> unit { let a: [3]u8 = [300; 3]; }", "E0709");
+}
+
+#[test]
+fn real_array_repeat_grounds_to_annotated_elem_type() {
+    assert_real_clean("fn f() -> unit { let a: [3]u8 = [9; 3]; }");
+}
+
+#[test]
+fn real_array_lit_suffixed_sibling_grounds_and_range_checks() {
+    // The u8 sibling grounds the running element type (d88354c); a bare
+    // over-range element must then fail against it even with NO annotation.
+    assert_real_has("fn f() -> unit { let t = [300, 1u8]; }", "E0709");
+}
+
+// The ledger's narrowing repro: `let t = [1, 2];` used for a `[2]u8` field
+// stored `a[1] == 0`. The unannotated binding now grounds to the `[2]i64`
+// default (the array's layout is fixed at the landing site), so the `[2]u8`
+// use is a compile-time mismatch, never a truncating copy.
+#[test]
+fn real_unannotated_array_binding_grounds_to_i64_default() {
+    assert_real_has(
+        "struct S { a: [2]u8, b: i64 } \
+         fn f() -> i64 { let t = [1, 2]; let s: S = S { a: t, b: 42 }; return s.b; }",
+        "E0703",
+    );
+}
+
+#[test]
+fn real_unannotated_array_repeat_binding_grounds_to_i64_default() {
+    assert_real_has(
+        "fn g(x: [2]u8) -> unit { } fn f() -> unit { let t = [1; 2]; g(t); }",
+        "E0703",
+    );
+}
+
+#[test]
+fn real_unannotated_array_binding_stays_usable_as_i64() {
+    assert_real_clean("fn f() -> i64 { let t = [1, 2]; let u: [2]i64 = t; return u[1]; }");
+}
+
+// F1 (adversarial review): the expected type must NOT leak into
+// non-propagating sub-expressions — an index expression, an index base, an
+// operand, or a repeat SIZE is its own typing context, so a literal array
+// inside one never grounds or range-checks against the outer slot's element
+// type.
+
+#[test]
+fn real_index_expression_does_not_adopt_outer_element_type() {
+    // The reviewer's repro: `[300, 1][1]` computes the INDEX; its 300 has
+    // nothing to do with the `[2]u8` slot the whole expression lands in.
+    assert_real_clean(
+        "fn f() -> u8 { let m: [2][2]u8 = [[1, 2], [3, 4]]; \
+         let a: [2]u8 = m[conv usize ([300, 1][1])]; return a[0]; }",
+    );
+}
+
+#[test]
+fn real_repeat_size_expression_does_not_adopt_element_type() {
+    // The size is a count, not an element: a computed size is E0717, and the
+    // `[300, 1]` inside it must NOT range-check against `u8` (no E0709).
+    let cs = real_codes("fn f() -> unit { let a: [3]u8 = [9; [300, 1][0]]; }");
+    assert!(cs.iter().any(|c| c == "E0717"), "expected E0717: {cs:?}");
+    assert!(!cs.iter().any(|c| c == "E0709"), "no E0709 for a size sub-expression: {cs:?}");
+}
+
+// Guards (d88354c pins, real front-end): mixing bare and one-suffixed
+// elements stays legal; distinct concrete element types stay rejected.
+
+#[test]
+fn guard_real_array_lit_intlit_elements_unify_with_a_suffixed_one() {
+    assert_real_clean("fn f() -> unit { let a: [3]u8 = [1, 2u8, 3]; }");
+}
+
+#[test]
+fn guard_real_array_lit_distinct_concrete_ints_rejected() {
+    assert_real_has("fn f() -> unit { let a: [3]i64 = [1, 2u8, 3i64]; }", "E0703");
+}
+
+// The `.cn` front-end grounds identically (range diagnostics are real-only,
+// mirroring the scalar literal rule): the binding-default mismatch is E0703
+// under both front-ends.
+
+#[test]
+fn unannotated_array_binding_grounds_to_i64_default() {
+    assert_has(
+        "struct S { a: [2]u8, b: i64 } \
+         fn f() -> i64 { let t = [1, 2]; let s: S = S { a: t, b: 42 }; return s.b; }",
+        "E0703",
+    );
+}
+
+#[test]
+fn array_lit_grounds_to_annotated_elem_type() {
+    assert_clean("fn f() -> unit { let a: [2]u8 = [1, 2]; }");
+}

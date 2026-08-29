@@ -805,15 +805,15 @@ fn array_through_two_deep_generic_chain_all_engines() {
 }
 
 /// An array-typed field inside a generic struct: the instance's field type must
-/// be laid out at the real length. The first element is suffixed because an
-/// all-unsuffixed array literal in a generic struct literal still hits the open
-/// `{integer}`-grounding finding P5 (2026-08-03 review) — a separate defect.
+/// be laid out at the real length. All-unsuffixed elements: the P5 fix grounds
+/// the literal's element type before the instantiation is recorded, so no
+/// suffix is needed (this line was `[4i64, 5, 6]` while P5 was open).
 #[test]
 fn array_field_inside_generic_struct_all_engines() {
     let src = "struct Wrap[T] { v: T }\n\
                fn first[T: copy](w: Wrap[T]) -> T { return w.v; }\n\
                fn main() -> i64 {\n\
-                   let w: Wrap[[3]i64] = Wrap { v: [4i64, 5, 6] };\n\
+                   let w: Wrap[[3]i64] = Wrap { v: [4, 5, 6] };\n\
                    let c: [3]i64 = first(w);\n\
                    return c[0] * 100 + c[1] * 10 + c[2];\n\
                }\n";
@@ -940,4 +940,114 @@ fn array_in_generic_enum_payload_all_engines() {
                    }\n\
                }\n";
     assert_eq!(all_engines_ret(src), 123);
+}
+
+// ===========================================================================
+// P5 (2026-08-03 ledger, re-opened): an all-unsuffixed array literal grounds
+// its element type BEFORE the monomorphization shape is recorded — from the
+// expected type when one exists, else to the `i64` default (design 0002 §0.1,
+// the same default `unify` gives a bare scalar literal argument). While open,
+// the annotation and the struct-literal shape instantiated one generic at TWO
+// element types ({integer} vs i64): the oracle faulted, MIR/native refused.
+// ===========================================================================
+
+/// The exact ledger repro: a generic struct literal whose array field is
+/// all-unsuffixed, instantiated under a `Wrap[[3]i64]` annotation. Must check
+/// clean and run with `v == [4, 5, 6]` on every engine.
+#[test]
+fn unsuffixed_array_field_generic_struct_lit_all_engines() {
+    let src = "struct Wrap[T] { v: T }\n\
+               fn main() -> i64 {\n\
+                   let w: Wrap[[3]i64] = Wrap { v: [4, 5, 6] };\n\
+                   return w.v[0] * 100 + w.v[1] * 10 + w.v[2];\n\
+               }\n";
+    assert_eq!(all_engines_ret(src), 456);
+}
+
+/// No annotation at all: the field value alone pins the instance, so the
+/// grounded `i64` default must be what the instance is recorded at.
+#[test]
+fn unsuffixed_array_field_unannotated_generic_struct_lit_all_engines() {
+    let src = "struct Wrap[T] { v: T }\n\
+               fn main() -> i64 {\n\
+                   let w = Wrap { v: [4, 5, 6] };\n\
+                   return w.v[0] * 100 + w.v[1] * 10 + w.v[2];\n\
+               }\n";
+    assert_eq!(all_engines_ret(src), 456);
+}
+
+/// A generic CALL with an all-unsuffixed array argument: the type argument
+/// binds at the grounded `[2]i64`, matching the annotated landing slot.
+#[test]
+fn unsuffixed_array_argument_generic_call_all_engines() {
+    let src = "fn idf[T: copy](x: T) -> T { return x; }\n\
+               fn main() -> i64 {\n\
+                   let b: [2]i64 = idf([1, 2]);\n\
+                   let c = idf([30, 4]);\n\
+                   return b[1] * 100 + c[0];\n\
+               }\n";
+    assert_eq!(all_engines_ret(src), 230);
+}
+
+/// A generic instantiated at a NON-default element type still requires the
+/// evidence to agree: the value argument grounds to `[2]i64` (the default),
+/// so a `Wrap[[2]u8]` annotation is a type mismatch — exactly as the scalar
+/// rule treats `let w: Wrap[u8] = Wrap { v: 1 };` — never two instances.
+#[test]
+fn unsuffixed_array_field_against_u8_annotation_rejected() {
+    assert_code(
+        "struct Wrap[T] { v: T }\n\
+         fn main() -> i64 {\n\
+             let w: Wrap[[2]u8] = Wrap { v: [1, 2] };\n\
+             return 0;\n\
+         }\n",
+        "E0703",
+    );
+}
+
+/// A generic CALL argument is its own typing context (F1/F3): the landing
+/// slot's annotation does not leak into the argument, so `[1, 2]` grounds to
+/// the `[2]i64` default and the `[2]u8` slot is E0703 — deliberately mirroring
+/// the scalar rule (`let a: u8 = idf(1);` is E0703), not collateral of the
+/// leak fix.
+#[test]
+fn unsuffixed_array_argument_does_not_adopt_landing_slot_type() {
+    assert_code(
+        "fn idf[T: copy](x: T) -> T { return x; }\n\
+         fn main() -> i64 {\n\
+             let a: [2]u8 = idf([1, 2]);\n\
+             return 0;\n\
+         }\n",
+        "E0703",
+    );
+}
+
+/// Mixed suffixed/unsuffixed siblings in a generic struct slot (F11): the
+/// `2u8` grounds the whole literal to `u8` (d88354c's running unification),
+/// the instance binds at `[3]u8`, and the annotation agrees — u8 layout on
+/// every engine.
+#[test]
+fn mixed_suffix_array_field_generic_struct_lit_all_engines() {
+    let src = "struct Wrap[T] { v: T }\n\
+               fn main() -> i64 {\n\
+                   let w: Wrap[[3]u8] = Wrap { v: [1, 2u8, 3] };\n\
+                   return conv i64 (w.v[0]) * 100 + conv i64 (w.v[1]) * 10 + conv i64 (w.v[2]);\n\
+               }\n";
+    assert_eq!(all_engines_ret(src), 123);
+}
+
+/// Non-generic engine agreement for the grounded-literal class: a `[2]u8`
+/// field literal, a nested `[2][2]u8` literal, and a `[3]u8` repeat must
+/// materialize at the annotated element type on every engine (the oracle's
+/// repeat path used to lay out i64 slots for `[9; 3]` under a `[3]u8` slot).
+#[test]
+fn unsuffixed_literals_ground_to_u8_layout_all_engines() {
+    let src = "struct S { a: [2]u8, b: i64 }\n\
+               fn main() -> i64 {\n\
+                   let s = S { a: [1, 2], b: 42 };\n\
+                   let m: [2][2]u8 = [[3, 4], [5, 6]];\n\
+                   let r: [3]u8 = [9; 3];\n\
+                   return conv i64 (s.a[1]) * 100 + conv i64 (m[1][0]) * 10 + conv i64 (r[2]);\n\
+               }\n";
+    assert_eq!(all_engines_ret(src), 259);
 }

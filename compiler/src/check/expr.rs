@@ -112,11 +112,27 @@ impl<'a> Checker<'a> {
             } => self.check_enum_ctor(enum_name, variant, args, e.span),
             ExprKind::ArrayLit(elems) => self.check_array_lit(elems),
             ExprKind::ArrayRepeat { value, size } => {
+                // The repeated element checks under the expected ELEMENT type
+                // and grounds against it, exactly as an array literal's
+                // elements do (P5; see `check_array_lit`/`ground_array_elem`).
+                let elem_expect: Option<Type> = match &self.expected_ty {
+                    Some(Type::Array(el, _)) => Some((**el).clone()),
+                    _ => None,
+                };
+                let saved_expect = std::mem::replace(&mut self.expected_ty, elem_expect.clone());
                 let t = self.check_expr(value, Use::Value);
+                self.expected_ty = saved_expect;
+                let bare: Vec<(i128, Span)> = match (&t, const_int(value)) {
+                    (Type::IntLit, Some(v)) => vec![(v, value.span)],
+                    _ => Vec::new(),
+                };
+                let t = self.ground_array_elem(t, &elem_expect, &bare);
                 // A `read x` element's loan is carried by the whole array value
                 // (P4, whole-array granularity): keep it across the size check.
+                // The SIZE is a count, not an element (F1): it checks with the
+                // expectation cleared, never against the element type.
                 let carried = self.take_carried();
-                let _ = self.check_expr(size, Use::Value);
+                let _ = self.check_operand(size, Use::Value);
                 self.set_carried(carried);
                 // Repeating IS copying: the one element value is duplicated into
                 // every slot, so a non-`copy` (drop-hooked or owning) element
@@ -253,7 +269,30 @@ impl<'a> Checker<'a> {
 
     // ----- places ---------------------------------------------------------
 
+    /// Check a sub-expression in a NON-PROPAGATING position (an operand, an
+    /// index expression, a `conv`/`bitcast` operand, a repeat size): the
+    /// surrounding slot's expected type does not describe this sub-expression,
+    /// so it is cleared for the recursion — a bare literal array inside must
+    /// not ground or range-check against the outer slot's element type (F1).
+    fn check_operand(&mut self, e: &Expr, u: Use) -> Type {
+        let saved = self.expected_ty.take();
+        let t = self.check_expr(e, u);
+        self.expected_ty = saved;
+        t
+    }
+
     pub(super) fn check_place(&mut self, e: &Expr) -> (Type, Option<Place>) {
+        // A place recursion never propagates the surrounding slot's expected
+        // type (F1): an index expression, an index BASE, or a match scrutinee
+        // is its own typing context — a literal inside must not ground or
+        // range-check against the outer slot's element type.
+        let saved = self.expected_ty.take();
+        let out = self.check_place_inner(e);
+        self.expected_ty = saved;
+        out
+    }
+
+    fn check_place_inner(&mut self, e: &Expr) -> (Type, Option<Place>) {
         match &e.kind {
             ExprKind::Paren(inner) => self.check_place(inner),
             ExprKind::Ident(name) => {
@@ -532,7 +571,7 @@ impl<'a> Checker<'a> {
     // ----- operators ------------------------------------------------------
 
     fn check_unary(&mut self, op: UnOp, expr: &Expr) -> Type {
-        let t = self.check_expr(expr, Use::Value);
+        let t = self.check_operand(expr, Use::Value);
         match op {
             UnOp::Neg => {
                 // Unary minus applies to any numeric operand: integer or a float
@@ -559,8 +598,8 @@ impl<'a> Checker<'a> {
     }
 
     fn check_binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, span: Span) -> Type {
-        let l = self.check_expr(lhs, Use::Value);
-        let r = self.check_expr(rhs, Use::Value);
+        let l = self.check_operand(lhs, Use::Value);
+        let r = self.check_operand(rhs, Use::Value);
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
                 self.unify_arith(&l, &r, span)
@@ -677,7 +716,7 @@ impl<'a> Checker<'a> {
     }
 
     fn check_conv(&mut self, ty: &Ty, expr: &Expr, span: Span) -> Type {
-        let src = self.check_expr(expr, Use::Value);
+        let src = self.check_operand(expr, Use::Value);
         let target = self.resolve_ty(ty);
         let is_num = |t: &Type| t.is_integer() || matches!(t, Type::Scalar(s) if s.is_float());
         if !matches!(src, Type::Error) && !is_num(&src) {
@@ -736,7 +775,7 @@ impl<'a> Checker<'a> {
     /// regime-independent. The result type is `T`.
     fn check_bitcast(&mut self, ty: &Ty, expr: &Expr, span: Span) -> Type {
         use crate::interp::layout::Layout;
-        let src = self.check_expr(expr, Use::Value);
+        let src = self.check_operand(expr, Use::Value);
         let target = self.resolve_ty(ty);
         if matches!(src, Type::Error) || matches!(target, Type::Error) {
             return target;
@@ -930,15 +969,35 @@ impl<'a> Checker<'a> {
     }
 
     fn check_array_lit(&mut self, elems: &[Expr]) -> Type {
+        // The expected ELEMENT type, when this literal sits in an array-expecting
+        // slot (a `let`/field/argument/return annotation). It grounds a bare
+        // `{integer}` element type exactly as a slot grounds a bare scalar
+        // literal (`let x: u8 = 1` — `assignable`'s IntLit flexibility; the
+        // engines lower the literal at the slot's type), and it is the
+        // expectation the elements themselves check under, so a NESTED literal
+        // grounds against its own element type, never the outer array's (P5).
+        let elem_expect: Option<Type> = match &self.expected_ty {
+            Some(Type::Array(el, _)) => Some((**el).clone()),
+            _ => None,
+        };
+        let saved_expect = std::mem::replace(&mut self.expected_ty, elem_expect.clone());
         let mut ty = Type::Error;
         // Borrow elements: every element's loan(s) accumulate onto the whole
         // array value (P4, conservative whole-array granularity), so the
         // landing binding anchors them all — `record_borrow` alone would keep
         // only the last element's loan.
         let mut carried: Vec<usize> = Vec::new();
+        // Bare `{integer}` elements that fold to constants: range-checked below
+        // against whatever element type the literal finally grounds to.
+        let mut bare: Vec<(i128, Span)> = Vec::new();
         for (i, el) in elems.iter().enumerate() {
             self.clear_carried();
             let t = self.check_expr(el, Use::Value);
+            if matches!(t, Type::IntLit) {
+                if let Some(v) = const_int(el) {
+                    bare.push((v, el.span));
+                }
+            }
             let new_ids = self.take_carried();
             self.check_array_elem_overlaps(&carried, &new_ids);
             carried.extend(new_ids);
@@ -949,7 +1008,59 @@ impl<'a> Checker<'a> {
             }
         }
         self.set_carried(carried);
+        self.expected_ty = saved_expect;
+        let ty = self.ground_array_elem(ty, &elem_expect, &bare);
         Type::Array(Box::new(ty), ArrayLen::Lit(elems.len() as u64))
+    }
+
+    /// Ground an array literal's (or repeat's) still-bare `{integer}` element
+    /// type against the expected element type, mirroring the scalar literal
+    /// rule (`let x: u8 = 1`; unconstrained default `i64`, design 0002 §0.1) —
+    /// a bare `{integer}` element type must never survive into a layout or a
+    /// monomorphization shape (P5). Then range-check each bare constant element
+    /// against the grounded element type: grounding is never a narrowing
+    /// conversion (spec 03 §9.1), so `[300, 1]` into `[2]u8` is E0709 — the
+    /// check a suffixed literal already gets against its own suffix (spec 01
+    /// §3.3) — not a truncating store. `i64`/`isize` are skipped: every bare
+    /// element was already checked against the `i64` default range on sight.
+    /// Without an expectation the element type stays `{integer}` here and is
+    /// grounded to `i64` where it escapes (an unannotated `let`, a generic
+    /// type-argument binding — `ground_nested_int_lit`).
+    fn ground_array_elem(&mut self, ty: Type, elem_expect: &Option<Type>, bare: &[(i128, Span)]) -> Type {
+        let mut ty = ty;
+        if matches!(ty, Type::IntLit) {
+            if let Some(Type::Scalar(s)) = elem_expect {
+                if s.is_integer() {
+                    ty = Type::Scalar(*s);
+                }
+            }
+        }
+        if self.is_real() {
+            if let Type::Scalar(s) = &ty {
+                if s.is_integer() && !matches!(s, ScalarTy::I64 | ScalarTy::Isize) {
+                    for (v, sp) in bare {
+                        if !scalar_fits(*v, *s) {
+                            self.diags.push(
+                                Diag::error(
+                                    "E0709",
+                                    format!(
+                                        "integer literal `{}` is out of range for element type `{}`",
+                                        v,
+                                        scalar_name(*s)
+                                    ),
+                                    *sp,
+                                )
+                                .with_note(
+                                    "an over-range literal is rejected at compile time, never a runtime fault (spec 01 §3.3)",
+                                    None,
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        ty
     }
 
     /// Elements of one array literal are live together for the array's whole
@@ -1904,6 +2015,18 @@ impl<'a> Checker<'a> {
     }
 
     fn check_builtin(&mut self, name: &str, args: &[Expr], span: Span) -> Option<Type> {
+        // Builtin ARGUMENTS never see the call's surrounding expected type
+        // (F1): a builtin's parameter types are its own contract, so a literal
+        // array argument must not ground against the caller's slot type. The
+        // few builtins whose RETURN type is fixed by the annotation (`vec_new`,
+        // `map_new`) read the saved expectation explicitly.
+        let expect = self.expected_ty.take();
+        let t = self.check_builtin_inner(name, args, span, &expect);
+        self.expected_ty = expect;
+        t
+    }
+
+    fn check_builtin_inner(&mut self, name: &str, args: &[Expr], span: Span, expect: &Option<Type>) -> Option<Type> {
         let t = match name {
             "box" => {
                 if args.len() == 2 {
@@ -2131,7 +2254,7 @@ impl<'a> Checker<'a> {
                     self.mismatch(span, "map_new", "read Alloc", &t);
                 }
                 self.note_alloc(span, "`map_new` builds an owning Map (allocates/frees on drop)");
-                match &self.expected_ty {
+                match expect {
                     Some(Type::App(n, targs)) if n == "Map" => Type::App("Map".to_string(), targs.clone()),
                     _ => Type::App("Map".to_string(), vec![Type::Error]),
                 }
@@ -2185,7 +2308,7 @@ impl<'a> Checker<'a> {
                     self.mismatch(span, "vec_new", "read Alloc", &t);
                 }
                 self.note_alloc(span, "`vec_new` builds an owning Vec (allocates/frees on drop)");
-                match &self.expected_ty {
+                match expect {
                     Some(Type::App(n, targs)) if n == "Vec" => Type::App("Vec".to_string(), targs.clone()),
                     _ => Type::App("Vec".to_string(), vec![Type::Error]),
                 }

@@ -41,7 +41,7 @@ by admitting `read`-borrow repeat elements. The loan checker needs to track
 borrows stored into array elements (it tracks struct fields; arrays fell
 through).
 
-## P5 — Untyped-literal array narrows silently through inference (RE-OPENED, MEDIUM)
+## P5 — Untyped-literal array narrows silently through inference (CLOSED 2026-08-26, was RE-OPENED, MEDIUM)
 
 `let t = [1, 2]; S { a: t, b: 42 }` with `a: [2]u8` stores `a[1] == 0` on
 all engines. Root cause: an array of unsuffixed integer literals is never
@@ -54,6 +54,16 @@ concrete one, producing two divergent instances of one type (oracle faults;
 MIR/native refuse). Four-line repro in the P1 workstream report. Needs the
 checker to ground literal element types against the expected type before
 the monomorphization shape is recorded.
+
+CLOSED by the P5 grounding workstream (adversarially reviewed, SHIP): an
+unsuffixed literal array now grounds its element type from the expected type
+where one exists (with per-element E0709 range checks), and to the `i64`
+default at the escape points (unannotated `let`, generic type-argument
+binding) — no `{integer}` reaches a layout or a monomorphization shape
+(debug-asserted at `record_inst`). Both repros flip: the Wrap shape checks
+clean and runs `[4,5,6]` on every engine; the binding shape is E0703.
+Residual, still open as its own item: P15 below (array-literal-as-index-base
+still silently narrows on the oracle). New same-family scalar finding: P16.
 
 ## Disposition
 
@@ -160,3 +170,27 @@ No fixture hits it today.
 beside the pre-existing E0301; the two propagated copies of one loan are
 counted as a conflicting pair. Can only co-occur with E0301, so no legal
 program is rejected.
+
+# Ledger additions from the P5-fix adversarial review (2026-08-26)
+
+## P19 — Array literal as an index BASE escapes grounding (MEDIUM, pre-existing)
+
+`[[1, 2], [3, 4]][0]` into a `[2]u8` slot still silently narrows on the
+oracle (the base literal is materialized at the i64 stride while the slot
+copies u8); MIR/native refuse the shape. An index base is a non-propagating
+position (deliberately — the slot's element type does not describe the
+base), so the P5 grounding never sees it, and the base's own landing is a
+temporary, not a binding. Pre-existing on both binaries; stays open as its
+own item, not folded into P5's closure.
+
+## P21 — Scalar literal range checks ignore the expected type, both directions (HIGH)
+
+Queued fix workstream, not fixed by the P5 work (which covers arrays only).
+Direction 1: `let x: u8 = 300;` checks clean and stores 44 on every engine —
+silent truncation, violating spec 01 §3.3 ("an over-range literal is
+rejected at compile time"); same through a binding (`let x = 300; let y: u8
+= x;` is 44). Direction 2: an in-range `u64` maximum literal is REJECTED,
+because `check_int_lit_range` runs against the `i64` default at literal
+sight, before the expectation is known — the same root defect pointing the
+other way. Fix belongs where the expectation is applied (`check_against`),
+mirroring what the array elements now get.

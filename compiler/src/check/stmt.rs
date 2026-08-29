@@ -3,7 +3,7 @@
 //! — recorded as an `Assign` action for Stage 4).
 
 use crate::ast::*;
-use crate::types::{bears_box, box_subpaths, field_stores_borrow, needs_drop, Type};
+use crate::types::{bears_box, box_subpaths, field_stores_borrow, ground_nested_int_lit, needs_drop, Type};
 
 use super::dataflow::{Access, Place};
 use crate::ast::{ExprKind, PrefixOp};
@@ -48,7 +48,21 @@ impl<'a> Checker<'a> {
                                 self.check_against(e, dt);
                                 dt.clone()
                             }
-                            None => self.check_expr(e, Use::Value),
+                            // An unannotated binding grounds a `{integer}`
+                            // carried inside a composite (an all-unsuffixed
+                            // array literal) to the `i64` default at the
+                            // landing site (P5): a composite's layout is fixed
+                            // by its element type, so `let t = [1, 2];` is
+                            // `[2]i64` — a later `[2]u8` slot is then E0703,
+                            // not a silently truncating copy. This is a
+                            // deliberate ASYMMETRY with the scalar rule: a
+                            // bare scalar `{integer}` keeps its flexibility
+                            // through a `let` (`let x = 1; let y: u8 = x;`
+                            // stays legal), but composite flexibility through
+                            // a binding was producing silently wrong values
+                            // (the engines had already fixed an i64 stride),
+                            // so composites give it up here.
+                            None => ground_nested_int_lit(&self.check_expr(e, Use::Value)),
                         };
                         let nd = needs_drop(&t, self.items);
                         let bp = box_subpaths(&t, self.items);
