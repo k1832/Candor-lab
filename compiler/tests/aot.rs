@@ -184,6 +184,11 @@ const OK: &[(&str, bool)] = &[
     ("fn fib(n: i64) -> i64 { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); } fn main() -> i64 { let r: i64 = fib(10); trace(r); return r; }", false),
     ("fn main() -> i64 { let mut s: i64 = 0; let mut i: i64 = 0; while i < 5 { s = s + i; trace(i); i = i + 1; } trace(s); return s; }", false),
     ("fn main() -> i64 { let a: u8 = 12u8; let b: u8 = 10u8; trace(conv i64 (a & b)); trace(conv i64 (a | b)); trace(conv i64 (a ^ b)); return 0; }", true),
+    // Sub-32-bit float->int conv (ledger P15: used to panic AOT at compile
+    // time): between-the-bounds saturation (300.7 is past u8 but inside i32,
+    // so the I32-saturate-then-clamp lowering must clamp, not wrap) and a
+    // negative into unsigned.
+    ("fn main() -> i64 { let a: f64 = 300.7; trace(conv i64 (conv u8 (a))); let b: f64 = -5.9; trace(conv i64 (conv u8 (b))); let c: f64 = 6.4; return conv i64 (conv u8 (c)); }", true),
 ];
 
 #[test]

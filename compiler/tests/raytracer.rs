@@ -17,24 +17,25 @@
 //! stage_d, aot, llvm) re-run the fixture as well, so the render is also gated
 //! through the linked-ELF paths.
 //!
-//! KNOWN TOOLCHAIN BUG, found while building this tracer and deliberately
-//! routed around: a float->int `conv` to a SUB-32-BIT target (`conv u8`,
-//! `conv u16`, `conv i8` of an f64) panics both Cranelift backends (JIT and
-//! AOT) inside cranelift-codegen's x64 emitter — `eval_float_conv`
-//! (src/backend/lower.rs) asks `fcvt_to_{s,u}int_sat` for an I8/I16 result,
-//! which the x64 ISA lowering cannot emit ("internal error: entered
-//! unreachable code", cranelift-codegen-0.132.3 src/isa/x64/inst/emit.rs:1247).
-//! Minimal reproduction:
+//! TOOLCHAIN BUG found while building this tracer, SINCE FIXED (checker-review
+//! ledger P15, fixed 2026-08-30): a float->int `conv` to a SUB-32-BIT target
+//! (`conv u8`, `conv u16`, `conv i8` of an f64) panicked both Cranelift
+//! backends (JIT and AOT) inside cranelift-codegen's x64 emitter —
+//! `eval_float_conv` (src/backend/lower.rs) asked `fcvt_to_{s,u}int_sat` for
+//! an I8/I16 result, which the x64 ISA lowering cannot emit ("internal error:
+//! entered unreachable code", cranelift-codegen-0.132.3
+//! src/isa/x64/inst/emit.rs:1247). Minimal reproduction:
 //!
 //! ```text
 //! fn main() -> i64 { let a: f64 = 6.4; let b: u8 = conv u8 (a); return conv i64 (b); }
 //! ```
 //!
-//! The tree-walker and MIR interpreter execute it fine (saturating narrow),
-//! so this is an engine-parity hole, not a semantics question. Until it is
-//! fixed, float->int `conv` in corpus code targets i32/i64 and narrows in the
-//! integer domain (clamp, then int->int `conv`) — `to_byte` in the fixture is
-//! the shape.
+//! The tree-walker and MIR interpreter always executed it fine (saturating
+//! narrow), so it was an engine-parity hole, not a semantics question. The
+//! lowering now saturates at I32 and clamps to the target's bounds; the
+//! sub-32-bit width matrix is gated in tests/floats.rs and
+//! tests/floats_f32.rs. The fixture's `to_byte` (clamp, then int->int `conv`)
+//! predates the fix and stays as the shipped example's shape.
 
 use std::path::Path;
 use std::process::Command;
