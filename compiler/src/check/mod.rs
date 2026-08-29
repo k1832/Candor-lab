@@ -643,13 +643,14 @@ impl<'a> Checker<'a> {
     /// of the borrowed backing is a use-after-free the checker misses. Fresh
     /// transient loans (same place, kind, span) are recorded and marked carried, so
     /// the landing binding anchors them to its own live range exactly as a fresh
-    /// borrow would. `field_stores_borrow` is the value-type predicate: the five
+    /// borrow would. `may_store_borrow` is the value-type predicate: the five
     /// borrow kinds plus arrays of them — copying an array of borrows (or one of
     /// its elements) aliases the same borrowed memory (P4, whole-array
-    /// granularity).
+    /// granularity) — plus, inside generic code, an opaque projection
+    /// (`I::Item`), which may be a borrow at some instantiation (P22(a)).
     pub(super) fn propagate_place_loans(&mut self, place: &Option<Place>, ty: &Type) {
         let root = match place {
-            Some(p) if field_stores_borrow(ty) => p.root.clone(),
+            Some(p) if may_store_borrow(ty) => p.root.clone(),
             _ => return,
         };
         let sources: Vec<LoanInfo> = self
@@ -793,8 +794,10 @@ impl<'a> Checker<'a> {
         self.f = FnState::empty();
         self.f.ret_ty = sig.ret.clone();
         // Arrays of borrows escape a frame exactly as a bare borrow does (P4):
-        // the provenance walk runs for them too.
-        self.f.ret_is_borrow = field_stores_borrow(&sig.ret);
+        // the provenance walk runs for them too. So does an opaque `I::Item`
+        // return at a generic definition site (P22(a), spec 04 §7.6): the
+        // projection may be a borrow at some instantiation.
+        self.f.ret_is_borrow = may_store_borrow(&sig.ret);
         self.f.ret_region = sig.ret_region.clone();
         self.f.sig_params = sig
             .params
@@ -1103,13 +1106,13 @@ impl<'a> Checker<'a> {
         // unwritable, where the return-position analog is not. Zero corpus
         // impact today; lifting it requires a grammar extension (a region tag
         // on `out`, spec 02 §4 amendment).
-        if sig.params.iter().any(|p| p.mode == ParamMode::Out && field_stores_borrow(&p.decl_ty)) {
+        if sig.params.iter().any(|p| p.mode == ParamMode::Out && may_store_borrow(&p.decl_ty)) {
             let ins = sig.params.iter().filter(|p| is_borrow_param(p)).count();
             if ins >= 2 {
                 let p = sig
                     .params
                     .iter()
-                    .find(|p| p.mode == ParamMode::Out && field_stores_borrow(&p.decl_ty))
+                    .find(|p| p.mode == ParamMode::Out && may_store_borrow(&p.decl_ty))
                     .unwrap();
                 self.diags.push(
                     Diag::error(
@@ -1122,8 +1125,14 @@ impl<'a> Checker<'a> {
             }
         }
         // An array-of-borrows return carries borrows out exactly as a bare
-        // borrow return does (P4), so the same region rules apply.
-        if !field_stores_borrow(&sig.ret) {
+        // borrow return does (P4), so the same region rules apply. So may an
+        // opaque `I::Item` return at a generic definition (P22(a), spec 04
+        // §7.6): with two-plus borrow inputs this rejects the declaration
+        // (E0807) exactly as its concrete twin — the missing def-site
+        // backstop behind the leak2 shape. No region tag is spellable on a
+        // projection return today; a legitimate two-input shape would need a
+        // region-tag grammar extension first (memo 2026-08-30 §2(i)).
+        if !may_store_borrow(&sig.ret) {
             return;
         }
         let borrow_params: Vec<&crate::resolve::ParamInfo> =
@@ -1152,14 +1161,25 @@ impl<'a> Checker<'a> {
             }
             None => {
                 if borrow_params.len() >= 2 {
-                    self.diags.push(
-                        Diag::error(
-                            "E0807",
-                            "a borrow return from two or more borrow parameters requires a region variable".to_string(),
-                            sig.ret_span,
-                        )
-                        .with_note("region variables are mandatory here; there is no compact default (§3.3)", None),
+                    let d = Diag::error(
+                        "E0807",
+                        "a borrow return from two or more borrow parameters requires a region variable".to_string(),
+                        sig.ret_span,
                     );
+                    // A projection return has NO spellable region variable (no
+                    // grammar position exists), so the standard "add a region"
+                    // advice would be a dead end: name the real escape hatches
+                    // instead (spec 04 §7.6). The return is Proj-shaped exactly
+                    // when only the conservative predicate flags it.
+                    let d = if !field_stores_borrow(&sig.ret) {
+                        d.with_note(
+                            "no region variable can be spelled on a projection return; bind a concrete type for the associated type, or reduce the signature to one borrow input (spec 04 §7.6)",
+                            None,
+                        )
+                    } else {
+                        d.with_note("region variables are mandatory here; there is no compact default (§3.3)", None)
+                    };
+                    self.diags.push(d);
                 }
             }
         }
@@ -1227,14 +1247,16 @@ impl<'a> Checker<'a> {
 /// A parameter that is itself a borrow INPUT (design §3.3): a `read`/`write`
 /// mode parameter, or a by-value borrow-kind (slice/borrow) parameter —
 /// including an array of borrows (P4), whose elements point into caller frames
-/// just as a bare borrow parameter does. An `out`-mode slot is excluded even
-/// when its type stores borrows: it is a borrow OUTPUT the callee fills (P7),
-/// never a source a returned borrow can derive from.
+/// just as a bare borrow parameter does, and, at a generic definition site, a
+/// parameter typed at an opaque projection (`extra: I::Item`), which may be a
+/// borrow at some instantiation (P22(a), spec 04 §7.6). An `out`-mode slot is
+/// excluded even when its type stores borrows: it is a borrow OUTPUT the
+/// callee fills (P7), never a source a returned borrow can derive from.
 fn is_borrow_param(p: &crate::resolve::ParamInfo) -> bool {
     match p.mode {
         ParamMode::Read | ParamMode::Write => true,
         ParamMode::Out => false,
-        ParamMode::Take => field_stores_borrow(&p.decl_ty),
+        ParamMode::Take => may_store_borrow(&p.decl_ty),
     }
 }
 
@@ -1244,7 +1266,7 @@ fn is_borrow_param(p: &crate::resolve::ParamInfo) -> bool {
 /// reborrow's obligation chain is a separate (pre-existing) mechanism.
 fn aggregate_stores_borrows(ty: &Type) -> bool {
     match ty {
-        Type::Array(e, _) | Type::Slice(e) | Type::SliceMut(e) => field_stores_borrow(e),
+        Type::Array(e, _) | Type::Slice(e) | Type::SliceMut(e) => may_store_borrow(e),
         _ => false,
     }
 }

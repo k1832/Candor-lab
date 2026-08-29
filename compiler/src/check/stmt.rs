@@ -3,7 +3,7 @@
 //! — recorded as an `Assign` action for Stage 4).
 
 use crate::ast::*;
-use crate::types::{bears_box, box_subpaths, field_stores_borrow, ground_nested_int_lit, needs_drop, Type};
+use crate::types::{bears_box, box_subpaths, ground_nested_int_lit, may_store_borrow, needs_drop, Type};
 
 use super::dataflow::{Access, Place};
 use crate::ast::{ExprKind, PrefixOp};
@@ -117,7 +117,7 @@ impl<'a> Checker<'a> {
                 // (E0806 family). Covers the whole slot and element stores
                 // into an out array-of-borrows alike. The return's own region
                 // tag does not govern the out slot, so it is masked here.
-                if field_stores_borrow(&tt)
+                if may_store_borrow(&tt)
                     && place
                         .as_ref()
                         .is_some_and(|p| self.f.out_params.contains(&p.root))
@@ -150,7 +150,7 @@ impl<'a> Checker<'a> {
                     // range may end before the slot's.)
                     Some(p)
                         if self.carries_borrow(value)
-                            && (p.proj.is_empty() || field_stores_borrow(&tt)) =>
+                            && (p.proj.is_empty() || may_store_borrow(&tt)) =>
                     {
                         let name = p.root.clone();
                         self.anchor_carried(&name);
@@ -238,18 +238,19 @@ impl<'a> Checker<'a> {
                 op: PrefixOp::Read | PrefixOp::Write,
                 ..
             } => true,
-            // `field_stores_borrow` is the borrow-value type predicate: the five
-            // borrow kinds plus arrays of them (P4, whole-array granularity).
+            // `may_store_borrow` is the borrow-value type predicate: the five
+            // borrow kinds plus arrays of them (P4, whole-array granularity),
+            // plus an opaque `I::Item` inside generic code (P22(a)).
             ExprKind::Ident(name) => self
                 .lookup_local(name)
-                .map(|li| field_stores_borrow(&li.ty))
+                .map(|li| may_store_borrow(&li.ty))
                 .unwrap_or(false),
             // An array element read (`a[0]`) copies a borrow out of the array,
             // aliasing the same borrowed place; a whole-array or nested-array
             // read likewise. Probe the place's type without emitting.
             ExprKind::Index { .. } => {
                 let (t, _) = self.write_path_probe(e);
-                field_stores_borrow(&t)
+                may_store_borrow(&t)
             }
             // An array of borrows carries every element's loan (P4).
             ExprKind::ArrayLit(elems) => {
@@ -283,7 +284,7 @@ impl<'a> Checker<'a> {
                         // does; without this a view laundered out of a call sheds the
                         // source loan (the function-return view UAF). An array of
                         // borrows aliases its sources the same way (P4).
-                        return field_stores_borrow(&sig.ret);
+                        return may_store_borrow(&sig.ret);
                     }
                     return false;
                 }
@@ -331,26 +332,48 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        let ret = match &recv_ty {
+        let ret = self.iface_method_for_ty(&recv_ty, field).map(|m| m.ret);
+        // Arrays of borrows returned from a method alias their sources exactly
+        // as a bare borrow return does (P4); so does an opaque `Self::Item`
+        // return at a generic def site (P22(a)).
+        matches!(ret, Some(t) if may_store_borrow(&t))
+    }
+
+    /// Resolve `base.field(..)` to its interface method declaration, probing
+    /// the receiver's type. Pure w.r.t. the carried-loan state (the probe is
+    /// saved/restored around). `None` when the receiver answers no interface
+    /// method by that name (including the `Vec`-wired `get_ref`/`at`, which
+    /// have no declaration to return).
+    pub(super) fn receiver_iface_method(
+        &mut self,
+        base: &crate::ast::Expr,
+        field: &str,
+    ) -> Option<crate::resolve::IfaceMethod> {
+        let saved = std::mem::take(&mut self.f.carried);
+        let recv_ty = self.synth_arg_type(base);
+        self.f.carried = saved;
+        self.iface_method_for_ty(&recv_ty, field)
+    }
+
+    /// The interface method a receiver TYPE answers for `field`: a bound
+    /// interface's method for an opaque type parameter, or the covering
+    /// impl's interface method for a nominal/instantiated/scalar receiver.
+    fn iface_method_for_ty(&self, recv_ty: &Type, field: &str) -> Option<crate::resolve::IfaceMethod> {
+        match recv_ty {
             Type::Param(p) => self
                 .param_bound_ifaces(p)
                 .iter()
-                .find_map(|i| self.iface_method(i, field))
-                .map(|m| m.ret),
+                .find_map(|i| self.iface_method(i, field)),
             Type::Named(_) | Type::App(_, _) | Type::Scalar(_) => (0..self.items.impls.len())
                 .find(|&i| {
-                    self.items.impls[i].methods.contains_key(field) && self.impl_covers(i, &recv_ty)
+                    self.items.impls[i].methods.contains_key(field) && self.impl_covers(i, recv_ty)
                 })
                 .and_then(|idx| {
                     let iface = self.items.impls[idx].iface.clone();
                     self.iface_method(&iface, field)
-                })
-                .map(|m| m.ret),
+                }),
             _ => None,
-        };
-        // Arrays of borrows returned from a method alias their sources exactly
-        // as a bare borrow return does (P4).
-        matches!(ret, Some(t) if field_stores_borrow(&t))
+        }
     }
 }
 

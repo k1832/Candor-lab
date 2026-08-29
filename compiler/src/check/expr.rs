@@ -1294,8 +1294,9 @@ impl<'a> Checker<'a> {
     }
 
     /// The input root a borrow value ultimately derives from (design §3.3),
-    /// computed purely from the expression shape.
-    fn borrow_provenance(&self, e: &Expr) -> Option<String> {
+    /// computed purely from the expression shape (`&mut` only to probe a
+    /// method receiver's type; no checker state survives the probe).
+    fn borrow_provenance(&mut self, e: &Expr) -> Option<String> {
         match &e.kind {
             ExprKind::Paren(i) => self.borrow_provenance(i),
             ExprKind::Prefix {
@@ -1307,7 +1308,7 @@ impl<'a> Checker<'a> {
                 // provenance root, at whole-array granularity.
                 if self
                     .lookup_local(n)
-                    .map(|l| field_stores_borrow(&l.ty))
+                    .map(|l| may_store_borrow(&l.ty))
                     .unwrap_or(false)
                 {
                     Some(n.clone())
@@ -1334,7 +1335,7 @@ impl<'a> Checker<'a> {
                         _ => {
                             if let Some(sig) = self.items.fns.get(name) {
                                 // Arrays of borrows forward like bare borrows (P4).
-                                if field_stores_borrow(&sig.ret) {
+                                if may_store_borrow(&sig.ret) {
                                     let src = region_source_indices(sig);
                                     return src
                                         .first()
@@ -1345,10 +1346,47 @@ impl<'a> Checker<'a> {
                             None
                         }
                     }
+                } else if let ExprKind::Field { base, field, .. } = &callee.kind {
+                    // An assoc-method call's returned borrow (P22(a)
+                    // provenance extension, spec 04 §7.6).
+                    self.assoc_method_provenance(base, field, args)
                 } else {
                     None
                 }
             }
+            _ => None,
+        }
+    }
+
+    /// Provenance of an assoc-method call's returned borrow — the mirror of
+    /// `check_iface_method_call`'s compact default on the loan side (P22(a),
+    /// spec 04 §7.6): a borrow-valued method return derives from the method's
+    /// sole borrow input. That is the receiver root when the receiver is the
+    /// sole borrow-in (`it.get()` with `get(read self)` — the accessor idiom
+    /// the def-site Proj rule must keep legal), or recursively the sole
+    /// borrow-in argument. Two-plus borrow inputs are ambiguous — `None`
+    /// (E0806), exactly as the free-fn compact default refuses to guess. An
+    /// owned receiver rooting here is still caught by `check_return_root`'s
+    /// owned-parameter rejection (the dead-frame l2 shape).
+    fn assoc_method_provenance(&mut self, base: &Expr, field: &str, args: &[Expr]) -> Option<String> {
+        let m = self.receiver_iface_method(base, field)?;
+        if !may_store_borrow(&m.ret) {
+            return None;
+        }
+        let self_is_borrow_in = matches!(m.self_mode, ParamMode::Read | ParamMode::Write);
+        let borrow_ins: Vec<usize> = m
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, (mode, t))| {
+                matches!(mode, ParamMode::Read | ParamMode::Write)
+                    || (*mode != ParamMode::Out && may_store_borrow(t))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        match (self_is_borrow_in, borrow_ins.len()) {
+            (true, 0) => expr_place_root(base),
+            (false, 1) => args.get(borrow_ins[0]).and_then(|a| self.borrow_provenance(a)),
             _ => None,
         }
     }
@@ -1832,7 +1870,7 @@ impl<'a> Checker<'a> {
         // (§3.1/§3.3) — a view aliases its source's backing exactly as a borrow
         // does, so a view laundered out of a call must carry the source loan.
         // An array of borrows aliases its sources the same way (P4).
-        if field_stores_borrow(&sig.ret) {
+        if may_store_borrow(&sig.ret) {
             let src = region_source_indices(sig);
             let mut ids = Vec::new();
             for i in src {
@@ -1866,7 +1904,7 @@ impl<'a> Checker<'a> {
         let out_slots: Vec<usize> = ps
             .iter()
             .enumerate()
-            .filter(|(_, (m, t))| *m == ParamMode::Out && field_stores_borrow(t))
+            .filter(|(_, (m, t))| *m == ParamMode::Out && may_store_borrow(t))
             .map(|(i, _)| i)
             .collect();
         if out_slots.is_empty() {
@@ -1877,7 +1915,7 @@ impl<'a> Checker<'a> {
             .enumerate()
             .filter(|(_, (m, t))| {
                 matches!(m, ParamMode::Read | ParamMode::Write)
-                    || (*m != ParamMode::Out && field_stores_borrow(t))
+                    || (*m != ParamMode::Out && may_store_borrow(t))
             })
             .map(|(i, _)| i)
             .collect();
@@ -2744,7 +2782,7 @@ impl<'a> Checker<'a> {
                     self.check_arm_guard(arm);
                     self.clear_carried();
                     let bt = self.check_expr(&arm.body, Use::Value);
-                    if field_stores_borrow(&bt) {
+                    if may_store_borrow(&bt) {
                         arm_carried.extend(self.take_carried());
                     }
                     ty = join_types(ty, bt);
@@ -2861,7 +2899,7 @@ impl<'a> Checker<'a> {
             self.check_arm_guard(arm);
             self.clear_carried();
             let bt = self.check_expr(&arm.body, Use::Value);
-            if field_stores_borrow(&bt) {
+            if may_store_borrow(&bt) {
                 arm_carried.extend(self.take_carried());
             }
             self.pop_scope();
@@ -2884,7 +2922,7 @@ impl<'a> Checker<'a> {
     /// which cannot re-derive borrow-ness from arm syntax (a rebind of a
     /// pattern-bound borrow is out of scope by then).
     fn finish_match_value(&mut self, result: &Type, arm_carried: Vec<usize>, span: Span) {
-        if field_stores_borrow(result) {
+        if may_store_borrow(result) {
             self.f.borrow_valued.insert((span.start, span.end));
             self.set_carried(arm_carried);
         } else {
@@ -3011,7 +3049,7 @@ impl<'a> Checker<'a> {
                     self.check_arm_guard(arm);
                     self.clear_carried();
                     let bt = self.check_expr(&arm.body, Use::Value);
-                    if field_stores_borrow(&bt) {
+                    if may_store_borrow(&bt) {
                         arm_carried.extend(self.take_carried());
                     }
                     ty = join_types(ty, bt);
@@ -3046,7 +3084,7 @@ impl<'a> Checker<'a> {
             self.check_arm_guard(arm);
             self.clear_carried();
             let bt = self.check_expr(&arm.body, Use::Value);
-            if field_stores_borrow(&bt) {
+            if may_store_borrow(&bt) {
                 arm_carried.extend(self.take_carried());
             }
             self.pop_scope();
@@ -3323,7 +3361,7 @@ fn region_source_indices(sig: &crate::resolve::FnSig) -> Vec<usize> {
         .enumerate()
         .filter(|(_, p)| {
             matches!(p.mode, ParamMode::Read | ParamMode::Write)
-                || (p.mode != ParamMode::Out && field_stores_borrow(&p.decl_ty))
+                || (p.mode != ParamMode::Out && may_store_borrow(&p.decl_ty))
         })
         .map(|(i, _)| i)
         .collect();

@@ -715,6 +715,33 @@ pub fn field_stores_borrow(ty: &Type) -> bool {
     }
 }
 
+/// The loan machinery's conservative twin of `field_stores_borrow` (ledger
+/// P22(a), ratified 2026-08-30; spec 04 §7.6): inside generic code an opaque
+/// associated-type projection (`I::Item`, and arrays of it) is treated as if
+/// it MAY store a borrow — an impl can legally bind `type Item = read T`
+/// (P11), and a generic body is checked once, before any impl is known
+/// (design 0007 §5.2). Concrete code that checks today is unaffected: a
+/// projection whose base is known normalizes away before these checks run
+/// (spec 04 §7.6 records the one already-ill-formed exception). This
+/// predicate is
+/// consumed ONLY by the loan machinery and the §7 signature rules; E1006
+/// (borrow type arguments) and E0201 (borrow fields) keep consuming
+/// `field_stores_borrow` — their meaning ("IS a borrow type") must not widen.
+/// A bare type parameter `T` needs no conservative treatment inside a generic
+/// fn body: every route that pins a fn's type argument (inference, turbofish,
+/// bound conformance) passes E1006. A WRAPPED projection (`Opt[I::Item]`)
+/// deliberately stays outside this predicate — that is the OPEN App-of-Proj
+/// residual (ledger P22 partial closure / P9): E1006 does not run on
+/// struct-literal / enum-constructor type arguments or type annotations, so
+/// a borrow-bound Item can be laundered through an App today.
+pub fn may_store_borrow(ty: &Type) -> bool {
+    match ty {
+        Type::Proj(_, _) => true,
+        Type::Array(elem, _) => may_store_borrow(elem),
+        _ => field_stores_borrow(ty),
+    }
+}
+
 /// Ground any `{integer}` sitting INSIDE a composite type to `i64` — the
 /// unconstrained-literal default (design 0002 §0.1), applied structurally. A
 /// bare top-level `{integer}` is returned unchanged (scalar literals stay

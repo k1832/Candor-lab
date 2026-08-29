@@ -111,7 +111,7 @@ landing binding holds an unguarded borrow and the borrowed place reopens.
 Plain borrows and arrays of borrows both take this path. (The return-side
 walk already recurses into `match` arms; the value-side carry does not.)
 
-## P9 — E1006 annotation-position gap (LATENT, pre-existing)
+## P9 — E1006 annotation-position gap (REOPENED 2026-08-30, HIGH, reachable)
 
 E1006 ("a borrow type is not a legal type argument", now also arrays of
 borrows) fires at explicit type-argument positions. A type argument that is
@@ -122,6 +122,43 @@ generic-monomorphization array bug (P1 above: array type arguments render
 with length 0) breaks the carrier shapes first — the in-flight generics
 workstream that fixes P1 may unblock this path, so re-test E1006 coverage
 when P1 lands.
+
+REOPENED as HIGH/reachable (P22-implementation adversarial review,
+2026-08-30): P1 is fixed, and the gap is wider than "inferred annotations" —
+`check_arg_conformance` runs ONLY on generic fn calls and impl conformance
+(its `check_bounds` callers at generics.rs:75 and :890, and the generic-impl
+conformance check at :1110), NEVER on struct-literal / enum-constructor type
+arguments or on type annotations. `let o: Opt[read i64] =
+Opt::None;` checks clean today (verified). Combined with P11's legalization
+of borrow-bound `type Item`, this makes App-of-Proj a live borrow-laundering
+route through the ratified P22(a) rule (which is deliberately bare-Proj-
+only). Both escape repros check clean and RUN on the current binary
+(verified 2026-08-30; also locked in as accepted-today tests
+`p22_open_hole_app_of_proj_*` in compiler/tests/generics.rs):
+
+    // shared escape: runs to 9 through a "live" wrapped borrow
+    enum Opt[T] { Some(T), None, }
+    interface Get { type Item; fn get(read self) -> Self::Item; }
+    struct Q { a: i64 }
+    impl Get for Q { type Item = read i64;
+                     fn get(read self) -> read i64 { return read self.a; } }
+    fn wrap[I: Get](it: read I) alloc -> Opt[I::Item] {
+        return Opt::Some(it.get());
+    }
+    // caller: let o: Opt[read i64] = wrap(read q); q.a = 9; match ... b.* == 9
+
+    // exclusive escape: two live aliases; runs to 42
+    struct W[T] { v: T }
+    // impl binds type Item = write i64; get(write self) -> write i64
+    fn wrap[I: Get](it: write I) -> W[I::Item] { return W { v: it.get() }; }
+    // caller: let w: W[write i64] = wrap(write q); q.a = 7; w.v.* = 42;
+
+Closing P9 (running the E1006 borrow-argument rule at constructor and
+annotation positions) would also close the App-of-Proj residual of P22 the
+(iii-b)-flavored way; the measured alternative (extending the conservative
+predicate through App) rejects the shipped corelib iterator tree — numbers
+in docs/reviews/2026-08-30-generic-borrow-opacity-design.md, "App
+extension, measured". Cross-reference: P22 (partial closure), P11.
 
 ## P10 — Block-scope dangle for plain borrows (MEDIUM-HIGH, pre-existing, now confirmed)
 
@@ -193,13 +230,21 @@ give 44, not 255); the clamp is load-bearing. LLVM was already correct
 (`llvm.fpto*i.sat.iN` at exact width). Gated five-engine in tests/floats.rs,
 tests/floats_f32.rs, and the AOT slice.
 
-## P16 — Generic functions do no return-borrow loan extension (HIGH)
+## P16 — Generic functions do no return-borrow loan extension (CLOSED 2026-08-30, HIGH)
 
 `fn idr[T](p: read T) -> read T` lets the caller shed the argument loan
 entirely: the returned borrow carries nothing, so writing the borrowed-from
 owner while the result lives checks clean. Same laundering family as P9/P1;
 found on the baseline binary during the P7/P8/P11 workstream (its fixes
 cover interface methods and out-slots, not plain generic returns).
+
+CLOSED by the P22(b) call-site workstream (memo
+docs/reviews/2026-08-30-generic-borrow-opacity-design.md §1(b)/§3; this is
+sub-problem (b)'s q1 shape): `check_generic_call` now applies the concrete
+return-borrow extension on the SUBSTITUTED return and parameter types, so
+the repro rejects E0803 and the within-window twin stays clean (tests
+`p16_generic_borrow_return_*` in compiler/tests/generics.rs). Corpus sweep:
+zero diagnostic diffs.
 
 ## P17 — Native trace order around joins diverges from the oracle (MEDIUM)
 
@@ -299,7 +344,7 @@ Pre-existing holes found while attacking the P7/P8/P11 fixes. All reproduce
 on the pre-fix binary, so none are regressions of that work; each is logged
 to be fixed in its own workstream.
 
-## P22 — Generic bodies are Proj-opaque and generic calls shed all loans (HIGH)
+## P22 — Generic bodies are Proj-opaque and generic calls shed all loans (PARTIALLY CLOSED 2026-08-30, HIGH; App-of-Proj residual OPEN as P9)
 
 Two halves of one family. (a) Generic function bodies are checked ONCE at
 the definition site with opaque type parameters, so `Type::Proj`
@@ -315,6 +360,40 @@ read T) -> read T` lets the caller write the borrowed owner and observe it
 CONCRETE halves of these shapes are closed by the P7/P8/P11 workstream. The
 generic halves need per-instantiation borrow information or def-site Proj
 bounds — the next major checker workstream.
+
+PARTIALLY CLOSED. (b) was implemented in the P22(b) workstream (memo
+docs/reviews/2026-08-30-generic-borrow-opacity-design.md §4): the
+substituted-type return-borrow extension closes the caller-visible halves
+of k3/l2/s1 and q1 (== P16). The BARE-PROJ def-site shapes of (a) are
+closed by the Proj-only conservative rule the deciding authority ratified
+2026-08-30 (memo §2 option (i); spec 04 §7.6): inside generic code an
+opaque projection (`I::Item`, and arrays of it) is treated as potentially
+borrow-storing by the loan machinery and the signature rules, via the
+named predicate `may_store_borrow` (E1006 and E0201 keep the unwidened
+`field_stores_borrow`). Verified closures: l2's def-site dead-frame store
+rejects E0806, k3-internal rejects E0801, the s1 match-join twin rejects
+E0801, and leak2's missing def-site backstop rejects E0807 exactly like
+its concrete twin (tests `p22_*` in compiler/tests/generics.rs; the former
+open-hole lock-in is flipped to its rejection twin). The assoc-method
+provenance extension keeps the single-borrow-in accessor idiom legal, and
+the corelib iterator stack (owned Items) checks clean. Measured
+over-rejection on the 370-subject corpus (fixtures + selfhost + ports +
+corelib, selfhost, and p20-reference trees): zero diagnostic diffs.
+
+OPEN residual (implementation adversarial review, 2026-08-30): the rule is
+bare-Proj-only by scope, and a WRAPPED projection (`Opt[I::Item]`,
+`W[I::Item]`) still launders a borrow-bound Item — `fn wrap[I: Get](it:
+read I) alloc -> Opt[I::Item] { return Opt::Some(it.get()); }` checks
+clean and runs (caller observes 9 through the wrapped "live" borrow; a
+struct variant smuggles a WRITE borrow, both aliases live, runs to 42).
+The memo's original completeness argument ("E1006 bars borrow-kind
+arguments to generic enums") is wrong at constructor/annotation positions
+— that is ledger P9, reopened HIGH with both repros inlined there. Locked
+in as accepted-today tests `p22_open_hole_app_of_proj_*`; the candidate
+predicate extension through App was prototyped and measured (memo, "App
+extension, measured"): it rejects the shipped corelib iterator tree, so
+the residual needs either constructor-aware provenance or the P9/E1006
+closure, under its own ruling.
 
 ## P23 — Checker panic on a borrow-returning call with too few arguments (CLOSED 2026-08-30, MEDIUM)
 
@@ -361,7 +440,7 @@ let y: u8 = x;`) or tracking constant values through bindings — a language
 ruling, not a mechanical fix. Surfaced by the P21 closure's verifier,
 2026-08-30.
 
-## P26 — Generic calls never push a call group, so same-call overlap is unchecked (MEDIUM)
+## P26 — Generic calls never push a call group, so same-call overlap is unchecked (CLOSED for free generic calls 2026-08-30, MEDIUM; method path split out as P28)
 
 Found by the P22(b) adversarial review (2026-08-30): `check_generic_call`
 captures per-argument loans (and the P22(b) fix now extends the return
@@ -374,6 +453,19 @@ the P22(b) fix neither created nor touched this path). A mirror gap of
 the same family as P22(b), likely a one-call fix at the same site, but
 logged as its own item so it gets its own tests and sweep rather than
 riding the P22 change. Cross-reference: P22.
+
+CLOSED FOR FREE GENERIC CALLS ONLY (same 2026-08-30 workstream as the
+P22(a) rule, separate tests and sweep verification): `check_generic_call`
+pushes the per-argument loan group right after the argument loans are
+captured — the exact `check_user_call` placement, before the out-slot
+extension. The ledger repro rejects E0805, the distinct-owners twin stays
+clean, and the out+read overlap twin rejects like its concrete
+`out_and_read_overlap` (tests `p26_*` in compiler/tests/generics.rs; the
+`synth_arg_type` probe already truncates probe-pushed groups, so no
+duplicate diagnostics). Corpus sweep: zero diagnostic diffs. The
+adversarial review found the SAME gap on the interface-method call path
+(`check_iface_method_call`), which this round did not fix — logged as
+ledger P28 below.
 
 ## P27 — `spawn` arguments bypass the argument type check entirely (HIGH, pending triage)
 
@@ -397,3 +489,55 @@ that executes the confusion today. Numbered past P26 (claimed by the
 in-flight generics worktree). Needs its own reviewed fix (route spawn
 arguments through `check_against` before the portability/loan gates); NOT
 fixed in the P21 round by review instruction.
+
+# Ledger additions from the P22(a)-implementation adversarial review (2026-08-30)
+
+## P28 — Interface-method calls never push a call group, so same-call overlap is unchecked (MEDIUM)
+
+The method-path sibling of P26 (whose fix covers free generic calls only):
+`check_iface_method_call` (check/generics.rs:1158) captures per-argument
+loans into `per_arg` but never calls `push_call_group`, so the §3.1
+no-two-phase rule (E0805) does not run for interface-method calls —
+`s.fill2(out x, out x)` checks CLEAN where the concrete free-fn twin
+`g(out x, out x)` is E0805 (verified 2026-08-30; the generic free-fn twin
+also rejects since the P26 fix). Additionally `recv_carried` (the
+receiver's loan, captured separately at :1179) is excluded from `per_arg`,
+so a receiver-vs-argument overlap would be unchecked even with a group
+pushed — a complete fix must fold the receiver loans into the group.
+Repro:
+
+    interface Two { fn fill2(read self, a: out i64, b: out i64) -> unit; }
+    struct S { v: i64 }
+    impl Two for S { fn fill2(read self, a: out i64, b: out i64) -> unit
+                     { a = 1; b = 2; } }
+    fn main() -> i64 { let s: S = S { v: 1 }; let mut x: i64 = 0;
+                       s.fill2(out x, out x); return x; }
+
+NOT fixed in the P22(a) round by review instruction; needs the same
+push-after-capture mirror plus the receiver fold, with its own tests.
+Cross-reference: P26.
+
+## P29 — Interface methods with `read`/`write`-mode value parameters double-lower the parameter type (HIGH, pre-existing)
+
+Found by the P22(a) adversarial review while probing method-call shapes:
+an interface method declaring a borrow-MODE parameter is unusable —
+
+    interface One { fn m(read self, a: read i64) -> i64; }
+    // impl for S accordingly...
+    fn main() -> i64 { let s: S = S { v: 1 }; let x: i64 = 2;
+                       return s.m(read x); }
+
+gives E0703 `type mismatch: expected `borrow borrow i64`, found `borrow
+i64`` at every call site (verified 2026-08-30, on the pre-P22(a) binary
+and the current one alike). Mechanism: interface-method resolution stores
+each parameter as `(mode, lower_param(mode, ty))` (crate::generics
+iface lowering, generics.rs:226) — the TYPE is already mode-lowered
+(`read i64` -> `borrow i64`) while the mode is kept — and
+`check_iface_method_call` then re-applies the mode through
+`check_arg_mode(*mode, &pty, ..)`, whose `Read` arm expects a borrow OF
+the declared type, i.e. `borrow borrow i64`. Free-fn `ParamInfo` keeps
+`decl_ty` unlowered with a separate `lowered` field; the iface path
+conflates the two. Every shipped interface method takes value params by
+`take` (or only `self` by mode), so the corpus never trips it. Fix is to
+store the unlowered type in the pair (or lower at binding time only), with
+call-site tests over read/write/out modes; NOT fixed this round.
