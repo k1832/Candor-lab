@@ -44,6 +44,10 @@ pub fn digest(bytes: &[u8]) -> [u8; 32] {
     }
     msg.extend_from_slice(&bit_len.to_be_bytes());
 
+    // as_chunks::<64>() (the newer-stable clippy suggestion) needs a const-
+    // generic array pattern; the padded message length is a multiple of 64 by
+    // construction, so chunks_exact has no remainder either way.
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     for chunk in msg.chunks_exact(64) {
         let mut w = [0u32; 64];
         for (i, word) in w.iter_mut().enumerate().take(16) {
