@@ -335,7 +335,7 @@ target), as is any signed literal outside its target's range; never a runtime
 fault. The range an unsuffixed literal checks against is the type it is
 *required* to take: written directly in a `u64` slot, `9223372036854775808` is in
 range and legal — the `i64` default governs only where no required type exists
-(spec 01 §3.3, amended 2026-08-30, ratification pending). Walked in §3. For the programmatic bound,
+(spec 01 §3.3, amended and ratified 2026-08-30). Walked in §3. For the programmatic bound,
 add compile-time intrinsics **`min_of(T)` / `max_of(T)`** to the `sizeof`/`alignof`
 family (greppable, NN#13-clean). An `i64::MIN` associated-constant spelling is
 rejected: `::` is reserved exclusively for enum variants (NN#13), and reopening it

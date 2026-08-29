@@ -6,6 +6,11 @@ review (repro shapes k3, l2, s1, q1). Written 2026-08-30 against d7152ca plus
 this workstream's own change. All measurements in this memo were re-run in this
 workstream; repro sources are inlined below so they survive the scratchpad.
 
+**Ruling (2026-08-30): the deciding authority ratified option (i), the
+Proj-only conservative rule, as recommended below. Implementation follows in
+its own reviewed workstream; the lock-in tests for the open shapes flip to
+rejection twins when it lands.**
+
 Summary of verdicts:
 
 * Sub-problem (b) — generic calls shed all loans — is CALL-SITE-side, contained,

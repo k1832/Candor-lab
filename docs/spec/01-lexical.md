@@ -124,8 +124,8 @@ throwaway inventory; it does not codify it.
     while a **bare unsigned over-range literal** such as `9223372036854775808`
     written on its own fits no target type and SHALL be **rejected at compile
     time**; it SHALL NOT produce a runtime fault (design 0006 §2.4, §3).
-    *(Amended 2026-08-30 — the former gloss "or an unsuffixed literal outside
-    `i64`" overstated the default; ratification pending.)*
+    *(Amended and ratified 2026-08-30 — the former gloss "or an unsuffixed
+    literal outside `i64`" overstated the default.)*
 
 3.4 **The negative-literal fold is grammatical, not lexical.** A leading `-` is
     never part of an integer-literal token; it lexes as the `-` operator (§4).
