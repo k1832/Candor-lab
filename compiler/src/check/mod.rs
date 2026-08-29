@@ -93,8 +93,11 @@ struct FnState {
     /// to store a borrow where the landing-site predicate (`carries_borrow`)
     /// cannot re-derive it from the syntax: an interface-method call whose
     /// SUBSTITUTED return type stores a borrow (P11 — a declared `Self::Item`
-    /// is opaque before substitution) and a `match` whose result type stores
-    /// a borrow (P8 — the arms' loans carry into the match's value). Keyed on
+    /// is opaque before substitution), a `match` whose result type stores
+    /// a borrow (P8 — the arms' loans carry into the match's value), and a
+    /// GENERIC free-function call whose substituted return type stores a
+    /// borrow or view (P16/P22b — the raw signature's `read T` / `I::Item`
+    /// cannot show it). Keyed on
     /// the WHOLE span, not the start: a chained call `w.v().count()` shares
     /// its start byte with the inner `w.v()`, and a start-keyed memo aliased
     /// the two (F1 of the P7/P8/P11 review), tagging the outer non-borrow

@@ -343,6 +343,247 @@ fn p7_generic_out_slot_within_window_accepted() {
     assert!(codes(src).is_empty(), "expected clean, got {:?}", codes(src));
 }
 
+// ---- P16/P22b: generic free functions returning a borrow or view -----------
+// `check_generic_call` used to end with an unconditional carried-loan clear, so
+// EVERY generic borrow/view return shed its argument loan at the call site
+// (reviewer repro q1 ran to 9 through a "live" shared borrow). The fix applies
+// the concrete return-borrow extension using the SUBSTITUTED return and
+// parameter types; these mirror the concrete twins in loans.rs.
+
+#[test]
+fn p16_generic_borrow_return_keeps_argument_loan() {
+    // q1: writing the borrowed-from owner while the returned borrow lives.
+    assert_code(
+        "fn idr[T](p: read T) -> read T { return p; }\n\
+         fn main() -> i64 { let mut x: i64 = 5; \
+         let r: read i64 = idr(read x); x = 9; return r.*; }\n",
+        "E0803",
+    );
+}
+
+#[test]
+fn p16_generic_borrow_return_within_window_accepted() {
+    // NLL positive: the returned borrow dies before the write.
+    let src = "fn idr[T](p: read T) -> read T { return p; }\n\
+         fn main() -> i64 { let mut x: i64 = 5; \
+         let r: read i64 = idr(read x); let v: i64 = r.*; \
+         x = 9; return v + x; }\n";
+    assert!(codes(src).is_empty(), "expected clean, got {:?}", codes(src));
+}
+
+#[test]
+fn p16_generic_exclusive_borrow_return_keeps_argument_loan() {
+    // Reading the owner while the returned exclusive borrow lives is E0804.
+    assert_code(
+        "fn idw[T](p: write T) -> write T { return p; }\n\
+         fn main() -> i64 { let mut x: i64 = 5; \
+         let r: write i64 = idw(write x); let v: i64 = x; \
+         r.* = 7; return v; }\n",
+        "E0804",
+    );
+}
+
+#[test]
+fn p16_generic_view_return_keeps_argument_loan() {
+    // The view twin: a generic fn passing a slice through (`take`-mode view
+    // param — borrow-in-ness is decided on the substituted type).
+    assert_code(
+        "fn idv[T](s: [T]) -> [T] { return s; }\n\
+         fn main() -> i64 { let mut arr: [4]i64 = [1, 2, 3, 4]; \
+         let v: [i64] = idv(slice_of(arr)); arr[0] = 9; return v[0]; }\n",
+        "E0803",
+    );
+}
+
+#[test]
+fn p16_generic_view_return_within_window_accepted() {
+    let src = "fn idv[T](s: [T]) -> [T] { return s; }\n\
+         fn main() -> i64 { let mut arr: [4]i64 = [1, 2, 3, 4]; \
+         let v: [i64] = idv(slice_of(arr)); let s: i64 = v[0]; \
+         arr[0] = 9; return s + arr[0]; }\n";
+    assert!(codes(src).is_empty(), "expected clean, got {:?}", codes(src));
+}
+
+#[test]
+fn p22_generic_assoc_proj_return_keeps_argument_loan() {
+    // The caller-visible half of reviewer repro k3: a generic free fn declared
+    // `-> I::Item` whose projection resolves to a borrow at the call site. The
+    // substituted return type decides borrow-ness, so the argument loan must
+    // extend over the landing binding.
+    assert_code(
+        "interface Get { type Item; fn get(read self) -> Self::Item; }\n\
+         struct Q { a: i64 }\n\
+         impl Get for Q { type Item = read i64; fn get(read self) -> read i64 \
+         { return read self.a; } }\n\
+         fn leak[I: Get](it: read I) -> I::Item { let r: I::Item = it.get(); return r; }\n\
+         fn main() -> i64 { let mut q: Q = Q { a: 5 }; \
+         let b: read i64 = leak(read q); q.a = 9; return b.*; }\n",
+        "E0803",
+    );
+}
+
+#[test]
+fn p22_generic_assoc_proj_out_slot_extends_caller_loan() {
+    // The caller-visible half of reviewer repro l2: an `out I::Item` slot whose
+    // projection resolves to a borrow at the call site extends the sole
+    // borrow-in argument's loan over the slot's landing binding (P7 rule on
+    // substituted types).
+    assert_code(
+        "interface Get { type Item; fn get(read self) -> Self::Item; }\n\
+         struct Q { a: i64 }\n\
+         impl Get for Q { type Item = read i64; fn get(read self) -> read i64 \
+         { return read self.a; } }\n\
+         fn fill[I: Get](o: out I::Item, it: read I) -> unit { o = it.get(); }\n\
+         fn main() -> i64 { let mut q: Q = Q { a: 5 }; let mut s: read i64; \
+         fill(out s, read q); q.a = 9; return s.*; }\n",
+        "E0803",
+    );
+}
+
+#[test]
+fn p16_generic_borrow_return_assignment_landing_keeps_loan() {
+    // The assignment landing site anchors the carried loan exactly as a `let`
+    // does (§2.3): rebinding a borrow local to a generic call's result.
+    assert_code(
+        "fn idr[T](p: read T) -> read T { return p; }\n\
+         fn main() -> i64 { let mut x: i64 = 5; let mut y: i64 = 6; \
+         let mut r: read i64 = read x; r = idr(read y); \
+         y = 9; return r.*; }\n",
+        "E0803",
+    );
+}
+
+#[test]
+fn p16_generic_owned_return_sheds_argument_loan() {
+    // The non-borrow substituted-return branch: an owned generic return clears
+    // the carried loans (no sibling leak from the borrow argument), so the
+    // source is free immediately after the call.
+    let src = "fn second[T](p: read T, v: T) -> T { return v; }\n\
+         fn main() -> i64 { let mut x: i64 = 5; \
+         let r: i64 = second(read x, 7); x = 9; return r + x; }\n";
+    assert!(codes(src).is_empty(), "expected clean, got {:?}", codes(src));
+}
+
+#[test]
+fn p16_generic_array_of_borrows_return_keeps_argument_loan() {
+    // The generic twin of loans.rs `p4_array_return_from_borrow_param_extends_
+    // caller_loan`: a `[2]read T` return aliases its borrow-param source at
+    // whole-array granularity (P4), judged on the substituted return type.
+    assert_code(
+        "fn view2[T](p: read T) -> [2]read T { return [read p.*; 2]; }\n\
+         fn main() -> i64 { let mut x: i64 = 5; \
+         let a: [2]read i64 = view2(read x); x = 9; return a[0].*; }\n",
+        "E0803",
+    );
+}
+
+#[test]
+fn p16_generic_exclusive_loan_through_shared_return() {
+    // A shared return deriving from an exclusive (`write`) input carries the
+    // EXCLUSIVE loan: reading the owner while the result lives is E0804, the
+    // concrete `loan_copy_exclusive_then_read_source` flow through a generic
+    // call.
+    assert_code(
+        "fn ro[T](p: write T) -> read T { return read p.*; }\n\
+         fn main() -> i64 { let mut x: i64 = 5; \
+         let r: read i64 = ro(write x); let v: i64 = x; return r.* + v; }\n",
+        "E0804",
+    );
+}
+
+// ---- P16/P22b: region-tagged generic signatures (the `Some(r)` arm of
+// `generic_region_source_indices`), mirroring loans.rs's concrete §3.3 tests.
+
+#[test]
+fn p16_generic_two_borrow_params_return_without_region() {
+    // Def-site twin of `two_borrow_params_return_without_region`: `read T` is
+    // borrow-kind syntactically, so two borrow params + a borrow return with no
+    // region variable is E0807 at the generic definition.
+    assert_code(
+        "fn pick[T](a: read T, b: read T) -> read T { return a; }\n\
+         fn main() -> i64 { return 0; }\n",
+        "E0807",
+    );
+}
+
+#[test]
+fn p16_generic_region_provenance_mismatch() {
+    // Def-site twin of `provenance_mismatch`: the returned borrow must derive
+    // from the parameter carrying the return's region (E0808).
+    assert_code(
+        "fn pick2[region r, T](a: read[r] T, b: read T) -> read[r] T { return b; }\n\
+         fn main() -> i64 { return 0; }\n",
+        "E0808",
+    );
+}
+
+#[test]
+fn p16_generic_region_tagged_source_conflict_detected() {
+    // Call-site: the return's region tag selects WHICH argument's loan extends
+    // over the result — writing the tagged source's owner is E0803.
+    assert_code(
+        "fn choose[region r, T](a: read[r] T, b: read T) -> read[r] T { return a; }\n\
+         fn main() -> i64 { let mut x: i64 = 1; let mut y: i64 = 2; \
+         let r: read i64 = choose(read x, read y); x = 9; return r.*; }\n",
+        "E0803",
+    );
+}
+
+#[test]
+fn p16_generic_region_untagged_source_freed() {
+    // Call-site dual: the UNTAGGED argument's loan is not extended, so its
+    // owner is free while the result lives.
+    let src = "fn choose[region r, T](a: read[r] T, b: read T) -> read[r] T { return a; }\n\
+         fn main() -> i64 { let mut x: i64 = 1; let mut y: i64 = 2; \
+         let r: read i64 = choose(read x, read y); y = 9; return r.*; }\n";
+    assert!(codes(src).is_empty(), "expected clean, got {:?}", codes(src));
+}
+
+#[test]
+fn p22_generic_match_to_proj_return_keeps_argument_loan() {
+    // The caller-visible half of reviewer repro s1: a generic fn whose body
+    // joins a match to a Proj result. The call-site extension is driven by the
+    // substituted return type alone, so the landing still anchors the loan.
+    assert_code(
+        "interface Get { type Item; fn get(read self) -> Self::Item; }\n\
+         struct Q { a: i64 }\n\
+         impl Get for Q { type Item = read i64; fn get(read self) -> read i64 \
+         { return read self.a; } }\n\
+         fn pick[I: Get](it: read I, c: i64) -> I::Item { \
+         let r: I::Item = match c { 0 => it.get(), _ => it.get(), }; return r; }\n\
+         fn main() -> i64 { let mut q: Q = Q { a: 5 }; \
+         let b: read i64 = pick(read q, 0); q.a = 9; return b.*; }\n",
+        "E0803",
+    );
+}
+
+#[test]
+fn p22_open_hole_two_borrow_inputs_proj_return_still_accepted() {
+    // OPEN HOLE lock-in (ledger P22(a), reviewer repro leak2): with TWO
+    // post-substitution borrow inputs and a declared `-> I::Item` return, the
+    // call-site compact default is ambiguous (carries nothing, matching the
+    // concrete rule) and the def-site E0807 backstop does not fire because the
+    // declared Proj is opaque (`field_stores_borrow(Proj) == false`). No
+    // region tag is spellable on a Proj return, so the ambiguous branch is the
+    // only reachable one. This test DOCUMENTS the current acceptance; flip it
+    // to an expected rejection when the option-(a) def-site ruling lands (the
+    // Proj-only conservative rule gives this def an E0807 exactly like its
+    // concrete twin).
+    let src = "interface Get { type Item; fn get(read self) -> Self::Item; }\n\
+         struct Q { a: i64 }\n\
+         impl Get for Q { type Item = read i64; fn get(read self) -> read i64 \
+         { return read self.a; } }\n\
+         fn leak2[I: Get](it: read I, extra: I::Item) alloc -> I::Item { return it.get(); }\n\
+         fn main() alloc -> i64 { let mut q: Q = Q { a: 5 }; let x: i64 = 1; \
+         let b: read i64 = leak2(read q, read x); q.a = 9; return b.*; }\n";
+    assert!(
+        codes(src).is_empty(),
+        "leak2 unexpectedly rejected — the P22(a) def-site ruling may have landed; \
+         flip this lock-in to its rejection twin. got {:?}",
+        codes(src)
+    );
+}
+
 #[test]
 fn method_receiver_probe_does_not_duplicate_same_call_overlap() {
     // P4 review M1: `synth_arg_type` probes the receiver expression; the call

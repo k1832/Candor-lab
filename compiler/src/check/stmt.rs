@@ -257,6 +257,13 @@ impl<'a> Checker<'a> {
                     ) {
                         return true;
                     }
+                    if self.items.generic_fns.contains_key(name) {
+                        // Borrow-ness of a generic call's return depends on the
+                        // instantiation (P16/P22b): consult the substituted-return
+                        // answer recorded when the call was checked, exactly as
+                        // the P11 method-call path below does.
+                        return self.f.borrow_valued.contains(&(e.span.start, e.span.end));
+                    }
                     if let Some(sig) = self.items.fns.get(name) {
                         // A user fn returning a borrow OR a view (`[T]`/`str`) carries
                         // its return-extended argument loan, exactly as a borrow return

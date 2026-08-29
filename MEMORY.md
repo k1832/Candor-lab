@@ -1451,3 +1451,29 @@ once you add the literal node). Key design/impl facts worth reusing:
   tests/fixtures/run/raytracer.cnr still carries the old manual clamp — shipped
   and pinned, harmless, simplifiable in a future example refresh. (15_raytracer,
   2026-08-26; fixed 2026-08-30)
+
+- **Generic call-site loan rules must be judged on the SUBSTITUTED types, and
+  the landing-site answer travels by span.** The P22(b) fix (generic calls
+  shed all loans) was the concrete return-borrow extension applied in
+  `check_generic_call` on `subst(sig.ret)` — with a substituted-type mirror of
+  `region_source_indices`, so a take-mode `s: [T]` view argument counts as a
+  borrow input — plus a `borrow_valued` span record so `carries_borrow`
+  recognizes generic callees at the landing `let`/assignment (the raw generic
+  signature cannot show borrow-ness). ~65 lines, zero corpus diffs; the P7
+  out-slot extension at generic call sites (substituted types, generics.rs)
+  was the precedent. Mirror gaps hide in the same place: the arity early
+  return dodges P23's panic shape, but `push_call_group` was still missing
+  (E0805 skips generic calls — ledger P26). (P22 workstream, 2026-08-30)
+
+- **`field_stores_borrow` carries three different meanings — never flip it
+  globally for conservative-opacity experiments.** E1006 (borrow type
+  arguments) and E0201 (borrow fields/payloads) consume the same predicate as
+  the loan machinery but mean different things by it; a global Param=true flip
+  would make every generic container field and every def-site type argument
+  illegal (reasoned, deliberately excluded from the prototype — those two
+  sites kept the strict predicate). The measured P22 numbers are the
+  LOAN-SCOPED flip only: Param+Proj in the loan machinery already storms the
+  50kL reference with E0806/E0807 (12 corpus subjects newly fail), while
+  Proj-only measured ZERO over-rejection — bare `T` needs no conservatism at
+  all because E1006 already bars borrow-kind type arguments. (P22 workstream,
+  2026-08-30)
