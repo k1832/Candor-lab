@@ -111,12 +111,21 @@ throwaway inventory; it does not codify it.
     are two).
 
 3.3 **Over-range is a compile error, never a fault.** An integer literal whose
-    magnitude does not fit the type it is required to take — a suffixed literal
-    outside its suffix type's range, or an unsuffixed literal outside `i64` — is
-    **ill-formed** (rejected at compile time). In particular a **bare unsigned
-    over-range literal** such as `9223372036854775808` written on its own fits no
-    target type and SHALL be **rejected at compile time**; it SHALL NOT produce a
-    runtime fault (design 0006 §2.4, §3).
+    magnitude does not fit **the type it is required to take** is **ill-formed**
+    (rejected at compile time). The required type is the suffix when one is
+    present; for an unsuffixed literal it is the integer scalar type of the slot
+    the literal is written directly in — a `let`/field/argument/return/static
+    annotation, an assignment target (`x = 300`, `a[0] = 300`, a deref or
+    out-parameter store), or a match-arm value landing in a typed slot (the
+    list is not exhaustive; any position whose declared type the literal takes
+    qualifies) — and the `i64` default applies **only when no required type
+    exists**: an operand, an index expression, or a literal written on its own.
+    Thus `18446744073709551615` directly in a `u64` slot is in range and legal,
+    while a **bare unsigned over-range literal** such as `9223372036854775808`
+    written on its own fits no target type and SHALL be **rejected at compile
+    time**; it SHALL NOT produce a runtime fault (design 0006 §2.4, §3).
+    *(Amended 2026-08-30 — the former gloss "or an unsuffixed literal outside
+    `i64`" overstated the default; ratification pending.)*
 
 3.4 **The negative-literal fold is grammatical, not lexical.** A leading `-` is
     never part of an integer-literal token; it lexes as the `-` operator (§4).

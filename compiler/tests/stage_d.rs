@@ -80,6 +80,11 @@ const CORPUS: &[(&str, bool)] = &[
     ("enum Opt { None, Some(i64) } fn main() -> i64 { let a: Opt = Opt::Some(5); let x: i64 = match a { Opt::None => 0, Opt::Some(v) => v }; return x; }", true),
     // rawptr write+read through a fixed address (the MMIO substrate observable):
     ("fn main() -> i64 { unsafe \"mmio\" { let p: rawptr u32 = addr_to_ptr[u32](3145728); ptr_write(p, 7u32); let v: u32 = ptr_read(p); return conv i64 v; } }", true),
+    // P21 direction 2: an unsuffixed literal above i64::MAX is legal in a u64
+    // slot (spec 01 §3.3, required type) and must store bit-exactly everywhere.
+    ("fn main() -> i64 { let x: u64 = 18446744073709551615; if x == 18446744073709551615u64 { return 1; } return 0; }", true),
+    // ... including through a match arm, which propagates the slot expectation.
+    ("fn main() -> i64 { let c: i64 = 0; let x: u64 = match c { 0 => 18446744073709551615, _ => 0 }; if x == 18446744073709551615u64 { return 1; } return 0; }", true),
 ];
 
 const FAULTS: &[(&str, bool)] = &[

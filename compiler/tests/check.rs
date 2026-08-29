@@ -1607,3 +1607,264 @@ fn unannotated_array_binding_grounds_to_i64_default() {
 fn array_lit_grounds_to_annotated_elem_type() {
     assert_clean("fn f() -> unit { let a: [2]u8 = [1, 2]; }");
 }
+
+// ----- P21: scalar literal range checks honor the REQUIRED type ------------
+// (2026-08-03 ledger; spec 01 §3.3.) An unsuffixed literal checks against the
+// type it is required to take — the expected type of its propagating slot when
+// that is an integer scalar, the `i64` default otherwise — in BOTH directions:
+// over-range-for-slot rejects (E0709; was a silent truncation, `u8 = 300`
+// stored 44), and a literal in range for a `u64`/`usize` slot but above
+// `i64::MAX` is legal (was a spurious E0709 against the default). This is a
+// spec-compliance fix, not a new rule; range diagnostics stay real-front-end
+// only, mirroring the array-element rule above.
+
+#[test]
+fn real_scalar_overrange_in_let_rejected() {
+    assert_real_has("fn f() -> unit { let x: u8 = 300; }", "E0709");
+    assert_real_has("fn f() -> unit { let x: u8 = 256; }", "E0709");
+    assert_real_clean("fn f() -> unit { let x: u8 = 255; }");
+    assert_real_clean("fn f() -> unit { let x: u8 = 0; }");
+}
+
+#[test]
+fn real_scalar_boundaries_both_sides_of_i8() {
+    assert_real_clean("fn f() -> unit { let x: i8 = 127; }");
+    assert_real_has("fn f() -> unit { let x: i8 = 128; }", "E0709");
+    assert_real_clean("fn f() -> unit { let x: i8 = -128; }");
+    assert_real_has("fn f() -> unit { let x: i8 = -129; }", "E0709");
+}
+
+#[test]
+fn real_scalar_negative_into_unsigned_rejected() {
+    assert_real_has("fn f() -> unit { let x: u8 = -1; }", "E0709");
+    assert_real_has("fn f() -> unit { let x: u64 = -1; }", "E0709");
+}
+
+#[test]
+fn real_scalar_overrange_in_call_arg_rejected() {
+    assert_real_has("fn g(x: u8) -> unit { } fn f() -> unit { g(300); }", "E0709");
+    assert_real_clean("fn g(x: u8) -> unit { } fn f() -> unit { g(255); }");
+}
+
+#[test]
+fn real_scalar_overrange_in_struct_field_rejected() {
+    assert_real_has(
+        "struct S { a: u8 } fn f() -> unit { let s: S = S { a: 300 }; }",
+        "E0709",
+    );
+}
+
+#[test]
+fn real_scalar_overrange_in_return_rejected() {
+    assert_real_has("fn f() -> u8 { return 300; }", "E0709");
+    assert_real_clean("fn f() -> u8 { return 255; }");
+}
+
+#[test]
+fn real_scalar_overrange_in_static_rejected() {
+    assert_real_has("static B: u8 = 300;", "E0709");
+    assert_real_clean("static B: u8 = 255;");
+}
+
+#[test]
+fn real_scalar_overrange_in_assignment_rejected() {
+    assert_real_has("fn f() -> unit { let mut x: u8 = 1; x = 300; }", "E0709");
+    // Array-element assignment: the slot's ELEMENT type is the requirement.
+    assert_real_has(
+        "fn f() -> unit { let mut a: [2]u8 = [1, 2]; a[0] = 300; }",
+        "E0709",
+    );
+}
+
+#[test]
+fn real_u64_max_literal_in_u64_slot_accepted() {
+    assert_real_clean("fn f() -> unit { let x: u64 = 18446744073709551615; }");
+    assert_real_clean("fn f() -> u64 { return 18446744073709551615; }");
+    assert_real_clean("fn g(x: u64) -> unit { } fn f() -> unit { g(18446744073709551615); }");
+    assert_real_clean("fn f() -> unit { let x: usize = 18446744073709551615; }");
+    assert_real_clean("fn f() -> unit { let a: [1]u64 = [18446744073709551615]; }");
+    assert_real_clean("static B: u64 = 18446744073709551615;");
+}
+
+#[test]
+fn real_u32_boundaries_per_slot_type() {
+    assert_real_clean("fn f() -> unit { let x: u32 = 4294967295; }");
+    assert_real_has("fn f() -> unit { let x: u32 = 4294967296; }", "E0709");
+}
+
+#[test]
+fn real_over_i64_literal_stays_rejected_without_a_u64_slot() {
+    // Unconstrained (the i64 default, §3.3 "written on its own") and in an
+    // explicit i64 slot alike.
+    assert_real_has("fn f() -> unit { let x = 18446744073709551615; }", "E0709");
+    assert_real_has("fn f() -> unit { let x: i64 = 18446744073709551615; }", "E0709");
+}
+
+#[test]
+fn real_scalar_overrange_reported_once_per_array_element() {
+    // The element checks on sight against the expectation; the grounded-type
+    // re-check must not double-report.
+    let cs = real_codes("fn f() -> unit { let a: [2]u8 = [300, 1]; }");
+    assert_eq!(
+        cs.iter().filter(|c| *c == "E0709").count(),
+        1,
+        "exactly one E0709, got {cs:?}"
+    );
+}
+
+#[test]
+fn real_folded_negation_still_rechecked_against_grounded_elem_type() {
+    // `-(1)` is a fold, not a literal: its operand checks expectation-free
+    // (F1), so the grounded-type re-check still covers the folded value.
+    assert_real_has("fn f() -> unit { let a: [1]u64 = [-(1)]; }", "E0709");
+}
+
+#[test]
+fn real_index_expression_literal_keeps_i64_default() {
+    // F1 guard: an index expression is a non-propagating position — a literal
+    // inside it never range-checks against the outer `u8` slot.
+    assert_real_clean("fn f() -> u8 { let m: [400]u8 = [1; 400]; return m[300]; }");
+}
+
+#[test]
+fn real_match_arm_literal_grounds_to_slot_type() {
+    // Match arms propagate the slot expectation (the engines lower the arm
+    // value at the slot type): over-range rejects, u64-max in a u64 slot runs.
+    assert_real_has(
+        "fn f(c: i64) -> unit { let x: u8 = match c { 0 => 300, _ => 1 }; }",
+        "E0709",
+    );
+    assert_real_clean(
+        "fn f(c: i64) -> unit { let x: u64 = match c { 0 => 18446744073709551615, _ => 0 }; }",
+    );
+}
+
+#[test]
+fn guard_real_suffixed_literal_still_checked_against_its_suffix() {
+    // A suffix IS the required type: the slot never overrides it.
+    assert_real_has("fn f() -> unit { let x: i64 = 300u8; }", "E0709");
+    assert_real_has("fn f() -> unit { let x: u8 = 300u8; }", "E0709");
+}
+
+// B1 (adversarial review): the outer slot's expectation describes an arm's or
+// branch's VALUE, never the STATEMENTS inside a block body — the expectation
+// clears at the block-statement boundary, so a `let` inside grounds and
+// range-checks against its own annotation or the i64 default.
+
+#[test]
+fn real_block_statement_literal_keeps_i64_default_under_narrow_slot() {
+    // Reviewer repro (false-rejection direction): `y` is an unannotated let —
+    // i64 300 — and must stay legal inside a `u8`-slot match arm's block.
+    assert_real_clean(
+        "fn f(c: i64) -> u8 { let x: u8 = match c { \
+         0 => { let y = 300; if y > 0 { return 1; } return 2; } _ => 1 }; return x; }",
+    );
+}
+
+#[test]
+fn real_block_statement_literal_not_admitted_by_leaked_wide_slot() {
+    // Reviewer repro (wrong-value direction): every engine types `y` at the
+    // i64 default, so a leaked u64 expectation must NOT admit the bare
+    // over-i64 literal — it stays E0709.
+    assert_real_has(
+        "fn f(c: i64) -> u64 { let x: u64 = match c { \
+         0 => { let y = 18446744073709551615; return 0; } _ => 1 }; return x; }",
+        "E0709",
+    );
+}
+
+#[test]
+fn real_if_branch_statements_inside_arm_block_clear_expectation() {
+    // The if-branch and nested-block variants of the same boundary.
+    assert_real_clean(
+        "fn f(c: i64) -> u8 { let x: u8 = match c { \
+         0 => { if c == 0 { let y = 300; trace(y); } return 2; } _ => 1 }; return x; }",
+    );
+    assert_real_clean(
+        "fn f() -> u8 { let x: u8 = { let y = 300; return conv u8 (1); }; return x; }",
+    );
+}
+
+#[test]
+fn real_array_literal_in_arm_block_no_longer_adopts_slot_elem_type() {
+    // The same boundary closes a PRE-EXISTING array-grounding leak: under a
+    // `[2]u8` slot, the inner unannotated `let t = [300, 1]` used to ground
+    // against the LEAKED [2]u8 (spurious E0709, and `t[0]` mis-typed u8);
+    // it now takes the i64 binding default, so the whole shape checks clean.
+    assert_real_clean(
+        "fn f(c: i64) -> i64 { let x: [2]u8 = match c { \
+         0 => { let t = [300, 1]; return t[0]; } _ => [1, 2] }; return conv i64 (x[0]); }",
+    );
+    // The scalar-slot sibling (leak was harmless there — a scalar expectation
+    // never grounds an array — but the boundary now guarantees it).
+    assert_real_clean(
+        "fn f(c: i64) -> u8 { let x: u8 = match c { \
+         0 => { let t = [300, 1]; return conv u8 (t[0] - 299); } _ => 1 }; return x; }",
+    );
+}
+
+#[test]
+fn real_expectation_restores_after_a_block_arm() {
+    // The RESTORE side of the boundary: a literal arm FOLLOWING a block arm
+    // still sees the slot type — the block's clearing must not stick.
+    assert_real_has(
+        "fn f(c: i64) -> u8 { let x: u8 = match c { 0 => { return 1; } _ => 300 }; return x; }",
+        "E0709",
+    );
+}
+
+#[test]
+fn real_scope_body_statements_clear_expectation() {
+    // A `scope` body's statements are their own typing context too (`scope`
+    // is statement-leading only, so the enclosing block has already cleared;
+    // `check_scope`'s own clearing is defense-in-depth): a bare over-i64
+    // literal inside stays E0709 even under a u64 slot.
+    assert_real_has(
+        "fn f(c: i64) -> u64 { let x: u64 = match c { \
+         0 => { scope { let y = 18446744073709551615; } return 0; } _ => 1 }; return x; }",
+        "E0709",
+    );
+}
+
+// ----- P19: an array literal as an index BASE grounds to the i64 default ---
+// (2026-08-03 ledger.) An rvalue place base lands in a TEMPORARY — a
+// non-propagating landing — so its composite `{integer}` grounds to i64 there,
+// exactly as at an unannotated `let` (P5). A narrower outer slot is then a
+// compile-time E0703 on every engine, never the oracle's silently narrowing
+// copy (MIR/native already refused the place).
+
+#[test]
+fn array_literal_index_base_grounds_to_i64_default() {
+    assert_has("fn f() -> unit { let s: [2]u8 = [[1, 2], [3, 4]][0]; }", "E0703");
+    assert_clean("fn f() -> i64 { let s: [2]i64 = [[1, 2], [3, 4]][0]; return s[0] + s[1]; }");
+}
+
+#[test]
+fn real_array_literal_index_base_grounds_to_i64_default() {
+    assert_real_has("fn f() -> unit { let s: [2]u8 = [[1, 2], [3, 4]][0]; }", "E0703");
+    assert_real_clean(
+        "fn f() -> i64 { let s: [2]i64 = [[1, 2], [3, 4]][0]; return s[0] + s[1]; }",
+    );
+    // A scalar element out of an rvalue base is i64 for the same reason.
+    assert_real_has("fn f() -> unit { let x: u8 = [1, 2][0]; }", "E0703");
+    assert_real_clean("fn f() -> unit { let x: i64 = [1, 2][0]; }");
+}
+
+// ----- P23: arity-error call to a borrow-returning function must not panic --
+
+#[test]
+fn borrow_returning_call_with_too_few_arguments_reports_arity() {
+    // The E0706 must be DELIVERED: the return-extension previously indexed
+    // `per_arg` (zip-truncated to the argument count) by parameter position
+    // and panicked before diagnostics were printed.
+    assert_has(
+        "fn g(p: read i64) -> borrow i64 { return read (deref p); } \
+         fn f() -> unit { let r: borrow i64 = g(); }",
+        "E0706",
+    );
+    assert_has(
+        "fn g(p: read i64) -> borrow i64 { return read (deref p); } \
+         fn f(x: i64, y: i64) -> unit { let r: borrow i64 = g(x, y); }",
+        "E0706",
+    );
+}

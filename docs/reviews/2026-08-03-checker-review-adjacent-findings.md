@@ -224,7 +224,7 @@ Surfaced by the orphan-lifecycle review, 2026-08-26.
 
 # Ledger additions from the P5-fix adversarial review (2026-08-26)
 
-## P19 — Array literal as an index BASE escapes grounding (MEDIUM, pre-existing)
+## P19 — Array literal as an index BASE escapes grounding (CLOSED 2026-08-30, MEDIUM, pre-existing)
 
 `[[1, 2], [3, 4]][0]` into a `[2]u8` slot still silently narrows on the
 oracle (the base literal is materialized at the i64 stride while the slot
@@ -234,7 +234,22 @@ base), so the P5 grounding never sees it, and the base's own landing is a
 temporary, not a binding. Pre-existing on both binaries; stays open as its
 own item, not folded into P5's closure.
 
-## P21 — Scalar literal range checks ignore the expected type, both directions (HIGH)
+CLOSED by the P21/P19/P23 workstream: an rvalue used as a place base lands
+in a temporary — a non-propagating landing — so `check_place`'s rvalue
+fallthrough now grounds composite `{integer}` to the i64 default
+(`ground_nested_int_lit`), exactly the unannotated-`let` rule. This
+tightens the WHOLE rvalue-index-base family, not just the nested-literal
+shape: a scalar element out of an unsuffixed literal base is i64 now too
+(`let x: u8 = [1, 2][0];` is E0703 where it previously waved through). The
+`[2]u8` slot is E0703 on every engine (both front-ends); the grounded
+`[2]i64` form runs to the right values on the oracle, while MIR/native
+keep their pre-existing loud "unsupported place" subset refusal for rvalue
+index bases — a refusal, never a wrong value. Note:
+`run.rs::array_literal_index_base_reads_at_grounded_i64_stride` is a VALUE
+guard on the oracle's grounded read, not evidence the engines discriminate
+the shape — the discrimination evidence is the E0703 rejection tests.
+
+## P21 — Scalar literal range checks ignore the expected type, both directions (CLOSED 2026-08-30, HIGH)
 
 Queued fix workstream, not fixed by the P5 work (which covers arrays only).
 Direction 1: `let x: u8 = 300;` checks clean and stores 44 on every engine —
@@ -245,6 +260,38 @@ because `check_int_lit_range` runs against the `i64` default at literal
 sight, before the expectation is known — the same root defect pointing the
 other way. Fix belongs where the expectation is applied (`check_against`),
 mirroring what the array elements now get.
+
+CLOSED for the literal positions (spec-compliance fix, not a new rule):
+`check_int_lit_range` now resolves an unsuffixed literal's required type
+from the propagating expectation when it is an integer scalar, i64 default
+otherwise — sharing `scalar_range` with the array path. Two disciplines
+keep the expectation honest at the literal: F1 clears it at
+operand/index/builtin positions, and block-statement boundaries clear it on
+entry (`check_block_stmts`/`check_block_value`/`check_scope`) — the latter
+added after the adversarial review's B1 falsified the original "F1 already
+clears every non-propagating position" claim (the expectation used to leak
+into statements inside arm/branch block bodies, admitting a bare over-i64
+literal into an inner unannotated `let` and wrongly range-checking inner
+lets — including array literals, a pre-existing leak — against the outer
+slot). Both directions flip: over-range-for-slot is E0709 in lets, args,
+struct fields, enum payloads, returns, statics, and element assignments;
+`u64`/`usize` slots accept literals up to `u64::MAX` WRITTEN DIRECTLY IN
+THE SLOT and store them bit-exactly — the `u64_max_literal.cnr` fixture IS
+the five-engine evidence (oracle, MIR, native-noopt, native-opt, AOT/LLVM
+via the fixture-scanning gates), alongside the stage-D corpus entries —
+while comparisons, operands, and `conv` sources still take the i64
+default. The lexer already carries
+full u64 (`u64::from_str_radix`) — no second bug there. The
+through-a-binding residual is carried forward as its own open item, P25.
+Constant FOLDS (`let x: u64 = -(1);`, `let y: u8 = 200 + 100;`) are
+compounds, not literals, and keep today's behavior everywhere but array
+elements (whose pre-existing fold re-check is retained); the verifier
+confirmed the arithmetic-fold shape faults loudly at runtime (overflow)
+rather than truncating. RESIDUAL: argument positions not routed through
+`check_against` inherit the old gap — `push(s, c)`'s char argument is
+checked `expect_integer`-only, missing the `u32` required-type range
+check, and `spawn` arguments bypass the argument type check entirely (a
+larger pre-existing hole, logged as its own item: P27).
 
 # Ledger additions from the P7/P8/P11-fix adversarial review (2026-08-26)
 
@@ -269,7 +316,7 @@ CONCRETE halves of these shapes are closed by the P7/P8/P11 workstream. The
 generic halves need per-instantiation borrow information or def-site Proj
 bounds — the next major checker workstream.
 
-## P23 — Checker panic on a borrow-returning call with too few arguments (MEDIUM)
+## P23 — Checker panic on a borrow-returning call with too few arguments (CLOSED 2026-08-30, MEDIUM)
 
 `fn g(p: read i64) -> borrow i64` called as `g()` panics the checker
 (index out of bounds in `check_user_call`'s return-extension, currently
@@ -277,6 +324,12 @@ bounds — the next major checker workstream.
 `region_source_indices` indexes by parameter position) AFTER the correct
 E0706 arity diagnostic is queued. Reviewer repro i2. One-line `.get` fix in
 its own change; a panic, not an unsoundness.
+
+CLOSED: the return-extension indexes `per_arg` with `.get`, so the queued
+E0706 is delivered. The other `per_arg` consumers were audited: the
+fn-pointer and out-slot paths already `.get`, the method path indexes a
+vector built by the same zip (in bounds by construction), and the generic
+free-fn path returns early on arity mismatch.
 
 ## P24 — extern/fn-pointer signatures skip the out-slot E0807 rule (LOW)
 
@@ -290,3 +343,43 @@ the shape is rejected at its own declaration, so no callee can exist; the
 caller-side extension also refuses to guess with two-plus inputs. A latent
 asymmetry to close if fn-pointer signatures ever get their own
 well-formedness pass.
+
+# Ledger addition from the P21/P19/P23-fix verification (2026-08-30)
+
+## P25 — Scalar `{integer}` flexibility through a binding still truncates (MEDIUM)
+
+Split out of P21's closure (its "through a binding" example): `let x = 300;
+let y: u8 = x;` checks clean and stores 44 on every engine. A bare scalar
+`{integer}` deliberately keeps its slot flexibility through a `let` (the
+documented ASYMMETRY with composites from the P5 work, which grounds only
+composite-interior literals at an unannotated binding), but the binding's
+VALUE is not tracked, so a narrower later slot truncates silently — the
+same user-visible symptom P21 opened with, one binding removed. Closing it
+means either grounding bare scalar `{integer}` to i64 at the binding
+(making the `u8` use E0703, and breaking the currently-legal `let x = 1;
+let y: u8 = x;`) or tracking constant values through bindings — a language
+ruling, not a mechanical fix. Surfaced by the P21 closure's verifier,
+2026-08-30.
+
+## P27 — `spawn` arguments bypass the argument type check entirely (HIGH, pending triage)
+
+`fn t(v: u8) -> unit { trace(conv i64 (v)); }` spawned as `spawn t("x")`
+inside a `scope` CHECKS CLEAN — on the pre-P21 compiler and the current one
+alike (pre-existing, found while closing P21's literal-range gaps).
+Mechanism: `check_spawn` resolves the callee's parameter modes itself and
+routes each argument through `gate_spawn_arg`
+(check/concurrency.rs), which calls `check_expr`/`check_place` directly
+and NEVER `check_against` — the take-mode ownership-transfer branch gates
+only PORTABILITY (`non_portable_witness`) and the borrow branch gates the
+referent, so the argument's type is never compared to the declared
+parameter type. This is a full argument-type-check bypass (a `str` where
+`u8` is declared), not just a literal-range gap, and is potentially
+memory-unsafe for wider/narrower or pointer-bearing mismatches. Observed
+at runtime (2026-08-30): the oracle RUNS the repro and the task reads the
+`str` argument as `u8` value 0 — silent wrong value, no fault; MIR and
+native currently refuse this particular repro only for the unrelated
+"expr string-literal outside subset" limit, so the oracle is the engine
+that executes the confusion today. Numbered past P26 (claimed by the
+in-flight generics worktree). Needs its own reviewed fix (route spawn
+arguments through `check_against` before the portability/loan gates); NOT
+fixed in the P21 round by review instruction.
