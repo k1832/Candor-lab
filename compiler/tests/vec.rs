@@ -256,3 +256,45 @@ fn vec_copy_indexed_for_loop_still_works_unchanged() {
     );
     assert_eq!(run_ret(&src), 12);
 }
+
+// A borrow-returning interface method chained into the wired `count` protocol
+// (F1 of the P7/P8/P11 review): the chained call and the inner call share a
+// start byte, and the wired `count` path used to return without clearing the
+// carried loans — together they anchored the receiver's loan onto the `usize`
+// binding and falsely rejected a later legal write.
+const HOLD: &str = "\ninterface Hold { fn v(read self) -> read Vec[i64]; }\n\
+struct W { xs: Vec[i64] }\n\
+impl Hold for W { fn v(read self) -> read Vec[i64] { return read self.xs; } }\n";
+
+#[test]
+fn chained_count_does_not_anchor_receiver_loan() {
+    // `w.v().count()` yields an owned usize: no loan may survive onto `n`, so
+    // the later write to `w.xs` is legal (the F1 false-positive repro).
+    let src = format!(
+        "{ALLOC}{HOLD}\nfn main() alloc -> i64 {{\n  \
+         let mut bs: Bump = with_window(16777216, 1048576);\n  \
+         let al: Alloc = mk_alloc(write bs);\n  \
+         let mut w: W = W {{ xs: vec_new(read al) }};\n  \
+         let n: usize = w.v().count();\n  \
+         w.xs = vec_new(read al);\n  return conv i64 n;\n}}"
+    );
+    let e = errors(&src);
+    assert!(e.is_empty(), "expected clean, got {e:?}");
+}
+
+#[test]
+fn chained_count_loan_dies_before_write_control() {
+    // The NLL-window control: even a loan that DID land on `n` would be dead
+    // by the write; this shape must stay accepted in all states of the fix.
+    let src = format!(
+        "{ALLOC}{HOLD}\nfn main() alloc -> i64 {{\n  \
+         let mut bs: Bump = with_window(16777216, 1048576);\n  \
+         let al: Alloc = mk_alloc(write bs);\n  \
+         let mut w: W = W {{ xs: vec_new(read al) }};\n  \
+         let n: usize = w.v().count();\n  \
+         let m: i64 = conv i64 n;\n  \
+         w.xs = vec_new(read al);\n  return m;\n}}"
+    );
+    let e = errors(&src);
+    assert!(e.is_empty(), "expected clean, got {e:?}");
+}

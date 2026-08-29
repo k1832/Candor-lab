@@ -89,6 +89,21 @@ struct FnState {
     /// Loans carried by the just-evaluated expression's value (borrow exprs,
     /// call-return extension). Read by the binding site to anchor them.
     carried: Vec<usize>,
+    /// Full `(start, end)` spans of expressions whose CHECKED value is known
+    /// to store a borrow where the landing-site predicate (`carries_borrow`)
+    /// cannot re-derive it from the syntax: an interface-method call whose
+    /// SUBSTITUTED return type stores a borrow (P11 — a declared `Self::Item`
+    /// is opaque before substitution) and a `match` whose result type stores
+    /// a borrow (P8 — the arms' loans carry into the match's value). Keyed on
+    /// the WHOLE span, not the start: a chained call `w.v().count()` shares
+    /// its start byte with the inner `w.v()`, and a start-keyed memo aliased
+    /// the two (F1 of the P7/P8/P11 review), tagging the outer non-borrow
+    /// call as borrow-valued.
+    borrow_valued: std::collections::HashSet<(usize, usize)>,
+    /// Set (to the parameter's name) while the P7 out-slot assignment runs the
+    /// shared return-provenance walk, so the E0806-family diagnostics say what
+    /// actually happened — a borrow assigned to an `out` slot, not a `return`.
+    out_prov: Option<String>,
     /// Signature facts the return-provenance check needs (name, is_borrow_param,
     /// region tag) and the return's region/borrow-ness.
     sig_params: Vec<(String, bool, Option<String>)>,
@@ -128,6 +143,8 @@ impl FnState {
             loans: Vec::new(),
             call_groups: Vec::new(),
             carried: Vec::new(),
+            borrow_valued: std::collections::HashSet::new(),
+            out_prov: None,
             sig_params: Vec::new(),
             ret_region: None,
             ret_is_borrow: false,
@@ -1066,6 +1083,41 @@ impl<'a> Checker<'a> {
     /// two-plus borrow params returning a borrow OR view require a region variable;
     /// an explicit return region must be declared and tag some borrow param.
     fn check_signature_regions(&mut self, sig: &crate::resolve::FnSig) {
+        // P7: an `out`-mode slot whose type stores borrows carries a borrow OUT
+        // of the callee exactly as a borrow return does (spec 04 §6.5/§7.1):
+        // the caller must know which input it derives from without inference.
+        // `out` has no region spelling (spec 02 §4), so only the compact
+        // default (§7.3) can answer — with two or more borrow inputs the
+        // source is ambiguous and the declaration is rejected, exactly as the
+        // unannotated two-borrow-param borrow return is (§7.4).
+        //
+        // NOTE (pending ratification): this rule is STRICTLY STRONGER than the
+        // §7.4 rule it mirrors. §7.4 has a region-annotation escape hatch (add
+        // `[region r]`, tag the source parameter, tag the return); an out slot
+        // has no place to wear the tag, so the two-plus-borrow-input shape has
+        // NO legal spelling at all — e.g.
+        // `fn f[region r](o: out read i64, p: read[r] i64, n: read i64)` is
+        // unwritable, where the return-position analog is not. Zero corpus
+        // impact today; lifting it requires a grammar extension (a region tag
+        // on `out`, spec 02 §4 amendment).
+        if sig.params.iter().any(|p| p.mode == ParamMode::Out && field_stores_borrow(&p.decl_ty)) {
+            let ins = sig.params.iter().filter(|p| is_borrow_param(p)).count();
+            if ins >= 2 {
+                let p = sig
+                    .params
+                    .iter()
+                    .find(|p| p.mode == ParamMode::Out && field_stores_borrow(&p.decl_ty))
+                    .unwrap();
+                self.diags.push(
+                    Diag::error(
+                        "E0807",
+                        "a borrow-typed `out` parameter with two or more borrow parameters requires a region variable".to_string(),
+                        p.span,
+                    )
+                    .with_note("an `out` slot cannot carry a region; return the borrow instead, or split the function (§3.3)", None),
+                );
+            }
+        }
         // An array-of-borrows return carries borrows out exactly as a bare
         // borrow return does (P4), so the same region rules apply.
         if !field_stores_borrow(&sig.ret) {
@@ -1169,12 +1221,18 @@ impl<'a> Checker<'a> {
     }
 }
 
-/// A parameter that is itself a borrow (design §3.3): a `read`/`write` mode
-/// parameter, or a by-value borrow-kind (slice/borrow) parameter — including an
-/// array of borrows (P4), whose elements point into caller frames just as a
-/// bare borrow parameter does.
+/// A parameter that is itself a borrow INPUT (design §3.3): a `read`/`write`
+/// mode parameter, or a by-value borrow-kind (slice/borrow) parameter —
+/// including an array of borrows (P4), whose elements point into caller frames
+/// just as a bare borrow parameter does. An `out`-mode slot is excluded even
+/// when its type stores borrows: it is a borrow OUTPUT the callee fills (P7),
+/// never a source a returned borrow can derive from.
 fn is_borrow_param(p: &crate::resolve::ParamInfo) -> bool {
-    matches!(p.mode, ParamMode::Read | ParamMode::Write) || field_stores_borrow(&p.decl_ty)
+    match p.mode {
+        ParamMode::Read | ParamMode::Write => true,
+        ParamMode::Out => false,
+        ParamMode::Take => field_stores_borrow(&p.decl_ty),
+    }
 }
 
 /// An aggregate (array or slice) whose ELEMENTS store borrows (P4): borrowing
